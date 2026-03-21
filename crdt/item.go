@@ -86,11 +86,9 @@ func (item *Item) integrate(txn *Transaction) {
 		item.Right = left.Right
 		left.Right = item
 	}
+	// Back-pointer: if our right neighbour exists, point it back to us.
 	if item.Right != nil {
 		item.Right.Left = item
-	} else if item.ParentSub != "" {
-		// For map types, track the current value per key (last write wins).
-		item.Parent.itemMap[item.ParentSub] = item
 	}
 
 	// Update logical length.
@@ -98,8 +96,23 @@ func (item *Item) integrate(txn *Transaction) {
 		item.Parent.length += item.Content.Len()
 	}
 
-	// Register in the document store and mark the type as changed.
+	// Register in the document store.
 	txn.doc.store.Append(item)
+
+	// For map-keyed items, maintain last-write-wins semantics.
+	if item.ParentSub != "" {
+		if item.Right != nil && item.Right.ParentSub == item.ParentSub {
+			// A same-key item to our right won the concurrent write race — delete ourselves.
+			item.delete(txn)
+		} else {
+			// We are the rightmost item for this key; delete the previous winner.
+			if existing, ok := item.Parent.itemMap[item.ParentSub]; ok && !existing.Deleted {
+				existing.delete(txn)
+			}
+			item.Parent.itemMap[item.ParentSub] = item
+		}
+	}
+
 	txn.addChanged(item.Parent, item.ParentSub)
 }
 
@@ -115,6 +128,30 @@ func (item *Item) delete(txn *Transaction) {
 	}
 	txn.deleteSet.add(item.ID, item.Content.Len())
 	txn.addChanged(item.Parent, item.ParentSub)
+}
+
+// splitItem splits item at offset, returning the new right half.
+// item.Content is mutated to hold [0, offset); the returned item holds [offset, end).
+// Both halves are registered in the store. The linked-list pointers are updated.
+func splitItem(txn *Transaction, item *Item, offset int) *Item {
+	rightContent := item.Content.Splice(offset) // mutates item.Content → [0, offset)
+	right := &Item{
+		ID:          ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset)},
+		Origin:      &ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset) - 1},
+		OriginRight: item.OriginRight,
+		Left:        item,
+		Right:       item.Right,
+		Parent:      item.Parent,
+		ParentSub:   item.ParentSub,
+		Content:     rightContent,
+		Deleted:     item.Deleted,
+	}
+	if right.Right != nil {
+		right.Right.Left = right
+	}
+	item.Right = right
+	txn.doc.store.insertItem(right)
+	return right
 }
 
 // originIDEquals compares two nullable ID pointers.

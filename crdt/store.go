@@ -48,6 +48,29 @@ func (s *StructStore) StateVector() StateVector {
 	return sv
 }
 
+// NextClock returns the next available clock value for the given client.
+func (s *StructStore) NextClock(client ClientID) uint64 {
+	items := s.clients[client]
+	if len(items) == 0 {
+		return 0
+	}
+	last := items[len(items)-1]
+	return last.ID.Clock + uint64(last.Content.Len())
+}
+
+// insertItem inserts item into the per-client slice at the correct clock position.
+// Used when splitting an existing item to register the right half.
+func (s *StructStore) insertItem(item *Item) {
+	items := s.clients[item.ID.Client]
+	pos := sort.Search(len(items), func(i int) bool {
+		return items[i].ID.Clock >= item.ID.Clock
+	})
+	items = append(items, nil)
+	copy(items[pos+1:], items[pos:])
+	items[pos] = item
+	s.clients[item.ID.Client] = items
+}
+
 // IterateFrom calls fn for every Item whose ID is not yet in sv,
 // visiting items in client order, then clock order.
 func (s *StructStore) IterateFrom(sv StateVector, fn func(*Item)) {

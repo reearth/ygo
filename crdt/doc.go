@@ -7,7 +7,7 @@
 //
 //	doc := crdt.New()
 //	doc.Transact(func(txn *crdt.Transaction) {
-//	    doc.GetText("content").Insert(txn, 0, "Hello")
+//	    doc.GetText("content").Insert(txn, 0, "Hello", nil)
 //	})
 //	update := doc.EncodeStateAsUpdate()
 //
@@ -41,7 +41,7 @@ type Doc struct {
 	GC       bool
 
 	store *StructStore
-	share map[string]*abstractType // named root types
+	share map[string]sharedType // named root types
 
 	mu sync.Mutex
 
@@ -55,13 +55,65 @@ func New(opts ...DocOption) *Doc {
 		ClientID: ClientID(rand.Uint64()),
 		GC:       true,
 		store:    newStructStore(),
-		share:    make(map[string]*abstractType),
+		share:    make(map[string]sharedType),
 	}
 	for _, opt := range opts {
 		opt(d)
 	}
 	return d
 }
+
+// GetArray returns the named root YArray, creating it if it does not exist.
+func (d *Doc) GetArray(name string) *YArray {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if t, ok := d.share[name]; ok {
+		if arr, ok := t.(*YArray); ok {
+			return arr
+		}
+	}
+	arr := &YArray{}
+	arr.abstractType.doc = d
+	arr.abstractType.itemMap = make(map[string]*Item)
+	arr.abstractType.owner = arr
+	d.share[name] = arr
+	return arr
+}
+
+// GetMap returns the named root YMap, creating it if it does not exist.
+func (d *Doc) GetMap(name string) *YMap {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if t, ok := d.share[name]; ok {
+		if m, ok := t.(*YMap); ok {
+			return m
+		}
+	}
+	m := &YMap{}
+	m.abstractType.doc = d
+	m.abstractType.itemMap = make(map[string]*Item)
+	m.abstractType.owner = m
+	d.share[name] = m
+	return m
+}
+
+// GetText returns the named root YText, creating it if it does not exist.
+func (d *Doc) GetText(name string) *YText {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if t, ok := d.share[name]; ok {
+		if txt, ok := t.(*YText); ok {
+			return txt
+		}
+	}
+	txt := &YText{}
+	txt.abstractType.doc = d
+	txt.abstractType.itemMap = make(map[string]*Item)
+	txt.abstractType.owner = txt
+	d.share[name] = txt
+	return txt
+}
+
 
 // Transact executes fn inside a transaction. All insertions and deletions made
 // during fn are batched; observers fire once after fn returns.
@@ -86,6 +138,13 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 	fn(txn)
 
 	txn.afterState = d.store.StateVector()
+
+	// Fire per-type observers for each modified type.
+	for t, keys := range txn.changed {
+		if t.owner != nil {
+			t.owner.fire(txn, keys)
+		}
+	}
 
 	for _, fn := range d.onUpdate {
 		fn(orig)

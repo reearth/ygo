@@ -1,0 +1,151 @@
+package crdt
+
+// YArray is a shared ordered list that supports arbitrary-type elements.
+// It embeds abstractType, which owns the underlying doubly-linked Item list.
+type YArray struct {
+	abstractType
+	observers []func(YArrayEvent)
+}
+
+func (a *YArray) baseType() *abstractType { return &a.abstractType }
+
+func (a *YArray) fire(txn *Transaction, _ map[string]struct{}) {
+	if len(a.observers) == 0 {
+		return
+	}
+	e := YArrayEvent{Target: a, Txn: txn}
+	for _, fn := range a.observers {
+		fn(e)
+	}
+}
+
+// Len returns the number of non-deleted elements.
+func (a *YArray) Len() int { return a.abstractType.length }
+
+// Insert inserts vals at logical position index (0 = prepend, Len() = append).
+func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
+	t := &a.abstractType
+	left, offset := t.leftNeighbourAt(index)
+	if offset > 0 {
+		splitItem(txn, left, offset)
+		// left is now the left half; its Right points to the right half.
+	}
+
+	var origin *ID
+	var originRight *ID
+	if left != nil {
+		end := left.ID.Clock + uint64(left.Content.Len()) - 1
+		origin = &ID{Client: left.ID.Client, Clock: end}
+		if left.Right != nil {
+			id := left.Right.ID
+			originRight = &id
+		}
+	} else if t.start != nil {
+		id := t.start.ID
+		originRight = &id
+	}
+
+	item := &Item{
+		ID:          ID{Client: txn.doc.ClientID, Clock: txn.doc.store.NextClock(txn.doc.ClientID)},
+		Origin:      origin,
+		OriginRight: originRight,
+		Left:        left,
+		Parent:      t,
+		Content:     NewContentAny(vals...),
+	}
+	item.integrate(txn, 0)
+}
+
+// Push appends vals to the end of the array.
+func (a *YArray) Push(txn *Transaction, vals []any) {
+	a.Insert(txn, a.Len(), vals)
+}
+
+// Get returns the element at logical position index, or nil if out of bounds.
+func (a *YArray) Get(index int) any {
+	t := &a.abstractType
+	counted := 0
+	for item := t.start; item != nil; item = item.Right {
+		if item.Deleted || !item.Content.IsCountable() {
+			continue
+		}
+		n := item.Content.Len()
+		if counted+n > index {
+			if ca, ok := item.Content.(*ContentAny); ok {
+				return ca.Vals[index-counted]
+			}
+			return nil
+		}
+		counted += n
+	}
+	return nil
+}
+
+// Delete removes length elements starting at logical position index.
+func (a *YArray) Delete(txn *Transaction, index, length int) {
+	deleteRange(&a.abstractType, txn, index, length)
+}
+
+// ToSlice returns all non-deleted elements as a new slice.
+func (a *YArray) ToSlice() []any {
+	t := &a.abstractType
+	result := make([]any, 0, t.length)
+	for item := t.start; item != nil; item = item.Right {
+		if item.Deleted || !item.Content.IsCountable() {
+			continue
+		}
+		if ca, ok := item.Content.(*ContentAny); ok {
+			result = append(result, ca.Vals...)
+		}
+	}
+	return result
+}
+
+// Observe registers fn to be called after every transaction that modifies this
+// array. Returns an unsubscribe function.
+func (a *YArray) Observe(fn func(YArrayEvent)) func() {
+	a.observers = append(a.observers, fn)
+	idx := len(a.observers) - 1
+	return func() {
+		a.observers = append(a.observers[:idx], a.observers[idx+1:]...)
+	}
+}
+
+// deleteRange is shared by YArray and YText to delete a logical range.
+func deleteRange(t *abstractType, txn *Transaction, index, length int) {
+	if length <= 0 {
+		return
+	}
+	counted := 0
+	item := t.start
+	for item != nil && length > 0 {
+		if item.Deleted || !item.Content.IsCountable() {
+			item = item.Right
+			continue
+		}
+		n := item.Content.Len()
+		if counted+n <= index {
+			counted += n
+			item = item.Right
+			continue
+		}
+		if counted < index {
+			// index falls inside this item; split at the start of the deletion.
+			splitAt := index - counted
+			right := splitItem(txn, item, splitAt)
+			counted = index
+			item = right
+			n = right.Content.Len()
+		}
+		if n <= length {
+			item.delete(txn)
+			length -= n
+			item = item.Right
+		} else {
+			// item extends past the end of the deletion range; split it first.
+			splitItem(txn, item, length)
+			item.delete(txn)
+			length = 0
+		}
+	}
+}
