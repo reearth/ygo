@@ -136,7 +136,11 @@ func (d *Decoder) ReadAny() (any, error) {
 	case 121:
 		return false, nil
 	case 125:
-		return d.ReadVarInt()
+		v, err := d.ReadVarInt()
+		if err != nil {
+			return nil, err
+		}
+		return int(v), nil
 	case 124:
 		return d.ReadFloat32()
 	case 123:

@@ -1,0 +1,362 @@
+package crdt
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
+
+func TestUnit_UpdateV1_RoundTrip_EmptyDoc(t *testing.T) {
+	doc := newTestDoc(1)
+	update := EncodeStateAsUpdateV1(doc, nil)
+
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, update, nil))
+
+	assert.Equal(t, doc.StateVector(), doc2.StateVector())
+}
+
+func TestUnit_UpdateV1_RoundTrip_TextInsert(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("content")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "Hello World", nil) })
+
+	update := EncodeStateAsUpdateV1(doc, nil)
+
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, update, nil))
+
+	assert.Equal(t, "Hello World", doc2.GetText("content").ToString())
+	assert.Equal(t, 11, doc2.GetText("content").Len())
+}
+
+func TestUnit_UpdateV1_RoundTrip_ArrayInsert(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("list")
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{1, "two", true}) })
+
+	update := EncodeStateAsUpdateV1(doc, nil)
+
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, update, nil))
+
+	assert.Equal(t, []any{1, "two", true}, doc2.GetArray("list").ToSlice())
+}
+
+func TestUnit_UpdateV1_RoundTrip_MapSet(t *testing.T) {
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	doc.Transact(func(txn *Transaction) {
+		m.Set(txn, "key", "value")
+		m.Set(txn, "num", 42)
+	})
+
+	update := EncodeStateAsUpdateV1(doc, nil)
+
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, update, nil))
+
+	v1, _ := doc2.GetMap("m").Get("key")
+	v2, _ := doc2.GetMap("m").Get("num")
+	assert.Equal(t, "value", v1)
+	assert.Equal(t, 42, v2)
+}
+
+func TestUnit_UpdateV1_RoundTrip_WithDeletes(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("content")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "Hello World", nil) })
+	doc.Transact(func(txn *Transaction) { txt.Delete(txn, 5, 6) }) // delete " World"
+
+	update := EncodeStateAsUpdateV1(doc, nil)
+
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, update, nil))
+
+	assert.Equal(t, "Hello", doc2.GetText("content").ToString())
+}
+
+func TestUnit_UpdateV1_MultipleTypes(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("txt")
+	arr := doc.GetArray("arr")
+	mp := doc.GetMap("mp")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "hello", nil)
+		arr.Push(txn, []any{1, 2, 3})
+		mp.Set(txn, "x", 99)
+	})
+
+	update := EncodeStateAsUpdateV1(doc, nil)
+
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, update, nil))
+
+	assert.Equal(t, "hello", doc2.GetText("txt").ToString())
+	assert.Equal(t, []any{1, 2, 3}, doc2.GetArray("arr").ToSlice())
+	vx, _ := doc2.GetMap("mp").Get("x")
+	assert.Equal(t, 99, vx)
+}
+
+func TestUnit_UpdateV2_SmallerThanV1(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("content")
+	// Insert enough text for zlib compression to be meaningful.
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, strings.Repeat("abcdefghij", 50), nil)
+	})
+
+	v1 := EncodeStateAsUpdateV1(doc, nil)
+	v2 := EncodeStateAsUpdateV2(doc, nil)
+
+	assert.Less(t, len(v2), len(v1), "V2 should be smaller than V1 for compressible data")
+}
+
+func TestUnit_V1toV2_Roundtrip(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("content")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "Hello", nil) })
+
+	v1 := EncodeStateAsUpdateV1(doc, nil)
+	v2, err := UpdateV1ToV2(v1)
+	require.NoError(t, err)
+
+	v1Back, err := UpdateV2ToV1(v2)
+	require.NoError(t, err)
+
+	assert.Equal(t, v1, v1Back)
+}
+
+func TestUnit_ApplyUpdateV2_RoundTrip(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello v2", nil) })
+
+	v2 := EncodeStateAsUpdateV2(doc, nil)
+
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV2(doc2, v2, nil))
+
+	assert.Equal(t, "hello v2", doc2.GetText("t").ToString())
+}
+
+func TestUnit_ApplyUpdate_Idempotent(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "Hello", nil) })
+
+	update := EncodeStateAsUpdateV1(doc, nil)
+
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, update, nil))
+	require.NoError(t, ApplyUpdateV1(doc2, update, nil)) // apply twice — must be a no-op
+
+	assert.Equal(t, "Hello", doc2.GetText("t").ToString())
+	assert.Equal(t, 5, doc2.GetText("t").Len())
+}
+
+func TestUnit_MergeUpdates_OrderIndependent(t *testing.T) {
+	doc1 := newTestDoc(1)
+	doc2 := newTestDoc(2)
+	txt1 := doc1.GetText("t")
+	txt2 := doc2.GetText("t")
+
+	doc1.Transact(func(txn *Transaction) { txt1.Insert(txn, 0, "Alice", nil) })
+	doc2.Transact(func(txn *Transaction) { txt2.Insert(txn, 0, "Bob", nil) })
+
+	u1 := EncodeStateAsUpdateV1(doc1, nil)
+	u2 := EncodeStateAsUpdateV1(doc2, nil)
+
+	merged12, err := MergeUpdatesV1(u1, u2)
+	require.NoError(t, err)
+	merged21, err := MergeUpdatesV1(u2, u1)
+	require.NoError(t, err)
+
+	// Both orderings must produce the same result.
+	docA := New(WithClientID(3))
+	docB := New(WithClientID(4))
+	require.NoError(t, ApplyUpdateV1(docA, merged12, nil))
+	require.NoError(t, ApplyUpdateV1(docB, merged21, nil))
+
+	assert.Equal(t, docA.GetText("t").ToString(), docB.GetText("t").ToString())
+}
+
+func TestUnit_DiffUpdate_OnlyMissing(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "Hello", nil) })
+	svAfterHello := doc.StateVector()
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 5, " World", nil) })
+
+	fullUpdate := EncodeStateAsUpdateV1(doc, nil)
+
+	diff, err := DiffUpdateV1(fullUpdate, svAfterHello)
+	require.NoError(t, err)
+
+	// The diff should be strictly smaller than the full update.
+	assert.Less(t, len(diff), len(fullUpdate))
+
+	// Applying the full update + diff idempotently must give the correct result.
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, fullUpdate, nil))
+	require.NoError(t, ApplyUpdateV1(doc2, diff, nil)) // idempotent
+	assert.Equal(t, "Hello World", doc2.GetText("t").ToString())
+}
+
+func TestUnit_ApplyUpdate_OutOfOrder(t *testing.T) {
+	// Two independent clients — apply updates in both orders and check convergence.
+	doc1 := newTestDoc(1)
+	doc2 := newTestDoc(2)
+	txt1 := doc1.GetText("t")
+	txt2 := doc2.GetText("t")
+
+	doc1.Transact(func(txn *Transaction) { txt1.Insert(txn, 0, "A", nil) })
+	doc2.Transact(func(txn *Transaction) { txt2.Insert(txn, 0, "B", nil) })
+
+	u1 := EncodeStateAsUpdateV1(doc1, nil)
+	u2 := EncodeStateAsUpdateV1(doc2, nil)
+
+	docA := New(WithClientID(3))
+	require.NoError(t, ApplyUpdateV1(docA, u1, nil))
+	require.NoError(t, ApplyUpdateV1(docA, u2, nil))
+
+	docB := New(WithClientID(4))
+	require.NoError(t, ApplyUpdateV1(docB, u2, nil))
+	require.NoError(t, ApplyUpdateV1(docB, u1, nil))
+
+	assert.Equal(t, docA.GetText("t").ToString(), docB.GetText("t").ToString())
+}
+
+func TestUnit_EncodeStateVector_RoundTrip(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+
+	encoded := EncodeStateVectorV1(doc)
+	decoded, err := DecodeStateVectorV1(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, doc.StateVector(), decoded)
+}
+
+func TestUnit_DocConvenienceMethods(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+
+	update := doc.EncodeStateAsUpdate()
+
+	doc2 := New(WithClientID(2))
+	require.NoError(t, doc2.ApplyUpdate(update))
+	assert.Equal(t, "hello", doc2.GetText("t").ToString())
+}
+
+// ── Integration tests ─────────────────────────────────────────────────────────
+
+func TestInteg_Update_TwoPeer_TextConvergence(t *testing.T) {
+	doc1 := newTestDoc(1)
+	doc2 := newTestDoc(2)
+	txt1 := doc1.GetText("t")
+	txt2 := doc2.GetText("t")
+
+	doc1.Transact(func(txn *Transaction) { txt1.Insert(txn, 0, "Alice", nil) })
+	doc2.Transact(func(txn *Transaction) { txt2.Insert(txn, 0, "Bob", nil) })
+
+	u1 := EncodeStateAsUpdateV1(doc1, nil)
+	u2 := EncodeStateAsUpdateV1(doc2, nil)
+
+	require.NoError(t, ApplyUpdateV1(doc1, u2, nil))
+	require.NoError(t, ApplyUpdateV1(doc2, u1, nil))
+
+	// Both peers converge; client 1 < 2 so "Alice" precedes "Bob".
+	assert.Equal(t, doc1.GetText("t").ToString(), doc2.GetText("t").ToString())
+	assert.Equal(t, "AliceBob", doc1.GetText("t").ToString())
+}
+
+func TestInteg_Update_TwoPeer_ArrayConvergence(t *testing.T) {
+	doc1 := newTestDoc(1)
+	doc2 := newTestDoc(2)
+	arr1 := doc1.GetArray("a")
+	arr2 := doc2.GetArray("a")
+
+	doc1.Transact(func(txn *Transaction) { arr1.Push(txn, []any{1, 2}) })
+	doc2.Transact(func(txn *Transaction) { arr2.Push(txn, []any{3, 4}) })
+
+	u1 := EncodeStateAsUpdateV1(doc1, nil)
+	u2 := EncodeStateAsUpdateV1(doc2, nil)
+
+	require.NoError(t, ApplyUpdateV1(doc1, u2, nil))
+	require.NoError(t, ApplyUpdateV1(doc2, u1, nil))
+
+	assert.Equal(t, doc1.GetArray("a").ToSlice(), doc2.GetArray("a").ToSlice())
+}
+
+func TestInteg_Update_IncrementalSync(t *testing.T) {
+	doc1 := newTestDoc(1)
+	doc2 := newTestDoc(2)
+	txt1 := doc1.GetText("t")
+
+	// Step 1: doc1 inserts "Hello".
+	doc1.Transact(func(txn *Transaction) { txt1.Insert(txn, 0, "Hello", nil) })
+	sv2 := doc2.StateVector() // doc2 is empty
+	u := EncodeStateAsUpdateV1(doc1, sv2)
+	require.NoError(t, ApplyUpdateV1(doc2, u, nil))
+	assert.Equal(t, "Hello", doc2.GetText("t").ToString())
+
+	// Step 2: doc1 appends " World".
+	doc1.Transact(func(txn *Transaction) { txt1.Insert(txn, 5, " World", nil) })
+	sv2 = doc2.StateVector()
+	u = EncodeStateAsUpdateV1(doc1, sv2)
+	require.NoError(t, ApplyUpdateV1(doc2, u, nil))
+	assert.Equal(t, "Hello World", doc2.GetText("t").ToString())
+}
+
+func TestInteg_Update_DeleteSync(t *testing.T) {
+	doc1 := newTestDoc(1)
+	txt1 := doc1.GetText("t")
+	doc1.Transact(func(txn *Transaction) { txt1.Insert(txn, 0, "Hello World", nil) })
+	doc1.Transact(func(txn *Transaction) { txt1.Delete(txn, 5, 6) })
+
+	u := EncodeStateAsUpdateV1(doc1, nil)
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, u, nil))
+
+	assert.Equal(t, "Hello", doc2.GetText("t").ToString())
+}
+
+// ── Fuzz targets ──────────────────────────────────────────────────────────────
+
+func FuzzApplyUpdateV1(f *testing.F) {
+	makeSeed := func() []byte {
+		doc := newTestDoc(1)
+		txt := doc.GetText("c")
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+		return EncodeStateAsUpdateV1(doc, nil)
+	}
+	f.Add(makeSeed())
+	f.Add([]byte{}) // empty — must not panic
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		d := New()
+		_ = ApplyUpdateV1(d, data, nil) // must not panic regardless of input
+	})
+}
+
+func FuzzApplyUpdateV2(f *testing.F) {
+	makeSeed := func() []byte {
+		doc := newTestDoc(1)
+		txt := doc.GetText("c")
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+		return EncodeStateAsUpdateV2(doc, nil)
+	}
+	f.Add(makeSeed())
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		d := New()
+		_ = ApplyUpdateV2(d, data, nil) // must not panic regardless of input
+	})
+}

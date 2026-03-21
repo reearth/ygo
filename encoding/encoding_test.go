@@ -163,9 +163,9 @@ func TestUnit_Any_AllVariants(t *testing.T) {
 		{"nil", nil},
 		{"bool_true", true},
 		{"bool_false", false},
-		{"int_zero", int64(0)},
-		{"int_positive", int64(42)},
-		{"int_negative", int64(-99)},
+		{"int_zero", int(0)},
+		{"int_positive", int(42)},
+		{"int_negative", int(-99)},
 		{"float32", float32(1.5)},
 		{"float64_pi", math.Pi},
 		{"string_empty", ""},
@@ -174,9 +174,9 @@ func TestUnit_Any_AllVariants(t *testing.T) {
 		{"bytes_empty", []byte{}},
 		{"bytes", []byte{0xde, 0xad, 0xbe, 0xef}},
 		{"array_empty", []any{}},
-		{"array_mixed", []any{int64(1), "two", true, nil}},
+		{"array_mixed", []any{int(1), "two", true, nil}},
 		{"map_empty", map[string]any{}},
-		{"map_basic", map[string]any{"key": "val", "n": int64(7)}},
+		{"map_basic", map[string]any{"key": "val", "n": int(7)}},
 	}
 
 	for _, tc := range cases {
@@ -193,7 +193,7 @@ func TestUnit_Any_AllVariants(t *testing.T) {
 func TestUnit_Any_NestedStructure(t *testing.T) {
 	v := map[string]any{
 		"name":  "Alice",
-		"score": int64(100),
+		"score": int(100),
 		"tags":  []any{"go", "crdt"},
 		"meta":  map[string]any{"active": true},
 	}
@@ -205,12 +205,12 @@ func TestUnit_Any_NestedStructure(t *testing.T) {
 }
 
 func TestUnit_Any_IntAlias(t *testing.T) {
-	// WriteAny accepts plain int; ReadAny always returns int64.
+	// WriteAny accepts plain int; ReadAny returns int.
 	e := encoding.NewEncoder()
 	e.WriteAny(int(42))
 	got, err := encoding.NewDecoder(e.Bytes()).ReadAny()
 	require.NoError(t, err)
-	assert.Equal(t, int64(42), got)
+	assert.Equal(t, int(42), got)
 }
 
 // --- Encoder reset ---

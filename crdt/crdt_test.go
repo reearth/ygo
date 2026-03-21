@@ -96,7 +96,7 @@ func TestUnit_StructStore_FindExact(t *testing.T) {
 	txn := newTxn(doc)
 
 	a := makeItem(1, 0, NewContentString("a"), root)
-	a.integrate(txn)
+	a.integrate(txn, 0)
 
 	found := doc.store.Find(ID{1, 0})
 	require.NotNil(t, found)
@@ -113,9 +113,9 @@ func TestUnit_StructStore_StateVector(t *testing.T) {
 	root := newTestType(doc)
 	txn := newTxn(doc)
 
-	makeItem(1, 0, NewContentString("a"), root).integrate(txn)
-	makeItem(1, 1, NewContentString("b"), root).integrate(txn)
-	makeItem(2, 0, NewContentString("x"), root).integrate(txn)
+	makeItem(1, 0, NewContentString("a"), root).integrate(txn, 0)
+	makeItem(1, 1, NewContentString("b"), root).integrate(txn, 0)
+	makeItem(2, 0, NewContentString("x"), root).integrate(txn, 0)
 
 	sv := doc.store.StateVector()
 	assert.Equal(t, uint64(2), sv[1])
@@ -170,9 +170,9 @@ func TestUnit_Item_Integrate_Sequential(t *testing.T) {
 	b := makeItemAfter(1, 1, NewContentString("b"), root, a)
 	c := makeItemAfter(1, 2, NewContentString("c"), root, b)
 
-	a.integrate(txn)
-	b.integrate(txn)
-	c.integrate(txn)
+	a.integrate(txn, 0)
+	b.integrate(txn, 0)
+	c.integrate(txn, 0)
 
 	assert.Equal(t, []string{"a", "b", "c"}, listContent(root))
 	assert.Equal(t, 3, root.length)
@@ -187,9 +187,9 @@ func TestUnit_Item_Integrate_PrependToStart(t *testing.T) {
 	b := makeItem(1, 1, NewContentString("b"), root) // no Left = prepend
 	c := makeItem(1, 2, NewContentString("c"), root)
 
-	a.integrate(txn)
-	b.integrate(txn) // goes to start
-	c.integrate(txn) // also goes to start
+	a.integrate(txn, 0)
+	b.integrate(txn, 0) // goes to start
+	c.integrate(txn, 0) // also goes to start
 
 	// All have nil origin so they go to the start in reverse order
 	assert.NotNil(t, root.start)
@@ -208,8 +208,8 @@ func TestUnit_Item_Integrate_Concurrent_LowerClientIDWins(t *testing.T) {
 	c2 := makeItem(2, 0, NewContentString("B"), root)
 	c1 := makeItem(1, 0, NewContentString("A"), root)
 
-	c2.integrate(txn)
-	c1.integrate(txn)
+	c2.integrate(txn, 0)
+	c1.integrate(txn, 0)
 
 	assert.Equal(t, []string{"A", "B"}, listContent(root),
 		"client 1 (lower ID) must sort before client 2")
@@ -225,8 +225,8 @@ func TestUnit_Item_Integrate_Concurrent_Deterministic(t *testing.T) {
 		// Re-create items so they get fresh parent pointers.
 		a := &Item{ID: first.ID, Content: first.Content.Copy(), Parent: root}
 		b := &Item{ID: second.ID, Content: second.Content.Copy(), Parent: root}
-		a.integrate(txn)
-		b.integrate(txn)
+		a.integrate(txn, 0)
+		b.integrate(txn, 0)
 		return listContent(root)
 	}
 
@@ -255,7 +255,7 @@ func TestUnit_Item_Integrate_ThreeWayConcurrent(t *testing.T) {
 		}
 		for _, idx := range order {
 			cp := &Item{ID: items[idx].ID, Content: items[idx].Content.Copy(), Parent: root}
-			cp.integrate(txn)
+			cp.integrate(txn, 0)
 		}
 		return listContent(root)
 	}
@@ -275,15 +275,15 @@ func TestUnit_Item_Integrate_DeletedOrigin(t *testing.T) {
 	txn := newTxn(doc)
 
 	a := makeItem(1, 0, NewContentString("a"), root)
-	a.integrate(txn)
+	a.integrate(txn, 0)
 
 	b := makeItemAfter(1, 1, NewContentString("b"), root, a)
-	b.integrate(txn)
+	b.integrate(txn, 0)
 
 	a.delete(txn)
 
 	c := makeItemAfter(1, 2, NewContentString("c"), root, b)
-	c.integrate(txn)
+	c.integrate(txn, 0)
 
 	// a is deleted but still in list; b and c are visible.
 	assert.Equal(t, []string{"b", "c"}, listContent(root))
@@ -326,8 +326,8 @@ func TestUnit_Item_Integrate_Idempotent(t *testing.T) {
 			ID: ID{2, 0}, Content: NewContentString("world"), Parent: root,
 			Left: a, Origin: &ID{1, 0},
 		}
-		a.integrate(txn)
-		b.integrate(txn)
+		a.integrate(txn, 0)
+		b.integrate(txn, 0)
 		return listContent(root)
 	}
 
@@ -342,7 +342,7 @@ func TestUnit_Item_Delete_UpdatesLength(t *testing.T) {
 	txn := newTxn(doc)
 
 	a := makeItem(1, 0, NewContentString("hello"), root)
-	a.integrate(txn)
+	a.integrate(txn, 0)
 	assert.Equal(t, 5, root.length)
 
 	a.delete(txn)
@@ -356,7 +356,7 @@ func TestUnit_Item_Delete_Idempotent(t *testing.T) {
 	txn := newTxn(doc)
 
 	a := makeItem(1, 0, NewContentString("x"), root)
-	a.integrate(txn)
+	a.integrate(txn, 0)
 
 	a.delete(txn)
 	a.delete(txn) // second delete must be a no-op
@@ -371,7 +371,7 @@ func TestUnit_Item_Delete_RecordedInDeleteSet(t *testing.T) {
 	txn := newTxn(doc)
 
 	a := makeItem(1, 0, NewContentString("ab"), root)
-	a.integrate(txn)
+	a.integrate(txn, 0)
 	a.delete(txn)
 
 	assert.True(t, txn.deleteSet.IsDeleted(ID{1, 0}))
@@ -386,9 +386,9 @@ func TestUnit_Doc_Transact_ObserverFiresOnce(t *testing.T) {
 
 	doc.Transact(func(txn *Transaction) {
 		root := newTestType(doc)
-		makeItem(1, 0, NewContentString("a"), root).integrate(txn)
-		makeItem(1, 1, NewContentString("b"), root).integrate(txn)
-		makeItem(1, 2, NewContentString("c"), root).integrate(txn)
+		makeItem(1, 0, NewContentString("a"), root).integrate(txn, 0)
+		makeItem(1, 1, NewContentString("b"), root).integrate(txn, 0)
+		makeItem(1, 2, NewContentString("c"), root).integrate(txn, 0)
 	})
 
 	assert.Equal(t, 1, calls, "observer must fire exactly once per transaction")
@@ -446,7 +446,7 @@ func applyBlueprints(blueprints []itemBlueprint, order []int) []string {
 			item.Origin = &ID{ClientID(*bp.originClient), *bp.originClock}
 			item.Left = doc.store.Find(*item.Origin)
 		}
-		item.integrate(txn)
+		item.integrate(txn, 0)
 	}
 	return listContent(root)
 }

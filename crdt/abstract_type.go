@@ -18,6 +18,7 @@ type abstractType struct {
 	length  int              // logical length (non-deleted, countable items only)
 	item    *Item            // the Item containing this type when nested
 	owner   sharedType       // back-pointer to the concrete wrapper
+	name    string           // root type name; used during V1 update encoding
 }
 
 // leftNeighbourAt returns the item that should be the left neighbour when

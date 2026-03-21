@@ -63,6 +63,46 @@ func New(opts ...DocOption) *Doc {
 	return d
 }
 
+// rawType is a placeholder sharedType created during update decoding when the
+// concrete type (YArray, YMap, YText, …) is not yet known. It is upgraded
+// transparently the first time the user calls GetArray/GetMap/GetText/etc.
+type rawType struct {
+	abstractType
+}
+
+func (r *rawType) baseType() *abstractType                              { return &r.abstractType }
+func (r *rawType) fire(_ *Transaction, _ map[string]struct{}) {}
+
+// getOrCreateType returns the abstractType for a named root type, creating a
+// rawType placeholder if none exists yet. Must be called with d.mu already held
+// (i.e., from within a Transact callback or another locked helper).
+func (d *Doc) getOrCreateType(name string) *abstractType {
+	if t, ok := d.share[name]; ok {
+		return t.baseType()
+	}
+	r := &rawType{}
+	r.abstractType.doc = d
+	r.abstractType.itemMap = make(map[string]*Item)
+	r.abstractType.owner = r
+	r.abstractType.name = name
+	d.share[name] = r
+	return &r.abstractType
+}
+
+// upgradeRawType copies a rawType's abstractType into dst, rewires all item
+// Parent pointers to dst, and stores dst in d.share[name].
+// Must be called with d.mu held.
+func upgradeRawType(raw *rawType, dst sharedType, name string, share map[string]sharedType) {
+	at := dst.baseType()
+	*at = raw.abstractType // copy all fields (doc, start, itemMap, length, item, name)
+	at.owner = dst
+	// Rewire every item's Parent pointer.
+	for item := at.start; item != nil; item = item.Right {
+		item.Parent = at
+	}
+	share[name] = dst
+}
+
 // GetArray returns the named root YArray, creating it if it does not exist.
 func (d *Doc) GetArray(name string) *YArray {
 	d.mu.Lock()
@@ -71,11 +111,17 @@ func (d *Doc) GetArray(name string) *YArray {
 		if arr, ok := t.(*YArray); ok {
 			return arr
 		}
+		if raw, ok := t.(*rawType); ok {
+			arr := &YArray{}
+			upgradeRawType(raw, arr, name, d.share)
+			return arr
+		}
 	}
 	arr := &YArray{}
 	arr.abstractType.doc = d
 	arr.abstractType.itemMap = make(map[string]*Item)
 	arr.abstractType.owner = arr
+	arr.abstractType.name = name
 	d.share[name] = arr
 	return arr
 }
@@ -88,11 +134,17 @@ func (d *Doc) GetMap(name string) *YMap {
 		if m, ok := t.(*YMap); ok {
 			return m
 		}
+		if raw, ok := t.(*rawType); ok {
+			m := &YMap{}
+			upgradeRawType(raw, m, name, d.share)
+			return m
+		}
 	}
 	m := &YMap{}
 	m.abstractType.doc = d
 	m.abstractType.itemMap = make(map[string]*Item)
 	m.abstractType.owner = m
+	m.abstractType.name = name
 	d.share[name] = m
 	return m
 }
@@ -105,11 +157,17 @@ func (d *Doc) GetText(name string) *YText {
 		if txt, ok := t.(*YText); ok {
 			return txt
 		}
+		if raw, ok := t.(*rawType); ok {
+			txt := &YText{}
+			upgradeRawType(raw, txt, name, d.share)
+			return txt
+		}
 	}
 	txt := &YText{}
 	txt.abstractType.doc = d
 	txt.abstractType.itemMap = make(map[string]*Item)
 	txt.abstractType.owner = txt
+	txt.abstractType.name = name
 	d.share[name] = txt
 	return txt
 }
@@ -174,11 +232,17 @@ func (d *Doc) GetXmlFragment(name string) *YXmlFragment {
 		if f, ok := t.(*YXmlFragment); ok {
 			return f
 		}
+		if raw, ok := t.(*rawType); ok {
+			f := &YXmlFragment{}
+			upgradeRawType(raw, f, name, d.share)
+			return f
+		}
 	}
 	f := &YXmlFragment{}
 	f.abstractType.doc = d
 	f.abstractType.itemMap = make(map[string]*Item)
 	f.abstractType.owner = f
+	f.abstractType.name = name
 	d.share[name] = f
 	return f
 }
@@ -188,4 +252,14 @@ func (d *Doc) StateVector() StateVector {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.store.StateVector()
+}
+
+// EncodeStateAsUpdate encodes the full document state as a V1 binary update.
+func (d *Doc) EncodeStateAsUpdate() []byte {
+	return EncodeStateAsUpdateV1(d, nil)
+}
+
+// ApplyUpdate decodes and integrates a V1 binary update into the document.
+func (d *Doc) ApplyUpdate(update []byte) error {
+	return ApplyUpdateV1(d, update, nil)
 }
