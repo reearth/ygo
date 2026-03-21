@@ -15,17 +15,18 @@ It is **binary-compatible** with the JavaScript Yjs reference implementation —
 > **This library is under active development and is not yet ready for production use.**
 > See the [project roadmap](https://github.com/reearth/ygo/issues) for current progress.
 
-| Component         | Status      |
-|-------------------|-------------|
-| `encoding/`       | 🔲 Planned  |
-| `crdt/` core      | 🔲 Planned  |
-| `crdt/types/`     | 🔲 Planned  |
-| Update encoding   | 🔲 Planned  |
-| Sync protocol     | 🔲 Planned  |
-| Awareness         | 🔲 Planned  |
-| Snapshots / GC    | 🔲 Planned  |
-| WebSocket handler | 🔲 Planned  |
-| HTTP handler      | 🔲 Planned  |
+| Component              | Status          |
+|------------------------|-----------------|
+| `encoding/`            | ✅ Complete     |
+| `crdt/` core           | ✅ Complete     |
+| `crdt/types/`          | ✅ Complete     |
+| Update encoding V1     | ✅ Complete     |
+| Update encoding V2     | ✅ Complete     |
+| Sync protocol          | ✅ Complete     |
+| Awareness              | ✅ Complete     |
+| WebSocket handler      | ✅ Complete     |
+| HTTP handler           | ✅ Complete     |
+| Snapshots / GC         | ✅ Complete     |
 
 ## Features
 

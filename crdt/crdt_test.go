@@ -486,7 +486,7 @@ func TestInteg_MultiplePeers_ConcurrentAtStart_Converges(t *testing.T) {
 	// YATA must produce the same list regardless of message arrival order.
 	const (
 		numPeers   = 6
-		iterations = 500
+		iterations = 1000
 	)
 
 	blueprints := make([]itemBlueprint, numPeers)
@@ -591,4 +591,78 @@ func TestUnit_OriginIDEquals(t *testing.T) {
 	assert.False(t, originIDEquals(a, nil))
 	assert.True(t, originIDEquals(a, b))
 	assert.False(t, originIDEquals(a, c))
+}
+
+// ── ObserveDeep ───────────────────────────────────────────────────────────────
+
+func TestUnit_YArray_ObserveDeep_FiresOnChange(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+
+	var calls int
+	unsub := arr.ObserveDeep(func(_ *Transaction) { calls++ })
+	defer unsub()
+
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{1, 2}) })
+	assert.Equal(t, 1, calls)
+
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{3}) })
+	assert.Equal(t, 2, calls)
+}
+
+func TestUnit_YMap_ObserveDeep_FiresOnChange(t *testing.T) {
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+
+	var calls int
+	unsub := m.ObserveDeep(func(_ *Transaction) { calls++ })
+	defer unsub()
+
+	doc.Transact(func(txn *Transaction) { m.Set(txn, "k", "v") })
+	assert.Equal(t, 1, calls)
+}
+
+func TestUnit_YText_ObserveDeep_FiresOnChange(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+
+	var calls int
+	unsub := txt.ObserveDeep(func(_ *Transaction) { calls++ })
+	defer unsub()
+
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hi", nil) })
+	assert.Equal(t, 1, calls)
+}
+
+func TestUnit_ObserveDeep_Unsubscribe(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+
+	var calls int
+	unsub := arr.ObserveDeep(func(_ *Transaction) { calls++ })
+
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{1}) })
+	assert.Equal(t, 1, calls)
+
+	unsub()
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{2}) })
+	assert.Equal(t, 1, calls, "no more calls after unsubscribe")
+}
+
+// ── Doc.Destroy ───────────────────────────────────────────────────────────────
+
+func TestUnit_Doc_Destroy_ClearsState(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+
+	var updateCalls int
+	doc.OnUpdate(func(_ any) { updateCalls++ })
+
+	doc.Destroy()
+
+	// After Destroy, OnUpdate observers are cleared — no further callbacks.
+	// (We can't call Transact safely after Destroy, but state vector is empty.)
+	assert.Equal(t, StateVector{}, doc.StateVector())
+	assert.Equal(t, 0, updateCalls, "OnUpdate must not fire after Destroy")
 }

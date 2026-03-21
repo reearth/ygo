@@ -1,7 +1,6 @@
 package crdt
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -105,15 +104,18 @@ func TestUnit_UpdateV1_MultipleTypes(t *testing.T) {
 func TestUnit_UpdateV2_SmallerThanV1(t *testing.T) {
 	doc := newTestDoc(1)
 	txt := doc.GetText("content")
-	// Insert enough text for zlib compression to be meaningful.
-	doc.Transact(func(txn *Transaction) {
-		txt.Insert(txn, 0, strings.Repeat("abcdefghij", 50), nil)
-	})
+	// Insert many individual characters so the column-oriented V2 format can
+	// compress repeated client IDs and info bytes via RLE.
+	for i := 0; i < 100; i++ {
+		doc.Transact(func(txn *Transaction) {
+			txt.Insert(txn, txt.Len(), "a", nil)
+		})
+	}
 
 	v1 := EncodeStateAsUpdateV1(doc, nil)
 	v2 := EncodeStateAsUpdateV2(doc, nil)
 
-	assert.Less(t, len(v2), len(v1), "V2 should be smaller than V1 for compressible data")
+	assert.Less(t, len(v2), len(v1), "V2 column-oriented format should be smaller than V1 for many items")
 }
 
 func TestUnit_V1toV2_Roundtrip(t *testing.T) {

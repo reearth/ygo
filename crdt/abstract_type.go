@@ -12,13 +12,14 @@ type sharedType interface {
 // It owns the doubly-linked list of Items that backs the type's content and
 // provides the bookkeeping that Item integration needs.
 type abstractType struct {
-	doc     *Doc
-	start   *Item
-	itemMap map[string]*Item // last live item per key; non-nil only for map-based types
-	length  int              // logical length (non-deleted, countable items only)
-	item    *Item            // the Item containing this type when nested
-	owner   sharedType       // back-pointer to the concrete wrapper
-	name    string           // root type name; used during V1 update encoding
+	doc           *Doc
+	start         *Item
+	itemMap       map[string]*Item // last live item per key; non-nil only for map-based types
+	length        int              // logical length (non-deleted, countable items only)
+	item          *Item            // the Item containing this type when nested
+	owner         sharedType       // back-pointer to the concrete wrapper
+	name          string           // root type name; used during V1 update encoding
+	deepObservers []func(*Transaction)
 }
 
 // leftNeighbourAt returns the item that should be the left neighbour when

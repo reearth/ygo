@@ -32,6 +32,14 @@ func (d *Decoder) Remaining() int { return len(d.buf) - d.pos }
 // HasContent reports whether there are unread bytes remaining.
 func (d *Decoder) HasContent() bool { return d.pos < len(d.buf) }
 
+// RemainingBytes returns a copy of the unread portion of the buffer.
+func (d *Decoder) RemainingBytes() []byte {
+	rem := d.buf[d.pos:]
+	cp := make([]byte, len(rem))
+	copy(cp, rem)
+	return cp
+}
+
 func (d *Decoder) readByte() (byte, error) {
 	if d.pos >= len(d.buf) {
 		return 0, ErrUnexpectedEOF
@@ -67,14 +75,31 @@ func (d *Decoder) ReadVarUint() (uint64, error) {
 	}
 }
 
-// ReadVarInt decodes a ZigZag-encoded signed integer.
+// ReadVarInt decodes a lib0 sign-magnitude variable-length integer.
+// Returns ErrOverflow if the encoded magnitude exceeds 55 bits.
 func (d *Decoder) ReadVarInt() (int64, error) {
-	uv, err := d.ReadVarUint()
+	b, err := d.readByte()
 	if err != nil {
 		return 0, err
 	}
-	// Reverse ZigZag: (n >> 1) ^ -(n & 1)
-	return int64((uv >> 1) ^ -(uv & 1)), nil
+	neg := b&0x40 != 0
+	result := uint64(b & 0x3F)
+	shift := uint(6)
+	for b&0x80 != 0 {
+		if shift > 48 {
+			return 0, ErrOverflow
+		}
+		b, err = d.readByte()
+		if err != nil {
+			return 0, err
+		}
+		result |= uint64(b&0x7F) << shift
+		shift += 7
+	}
+	if neg {
+		return -int64(result), nil
+	}
+	return int64(result), nil
 }
 
 // ReadVarString decodes a length-prefixed UTF-8 string.
@@ -120,6 +145,31 @@ func (d *Decoder) ReadFloat64() (float64, error) {
 	bits := binary.LittleEndian.Uint64(d.buf[d.pos:])
 	d.pos += 8
 	return math.Float64frombits(bits), nil
+}
+
+// readVarIntWithSign reads a sign-magnitude VarInt and returns the magnitude
+// and whether the sign bit was set.  Used by UintOptRleDecoder to distinguish
+// negative zero from positive zero.
+func (d *Decoder) readVarIntWithSign() (magnitude uint64, negative bool, err error) {
+	b, err := d.readByte()
+	if err != nil {
+		return 0, false, err
+	}
+	negative = b&0x40 != 0
+	result := uint64(b & 0x3F)
+	shift := uint(6)
+	for b&0x80 != 0 {
+		if shift > 48 {
+			return 0, negative, ErrOverflow
+		}
+		b, err = d.readByte()
+		if err != nil {
+			return 0, negative, err
+		}
+		result |= uint64(b&0x7F) << shift
+		shift += 7
+	}
+	return result, negative, nil
 }
 
 // ReadAny decodes a tagged-union value written by Encoder.WriteAny.

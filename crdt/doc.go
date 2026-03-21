@@ -203,6 +203,27 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 		}
 	}
 
+	// Fire deep observers, propagating each change up the type tree.
+	// Each modified type and all its ancestors receive deep observer callbacks.
+	firedDeep := make(map[*abstractType]struct{})
+	for t := range txn.changed {
+		current := t
+		for current != nil {
+			if _, already := firedDeep[current]; already {
+				break
+			}
+			firedDeep[current] = struct{}{}
+			for _, fn := range current.deepObservers {
+				fn(txn)
+			}
+			if current.item != nil {
+				current = current.item.Parent
+			} else {
+				break
+			}
+		}
+	}
+
 	for _, fn := range d.onUpdate {
 		fn(orig)
 	}
@@ -261,4 +282,14 @@ func (d *Doc) EncodeStateAsUpdate() []byte {
 // ApplyUpdate decodes and integrates a V1 binary update into the document.
 func (d *Doc) ApplyUpdate(update []byte) error {
 	return ApplyUpdateV1(d, update, nil)
+}
+
+// Destroy detaches all observers and clears internal state, releasing
+// references held by the document. After Destroy the document must not be used.
+func (d *Doc) Destroy() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onUpdate = nil
+	d.share = make(map[string]sharedType)
+	d.store = newStructStore()
 }

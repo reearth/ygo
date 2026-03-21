@@ -21,6 +21,9 @@ func (e *Encoder) Bytes() []byte { return e.buf }
 // Reset clears the buffer so the Encoder can be reused.
 func (e *Encoder) Reset() { e.buf = e.buf[:0] }
 
+// WriteRaw appends raw bytes to the encoder buffer without any length prefix.
+func (e *Encoder) WriteRaw(b []byte) { e.buf = append(e.buf, b...) }
+
 // WriteUint8 writes a single byte.
 func (e *Encoder) WriteUint8(v uint8) {
 	e.buf = append(e.buf, v)
@@ -37,11 +40,30 @@ func (e *Encoder) WriteVarUint(v uint64) {
 	e.buf = append(e.buf, byte(v))
 }
 
-// WriteVarInt encodes a signed integer via ZigZag mapping before WriteVarUint,
-// so that small negative numbers produce small byte sequences.
-// ZigZag: (n << 1) ^ (n >> 63)  maps  0→0, -1→1, 1→2, -2→3, ...
+// WriteVarInt encodes a signed integer using the lib0 sign-magnitude format,
+// matching the JavaScript lib0 library's writeVarInt.
+// The sign occupies bit 6 of the first byte; bits 0-5 hold the low 6 bits of
+// the magnitude. Continuation bytes carry 7 data bits each (bit 7 = more).
 func (e *Encoder) WriteVarInt(v int64) {
-	e.WriteVarUint(uint64((v << 1) ^ (v >> 63)))
+	sign := byte(0)
+	var mag uint64
+	if v < 0 {
+		sign = 0x40
+		mag = uint64(-v)
+	} else {
+		mag = uint64(v)
+	}
+	if mag < 64 {
+		e.buf = append(e.buf, sign|byte(mag))
+		return
+	}
+	e.buf = append(e.buf, 0x80|sign|byte(mag&0x3F))
+	mag >>= 6
+	for mag >= 128 {
+		e.buf = append(e.buf, 0x80|byte(mag&0x7F))
+		mag >>= 7
+	}
+	e.buf = append(e.buf, byte(mag))
 }
 
 // WriteVarString encodes s as VarUint(byteLength) followed by raw UTF-8 bytes.
@@ -68,6 +90,23 @@ func (e *Encoder) WriteFloat64(v float64) {
 	var b [8]byte
 	binary.LittleEndian.PutUint64(b[:], math.Float64bits(v))
 	e.buf = append(e.buf, b[:]...)
+}
+
+// writeNegVarUint writes -(v) using sign-magnitude VarInt format.
+// Unlike WriteVarInt(-int64(v)), this correctly encodes -0 (as 0x40) when v=0.
+func (e *Encoder) writeNegVarUint(v uint64) {
+	const sign = byte(0x40)
+	if v < 64 {
+		e.buf = append(e.buf, sign|byte(v))
+		return
+	}
+	e.buf = append(e.buf, 0x80|sign|byte(v&0x3F))
+	v >>= 6
+	for v >= 128 {
+		e.buf = append(e.buf, 0x80|byte(v&0x7F))
+		v >>= 7
+	}
+	e.buf = append(e.buf, byte(v))
 }
 
 // WriteAny encodes an arbitrary value using lib0's tagged-union format.

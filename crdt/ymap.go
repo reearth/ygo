@@ -112,3 +112,14 @@ func (m *YMap) Observe(fn func(YMapEvent)) func() {
 		m.observers = append(m.observers[:idx], m.observers[idx+1:]...)
 	}
 }
+
+// ObserveDeep registers fn to be called after any transaction that modifies
+// this map or any nested shared type within it. Returns an unsubscribe function.
+func (m *YMap) ObserveDeep(fn func(*Transaction)) func() {
+	m.abstractType.deepObservers = append(m.abstractType.deepObservers, fn)
+	idx := len(m.abstractType.deepObservers) - 1
+	return func() {
+		obs := m.abstractType.deepObservers
+		m.abstractType.deepObservers = append(obs[:idx], obs[idx+1:]...)
+	}
+}

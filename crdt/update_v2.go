@@ -1,0 +1,906 @@
+package crdt
+
+import (
+	"fmt"
+	"sort"
+
+	"github.com/reearth/ygo/encoding"
+)
+
+// ── V2 encoder state ──────────────────────────────────────────────────────────
+
+type v2Encoder struct {
+	keyClock int
+	keyMap   map[string]int
+
+	keyClockEnc   encoding.IntDiffOptRleEncoder
+	clientEnc     encoding.UintOptRleEncoder
+	leftClockEnc  encoding.IntDiffOptRleEncoder
+	rightClockEnc encoding.IntDiffOptRleEncoder
+	infoEnc       encoding.RleByteEncoder
+	stringEnc     encoding.StringEncoder
+	parentInfoEnc encoding.RleByteEncoder
+	typeRefEnc    encoding.UintOptRleEncoder
+	lenEnc        encoding.UintOptRleEncoder
+	restEnc       *encoding.Encoder
+
+	dsCurrVal uint64
+}
+
+func newV2Encoder() *v2Encoder {
+	return &v2Encoder{
+		keyMap:  make(map[string]int),
+		restEnc: encoding.NewEncoder(),
+	}
+}
+
+func (e *v2Encoder) toBytes() []byte {
+	out := encoding.NewEncoder()
+	out.WriteVarUint(0) // feature flag
+	out.WriteVarBytes(e.keyClockEnc.Bytes())
+	out.WriteVarBytes(e.clientEnc.Bytes())
+	out.WriteVarBytes(e.leftClockEnc.Bytes())
+	out.WriteVarBytes(e.rightClockEnc.Bytes())
+	out.WriteVarBytes(e.infoEnc.Bytes())
+	out.WriteVarBytes(e.stringEnc.Bytes())
+	out.WriteVarBytes(e.parentInfoEnc.Bytes())
+	out.WriteVarBytes(e.typeRefEnc.Bytes())
+	out.WriteVarBytes(e.lenEnc.Bytes())
+	// restEncoder is appended raw (no length prefix) — matches Yjs UpdateEncoderV2.toUint8Array
+	out.WriteRaw(e.restEnc.Bytes())
+	return out.Bytes()
+}
+
+func (e *v2Encoder) writeClient(client ClientID) {
+	e.clientEnc.Write(uint64(client))
+}
+
+func (e *v2Encoder) writeInfo(info byte) {
+	e.infoEnc.Write(info)
+}
+
+func (e *v2Encoder) writeLeftID(id ID) {
+	e.clientEnc.Write(uint64(id.Client))
+	e.leftClockEnc.Write(int64(id.Clock))
+}
+
+func (e *v2Encoder) writeRightID(id ID) {
+	e.clientEnc.Write(uint64(id.Client))
+	e.rightClockEnc.Write(int64(id.Clock))
+}
+
+func (e *v2Encoder) writeParentInfo(isYKey bool) {
+	if isYKey {
+		e.parentInfoEnc.Write(1)
+	} else {
+		e.parentInfoEnc.Write(0)
+	}
+}
+
+func (e *v2Encoder) writeString(s string) {
+	e.stringEnc.Write(s)
+}
+
+func (e *v2Encoder) writeTypeRef(ref byte) {
+	e.typeRefEnc.Write(uint64(ref))
+}
+
+func (e *v2Encoder) writeLen(l int) {
+	e.lenEnc.Write(uint64(l))
+}
+
+func (e *v2Encoder) writeKey(key string) {
+	if clock, ok := e.keyMap[key]; ok {
+		e.keyClockEnc.Write(int64(clock))
+	} else {
+		e.keyClockEnc.Write(int64(e.keyClock))
+		e.stringEnc.Write(key)
+		e.keyMap[key] = e.keyClock
+		e.keyClock++
+	}
+}
+
+func (e *v2Encoder) resetDsCurVal() { e.dsCurrVal = 0 }
+
+func (e *v2Encoder) writeDsClock(clock uint64) {
+	diff := clock - e.dsCurrVal
+	e.dsCurrVal = clock
+	e.restEnc.WriteVarUint(diff)
+}
+
+func (e *v2Encoder) writeDsLen(l uint64) {
+	e.restEnc.WriteVarUint(l - 1)
+	e.dsCurrVal += l
+}
+
+// ── V2 decoder state ──────────────────────────────────────────────────────────
+
+type v2Decoder struct {
+	keyClockDec   *encoding.IntDiffOptRleDecoder
+	clientDec     *encoding.UintOptRleDecoder
+	leftClockDec  *encoding.IntDiffOptRleDecoder
+	rightClockDec *encoding.IntDiffOptRleDecoder
+	infoDec       *encoding.RleByteDecoder
+	stringDec     *encoding.StringDecoder
+	parentInfoDec *encoding.RleByteDecoder
+	typeRefDec    *encoding.UintOptRleDecoder
+	lenDec        *encoding.UintOptRleDecoder
+	restDec       *encoding.Decoder
+
+	keys      []string
+	dsCurrVal uint64
+}
+
+func newV2Decoder(data []byte) (*v2Decoder, error) {
+	dec := encoding.NewDecoder(data)
+
+	// Feature flag (currently unused, always 0)
+	if _, err := dec.ReadVarUint(); err != nil {
+		return nil, fmt.Errorf("%w: V2 feature flag: %v", ErrInvalidUpdate, err)
+	}
+
+	read := func(name string) ([]byte, error) {
+		b, err := dec.ReadVarBytes()
+		if err != nil {
+			return nil, fmt.Errorf("%w: V2 %s: %v", ErrInvalidUpdate, name, err)
+		}
+		cp := make([]byte, len(b))
+		copy(cp, b)
+		return cp, nil
+	}
+
+	keyClockBytes, err := read("keyClockEncoder")
+	if err != nil {
+		return nil, err
+	}
+	clientBytes, err := read("clientEncoder")
+	if err != nil {
+		return nil, err
+	}
+	leftClockBytes, err := read("leftClockEncoder")
+	if err != nil {
+		return nil, err
+	}
+	rightClockBytes, err := read("rightClockEncoder")
+	if err != nil {
+		return nil, err
+	}
+	infoBytes, err := read("infoEncoder")
+	if err != nil {
+		return nil, err
+	}
+	stringBytes, err := read("stringEncoder")
+	if err != nil {
+		return nil, err
+	}
+	parentInfoBytes, err := read("parentInfoEncoder")
+	if err != nil {
+		return nil, err
+	}
+	typeRefBytes, err := read("typeRefEncoder")
+	if err != nil {
+		return nil, err
+	}
+	lenBytes, err := read("lenEncoder")
+	if err != nil {
+		return nil, err
+	}
+
+	// Remaining bytes = restDecoder (raw, no length prefix)
+	remaining := dec.RemainingBytes()
+
+	stringDec, err := encoding.NewStringDecoder(stringBytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: V2 stringDecoder: %v", ErrInvalidUpdate, err)
+	}
+
+	return &v2Decoder{
+		keyClockDec:   encoding.NewIntDiffOptRleDecoder(keyClockBytes),
+		clientDec:     encoding.NewUintOptRleDecoder(clientBytes),
+		leftClockDec:  encoding.NewIntDiffOptRleDecoder(leftClockBytes),
+		rightClockDec: encoding.NewIntDiffOptRleDecoder(rightClockBytes),
+		infoDec:       encoding.NewRleByteDecoder(infoBytes),
+		stringDec:     stringDec,
+		parentInfoDec: encoding.NewRleByteDecoder(parentInfoBytes),
+		typeRefDec:    encoding.NewUintOptRleDecoder(typeRefBytes),
+		lenDec:        encoding.NewUintOptRleDecoder(lenBytes),
+		restDec:       encoding.NewDecoder(remaining),
+	}, nil
+}
+
+func (d *v2Decoder) readClient() (ClientID, error) {
+	v, err := d.clientDec.Read()
+	return ClientID(v), err
+}
+
+func (d *v2Decoder) readInfo() (byte, error) {
+	return d.infoDec.Read()
+}
+
+func (d *v2Decoder) readLeftID() (ID, error) {
+	client, err := d.clientDec.Read()
+	if err != nil {
+		return ID{}, err
+	}
+	clock, err := d.leftClockDec.Read()
+	if err != nil {
+		return ID{}, err
+	}
+	return ID{Client: ClientID(client), Clock: uint64(clock)}, nil
+}
+
+func (d *v2Decoder) readRightID() (ID, error) {
+	client, err := d.clientDec.Read()
+	if err != nil {
+		return ID{}, err
+	}
+	clock, err := d.rightClockDec.Read()
+	if err != nil {
+		return ID{}, err
+	}
+	return ID{Client: ClientID(client), Clock: uint64(clock)}, nil
+}
+
+func (d *v2Decoder) readParentInfo() (bool, error) {
+	b, err := d.parentInfoDec.Read()
+	return b == 1, err
+}
+
+func (d *v2Decoder) readString() (string, error) {
+	return d.stringDec.Read()
+}
+
+func (d *v2Decoder) readTypeRef() (byte, error) {
+	v, err := d.typeRefDec.Read()
+	return byte(v), err
+}
+
+func (d *v2Decoder) readLen() (int, error) {
+	v, err := d.lenDec.Read()
+	return int(v), err
+}
+
+func (d *v2Decoder) readKey() (string, error) {
+	keyClock, err := d.keyClockDec.Read()
+	if err != nil {
+		return "", err
+	}
+	idx := int(keyClock)
+	if idx < len(d.keys) {
+		return d.keys[idx], nil
+	}
+	key, err := d.stringDec.Read()
+	if err != nil {
+		return "", err
+	}
+	d.keys = append(d.keys, key)
+	return key, nil
+}
+
+func (d *v2Decoder) readAny() (any, error) {
+	return d.restDec.ReadAny()
+}
+
+func (d *v2Decoder) readBuf() ([]byte, error) {
+	b, err := d.restDec.ReadVarBytes()
+	if err != nil {
+		return nil, err
+	}
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	return cp, nil
+}
+
+func (d *v2Decoder) resetDsCurVal() { d.dsCurrVal = 0 }
+
+func (d *v2Decoder) readDsClock() (uint64, error) {
+	diff, err := d.restDec.ReadVarUint()
+	if err != nil {
+		return 0, err
+	}
+	d.dsCurrVal += diff
+	return d.dsCurrVal, nil
+}
+
+func (d *v2Decoder) readDsLen() (uint64, error) {
+	v, err := d.restDec.ReadVarUint()
+	if err != nil {
+		return 0, err
+	}
+	l := v + 1
+	d.dsCurrVal += l
+	return l, nil
+}
+
+// ── V2 encoding ───────────────────────────────────────────────────────────────
+
+func encodeV2Locked(doc *Doc, sv StateVector) []byte {
+	enc := newV2Encoder()
+
+	type clientGroup struct {
+		client     ClientID
+		items      []*Item
+		startClock uint64
+	}
+
+	var groups []clientGroup
+	for client, items := range doc.store.clients {
+		svClock := sv.Clock(client)
+		var relevant []*Item
+		for _, item := range items {
+			if item.ID.Clock+uint64(item.Content.Len()) > svClock {
+				relevant = append(relevant, item)
+			}
+		}
+		if len(relevant) > 0 {
+			groups = append(groups, clientGroup{client, relevant, svClock})
+		}
+	}
+	// Yjs V2 writes clients in DESCENDING order.
+	sort.Slice(groups, func(i, j int) bool { return groups[i].client > groups[j].client })
+
+	enc.restEnc.WriteVarUint(uint64(len(groups)))
+	for _, g := range groups {
+		enc.restEnc.WriteVarUint(uint64(len(g.items)))
+		enc.writeClient(g.client)
+		enc.restEnc.WriteVarUint(g.startClock)
+		for i, item := range g.items {
+			offset := 0
+			if i == 0 && g.startClock > item.ID.Clock {
+				offset = int(g.startClock - item.ID.Clock)
+			}
+			encodeItemV2(enc, item, offset)
+		}
+	}
+
+	encodeDeleteSetV2(enc, buildDeleteSet(doc.store))
+	return enc.toBytes()
+}
+
+func encodeItemV2(enc *v2Encoder, item *Item, offset int) {
+	var origin, originRight *ID
+	if offset > 0 {
+		oc := ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset) - 1}
+		origin = &oc
+		originRight = item.OriginRight
+	} else {
+		origin = item.Origin
+		originRight = item.OriginRight
+	}
+
+	contentTag := contentTagOf(item.Content)
+	info := contentTag
+	if origin != nil {
+		info |= flagHasOrigin
+	}
+	if originRight != nil {
+		info |= flagHasRightOrigin
+	}
+	cantCopyParentInfo := origin == nil && originRight == nil
+	if cantCopyParentInfo && item.ParentSub != "" {
+		info |= flagHasParentSub
+	}
+	enc.writeInfo(info)
+
+	if origin != nil {
+		enc.writeLeftID(*origin)
+	}
+	if originRight != nil {
+		enc.writeRightID(*originRight)
+	}
+
+	if cantCopyParentInfo {
+		if item.Parent != nil && item.Parent.item != nil {
+			// Nested type: parent identified by its item's ID.
+			enc.writeParentInfo(false)
+			enc.writeLeftID(item.Parent.item.ID)
+		} else {
+			// Root named type.
+			enc.writeParentInfo(true)
+			name := ""
+			if item.Parent != nil {
+				name = item.Parent.name
+			}
+			enc.writeString(name)
+		}
+		if item.ParentSub != "" {
+			enc.writeString(item.ParentSub)
+		}
+	}
+
+	encodeContentV2(enc, item.Content, offset)
+}
+
+func contentTagOf(c Content) byte {
+	switch c.(type) {
+	case *ContentDeleted:
+		return wireDeleted
+	case *ContentJSON:
+		return wireJSON
+	case *ContentBinary:
+		return wireBinary
+	case *ContentString:
+		return wireString
+	case *ContentEmbed:
+		return wireEmbed
+	case *ContentFormat:
+		return wireFormat
+	case *ContentType:
+		return wireType
+	case *ContentAny:
+		return wireAny
+	case *ContentDoc:
+		return wireDoc
+	default:
+		return wireAny
+	}
+}
+
+func encodeContentV2(enc *v2Encoder, c Content, offset int) {
+	switch ct := c.(type) {
+	case *ContentDeleted:
+		enc.writeLen(ct.length - offset)
+	case *ContentJSON:
+		vals := ct.Vals[offset:]
+		enc.writeLen(len(vals))
+		for _, v := range vals {
+			enc.writeString(fmtValToJSON(v))
+		}
+	case *ContentBinary:
+		enc.restEnc.WriteVarBytes(ct.Data)
+	case *ContentString:
+		runes := []rune(ct.Str)
+		enc.writeString(string(runes[offset:]))
+	case *ContentEmbed:
+		enc.restEnc.WriteAny(ct.Val)
+	case *ContentFormat:
+		enc.writeKey(ct.Key)
+		enc.restEnc.WriteAny(ct.Val)
+	case *ContentType:
+		tc, nodeName := typeClassOf(ct)
+		enc.writeTypeRef(tc)
+		if tc == 3 { // YXmlElement
+			enc.writeKey(nodeName)
+		}
+	case *ContentAny:
+		vals := ct.Vals[offset:]
+		enc.writeLen(len(vals))
+		for _, v := range vals {
+			enc.restEnc.WriteAny(v)
+		}
+	case *ContentDoc:
+		enc.writeString("")
+		enc.restEnc.WriteAny(nil)
+	}
+}
+
+func encodeDeleteSetV2(enc *v2Encoder, ds DeleteSet) {
+	clients := make([]ClientID, 0, len(ds.clients))
+	for c := range ds.clients {
+		clients = append(clients, c)
+	}
+	// Yjs V2 writes delete set clients in DESCENDING order.
+	sort.Slice(clients, func(i, j int) bool { return clients[i] > clients[j] })
+
+	enc.restEnc.WriteVarUint(uint64(len(clients)))
+	for _, c := range clients {
+		enc.resetDsCurVal()
+		enc.restEnc.WriteVarUint(uint64(c))
+		ranges := ds.clients[c]
+		enc.restEnc.WriteVarUint(uint64(len(ranges)))
+		for _, r := range ranges {
+			enc.writeDsClock(r.Clock)
+			enc.writeDsLen(r.Len)
+		}
+	}
+}
+
+// ── V2 decoding ───────────────────────────────────────────────────────────────
+
+func applyV2Txn(txn *Transaction, update []byte) error {
+	dec, err := newV2Decoder(update)
+	if err != nil {
+		return err
+	}
+
+	sv := txn.doc.store.StateVector()
+
+	numClients, err := dec.restDec.ReadVarUint()
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+
+	for i := uint64(0); i < numClients; i++ {
+		numStructs, err := dec.restDec.ReadVarUint()
+		if err != nil {
+			return wrapUpdateErr(err)
+		}
+		client, err := dec.readClient()
+		if err != nil {
+			return wrapUpdateErr(err)
+		}
+		clock, err := dec.restDec.ReadVarUint()
+		if err != nil {
+			return wrapUpdateErr(err)
+		}
+
+		existingEnd := sv.Clock(client)
+
+		for j := uint64(0); j < numStructs; j++ {
+			info, err := dec.readInfo()
+			if err != nil {
+				return wrapUpdateErr(err)
+			}
+
+			contentType := info & 0x1F
+
+			switch contentType {
+			case 0: // GC (garbage collected)
+				l, err := dec.readLen()
+				if err != nil {
+					return wrapUpdateErr(err)
+				}
+				length := uint64(l)
+				itemEnd := clock + length
+				if itemEnd > existingEnd {
+					offset := 0
+					if clock < existingEnd {
+						offset = int(existingEnd - clock)
+					}
+					item := &Item{
+						ID:      ID{Client: client, Clock: clock},
+						Content: NewContentDeleted(l - offset),
+					}
+					// For GC items, we need to find the parent.
+					// This is tricky without parent info encoded for GC.
+					// Skip for now — these are already-deleted items.
+					_ = item
+				}
+				clock = itemEnd
+				continue
+
+			case 10: // Skip struct
+				l, err := dec.restDec.ReadVarUint()
+				if err != nil {
+					return wrapUpdateErr(err)
+				}
+				clock += l
+				continue
+			}
+
+			// Regular item
+			item, contentLen, err := decodeItemV2(dec, txn.doc, client, clock, info)
+			if err != nil {
+				return wrapUpdateErr(err)
+			}
+
+			itemEnd := clock + uint64(contentLen)
+			if itemEnd <= existingEnd {
+				clock = itemEnd
+				continue
+			}
+
+			offset := 0
+			if clock < existingEnd {
+				offset = int(existingEnd - clock)
+			}
+
+			if offset == 0 && item.Origin != nil {
+				item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
+			}
+
+			item.integrate(txn, offset)
+			clock = itemEnd
+		}
+	}
+
+	// Decode delete set
+	ds, err := decodeDeleteSetV2(dec)
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+	ds.applyTo(txn)
+	return nil
+}
+
+func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info byte) (*Item, int, error) {
+	hasOrigin := info&flagHasOrigin != 0
+	hasRightOrigin := info&flagHasRightOrigin != 0
+	hasParentSub := info&flagHasParentSub != 0
+
+	var origin, originRight *ID
+
+	if hasOrigin {
+		id, err := dec.readLeftID()
+		if err != nil {
+			return nil, 0, err
+		}
+		origin = &id
+	}
+
+	if hasRightOrigin {
+		id, err := dec.readRightID()
+		if err != nil {
+			return nil, 0, err
+		}
+		originRight = &id
+	}
+
+	var parent *abstractType
+	var parentSub string
+
+	cantCopyParentInfo := !hasOrigin && !hasRightOrigin
+	if cantCopyParentInfo {
+		isYKey, err := dec.readParentInfo()
+		if err != nil {
+			return nil, 0, err
+		}
+		if isYKey {
+			// Named root type.
+			name, err := dec.readString()
+			if err != nil {
+				return nil, 0, err
+			}
+			parent = doc.getOrCreateType(name)
+		} else {
+			// Parent by item ID.
+			parentID, err := dec.readLeftID()
+			if err != nil {
+				return nil, 0, err
+			}
+			parentItem := doc.store.Find(parentID)
+			if parentItem == nil {
+				return nil, 0, fmt.Errorf("parent item {%d,%d} not found", parentID.Client, parentID.Clock)
+			}
+			ct, ok := parentItem.Content.(*ContentType)
+			if !ok {
+				return nil, 0, fmt.Errorf("parent item {%d,%d} is not a ContentType", parentID.Client, parentID.Clock)
+			}
+			parent = ct.Type
+		}
+
+		if hasParentSub {
+			sub, err := dec.readString()
+			if err != nil {
+				return nil, 0, err
+			}
+			parentSub = sub
+		}
+	}
+
+	content, err := decodeContentV2(dec, doc, info&0x1F)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	item := &Item{
+		ID:          ID{Client: client, Clock: clock},
+		Origin:      origin,
+		OriginRight: originRight,
+		Parent:      parent,
+		ParentSub:   parentSub,
+		Content:     content,
+	}
+
+	// Infer parent from origin when not explicitly encoded.
+	if item.Parent == nil {
+		if origin != nil {
+			if oi := doc.store.Find(*origin); oi != nil {
+				item.Parent = oi.Parent
+			}
+		} else if originRight != nil {
+			if ori := doc.store.Find(*originRight); ori != nil {
+				item.Parent = ori.Parent
+			}
+		}
+	}
+
+	if item.Parent == nil {
+		return nil, 0, fmt.Errorf("could not determine parent for item {%d,%d}", client, clock)
+	}
+
+	return item, content.Len(), nil
+}
+
+func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
+	switch tag {
+	case wireDeleted:
+		l, err := dec.readLen()
+		if err != nil {
+			return nil, err
+		}
+		return NewContentDeleted(l), nil
+
+	case wireJSON:
+		l, err := dec.readLen()
+		if err != nil {
+			return nil, err
+		}
+		vals := make([]any, l)
+		for i := range vals {
+			s, err := dec.readString()
+			if err != nil {
+				return nil, err
+			}
+			if s == "undefined" {
+				vals[i] = nil
+			} else {
+				v, err := fmtValFromJSON(s)
+				if err != nil {
+					return nil, err
+				}
+				vals[i] = v
+			}
+		}
+		return NewContentJSON(vals...), nil
+
+	case wireBinary:
+		b, err := dec.readBuf()
+		if err != nil {
+			return nil, err
+		}
+		return NewContentBinary(b), nil
+
+	case wireString:
+		s, err := dec.readString()
+		if err != nil {
+			return nil, err
+		}
+		return NewContentString(s), nil
+
+	case wireEmbed:
+		v, err := dec.readAny()
+		if err != nil {
+			return nil, err
+		}
+		return NewContentEmbed(v), nil
+
+	case wireFormat:
+		key, err := dec.readKey()
+		if err != nil {
+			return nil, err
+		}
+		val, err := dec.readAny()
+		if err != nil {
+			return nil, err
+		}
+		return NewContentFormat(key, val), nil
+
+	case wireType:
+		typeRef, err := dec.readTypeRef()
+		if err != nil {
+			return nil, err
+		}
+		at, err := decodeTypeContentV2(dec, doc, typeRef)
+		if err != nil {
+			return nil, err
+		}
+		return NewContentType(at), nil
+
+	case wireAny:
+		l, err := dec.readLen()
+		if err != nil {
+			return nil, err
+		}
+		vals := make([]any, l)
+		for i := range vals {
+			v, err := dec.readAny()
+			if err != nil {
+				return nil, err
+			}
+			vals[i] = v
+		}
+		return NewContentAny(vals...), nil
+
+	case wireDoc:
+		// readString (doc guid) + readAny (opts) — we discard both
+		if _, err := dec.readString(); err != nil {
+			return nil, err
+		}
+		if _, err := dec.readAny(); err != nil {
+			return nil, err
+		}
+		return NewContentDoc(New()), nil
+
+	default:
+		return nil, fmt.Errorf("unknown V2 content tag: %d", tag)
+	}
+}
+
+func decodeTypeContentV2(dec *v2Decoder, doc *Doc, typeRef byte) (*abstractType, error) {
+	switch typeRef {
+	case 0: // YArray
+		arr := &YArray{}
+		arr.abstractType.doc = doc
+		arr.abstractType.itemMap = make(map[string]*Item)
+		arr.abstractType.owner = arr
+		return &arr.abstractType, nil
+
+	case 1: // YMap
+		m := &YMap{}
+		m.abstractType.doc = doc
+		m.abstractType.itemMap = make(map[string]*Item)
+		m.abstractType.owner = m
+		return &m.abstractType, nil
+
+	case 2: // YText
+		txt := &YText{}
+		txt.abstractType.doc = doc
+		txt.abstractType.itemMap = make(map[string]*Item)
+		txt.abstractType.owner = txt
+		return &txt.abstractType, nil
+
+	case 3: // YXmlElement — reads node name via readKey
+		nodeName, err := dec.readKey()
+		if err != nil {
+			return nil, err
+		}
+		elem := NewYXmlElement(nodeName)
+		elem.YXmlFragment.abstractType.doc = doc
+		return &elem.YXmlFragment.abstractType, nil
+
+	case 4: // YXmlFragment
+		frag := &YXmlFragment{}
+		frag.abstractType.doc = doc
+		frag.abstractType.itemMap = make(map[string]*Item)
+		frag.abstractType.owner = frag
+		return &frag.abstractType, nil
+
+	case 5: // YXmlHook — reads hook name via readKey (discard)
+		if _, err := dec.readKey(); err != nil {
+			return nil, err
+		}
+		r := &rawType{}
+		r.abstractType.doc = doc
+		r.abstractType.itemMap = make(map[string]*Item)
+		r.abstractType.owner = r
+		return &r.abstractType, nil
+
+	case 6: // YXmlText
+		xt := NewYXmlText()
+		xt.YText.abstractType.doc = doc
+		return &xt.YText.abstractType, nil
+
+	default:
+		r := &rawType{}
+		r.abstractType.doc = doc
+		r.abstractType.itemMap = make(map[string]*Item)
+		r.abstractType.owner = r
+		return &r.abstractType, nil
+	}
+}
+
+func decodeDeleteSetV2(dec *v2Decoder) (DeleteSet, error) {
+	ds := newDeleteSet()
+	n, err := dec.restDec.ReadVarUint()
+	if err != nil {
+		return ds, err
+	}
+	for i := uint64(0); i < n; i++ {
+		dec.resetDsCurVal()
+		clientU, err := dec.restDec.ReadVarUint()
+		if err != nil {
+			return ds, err
+		}
+		numRanges, err := dec.restDec.ReadVarUint()
+		if err != nil {
+			return ds, err
+		}
+		client := ClientID(clientU)
+		for j := uint64(0); j < numRanges; j++ {
+			clock, err := dec.readDsClock()
+			if err != nil {
+				return ds, err
+			}
+			length, err := dec.readDsLen()
+			if err != nil {
+				return ds, err
+			}
+			ds.clients[client] = append(ds.clients[client], DeleteRange{Clock: clock, Len: length})
+		}
+	}
+	for c := range ds.clients {
+		ds.sortAndCompact(c)
+	}
+	return ds, nil
+}

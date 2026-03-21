@@ -1,11 +1,9 @@
 package crdt
 
 import (
-	"bytes"
-	"compress/zlib"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
@@ -31,9 +29,6 @@ const (
 	flagHasParentSub   byte = 0x20
 )
 
-// v2Magic is the first byte of a V2 update payload.
-const v2Magic byte = 0x02
-
 // ErrInvalidUpdate is returned when a binary update cannot be decoded.
 var ErrInvalidUpdate = errors.New("crdt: invalid update")
 
@@ -56,54 +51,42 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 	return applyErr
 }
 
-// EncodeStateAsUpdateV2 encodes the document state as V2 (magic + zlib(V1)).
+// EncodeStateAsUpdateV2 encodes the document state using the Yjs V2
+// column-oriented binary format.  The output is interoperable with
+// Y.applyUpdateV2 / Y.encodeStateAsUpdateV2 from the yjs npm package.
 func EncodeStateAsUpdateV2(doc *Doc, sv StateVector) []byte {
-	v1 := EncodeStateAsUpdateV1(doc, sv)
-	v2, err := UpdateV1ToV2(v1)
-	if err != nil {
-		// zlib compression of in-memory bytes should never fail.
-		panic(fmt.Sprintf("crdt: EncodeStateAsUpdateV2: %v", err))
-	}
-	return v2
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	return encodeV2Locked(doc, sv)
 }
 
-// ApplyUpdateV2 decompresses a V2 update and applies it as V1.
+// ApplyUpdateV2 decodes and integrates a Yjs V2 binary update into doc.
 func ApplyUpdateV2(doc *Doc, update []byte, origin any) error {
-	v1, err := UpdateV2ToV1(update)
-	if err != nil {
-		return err
-	}
-	return ApplyUpdateV1(doc, v1, origin)
+	var applyErr error
+	doc.Transact(func(txn *Transaction) {
+		applyErr = applyV2Txn(txn, update)
+	}, origin)
+	return applyErr
 }
 
-// UpdateV1ToV2 wraps a V1 payload with the V2 magic byte and zlib compression.
+// UpdateV1ToV2 converts a V1 update payload to real Yjs V2 format by applying
+// it to a temporary document and re-encoding in V2.
 func UpdateV1ToV2(v1 []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	buf.WriteByte(v2Magic)
-	w := zlib.NewWriter(&buf)
-	if _, err := w.Write(v1); err != nil {
+	doc := New()
+	if err := ApplyUpdateV1(doc, v1, nil); err != nil {
 		return nil, err
 	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return EncodeStateAsUpdateV2(doc, nil), nil
 }
 
-// UpdateV2ToV1 strips the V2 magic byte and decompresses the V1 payload.
+// UpdateV2ToV1 converts a real Yjs V2 update to V1 format by applying it to a
+// temporary document and re-encoding in V1.
 func UpdateV2ToV1(v2 []byte) ([]byte, error) {
-	if len(v2) == 0 || v2[0] != v2Magic {
-		return nil, fmt.Errorf("%w: missing V2 magic byte", ErrInvalidUpdate)
+	doc := New()
+	if err := ApplyUpdateV2(doc, v2, nil); err != nil {
+		return nil, err
 	}
-	r, err := zlib.NewReader(bytes.NewReader(v2[1:]))
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidUpdate, err)
-	}
-	v1, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidUpdate, err)
-	}
-	return v1, nil
+	return EncodeStateAsUpdateV1(doc, nil), nil
 }
 
 // MergeUpdatesV1 combines multiple V1 updates into one by applying them all
@@ -310,7 +293,7 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 		enc.WriteAny(ct.Val)
 	case *ContentFormat:
 		enc.WriteVarString(ct.Key)
-		enc.WriteAny(ct.Val)
+		enc.WriteVarString(fmtValToJSON(ct.Val))
 	case *ContentType:
 		tc, nodeName := typeClassOf(ct)
 		enc.WriteUint8(tc)
@@ -618,7 +601,11 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		val, err := dec.ReadAny()
+		js, err := dec.ReadVarString()
+		if err != nil {
+			return nil, err
+		}
+		val, err := fmtValFromJSON(js)
 		if err != nil {
 			return nil, err
 		}
@@ -763,4 +750,31 @@ func wrapUpdateErr(err error) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %v", ErrInvalidUpdate, err)
+}
+
+// fmtValToJSON serialises a ContentFormat attribute value as a JSON string,
+// matching Yjs's ContentFormat.write() which calls encoder.writeJSON(value).
+func fmtValToJSON(v any) string {
+	if v == nil {
+		return "null"
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "null"
+	}
+	return string(b)
+}
+
+// fmtValFromJSON deserialises a ContentFormat attribute value from a JSON
+// string, matching Yjs's ContentFormat.read() which calls decoder.readJSON().
+// Numbers decode as float64, booleans as bool, null as nil.
+func fmtValFromJSON(s string) (any, error) {
+	if s == "undefined" {
+		return nil, nil
+	}
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }

@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ygo Collaborative Editor</title>
+  <style>
+    /* ── Reset & base ──────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Header bar ────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 16px;
+      height: 52px;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      flex-shrink: 0;
+      border-bottom: 1px solid #2e2e50;
+    }
+
+    header .logo {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: #7c83fd;
+    }
+
+    header .separator { color: #444; font-size: 20px; }
+
+    header .room-label {
+      font-size: 13px;
+      color: #888;
+    }
+
+    #room-name {
+      font-weight: 600;
+      color: #a5b4fc;
+      font-size: 14px;
+    }
+
+    /* Push status + users to the right */
+    header .spacer { flex: 1; }
+
+    #status {
+      font-size: 13px;
+      font-weight: 500;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: #2e2e50;
+    }
+
+    /* ── Users bar ─────────────────────────────────────────────────────── */
+    .users-bar {
+      padding: 6px 16px;
+      background: #13131f;
+      font-size: 12px;
+      color: #888;
+      flex-shrink: 0;
+      min-height: 30px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border-bottom: 1px solid #2e2e50;
+    }
+
+    .users-bar .label { color: #555; }
+
+    #users span {
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.07);
+    }
+
+    /* ── Editor area ───────────────────────────────────────────────────── */
+    .editor-wrapper {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      overflow: hidden;
+    }
+
+    #editor {
+      flex: 1;
+      width: 100%;
+      padding: 16px 20px;
+      font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+      font-size: 15px;
+      line-height: 1.6;
+      color: #e8e8f0;
+      background: #1e1e2e;
+      border: 1px solid #2e2e50;
+      border-radius: 8px;
+      resize: none;
+      outline: none;
+      transition: border-color 0.15s;
+      overflow-y: auto;
+    }
+
+    #editor:focus {
+      border-color: #7c83fd;
+      box-shadow: 0 0 0 3px rgba(124,131,253,0.15);
+    }
+
+    /* ── Footer hint ───────────────────────────────────────────────────── */
+    .hint {
+      padding: 8px 16px;
+      font-size: 11px;
+      color: #555;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .hint code {
+      background: #2e2e50;
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: #a5b4fc;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── Header: logo, room name, connection status ── -->
+  <header>
+    <span class="logo">ygo</span>
+    <span class="separator">·</span>
+    <span class="room-label">room:</span>
+    <span id="room-name">…</span>
+    <div class="spacer"></div>
+    <span id="status">⏳ Connecting…</span>
+  </header>
+
+  <!-- ── Online users (awareness) ── -->
+  <div class="users-bar">
+    <span class="label">Online:</span>
+    <span id="users">—</span>
+  </div>
+
+  <!-- ── Main editing area ── -->
+  <div class="editor-wrapper">
+    <textarea
+      id="editor"
+      spellcheck="false"
+      placeholder="Start typing… Open a second tab to collaborate in real time."
+    ></textarea>
+  </div>
+
+  <!-- ── Footer ── -->
+  <div class="hint">
+    Append a URL hash to join a different room, e.g.
+    <code>http://localhost:8080/#my-doc</code>
+  </div>
+
+  <!--
+    Import map: tells the browser where to resolve bare module specifiers like
+    "yjs" and "y-websocket". We use esm.sh, a CDN that transforms any npm
+    package into an ES module — no npm install, no build step required.
+
+    Pinning exact versions avoids surprises when the CDN updates.
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "yjs":         "https://esm.sh/yjs@13.6.30",
+      "y-websocket": "https://esm.sh/y-websocket@2.0.4",
+      "lib0/":       "https://esm.sh/lib0@0.2.98/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as Y from 'yjs'
+    import { WebsocketProvider } from 'y-websocket'
+
+    // ── 1. ROOM NAME ──────────────────────────────────────────────────────────
+    //
+    // We derive the room name from the URL hash so that two tabs at the same
+    // URL automatically share a document, while users can switch rooms simply
+    // by changing the hash — no server-side routing required.
+    //
+    // Examples:
+    //   http://localhost:8080/          → room "default"
+    //   http://localhost:8080/#team     → room "team"
+    //   http://localhost:8080/#my-doc  → room "my-doc"
+    const room = location.hash.slice(1) || 'default'
+    document.title = `ygo — ${room}`
+    document.getElementById('room-name').textContent = room
+
+    // ── 2. YJS DOCUMENT ───────────────────────────────────────────────────────
+    //
+    // Y.Doc is the root of a Yjs CRDT document. All shared state lives inside
+    // it. Multiple Y.Docs with the same updates applied always converge to the
+    // same value, regardless of the order the updates were received (CRDT
+    // property).
+    const ydoc = new Y.Doc()
+
+    // ── 3. WEBSOCKET PROVIDER ─────────────────────────────────────────────────
+    //
+    // WebsocketProvider connects this Y.Doc to the Go ygo server over a WebSocket.
+    // It speaks the y-protocols sync and awareness wire formats, which the Go
+    // server (provider/websocket.Server) also implements.
+    //
+    // URL construction: the library concatenates wsUrl + '/' + roomName, so:
+    //   wsUrl  = "ws://localhost:8080/yjs"
+    //   room   = "default"
+    //   result = "ws://localhost:8080/yjs/default"
+    //
+    // This maps to the Go route: /yjs/{room}
+    const wsUrl = `ws://${location.host}/yjs`
+    const provider = new WebsocketProvider(wsUrl, room, ydoc, {
+      connect: true,    // connect immediately on construction
+    })
+
+    // ── 4. SHARED TEXT ────────────────────────────────────────────────────────
+    //
+    // YText is Yjs's plain-text CRDT type (internally a doubly-linked list of
+    // character items with YATA conflict resolution). Any number of peers can
+    // insert and delete concurrently and the result is always consistent.
+    //
+    // We use the name "content" — this must match on every peer; the name is
+    // how Yjs identifies the same shared type across different Doc instances.
+    const ytext = ydoc.getText('content')
+
+    // ── 5. AWARENESS ─────────────────────────────────────────────────────────
+    //
+    // Awareness is an ephemeral channel layered on top of the same WebSocket.
+    // Unlike CRDT updates, awareness state is NOT persisted in the document:
+    // it disappears when the tab closes. It is used for user presence (online
+    // list, cursor position, selection).
+    //
+    // Each peer broadcasts a "local state" object. All peers' states are
+    // accessible via awareness.getStates() — a Map from clientID → state.
+    const awareness = provider.awareness
+    awareness.setLocalStateField('user', {
+      name:  `User-${Math.floor(Math.random() * 9000) + 1000}`,
+      color: `hsl(${Math.floor(Math.random() * 360)},70%,55%)`,
+    })
+
+    // ── 6. BIND YTEXT ↔ TEXTAREA ─────────────────────────────────────────────
+    //
+    // We need a two-way binding:
+    //   a) When any peer (including ourselves) commits a Yjs transaction, update
+    //      the textarea content.
+    //   b) When the local user types in the textarea, apply the diff to YText so
+    //      the change propagates to all other peers.
+    //
+    // The tricky part is avoiding a feedback loop: if the user types and we
+    // update YText, the YText observer fires and would overwrite the textarea
+    // (resetting the cursor). We guard against this with `ignoreInputEvent`.
+    const textarea = document.getElementById('editor')
+    let ignoreInputEvent = false
+    let prevValue = ''
+
+    // a) YText → textarea: called after every transaction that touches YText.
+    ytext.observe(() => {
+      if (ignoreInputEvent) return  // our own local edit — skip to avoid cursor reset
+
+      const newVal = ytext.toString()
+      if (newVal === textarea.value) return  // no actual change (e.g. duplicate event)
+
+      // Preserve the user's cursor position as best we can. This is a
+      // best-effort heuristic; for a production editor you would map old
+      // cursor offsets through the Yjs delta to find the new position.
+      const sel = {
+        start: textarea.selectionStart,
+        end:   textarea.selectionEnd,
+      }
+      textarea.value = newVal
+      // Clamp to new length in case the remote peer deleted text before cursor.
+      const len = newVal.length
+      textarea.setSelectionRange(
+        Math.min(sel.start, len),
+        Math.min(sel.end,   len),
+      )
+      prevValue = newVal
+    })
+
+    // b) textarea → YText: called on every keystroke / paste / cut / etc.
+    textarea.addEventListener('input', () => {
+      const newValue = textarea.value
+
+      // Compute the minimal diff between the previous and new textarea values.
+      // This avoids sending a "delete everything, insert everything" update on
+      // every keystroke, which would be very noisy in the CRDT history.
+      //
+      // Algorithm: find the longest common prefix (start) and the longest
+      // common suffix (endOld, endNew) and only encode the changed middle.
+      let start = 0
+      const minLen = Math.min(prevValue.length, newValue.length)
+      while (start < minLen && prevValue[start] === newValue[start]) start++
+
+      let endOld = prevValue.length
+      let endNew = newValue.length
+      while (
+        endOld > start && endNew > start &&
+        prevValue[endOld - 1] === newValue[endNew - 1]
+      ) {
+        endOld--
+        endNew--
+      }
+
+      // Wrap the delete + insert in a single Yjs transaction so all peers
+      // receive one atomic update. Without transact(), a delete and a
+      // subsequent insert would be two separate messages — valid but noisier.
+      ignoreInputEvent = true
+      ydoc.transact(() => {
+        if (endOld > start) {
+          // Delete the changed range from the old value.
+          ytext.delete(start, endOld - start)
+        }
+        if (endNew > start) {
+          // Insert the new text at the same position.
+          ytext.insert(start, newValue.slice(start, endNew))
+        }
+      })
+      ignoreInputEvent = false
+
+      prevValue = newValue
+    })
+
+    // ── 7. AWARENESS — online user list ──────────────────────────────────────
+    //
+    // awareness.getStates() returns a Map<clientID, state>. We filter for
+    // entries that have a "user" field (our format) and render them as coloured
+    // name badges.
+    function renderUsers() {
+      const states = Array.from(awareness.getStates().values())
+      const badges = states
+        .filter(s => s && s.user)
+        .map(s =>
+          `<span style="color:${s.user.color};border-color:${s.user.color}">${
+            escapeHtml(s.user.name)
+          }</span>`
+        )
+      document.getElementById('users').innerHTML =
+        badges.length ? badges.join(' ') : '<span style="color:#555">none</span>'
+    }
+
+    // 'change' fires whenever any peer's awareness state changes (join, update, leave).
+    awareness.on('change', renderUsers)
+    renderUsers()  // render immediately with our own state
+
+    // ── 8. CONNECTION STATUS ─────────────────────────────────────────────────
+    //
+    // The provider emits 'status' events with { status: 'connected' | 'disconnected' }.
+    // We display a simple coloured indicator in the header.
+    const statusEl = document.getElementById('status')
+    provider.on('status', ({ status }) => {
+      if (status === 'connected') {
+        statusEl.textContent = '🟢 Connected'
+        statusEl.style.color = '#6ee7b7'
+      } else {
+        statusEl.textContent = '🔴 Disconnected'
+        statusEl.style.color = '#fca5a5'
+      }
+    })
+
+    // ── 9. SYNC EVENT — initial load complete ─────────────────────────────────
+    //
+    // 'sync' fires once the provider has completed the SyncStep1/Step2
+    // handshake and applied any pending updates from the server. At this point
+    // the textarea is up to date with the shared document.
+    provider.on('sync', (isSynced) => {
+      if (isSynced) {
+        // Initialise prevValue so the first input event computes the correct diff.
+        prevValue = ytext.toString()
+        textarea.value = prevValue
+      }
+    })
+
+    // ── Utility: minimal HTML escaping ───────────────────────────────────────
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+    }
+  </script>
+
+</body>
+</html>

@@ -63,8 +63,7 @@ func TestUnit_VarInt_RoundTrip(t *testing.T) {
 	cases := []int64{
 		0, 1, -1, 63, -64, 127, -128,
 		math.MaxInt32, math.MinInt32,
-		// VarInt is bounded by the 53-bit VarUint limit.
-		// ZigZag maps positive n to 2n, so max is (2^53-1)/2 = 2^52-1.
+		// lib0 sign-magnitude VarInt: magnitude fits in 55 bits.
 		1<<52 - 1, -(1 << 52),
 	}
 	for _, v := range cases {
@@ -77,10 +76,10 @@ func TestUnit_VarInt_RoundTrip(t *testing.T) {
 }
 
 func TestUnit_VarInt_SmallNegativesAreSmall(t *testing.T) {
-	// -1 should encode to 2 bytes or fewer (ZigZag maps it to 1, which is 1 byte).
+	// -1 should encode to exactly 1 byte (sign-magnitude: 0x41).
 	e := encoding.NewEncoder()
 	e.WriteVarInt(-1)
-	assert.Len(t, e.Bytes(), 1, "-1 should ZigZag-encode to a single byte")
+	assert.Len(t, e.Bytes(), 1, "-1 should encode to a single byte")
 }
 
 // --- VarString ---

@@ -185,3 +185,14 @@ func (txt *YText) Observe(fn func(YTextEvent)) func() {
 		txt.observers = append(txt.observers[:idx], txt.observers[idx+1:]...)
 	}
 }
+
+// ObserveDeep registers fn to be called after any transaction that modifies
+// this text or any nested shared type within it. Returns an unsubscribe function.
+func (txt *YText) ObserveDeep(fn func(*Transaction)) func() {
+	txt.abstractType.deepObservers = append(txt.abstractType.deepObservers, fn)
+	idx := len(txt.abstractType.deepObservers) - 1
+	return func() {
+		obs := txt.abstractType.deepObservers
+		txt.abstractType.deepObservers = append(obs[:idx], obs[idx+1:]...)
+	}
+}
