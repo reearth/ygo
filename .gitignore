@@ -32,3 +32,4 @@ go.work.sum
 
 # Benchmarks
 benchmarks/*.txt
+testutil/node_modules/
