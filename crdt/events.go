@@ -43,3 +43,14 @@ type YTextEvent struct {
 	Txn    *Transaction
 	Delta  []Delta
 }
+
+// YXmlEvent is emitted after a transaction that modifies a YXmlFragment,
+// YXmlElement, or YXmlText node.
+// Target holds the concrete type (*YXmlFragment, *YXmlElement, or *YXmlText).
+// KeysChanged contains attribute keys that were added, updated, or deleted
+// during the transaction; it is nil for child-only modifications.
+type YXmlEvent struct {
+	Target      interface{}
+	Txn         *Transaction
+	KeysChanged map[string]struct{}
+}

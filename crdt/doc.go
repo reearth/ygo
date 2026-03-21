@@ -165,6 +165,24 @@ func (d *Doc) OnUpdate(fn func(origin any)) func() {
 	}
 }
 
+// GetXmlFragment returns the named root YXmlFragment, creating it if it does
+// not exist.
+func (d *Doc) GetXmlFragment(name string) *YXmlFragment {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if t, ok := d.share[name]; ok {
+		if f, ok := t.(*YXmlFragment); ok {
+			return f
+		}
+	}
+	f := &YXmlFragment{}
+	f.abstractType.doc = d
+	f.abstractType.itemMap = make(map[string]*Item)
+	f.abstractType.owner = f
+	d.share[name] = f
+	return f
+}
+
 // StateVector returns the current state vector of the document.
 func (d *Doc) StateVector() StateVector {
 	d.mu.Lock()
