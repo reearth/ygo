@@ -139,6 +139,43 @@ func (txt *YText) ToString() string {
 	return sb.String()
 }
 
+// ToDelta returns a Quill-compatible delta representing the current document
+// state as a sequence of insert operations.
+//
+// Each run of plain text becomes one Delta with Op=DeltaOpInsert.
+// Formatting attributes accumulated from ContentFormat markers are attached to
+// the text run they precede. A nil attribute value signals the end of a span
+// and is omitted from the output attributes map.
+func (txt *YText) ToDelta() []Delta {
+	var deltas []Delta
+	currentAttrs := make(Attributes)
+
+	for item := txt.abstractType.start; item != nil; item = item.Right {
+		if item.Deleted {
+			continue
+		}
+		switch c := item.Content.(type) {
+		case *ContentString:
+			d := Delta{Op: DeltaOpInsert, Insert: c.Str}
+			if len(currentAttrs) > 0 {
+				attrs := make(Attributes, len(currentAttrs))
+				for k, v := range currentAttrs {
+					attrs[k] = v
+				}
+				d.Attributes = attrs
+			}
+			deltas = append(deltas, d)
+		case *ContentFormat:
+			if c.Val == nil {
+				delete(currentAttrs, c.Key)
+			} else {
+				currentAttrs[c.Key] = c.Val
+			}
+		}
+	}
+	return deltas
+}
+
 // Observe registers fn to be called after every transaction that modifies this
 // text. Returns an unsubscribe function.
 func (txt *YText) Observe(fn func(YTextEvent)) func() {

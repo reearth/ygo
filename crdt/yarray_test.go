@@ -131,6 +131,52 @@ func TestUnit_YArray_Observe_Unsubscribe(t *testing.T) {
 	assert.Equal(t, 1, calls)
 }
 
+func TestUnit_YArray_Slice(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("list")
+
+	doc.Transact(func(txn *Transaction) {
+		arr.Push(txn, []any{0, 1, 2, 3, 4})
+	})
+
+	assert.Equal(t, []any{1, 2, 3}, arr.Slice(1, 4))
+	assert.Equal(t, []any{0, 1, 2, 3, 4}, arr.Slice(0, 5))
+	assert.Equal(t, []any{0, 1, 2, 3, 4}, arr.Slice(0, 99)) // clamps to Len()
+	assert.Equal(t, []any{4}, arr.Slice(4, 5))
+	assert.Empty(t, arr.Slice(2, 2)) // empty range
+}
+
+func TestUnit_YArray_ForEach(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("list")
+
+	doc.Transact(func(txn *Transaction) {
+		arr.Push(txn, []any{"a", "b", "c"})
+	})
+
+	var indices []int
+	var vals []any
+	arr.ForEach(func(i int, v any) {
+		indices = append(indices, i)
+		vals = append(vals, v)
+	})
+
+	assert.Equal(t, []int{0, 1, 2}, indices)
+	assert.Equal(t, []any{"a", "b", "c"}, vals)
+}
+
+func TestUnit_YArray_ForEach_SkipsDeleted(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("list")
+
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{10, 20, 30}) })
+	doc.Transact(func(txn *Transaction) { arr.Delete(txn, 1, 1) }) // remove 20
+
+	var result []any
+	arr.ForEach(func(_ int, v any) { result = append(result, v) })
+	assert.Equal(t, []any{10, 30}, result)
+}
+
 // ── YArray integration ────────────────────────────────────────────────────────
 
 func TestInteg_YArray_TwoPeer_Convergence(t *testing.T) {

@@ -111,6 +111,54 @@ func (a *YArray) Observe(fn func(YArrayEvent)) func() {
 	}
 }
 
+// Slice returns elements in the half-open range [start, end).
+// Clamps end to Len() if it exceeds the array length.
+func (a *YArray) Slice(start, end int) []any {
+	t := &a.abstractType
+	if end > t.length {
+		end = t.length
+	}
+	result := make([]any, 0, end-start)
+	counted := 0
+	for item := t.start; item != nil && counted < end; item = item.Right {
+		if item.Deleted || !item.Content.IsCountable() {
+			continue
+		}
+		ca, ok := item.Content.(*ContentAny)
+		if !ok {
+			counted++
+			continue
+		}
+		for _, v := range ca.Vals {
+			if counted >= start && counted < end {
+				result = append(result, v)
+			}
+			counted++
+			if counted >= end {
+				break
+			}
+		}
+	}
+	return result
+}
+
+// ForEach calls fn for every non-deleted element in index order.
+func (a *YArray) ForEach(fn func(index int, value any)) {
+	t := &a.abstractType
+	index := 0
+	for item := t.start; item != nil; item = item.Right {
+		if item.Deleted || !item.Content.IsCountable() {
+			continue
+		}
+		if ca, ok := item.Content.(*ContentAny); ok {
+			for _, v := range ca.Vals {
+				fn(index, v)
+				index++
+			}
+		}
+	}
+}
+
 // deleteRange is shared by YArray and YText to delete a logical range.
 func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 	if length <= 0 {
