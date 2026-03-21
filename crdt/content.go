@@ -1,0 +1,158 @@
+package crdt
+
+import "unicode/utf8"
+
+// Content is the payload carried by an Item.
+// Every concrete content type must implement this interface.
+type Content interface {
+	// Len returns how many logical positions this content occupies.
+	Len() int
+	// IsCountable reports whether this content contributes to a type's length.
+	// Deleted and format-marker content do not count.
+	IsCountable() bool
+	// Copy returns a deep copy.
+	Copy() Content
+	// Splice splits the content at offset, mutates the receiver to hold [0, offset),
+	// and returns a new Content holding [offset, Len()).
+	Splice(offset int) Content
+}
+
+// Content type tag bytes — match the Yjs wire format identifiers.
+const (
+	tagDeleted byte = 0
+	tagJSON    byte = 1
+	tagBinary  byte = 2
+	tagString  byte = 3
+	tagEmbed   byte = 4
+	tagFormat  byte = 5
+	tagType    byte = 6
+	tagAny     byte = 7
+	tagDoc     byte = 8
+)
+
+// ContentDeleted is a tombstone. It replaces real content when an item is
+// deleted but must stay in the linked list to preserve position references.
+type ContentDeleted struct{ length int }
+
+func NewContentDeleted(length int) *ContentDeleted { return &ContentDeleted{length} }
+func (c *ContentDeleted) Len() int                 { return c.length }
+func (c *ContentDeleted) IsCountable() bool        { return false }
+func (c *ContentDeleted) Copy() Content            { return &ContentDeleted{c.length} }
+func (c *ContentDeleted) Splice(offset int) Content {
+	right := &ContentDeleted{c.length - offset}
+	c.length = offset
+	return right
+}
+
+// ContentString holds a run of UTF-8 text from a single client.
+// Multiple consecutive characters typed by the same client are squashed into
+// one item, keeping the linked list short.
+type ContentString struct{ Str string }
+
+func NewContentString(s string) *ContentString { return &ContentString{s} }
+
+// Len returns the number of Unicode code points (runes), matching Yjs's
+// character-count semantics for indexing into text.
+func (c *ContentString) Len() int          { return utf8.RuneCountInString(c.Str) }
+func (c *ContentString) IsCountable() bool { return true }
+func (c *ContentString) Copy() Content     { return &ContentString{c.Str} }
+func (c *ContentString) Splice(offset int) Content {
+	runes := []rune(c.Str)
+	right := &ContentString{string(runes[offset:])}
+	c.Str = string(runes[:offset])
+	return right
+}
+
+// ContentBinary holds raw bytes (e.g. binary file attachments).
+type ContentBinary struct{ Data []byte }
+
+func NewContentBinary(b []byte) *ContentBinary { return &ContentBinary{b} }
+func (c *ContentBinary) Len() int              { return 1 }
+func (c *ContentBinary) IsCountable() bool     { return true }
+func (c *ContentBinary) Copy() Content {
+	cp := make([]byte, len(c.Data))
+	copy(cp, c.Data)
+	return &ContentBinary{cp}
+}
+func (c *ContentBinary) Splice(_ int) Content { panic("crdt: ContentBinary is not splittable") }
+
+// ContentAny holds a slice of arbitrary JSON-compatible values.
+// Used by YArray when storing heterogeneous elements.
+type ContentAny struct{ Vals []any }
+
+func NewContentAny(vals ...any) *ContentAny { return &ContentAny{vals} }
+func (c *ContentAny) Len() int              { return len(c.Vals) }
+func (c *ContentAny) IsCountable() bool     { return true }
+func (c *ContentAny) Copy() Content {
+	cp := make([]any, len(c.Vals))
+	copy(cp, c.Vals)
+	return &ContentAny{cp}
+}
+func (c *ContentAny) Splice(offset int) Content {
+	right := &ContentAny{append([]any{}, c.Vals[offset:]...)}
+	c.Vals = c.Vals[:offset]
+	return right
+}
+
+// ContentJSON holds legacy JSON-serializable values. Functionally equivalent
+// to ContentAny; kept separate to maintain wire-format compatibility.
+type ContentJSON struct{ Vals []any }
+
+func NewContentJSON(vals ...any) *ContentJSON { return &ContentJSON{vals} }
+func (c *ContentJSON) Len() int              { return len(c.Vals) }
+func (c *ContentJSON) IsCountable() bool     { return true }
+func (c *ContentJSON) Copy() Content {
+	cp := make([]any, len(c.Vals))
+	copy(cp, c.Vals)
+	return &ContentJSON{cp}
+}
+func (c *ContentJSON) Splice(offset int) Content {
+	right := &ContentJSON{append([]any{}, c.Vals[offset:]...)}
+	c.Vals = c.Vals[:offset]
+	return right
+}
+
+// ContentEmbed holds a single embedded object (e.g. an image or formula in rich text).
+type ContentEmbed struct{ Val any }
+
+func NewContentEmbed(val any) *ContentEmbed { return &ContentEmbed{val} }
+func (c *ContentEmbed) Len() int            { return 1 }
+func (c *ContentEmbed) IsCountable() bool   { return true }
+func (c *ContentEmbed) Copy() Content       { return &ContentEmbed{c.Val} }
+func (c *ContentEmbed) Splice(_ int) Content {
+	panic("crdt: ContentEmbed is not splittable")
+}
+
+// ContentFormat marks the start of a formatting attribute span in YText.
+// It does not contribute to the document's logical length.
+type ContentFormat struct {
+	Key string
+	Val any
+}
+
+func NewContentFormat(key string, val any) *ContentFormat { return &ContentFormat{key, val} }
+func (c *ContentFormat) Len() int                         { return 1 }
+func (c *ContentFormat) IsCountable() bool                { return false }
+func (c *ContentFormat) Copy() Content                    { return &ContentFormat{c.Key, c.Val} }
+func (c *ContentFormat) Splice(_ int) Content {
+	panic("crdt: ContentFormat is not splittable")
+}
+
+// ContentType holds a reference to a nested shared type (e.g. a YMap nested
+// inside a YArray). The linked item acts as the "container" for the child type.
+type ContentType struct{ Type *abstractType }
+
+func NewContentType(t *abstractType) *ContentType { return &ContentType{t} }
+func (c *ContentType) Len() int                   { return 1 }
+func (c *ContentType) IsCountable() bool          { return true }
+func (c *ContentType) Copy() Content              { return &ContentType{c.Type} }
+func (c *ContentType) Splice(_ int) Content       { panic("crdt: ContentType is not splittable") }
+
+// ContentDoc holds a reference to a subdocument.
+type ContentDoc struct{ Doc *Doc }
+
+func NewContentDoc(d *Doc) *ContentDoc      { return &ContentDoc{d} }
+func (c *ContentDoc) Len() int              { return 1 }
+func (c *ContentDoc) IsCountable() bool     { return true }
+func (c *ContentDoc) Copy() Content         { return &ContentDoc{c.Doc} }
+func (c *ContentDoc) Splice(_ int) Content  { panic("crdt: ContentDoc is not splittable") }
