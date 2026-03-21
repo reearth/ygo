@@ -1,0 +1,179 @@
+package encoding
+
+import (
+	"encoding/binary"
+	"errors"
+	"math"
+)
+
+var (
+	// ErrUnexpectedEOF is returned when the buffer is exhausted before decoding completes.
+	ErrUnexpectedEOF = errors.New("encoding: unexpected end of input")
+
+	// ErrOverflow is returned when a VarUint exceeds the 53-bit safe integer range.
+	// This matches JavaScript's Number.MAX_SAFE_INTEGER constraint in the Yjs protocol.
+	ErrOverflow = errors.New("encoding: varuint overflow (> 53 bits)")
+)
+
+// Decoder reads values from a byte slice using the lib0 encoding format.
+type Decoder struct {
+	buf []byte
+	pos int
+}
+
+// NewDecoder returns a Decoder that reads from b.
+func NewDecoder(b []byte) *Decoder {
+	return &Decoder{buf: b}
+}
+
+// Remaining returns the number of unread bytes.
+func (d *Decoder) Remaining() int { return len(d.buf) - d.pos }
+
+// HasContent reports whether there are unread bytes remaining.
+func (d *Decoder) HasContent() bool { return d.pos < len(d.buf) }
+
+func (d *Decoder) readByte() (byte, error) {
+	if d.pos >= len(d.buf) {
+		return 0, ErrUnexpectedEOF
+	}
+	b := d.buf[d.pos]
+	d.pos++
+	return b, nil
+}
+
+// ReadUint8 reads a single byte.
+func (d *Decoder) ReadUint8() (uint8, error) {
+	return d.readByte()
+}
+
+// ReadVarUint decodes a variable-length unsigned integer.
+// Returns ErrOverflow if the value exceeds 53 significant bits.
+func (d *Decoder) ReadVarUint() (uint64, error) {
+	var result uint64
+	var shift uint
+	for {
+		b, err := d.readByte()
+		if err != nil {
+			return 0, err
+		}
+		result |= uint64(b&0x7f) << shift
+		if b&0x80 == 0 {
+			return result, nil
+		}
+		shift += 7
+		if shift > 49 {
+			return 0, ErrOverflow
+		}
+	}
+}
+
+// ReadVarInt decodes a ZigZag-encoded signed integer.
+func (d *Decoder) ReadVarInt() (int64, error) {
+	uv, err := d.ReadVarUint()
+	if err != nil {
+		return 0, err
+	}
+	// Reverse ZigZag: (n >> 1) ^ -(n & 1)
+	return int64((uv >> 1) ^ -(uv & 1)), nil
+}
+
+// ReadVarString decodes a length-prefixed UTF-8 string.
+func (d *Decoder) ReadVarString() (string, error) {
+	b, err := d.ReadVarBytes()
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// ReadVarBytes decodes a length-prefixed byte slice.
+// The returned slice is a sub-slice of the decoder's buffer; copy if you need to retain it.
+func (d *Decoder) ReadVarBytes() ([]byte, error) {
+	n, err := d.ReadVarUint()
+	if err != nil {
+		return nil, err
+	}
+	end := d.pos + int(n)
+	if end > len(d.buf) {
+		return nil, ErrUnexpectedEOF
+	}
+	out := d.buf[d.pos:end]
+	d.pos = end
+	return out, nil
+}
+
+// ReadFloat32 reads a 32-bit little-endian IEEE 754 float.
+func (d *Decoder) ReadFloat32() (float32, error) {
+	if d.pos+4 > len(d.buf) {
+		return 0, ErrUnexpectedEOF
+	}
+	bits := binary.LittleEndian.Uint32(d.buf[d.pos:])
+	d.pos += 4
+	return math.Float32frombits(bits), nil
+}
+
+// ReadFloat64 reads a 64-bit little-endian IEEE 754 float.
+func (d *Decoder) ReadFloat64() (float64, error) {
+	if d.pos+8 > len(d.buf) {
+		return 0, ErrUnexpectedEOF
+	}
+	bits := binary.LittleEndian.Uint64(d.buf[d.pos:])
+	d.pos += 8
+	return math.Float64frombits(bits), nil
+}
+
+// ReadAny decodes a tagged-union value written by Encoder.WriteAny.
+func (d *Decoder) ReadAny() (any, error) {
+	tag, err := d.ReadUint8()
+	if err != nil {
+		return nil, err
+	}
+	switch tag {
+	case 127, 126: // undefined, null
+		return nil, nil
+	case 120:
+		return true, nil
+	case 121:
+		return false, nil
+	case 125:
+		return d.ReadVarInt()
+	case 124:
+		return d.ReadFloat32()
+	case 123:
+		return d.ReadFloat64()
+	case 119:
+		return d.ReadVarString()
+	case 116:
+		return d.ReadVarBytes()
+	case 117:
+		n, err := d.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]any, n)
+		for i := range out {
+			if out[i], err = d.ReadAny(); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	case 118:
+		n, err := d.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]any, n)
+		for range n {
+			k, err := d.ReadVarString()
+			if err != nil {
+				return nil, err
+			}
+			if out[k], err = d.ReadAny(); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	default:
+		return nil, nil
+	}
+}
