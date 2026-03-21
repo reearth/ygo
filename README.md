@@ -65,22 +65,45 @@ func main() {
     alice := crdt.New()
     bob := crdt.New()
 
+    // Obtain the shared type before entering a transaction —
+    // GetText and Transact both acquire the document mutex.
+    text := alice.GetText("content")
+
     // Alice makes edits
     alice.Transact(func(txn *crdt.Transaction) {
-        text := alice.GetText("content")
-        text.Insert(txn, 0, "Hello, world!")
+        text.Insert(txn, 0, "Hello, world!", nil)
     })
 
     // Encode Alice's state and send to Bob
     update := alice.EncodeStateAsUpdate()
 
     // Bob applies the update — both docs now converge
-    if err := bob.ApplyUpdate(update); err != nil {
+    if err := crdt.ApplyUpdateV1(bob, update, nil); err != nil {
         panic(err)
     }
 
-    fmt.Println(bob.GetText("content").String()) // "Hello, world!"
+    fmt.Println(bob.GetText("content").ToString()) // "Hello, world!"
 }
+```
+
+## Examples
+
+The [`examples/`](examples/) directory contains four runnable programs with detailed inline comments:
+
+| Example | What it shows |
+|---------|---------------|
+| [`examples/peer-sync`](examples/peer-sync/) | In-process two-peer sync via the y-protocols handshake — no network needed |
+| [`examples/http-sync`](examples/http-sync/) | Pull/push sync over HTTP with incremental state-vector diffs |
+| [`examples/collab-editor`](examples/collab-editor/) | Real-time multi-tab collaborative editor with a browser client |
+| [`examples/snapshot-history`](examples/snapshot-history/) | Document versioning — capture, store, and restore past states |
+
+Run any example from the repository root:
+
+```bash
+go run ./examples/peer-sync
+go run ./examples/http-sync
+go run ./examples/snapshot-history
+go run ./examples/collab-editor/server   # then open http://localhost:8080
 ```
 
 ## WebSocket Server
