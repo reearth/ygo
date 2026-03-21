@@ -123,6 +123,87 @@ func main() {
 }
 ```
 
+## Performance
+
+### Running the benchmarks
+
+```bash
+# Run all benchmarks with memory allocation stats
+go test ./... -run='^$' -bench='^Benchmark' -benchmem
+
+# Run a specific package only
+go test ./crdt/ -run='^$' -bench='^Benchmark' -benchmem
+
+# Run with more iterations for tighter confidence intervals
+go test ./... -run='^$' -bench='^Benchmark' -benchmem -benchtime=5s -count=3
+```
+
+To compare two branches (e.g. before and after an optimization), install [`benchstat`](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat):
+
+```bash
+go install golang.org/x/perf/cmd/benchstat@latest
+
+# Capture baseline
+git checkout main
+go test ./... -run='^$' -bench='^Benchmark' -benchmem -count=5 | tee old.txt
+
+# Capture candidate
+git checkout my-branch
+go test ./... -run='^$' -bench='^Benchmark' -benchmem -count=5 | tee new.txt
+
+# Compare
+benchstat old.txt new.txt
+```
+
+The CI benchmark workflow (`.github/workflows/benchmark.yml`) runs this comparison automatically on every pull request.
+
+### Reference numbers
+
+Measured on Apple M4 Max (arm64, Go 1.23). Your numbers will vary by hardware.
+
+**Encoding (`encoding/`)** — the codec runs on every item; these are sub-10 ns, zero-alloc:
+
+| Benchmark | ns/op | Allocs |
+|-----------|-------|--------|
+| ReadVarUint (1 byte) | 1.0 | 0 |
+| WriteVarUint (1 byte) | 1.7 | 0 |
+| WriteVarString (1000 chars) | 15 | 0 |
+| ReadVarString (1000 chars) | 89 | 1 (string copy) |
+| Encoder reuse (`Reset`) vs new | 7.7 vs 12.4 | 0 vs 1 |
+
+**CRDT core (`crdt/`)** — realistic document operations:
+
+| Benchmark | ns/op | Notes |
+|-----------|-------|-------|
+| `YText_InsertBulk` (1000 chars) | 2 006 | Single transaction — fast path |
+| `YText_Insert` (1000 × 1 char) | 344 048 | ~344 ns per keystroke |
+| `YText_Delete` (1000 × 1 char) | 891 456 | ~891 ns per delete |
+| `EncodeStateAsUpdateV1` (1000 items) | 21 360 | ~21 µs to serialise a document |
+| `ApplyUpdateV1` (1000 items) | 109 806 | ~110 µs to integrate a full state |
+| `EncodeStateAsUpdateV2` | 33 029 | V2 is ~1.5× larger to encode… |
+| `ApplyUpdateV2` | 679 207 | …and ~6× slower to decode |
+| `TwoPeerConvergence` | 16 284 | Encode + apply incremental sync |
+| `YMap_Set` (100 keys) | 19 557 | |
+| `YArray_Push` (100 elements) | 59 209 | |
+
+**Sync protocol (`sync/`)** — message framing overhead is negligible:
+
+| Benchmark | ns/op |
+|-----------|-------|
+| `EncodeSyncStep1` | 179 |
+| `ApplySyncMessage_Step1` | 631 |
+| `ApplySyncMessage_Update` (1000-item doc) | 1 404 |
+| `FullHandshake` | 1 303 |
+
+**Awareness (`awareness/`)** — per-peer ephemeral state:
+
+| Benchmark | ns/op |
+|-----------|-------|
+| `SetLocalState` | 65 |
+| `EncodeUpdate` (1 client) | 226 |
+| `EncodeUpdate` (50 clients) | 12 901 |
+| `ApplyUpdate` (50 clients) | 19 801 |
+
 ## Architecture
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed explanation of the CRDT algorithm, data model, and package design.
