@@ -89,8 +89,8 @@ func TestUnit_VarString_RoundTrip(t *testing.T) {
 	cases := []string{
 		"",
 		"hello",
-		"こんにちは",    // multibyte UTF-8
-		"😀🎉🚀",     // 4-byte codepoints
+		"こんにちは",       // multibyte UTF-8
+		"😀🎉🚀",         // 4-byte codepoints
 		"\x00nul\x00", // embedded null bytes
 	}
 	for _, s := range cases {
