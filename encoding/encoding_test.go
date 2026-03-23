@@ -4,9 +4,10 @@ import (
 	"math"
 	"testing"
 
-	"github.com/reearth/ygo/encoding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/encoding"
 )
 
 // roundtrip is a helper that encodes then immediately decodes a value,
@@ -129,7 +130,7 @@ func TestUnit_Float32_RoundTrip(t *testing.T) {
 		e.WriteFloat32(v)
 		got, err := encoding.NewDecoder(e.Bytes()).ReadFloat32()
 		require.NoError(t, err)
-		assert.Equal(t, v, got)
+		assert.Equal(t, math.Float32bits(v), math.Float32bits(got))
 	}
 }
 
@@ -140,7 +141,7 @@ func TestUnit_Float64_RoundTrip(t *testing.T) {
 		e.WriteFloat64(v)
 		got, err := encoding.NewDecoder(e.Bytes()).ReadFloat64()
 		require.NoError(t, err)
-		assert.Equal(t, v, got)
+		assert.Equal(t, math.Float64bits(v), math.Float64bits(got))
 	}
 }
 
