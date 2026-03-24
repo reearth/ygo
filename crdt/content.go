@@ -17,19 +17,6 @@ type Content interface {
 	Splice(offset int) Content
 }
 
-// Content type tag bytes — match the Yjs wire format identifiers.
-const (
-	tagDeleted byte = 0
-	tagJSON    byte = 1
-	tagBinary  byte = 2
-	tagString  byte = 3
-	tagEmbed   byte = 4
-	tagFormat  byte = 5
-	tagType    byte = 6
-	tagAny     byte = 7
-	tagDoc     byte = 8
-)
-
 // ContentDeleted is a tombstone. It replaces real content when an item is
 // deleted but must stay in the linked list to preserve position references.
 type ContentDeleted struct{ length int }
@@ -99,8 +86,8 @@ func (c *ContentAny) Splice(offset int) Content {
 type ContentJSON struct{ Vals []any }
 
 func NewContentJSON(vals ...any) *ContentJSON { return &ContentJSON{vals} }
-func (c *ContentJSON) Len() int              { return len(c.Vals) }
-func (c *ContentJSON) IsCountable() bool     { return true }
+func (c *ContentJSON) Len() int               { return len(c.Vals) }
+func (c *ContentJSON) IsCountable() bool      { return true }
 func (c *ContentJSON) Copy() Content {
 	cp := make([]any, len(c.Vals))
 	copy(cp, c.Vals)
@@ -151,8 +138,8 @@ func (c *ContentType) Splice(_ int) Content       { panic("crdt: ContentType is 
 // ContentDoc holds a reference to a subdocument.
 type ContentDoc struct{ Doc *Doc }
 
-func NewContentDoc(d *Doc) *ContentDoc      { return &ContentDoc{d} }
-func (c *ContentDoc) Len() int              { return 1 }
-func (c *ContentDoc) IsCountable() bool     { return true }
-func (c *ContentDoc) Copy() Content         { return &ContentDoc{c.Doc} }
-func (c *ContentDoc) Splice(_ int) Content  { panic("crdt: ContentDoc is not splittable") }
+func NewContentDoc(d *Doc) *ContentDoc     { return &ContentDoc{d} }
+func (c *ContentDoc) Len() int             { return 1 }
+func (c *ContentDoc) IsCountable() bool    { return true }
+func (c *ContentDoc) Copy() Content        { return &ContentDoc{c.Doc} }
+func (c *ContentDoc) Splice(_ int) Content { panic("crdt: ContentDoc is not splittable") }

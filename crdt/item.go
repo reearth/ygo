@@ -19,21 +19,7 @@ type Item struct {
 // integrate inserts this item into its parent's linked list using the YATA
 // conflict-resolution algorithm. After integrate returns, Left and Right
 // reflect the item's final position.
-//
-// offset > 0 is only needed when the item partially overlaps an existing item
-// in the store (a split scenario during update decoding). For Phase 2 all
-// items arrive cleanly (offset = 0).
-func (item *Item) integrate(txn *Transaction, offset int) {
-	if offset > 0 {
-		item.ID.Clock += uint64(offset)
-		item.Left = txn.doc.store.getItemCleanEnd(item.ID.Client, item.ID.Clock-1)
-		if item.Left != nil {
-			last := item.Left.ID.Clock + uint64(item.Left.Content.Len()) - 1
-			item.Origin = &ID{Client: item.Left.ID.Client, Clock: last}
-		}
-		item.Content = item.Content.Splice(offset)
-	}
-
+func (item *Item) integrate(txn *Transaction) {
 	if item.Parent == nil {
 		return
 	}

@@ -63,16 +63,6 @@ func New(opts ...DocOption) *Doc {
 	return d
 }
 
-// getOrCreateType returns the named root type, creating it if needed.
-func (d *Doc) getOrCreateType(name string) *abstractType {
-	t, ok := d.share[name]
-	if !ok {
-		t = &abstractType{doc: d, itemMap: make(map[string]*Item)}
-		d.share[name] = t
-	}
-	return t
-}
-
 // Transact executes fn inside a transaction. All insertions and deletions made
 // during fn are batched; observers fire once after fn returns.
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {

@@ -78,18 +78,3 @@ func (ds *DeleteSet) sortAndCompact(client ClientID) {
 	}
 	ds.clients[client] = compacted
 }
-
-// applyTo marks items in the document as deleted according to the ranges in ds.
-// Called when applying a remote update that carries a delete set.
-func (ds *DeleteSet) applyTo(txn *Transaction) {
-	for client, ranges := range ds.clients {
-		items := txn.doc.store.clients[client]
-		for _, r := range ranges {
-			for _, item := range items {
-				if item.ID.Clock >= r.Clock && item.ID.Clock < r.Clock+r.Len {
-					item.delete(txn)
-				}
-			}
-		}
-	}
-}

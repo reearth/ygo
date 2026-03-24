@@ -5,8 +5,8 @@ package crdt
 // which keeps event handler overhead proportional to transactions not edits.
 type Transaction struct {
 	doc         *Doc
-	Origin      any   // user-supplied tag forwarded to update observers
-	Local       bool  // true when the change originated on this peer
+	Origin      any  // user-supplied tag forwarded to update observers
+	Local       bool // true when the change originated on this peer
 	deleteSet   DeleteSet
 	beforeState StateVector
 	afterState  StateVector
