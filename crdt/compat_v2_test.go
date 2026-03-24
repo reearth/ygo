@@ -3,9 +3,10 @@ package crdt_test
 import (
 	"testing"
 
-	"github.com/reearth/ygo/crdt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/crdt"
 )
 
 func loadFixtureV2(t *testing.T, name string) []byte {

@@ -4,9 +4,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/reearth/ygo/crdt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/crdt"
 )
 
 // loadFixture reads a binary fixture file from testutil/fixtures/.
