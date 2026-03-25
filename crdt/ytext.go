@@ -111,10 +111,10 @@ func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) 
 
 	for k, v := range attrs {
 		fmtItem := &Item{
-			ID:     ID{Client: txn.doc.ClientID, Clock: txn.doc.store.NextClock(txn.doc.ClientID)},
-			Origin: origin,
-			Left:   left,
-			Parent: t,
+			ID:      ID{Client: txn.doc.ClientID, Clock: txn.doc.store.NextClock(txn.doc.ClientID)},
+			Origin:  origin,
+			Left:    left,
+			Parent:  t,
 			Content: NewContentFormat(k, v),
 		}
 		fmtItem.integrate(txn, 0)
