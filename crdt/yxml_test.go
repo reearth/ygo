@@ -135,7 +135,7 @@ func TestUnit_YXmlElement_Attributes_Update(t *testing.T) {
 	v, ok := elem.GetAttribute("class")
 	assert.True(t, ok)
 	assert.Equal(t, "new", v)
-	assert.Equal(t, 1, len(elem.GetAttributes()))
+	assert.Len(t, elem.GetAttributes(), 1)
 }
 
 func TestUnit_YXmlElement_Attributes_Delete(t *testing.T) {

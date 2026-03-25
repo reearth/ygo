@@ -70,7 +70,7 @@ type rawType struct {
 	abstractType
 }
 
-func (r *rawType) baseType() *abstractType                              { return &r.abstractType }
+func (r *rawType) baseType() *abstractType                    { return &r.abstractType }
 func (r *rawType) fire(_ *Transaction, _ map[string]struct{}) {}
 
 // getOrCreateType returns the abstractType for a named root type, creating a
@@ -171,7 +171,6 @@ func (d *Doc) GetText(name string) *YText {
 	d.share[name] = txt
 	return txt
 }
-
 
 // Transact executes fn inside a transaction. All insertions and deletions made
 // during fn are batched; observers fire once after fn returns.

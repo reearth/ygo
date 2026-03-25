@@ -79,7 +79,7 @@ func TestUnit_YMap_MultipleKeys(t *testing.T) {
 		m.Set(txn, "active", true)
 	})
 
-	assert.Equal(t, 3, len(m.Keys()))
+	assert.Len(t, m.Keys(), 3)
 
 	entries := m.Entries()
 	assert.Equal(t, "Alice", entries["name"])

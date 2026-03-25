@@ -78,3 +78,27 @@ func (ds *DeleteSet) sortAndCompact(client ClientID) {
 	}
 	ds.clients[client] = compacted
 }
+
+// Clients returns the client IDs that have at least one deleted range in ds.
+func (ds *DeleteSet) Clients() []ClientID {
+	out := make([]ClientID, 0, len(ds.clients))
+	for c := range ds.clients {
+		out = append(out, c)
+	}
+	return out
+}
+
+// applyTo marks items in the document as deleted according to the ranges in ds.
+// Called when applying a remote update that carries a delete set.
+func (ds *DeleteSet) applyTo(txn *Transaction) {
+	for client, ranges := range ds.clients {
+		items := txn.doc.store.clients[client]
+		for _, r := range ranges {
+			for _, item := range items {
+				if item.ID.Clock >= r.Clock && item.ID.Clock < r.Clock+r.Len {
+					item.delete(txn)
+				}
+			}
+		}
+	}
+}

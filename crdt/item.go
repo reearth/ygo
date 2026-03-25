@@ -34,7 +34,6 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		item.Content = item.Content.Splice(offset)
 	}
 
-
 	if item.Parent == nil {
 		return
 	}

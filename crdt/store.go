@@ -54,7 +54,6 @@ func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock u
 	return item // item is now the left half, ending at clock
 }
 
-
 // StateVector computes the current state vector: for each client, the clock of
 // the last item + its length (i.e. the next expected clock from that client).
 func (s *StructStore) StateVector() StateVector {
