@@ -42,7 +42,7 @@ func main() {
 	doc := crdt.New(crdt.WithClientID(1), crdt.WithGC(false))
 	article := doc.GetText("article")
 
-	var snapshots []encodedSnap
+	snapshots := make([]encodedSnap, 0, 4)
 
 	// Revision 1: write the initial draft.
 	doc.Transact(func(txn *crdt.Transaction) {
@@ -168,6 +168,10 @@ func main() {
 	}
 
 	historicalUpdate, err := crdt.EncodeStateFromSnapshot(doc, snap2)
+	if err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+		return
+	}
 	fmt.Printf("  Historical update size (revision 2): %d bytes\n", len(historicalUpdate))
 
 	peerB := crdt.New(crdt.WithClientID(2))

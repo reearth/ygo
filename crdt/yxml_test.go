@@ -336,8 +336,8 @@ func TestInteg_YXml_ConcurrentEdit_Convergence(t *testing.T) {
 				if ct, ok := item.Content.(*ContentType); ok {
 					if origElem, ok := ct.Type.owner.(*YXmlElement); ok {
 						cloneElem := NewYXmlElement(origElem.NodeName)
-						cloneElem.YXmlFragment.abstractType.doc = dst
-						cloneContent = NewContentType(&cloneElem.YXmlFragment.abstractType)
+						cloneElem.doc = dst
+						cloneContent = NewContentType(&cloneElem.abstractType)
 					} else {
 						cloneContent = item.Content.Copy()
 					}

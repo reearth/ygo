@@ -33,8 +33,8 @@ const (
 )
 
 var (
-	ErrUnexpectedEOF    = errors.New("sync: unexpected end of message")
-	ErrUnknownMessage   = errors.New("sync: unknown message type")
+	ErrUnexpectedEOF  = errors.New("sync: unexpected end of message")
+	ErrUnknownMessage = errors.New("sync: unknown message type")
 )
 
 // EncodeSyncStep1 encodes a sync-step-1 message containing doc's state vector.

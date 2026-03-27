@@ -23,7 +23,7 @@ func (txt *YText) fire(txn *Transaction, _ map[string]struct{}) {
 }
 
 // Len returns the number of non-deleted Unicode code points.
-func (txt *YText) Len() int { return txt.abstractType.length }
+func (txt *YText) Len() int { return txt.length }
 
 // Insert inserts text at logical character position index.
 // attrs may be nil for unstyled text. Formatting is applied by wrapping the
@@ -150,7 +150,7 @@ func (txt *YText) ToDelta() []Delta {
 	var deltas []Delta
 	currentAttrs := make(Attributes)
 
-	for item := txt.abstractType.start; item != nil; item = item.Right {
+	for item := txt.start; item != nil; item = item.Right {
 		if item.Deleted {
 			continue
 		}
@@ -189,10 +189,10 @@ func (txt *YText) Observe(fn func(YTextEvent)) func() {
 // ObserveDeep registers fn to be called after any transaction that modifies
 // this text or any nested shared type within it. Returns an unsubscribe function.
 func (txt *YText) ObserveDeep(fn func(*Transaction)) func() {
-	txt.abstractType.deepObservers = append(txt.abstractType.deepObservers, fn)
-	idx := len(txt.abstractType.deepObservers) - 1
+	txt.deepObservers = append(txt.deepObservers, fn)
+	idx := len(txt.deepObservers) - 1
 	return func() {
-		obs := txt.abstractType.deepObservers
-		txt.abstractType.deepObservers = append(obs[:idx], obs[idx+1:]...)
+		obs := txt.deepObservers
+		txt.deepObservers = append(obs[:idx], obs[idx+1:]...)
 	}
 }

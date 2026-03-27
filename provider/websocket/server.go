@@ -118,7 +118,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		p.handleDisconnect()
-		ws.Close()
+		_ = ws.Close()
 	}()
 
 	// 1. Send sync step-1 — request the peer's state vector.

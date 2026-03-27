@@ -81,10 +81,10 @@ func (d *Doc) getOrCreateType(name string) *abstractType {
 		return t.baseType()
 	}
 	r := &rawType{}
-	r.abstractType.doc = d
-	r.abstractType.itemMap = make(map[string]*Item)
-	r.abstractType.owner = r
-	r.abstractType.name = name
+	r.doc = d
+	r.itemMap = make(map[string]*Item)
+	r.owner = r
+	r.name = name
 	d.share[name] = r
 	return &r.abstractType
 }
@@ -118,10 +118,10 @@ func (d *Doc) GetArray(name string) *YArray {
 		}
 	}
 	arr := &YArray{}
-	arr.abstractType.doc = d
-	arr.abstractType.itemMap = make(map[string]*Item)
-	arr.abstractType.owner = arr
-	arr.abstractType.name = name
+	arr.doc = d
+	arr.itemMap = make(map[string]*Item)
+	arr.owner = arr
+	arr.name = name
 	d.share[name] = arr
 	return arr
 }
@@ -141,10 +141,10 @@ func (d *Doc) GetMap(name string) *YMap {
 		}
 	}
 	m := &YMap{}
-	m.abstractType.doc = d
-	m.abstractType.itemMap = make(map[string]*Item)
-	m.abstractType.owner = m
-	m.abstractType.name = name
+	m.doc = d
+	m.itemMap = make(map[string]*Item)
+	m.owner = m
+	m.name = name
 	d.share[name] = m
 	return m
 }
@@ -164,10 +164,10 @@ func (d *Doc) GetText(name string) *YText {
 		}
 	}
 	txt := &YText{}
-	txt.abstractType.doc = d
-	txt.abstractType.itemMap = make(map[string]*Item)
-	txt.abstractType.owner = txt
-	txt.abstractType.name = name
+	txt.doc = d
+	txt.itemMap = make(map[string]*Item)
+	txt.owner = txt
+	txt.name = name
 	d.share[name] = txt
 	return txt
 }
@@ -259,10 +259,10 @@ func (d *Doc) GetXmlFragment(name string) *YXmlFragment {
 		}
 	}
 	f := &YXmlFragment{}
-	f.abstractType.doc = d
-	f.abstractType.itemMap = make(map[string]*Item)
-	f.abstractType.owner = f
-	f.abstractType.name = name
+	f.doc = d
+	f.itemMap = make(map[string]*Item)
+	f.owner = f
+	f.name = name
 	d.share[name] = f
 	return f
 }

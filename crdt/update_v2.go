@@ -811,23 +811,23 @@ func decodeTypeContentV2(dec *v2Decoder, doc *Doc, typeRef byte) (*abstractType,
 	switch typeRef {
 	case 0: // YArray
 		arr := &YArray{}
-		arr.abstractType.doc = doc
-		arr.abstractType.itemMap = make(map[string]*Item)
-		arr.abstractType.owner = arr
+		arr.doc = doc
+		arr.itemMap = make(map[string]*Item)
+		arr.owner = arr
 		return &arr.abstractType, nil
 
 	case 1: // YMap
 		m := &YMap{}
-		m.abstractType.doc = doc
-		m.abstractType.itemMap = make(map[string]*Item)
-		m.abstractType.owner = m
+		m.doc = doc
+		m.itemMap = make(map[string]*Item)
+		m.owner = m
 		return &m.abstractType, nil
 
 	case 2: // YText
 		txt := &YText{}
-		txt.abstractType.doc = doc
-		txt.abstractType.itemMap = make(map[string]*Item)
-		txt.abstractType.owner = txt
+		txt.doc = doc
+		txt.itemMap = make(map[string]*Item)
+		txt.owner = txt
 		return &txt.abstractType, nil
 
 	case 3: // YXmlElement — reads node name via readKey
@@ -836,14 +836,14 @@ func decodeTypeContentV2(dec *v2Decoder, doc *Doc, typeRef byte) (*abstractType,
 			return nil, err
 		}
 		elem := NewYXmlElement(nodeName)
-		elem.YXmlFragment.abstractType.doc = doc
-		return &elem.YXmlFragment.abstractType, nil
+		elem.doc = doc
+		return &elem.abstractType, nil
 
 	case 4: // YXmlFragment
 		frag := &YXmlFragment{}
-		frag.abstractType.doc = doc
-		frag.abstractType.itemMap = make(map[string]*Item)
-		frag.abstractType.owner = frag
+		frag.doc = doc
+		frag.itemMap = make(map[string]*Item)
+		frag.owner = frag
 		return &frag.abstractType, nil
 
 	case 5: // YXmlHook — reads hook name via readKey (discard)
@@ -851,21 +851,21 @@ func decodeTypeContentV2(dec *v2Decoder, doc *Doc, typeRef byte) (*abstractType,
 			return nil, err
 		}
 		r := &rawType{}
-		r.abstractType.doc = doc
-		r.abstractType.itemMap = make(map[string]*Item)
-		r.abstractType.owner = r
+		r.doc = doc
+		r.itemMap = make(map[string]*Item)
+		r.owner = r
 		return &r.abstractType, nil
 
 	case 6: // YXmlText
 		xt := NewYXmlText()
-		xt.YText.abstractType.doc = doc
-		return &xt.YText.abstractType, nil
+		xt.doc = doc
+		return &xt.abstractType, nil
 
 	default:
 		r := &rawType{}
-		r.abstractType.doc = doc
-		r.abstractType.itemMap = make(map[string]*Item)
-		r.abstractType.owner = r
+		r.doc = doc
+		r.itemMap = make(map[string]*Item)
+		r.owner = r
 		return &r.abstractType, nil
 	}
 }

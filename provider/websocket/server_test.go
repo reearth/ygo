@@ -27,7 +27,7 @@ func dial(t *testing.T, srv *httptest.Server, room string) *gws.Conn {
 	t.Helper()
 	conn, _, err := gws.DefaultDialer.Dial(wsURL(srv, room), nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }
 
@@ -35,11 +35,11 @@ func dial(t *testing.T, srv *httptest.Server, room string) *gws.Conn {
 // Returns the outer type and decoded payload.
 // For sync (type 0), payload is the raw sync bytes (no length prefix).
 // For awareness (type 1), payload is the VarBytes-unwrapped awareness bytes.
-func readOne(t *testing.T, conn *gws.Conn, deadline time.Duration) (outerType uint64, payload []byte) {
+func readOne(t *testing.T, conn *gws.Conn, deadline time.Duration) (outerType uint64, payload []byte) { //nolint:unparam
 	t.Helper()
-	conn.SetReadDeadline(time.Now().Add(deadline))
+	_ = conn.SetReadDeadline(time.Now().Add(deadline))
 	_, data, err := conn.ReadMessage()
-	conn.SetReadDeadline(time.Time{}) // reset immediately so the conn stays usable
+	_ = conn.SetReadDeadline(time.Time{}) // reset immediately so the conn stays usable
 	require.NoError(t, err)
 
 	dec := encoding.NewDecoder(data)
@@ -243,7 +243,7 @@ func TestInteg_AwarenessBroadcast_PeerReceivesState(t *testing.T) {
 	require.NoError(t, awDec.ApplyUpdate(awPayload, nil))
 	states := awDec.GetStates()
 	require.Contains(t, states, uint64(42))
-	assert.Equal(t, float64(5), states[42].State["cursor"])
+	assert.InEpsilon(t, float64(5), states[42].State["cursor"], 1e-9)
 }
 
 func TestInteg_QueryAwareness_ReturnsCurrentState(t *testing.T) {
@@ -286,7 +286,7 @@ func TestInteg_MultiRoom_Isolated(t *testing.T) {
 	connB := dial(t, ts, "room-b")
 	drainHandshake(t, connB, docB)
 
-	assert.Equal(t, "", docB.GetText("t").ToString())
+	assert.Empty(t, docB.GetText("t").ToString())
 	assert.NotNil(t, srv.GetDoc("room-a"))
 	assert.NotNil(t, srv.GetDoc("room-b"))
 }

@@ -62,7 +62,7 @@ func makeItem(client, clock uint64, content Content, parent *abstractType) *Item
 }
 
 // makeItemAfter constructs an item whose left origin is the given item.
-func makeItemAfter(client, clock uint64, content Content, parent *abstractType, after *Item) *Item {
+func makeItemAfter(client, clock uint64, content Content, parent *abstractType, after *Item) *Item { //nolint:unparam
 	item := makeItem(client, clock, content, parent)
 	item.Left = after
 	if after != nil {

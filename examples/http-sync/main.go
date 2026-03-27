@@ -239,7 +239,7 @@ func mustPost(url string, body []byte) {
 	if err != nil {
 		log.Fatalf("POST %s failed: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
 		log.Fatalf("POST %s returned %d: %s", url, resp.StatusCode, b)
@@ -253,7 +253,7 @@ func mustGet(url string) []byte {
 	if err != nil {
 		log.Fatalf("GET %s failed: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
 		log.Fatalf("GET %s returned %d: %s", url, resp.StatusCode, b)

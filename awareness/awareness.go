@@ -33,8 +33,8 @@ type observer struct {
 
 // Awareness tracks ephemeral peer state.
 type Awareness struct {
-	clientID  uint64
-	mu        sync.RWMutex
+	clientID uint64
+	mu       sync.RWMutex
 	// states stores all known clients including those with nil State (removed).
 	// Clients with nil State have been removed but their clock is retained so
 	// removal messages can be properly encoded with an up-to-date clock.

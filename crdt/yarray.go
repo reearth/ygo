@@ -20,7 +20,7 @@ func (a *YArray) fire(txn *Transaction, _ map[string]struct{}) {
 }
 
 // Len returns the number of non-deleted elements.
-func (a *YArray) Len() int { return a.abstractType.length }
+func (a *YArray) Len() int { return a.length }
 
 // Insert inserts vals at logical position index (0 = prepend, Len() = append).
 func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
@@ -114,11 +114,11 @@ func (a *YArray) Observe(fn func(YArrayEvent)) func() {
 // ObserveDeep registers fn to be called after any transaction that modifies
 // this array or any nested shared type within it. Returns an unsubscribe function.
 func (a *YArray) ObserveDeep(fn func(*Transaction)) func() {
-	a.abstractType.deepObservers = append(a.abstractType.deepObservers, fn)
-	idx := len(a.abstractType.deepObservers) - 1
+	a.deepObservers = append(a.deepObservers, fn)
+	idx := len(a.deepObservers) - 1
 	return func() {
-		obs := a.abstractType.deepObservers
-		a.abstractType.deepObservers = append(obs[:idx], obs[idx+1:]...)
+		obs := a.deepObservers
+		a.deepObservers = append(obs[:idx], obs[idx+1:]...)
 	}
 }
 

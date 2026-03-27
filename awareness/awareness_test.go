@@ -3,9 +3,10 @@ package awareness_test
 import (
 	"testing"
 
-	"github.com/reearth/ygo/awareness"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/awareness"
 )
 
 // ---------------------------------------------------------------------------

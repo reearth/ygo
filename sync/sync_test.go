@@ -3,10 +3,11 @@ package sync_test
 import (
 	"testing"
 
-	"github.com/reearth/ygo/crdt"
-	"github.com/reearth/ygo/sync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/sync"
 )
 
 // helpers

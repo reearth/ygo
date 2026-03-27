@@ -37,7 +37,7 @@ func (f *YXmlFragment) fire(txn *Transaction, keysChanged map[string]struct{}) {
 // Len returns the number of non-deleted child nodes (attributes are excluded).
 func (f *YXmlFragment) Len() int {
 	count := 0
-	for item := f.abstractType.start; item != nil; item = item.Right {
+	for item := f.start; item != nil; item = item.Right {
 		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == "" {
 			count += item.Content.Len()
 		}
@@ -105,7 +105,7 @@ func (f *YXmlFragment) Delete(txn *Transaction, index, length int) {
 // Children returns all non-deleted child XML nodes in document order.
 func (f *YXmlFragment) Children() []xmlNode {
 	var result []xmlNode
-	for item := f.abstractType.start; item != nil; item = item.Right {
+	for item := f.start; item != nil; item = item.Right {
 		if item.Deleted || item.ParentSub != "" {
 			continue
 		}
@@ -152,8 +152,8 @@ type YXmlElement struct {
 }
 
 // baseType and baseXMLType both route to the single embedded abstractType.
-func (e *YXmlElement) baseType() *abstractType    { return &e.YXmlFragment.abstractType }
-func (e *YXmlElement) baseXMLType() *abstractType { return &e.YXmlFragment.abstractType }
+func (e *YXmlElement) baseType() *abstractType    { return &e.abstractType }
+func (e *YXmlElement) baseXMLType() *abstractType { return &e.abstractType }
 
 // fire fires element-level observers. Fragment-level observers are not used
 // for YXmlElement — always register via YXmlElement.Observe.
@@ -169,7 +169,7 @@ func (e *YXmlElement) fire(txn *Transaction, keysChanged map[string]struct{}) {
 
 // SetAttribute sets the XML attribute key to value.
 func (e *YXmlElement) SetAttribute(txn *Transaction, key, value string) {
-	t := &e.YXmlFragment.abstractType
+	t := &e.abstractType
 	var left *Item
 	var origin *ID
 	if existing, ok := t.itemMap[key]; ok {
@@ -190,7 +190,7 @@ func (e *YXmlElement) SetAttribute(txn *Transaction, key, value string) {
 
 // DeleteAttribute removes the attribute with the given key if it exists.
 func (e *YXmlElement) DeleteAttribute(txn *Transaction, key string) {
-	t := &e.YXmlFragment.abstractType
+	t := &e.abstractType
 	if item, ok := t.itemMap[key]; ok && !item.Deleted {
 		item.delete(txn)
 	}
@@ -198,7 +198,7 @@ func (e *YXmlElement) DeleteAttribute(txn *Transaction, key string) {
 
 // GetAttribute returns the value of attribute key and whether it is present.
 func (e *YXmlElement) GetAttribute(key string) (string, bool) {
-	t := &e.YXmlFragment.abstractType
+	t := &e.abstractType
 	item, ok := t.itemMap[key]
 	if !ok || item.Deleted {
 		return "", false
@@ -213,7 +213,7 @@ func (e *YXmlElement) GetAttribute(key string) (string, bool) {
 
 // GetAttributes returns all live attributes as a string-keyed map.
 func (e *YXmlElement) GetAttributes() map[string]string {
-	t := &e.YXmlFragment.abstractType
+	t := &e.abstractType
 	result := make(map[string]string)
 	for k, item := range t.itemMap {
 		if item.Deleted {
@@ -265,11 +265,11 @@ type YXmlText struct {
 	YText
 }
 
-func (t *YXmlText) baseXMLType() *abstractType { return &t.YText.abstractType }
+func (t *YXmlText) baseXMLType() *abstractType { return &t.abstractType }
 
 // ToXML returns the text content with XML-special characters escaped.
 func (t *YXmlText) ToXML() string {
-	return xmlEscapeText(t.YText.ToString())
+	return xmlEscapeText(t.YText.ToString()) //nolint:staticcheck // intentional: avoids recursion with YXmlText.ToXML
 }
 
 // ── Constructors ──────────────────────────────────────────────────────────────
@@ -278,8 +278,8 @@ func (t *YXmlText) ToXML() string {
 // YXmlFragment or another YXmlElement.
 func NewYXmlElement(nodeName string) *YXmlElement {
 	e := &YXmlElement{NodeName: nodeName}
-	e.YXmlFragment.abstractType.itemMap = make(map[string]*Item)
-	e.YXmlFragment.abstractType.owner = e
+	e.itemMap = make(map[string]*Item)
+	e.owner = e
 	return e
 }
 
@@ -287,8 +287,8 @@ func NewYXmlElement(nodeName string) *YXmlElement {
 // YXmlFragment or YXmlElement.
 func NewYXmlText() *YXmlText {
 	t := &YXmlText{}
-	t.YText.abstractType.itemMap = make(map[string]*Item)
-	t.YText.abstractType.owner = t
+	t.itemMap = make(map[string]*Item)
+	t.owner = t
 	return t
 }
 

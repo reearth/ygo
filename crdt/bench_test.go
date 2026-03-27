@@ -9,7 +9,7 @@ import (
 // buildTextDoc creates a doc whose "text" YText contains n single-character
 // inserts (one transaction per character, simulating keystroke-by-keystroke
 // typing). The returned YText handle is safe to use outside Transact.
-func buildTextDoc(n int) (*Doc, *YText) {
+func buildTextDoc(n int) (*Doc, *YText) { //nolint:unparam
 	doc := newTestDoc(1)
 	txt := doc.GetText("text")
 	for i := 0; i < n; i++ {

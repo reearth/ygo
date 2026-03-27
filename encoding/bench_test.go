@@ -24,7 +24,7 @@ var (
 
 	encodedAnyString []byte // WriteAny("hello world")
 
-	shortStr = "helloworld"             // exactly 10 ASCII chars
+	shortStr = "helloworld"              // exactly 10 ASCII chars
 	longStr  = strings.Repeat("x", 1000) // 1000-char string
 	payload  = make([]byte, 256)
 )

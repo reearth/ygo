@@ -1,12 +1,12 @@
+version: "2"
+
 linters:
   enable:
     - errcheck
-    - gosimple
     - govet
     - ineffassign
     - staticcheck
     - unused
-    - goimports
     - misspell
     - unconvert
     - unparam
@@ -14,9 +14,13 @@ linters:
     - tparallel
     - testifylint
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/reearth/ygo
+formatters:
+  enable:
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/reearth/ygo
 
 issues:
   exclude-rules:

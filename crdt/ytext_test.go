@@ -216,7 +216,7 @@ func TestUnit_YText_RunLengthSquashing(t *testing.T) {
 	// Count ContentString items in the linked list — should be ≤ 2
 	// (one item per contiguous same-client run).
 	itemCount := 0
-	for item := txt.abstractType.start; item != nil; item = item.Right {
+	for item := txt.start; item != nil; item = item.Right {
 		if !item.Deleted {
 			if _, ok := item.Content.(*ContentString); ok {
 				itemCount++
