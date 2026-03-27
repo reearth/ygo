@@ -7,6 +7,10 @@ import (
 	"github.com/reearth/ygo/encoding"
 )
 
+// maxV2Items caps the total number of structs decoded from a single V2 update to
+// prevent RLE-compressed pathological inputs from causing unbounded loops or OOM.
+const maxV2Items = uint64(1 << 20) // 1 million items
+
 // ── V2 encoder state ──────────────────────────────────────────────────────────
 
 type v2Encoder struct {
@@ -266,6 +270,9 @@ func (d *v2Decoder) readKey() (string, error) {
 		return "", err
 	}
 	idx := int(keyClock)
+	if idx < 0 {
+		return "", ErrInvalidUpdate
+	}
 	if idx < len(d.keys) {
 		return d.keys[idx], nil
 	}
@@ -509,11 +516,21 @@ func applyV2Txn(txn *Transaction, update []byte) error {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
+	// Guard against pathological inputs that encode huge counts via RLE compression.
+	// No realistic update has more client groups than its byte count.
+	if numClients > maxV2Items {
+		return ErrInvalidUpdate
+	}
 
+	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
 		numStructs, err := dec.restDec.ReadVarUint()
 		if err != nil {
 			return wrapUpdateErr(err)
+		}
+		totalStructs += numStructs
+		if totalStructs > maxV2Items {
+			return ErrInvalidUpdate
 		}
 		client, err := dec.readClient()
 		if err != nil {
@@ -716,6 +733,9 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
+		if l < 0 || l > int(maxV2Items) {
+			return nil, ErrInvalidUpdate
+		}
 		vals := make([]any, l)
 		for i := range vals {
 			s, err := dec.readString()
@@ -781,6 +801,9 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		l, err := dec.readLen()
 		if err != nil {
 			return nil, err
+		}
+		if l < 0 || l > int(maxV2Items) {
+			return nil, ErrInvalidUpdate
 		}
 		vals := make([]any, l)
 		for i := range vals {

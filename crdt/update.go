@@ -565,6 +565,9 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
+		if n > uint64(dec.Remaining()) {
+			return nil, ErrInvalidUpdate
+		}
 		vals := make([]any, n)
 		for i := range vals {
 			if vals[i], err = dec.ReadAny(); err != nil {
@@ -626,6 +629,9 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		n, err := dec.ReadVarUint()
 		if err != nil {
 			return nil, err
+		}
+		if n > uint64(dec.Remaining()) {
+			return nil, ErrInvalidUpdate
 		}
 		vals := make([]any, n)
 		for i := range vals {
