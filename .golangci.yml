@@ -13,6 +13,10 @@ linters:
     - prealloc
     - tparallel
     - testifylint
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [errcheck, unparam]
 
 formatters:
   enable:
@@ -21,9 +25,3 @@ formatters:
     goimports:
       local-prefixes:
         - github.com/reearth/ygo
-
-issues:
-  exclusions:
-    rules:
-      - path: _test\.go
-        linters: [errcheck, unparam]
