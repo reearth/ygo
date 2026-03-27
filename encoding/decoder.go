@@ -204,6 +204,9 @@ func (d *Decoder) ReadAny() (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if n > uint64(d.Remaining()) {
+			return nil, ErrUnexpectedEOF
+		}
 		out := make([]any, n)
 		for i := range out {
 			if out[i], err = d.ReadAny(); err != nil {
@@ -215,6 +218,9 @@ func (d *Decoder) ReadAny() (any, error) {
 		n, err := d.ReadVarUint()
 		if err != nil {
 			return nil, err
+		}
+		if n > uint64(d.Remaining()) {
+			return nil, ErrUnexpectedEOF
 		}
 		out := make(map[string]any, n)
 		for range n {
