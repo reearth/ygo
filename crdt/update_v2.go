@@ -560,18 +560,20 @@ func applyV2Txn(txn *Transaction, update []byte) error {
 				length := uint64(l)
 				itemEnd := clock + length
 				if itemEnd > existingEnd {
-					offset := 0
-					if clock < existingEnd {
-						offset = int(existingEnd - clock)
+					// GC structs carry no parent info in the V2 wire format, so
+					// we cannot integrate them as live items. Instead we add
+					// their clock range to the delete set: items we already hold
+					// in this range will be tombstoned, and items we've never
+					// seen (GC'd before they reached us) are benignly ignored
+					// because deleteSet.applyTo silently skips missing items.
+					effectiveStart := clock
+					if effectiveStart < existingEnd {
+						effectiveStart = existingEnd
 					}
-					item := &Item{
-						ID:      ID{Client: client, Clock: clock},
-						Content: NewContentDeleted(l - offset),
+					gcLen := int(itemEnd - effectiveStart)
+					if gcLen > 0 {
+						txn.deleteSet.add(ID{Client: client, Clock: effectiveStart}, gcLen)
 					}
-					// For GC items, we need to find the parent.
-					// This is tricky without parent info encoded for GC.
-					// Skip for now — these are already-deleted items.
-					_ = item
 				}
 				clock = itemEnd
 				continue
@@ -899,6 +901,9 @@ func decodeDeleteSetV2(dec *v2Decoder) (DeleteSet, error) {
 	if err != nil {
 		return ds, err
 	}
+	if n > maxV2Items {
+		return ds, ErrInvalidUpdate
+	}
 	for i := uint64(0); i < n; i++ {
 		dec.resetDsCurVal()
 		clientU, err := dec.restDec.ReadVarUint()
@@ -908,6 +913,9 @@ func decodeDeleteSetV2(dec *v2Decoder) (DeleteSet, error) {
 		numRanges, err := dec.restDec.ReadVarUint()
 		if err != nil {
 			return ds, err
+		}
+		if numRanges > maxV2Items {
+			return ds, ErrInvalidUpdate
 		}
 		client := ClientID(clientU)
 		for j := uint64(0); j < numRanges; j++ {

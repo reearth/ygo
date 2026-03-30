@@ -133,6 +133,11 @@ func DecodeStateVectorV1(data []byte) (StateVector, error) {
 	if err != nil {
 		return nil, wrapUpdateErr(err)
 	}
+	// Each entry requires at least 2 bytes (client varuint + clock varuint).
+	// Guard against a crafted count that would cause a multi-GB map allocation.
+	if n > uint64(len(data)/2) || n > maxV2Items {
+		return nil, ErrInvalidUpdate
+	}
 	sv := make(StateVector, n)
 	for i := uint64(0); i < n; i++ {
 		c, err := dec.ReadVarUint()
@@ -377,6 +382,9 @@ func applyV1Txn(txn *Transaction, update []byte) error {
 	numClients, err := dec.ReadVarUint()
 	if err != nil {
 		return wrapUpdateErr(err)
+	}
+	if numClients > uint64(len(update)/2) || numClients > maxV2Items {
+		return ErrInvalidUpdate
 	}
 
 	for i := uint64(0); i < numClients; i++ {
@@ -712,6 +720,9 @@ func decodeDeleteSet(dec *encoding.Decoder) (DeleteSet, error) {
 	if err != nil {
 		return ds, err
 	}
+	if n > maxV2Items {
+		return ds, ErrInvalidUpdate
+	}
 	for i := uint64(0); i < n; i++ {
 		clientU, err := dec.ReadVarUint()
 		if err != nil {
@@ -720,6 +731,9 @@ func decodeDeleteSet(dec *encoding.Decoder) (DeleteSet, error) {
 		numRanges, err := dec.ReadVarUint()
 		if err != nil {
 			return ds, err
+		}
+		if numRanges > maxV2Items {
+			return ds, ErrInvalidUpdate
 		}
 		client := ClientID(clientU)
 		for j := uint64(0); j < numRanges; j++ {

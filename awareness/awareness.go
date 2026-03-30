@@ -289,6 +289,27 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 	return nil
 }
 
+// StartAutoExpiry starts a background goroutine that periodically calls
+// RemoveExpired(timeout). The goroutine ticks at timeout/2 so that clients
+// are expired within one tick period after their deadline. The returned
+// function stops the goroutine; it must be called to avoid a goroutine leak.
+func (a *Awareness) StartAutoExpiry(timeout time.Duration) func() {
+	ticker := time.NewTicker(timeout / 2)
+	done := make(chan struct{})
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				a.RemoveExpired(timeout)
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 // RemoveExpired removes clients whose last update is older than timeout.
 // Only active clients (with non-nil State) are tracked in meta and can expire.
 func (a *Awareness) RemoveExpired(timeout time.Duration) {

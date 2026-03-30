@@ -105,9 +105,16 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		item.Right.Left = item
 	}
 
-	// Update logical length.
+	// Update logical length and, if necessary, invalidate the position cache.
+	// When the item is appended at the end (item.Right == nil), all existing
+	// cache entries remain valid — no previously-cached position shifts.
+	// For middle insertions we must clear the cache because every entry at an
+	// index >= the insert point now refers to the wrong item.
 	if !item.Deleted && item.Content.IsCountable() {
 		item.Parent.length += item.Content.Len()
+		if item.Right != nil {
+			item.Parent.invalidatePosCache()
+		}
 	}
 
 	// Register in the document store.
@@ -145,6 +152,7 @@ func (item *Item) delete(txn *Transaction) {
 	item.Deleted = true
 	if item.Content.IsCountable() {
 		item.Parent.length -= item.Content.Len()
+		item.Parent.invalidatePosCache()
 	}
 	txn.deleteSet.add(item.ID, item.Content.Len())
 	txn.addChanged(item.Parent, item.ParentSub)

@@ -332,16 +332,61 @@ func TestInteg_Update_DeleteSync(t *testing.T) {
 
 // ── Fuzz targets ──────────────────────────────────────────────────────────────
 
-func FuzzApplyUpdateV1(f *testing.F) {
-	makeSeed := func() []byte {
-		doc := newTestDoc(1)
-		txt := doc.GetText("c")
-		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
-		return EncodeStateAsUpdateV1(doc, nil)
-	}
-	f.Add(makeSeed())
-	f.Add([]byte{}) // empty — must not panic
+func fuzzSeedsV1() [][]byte {
+	seeds := make([][]byte, 0, 6)
 
+	// seed 1: simple text insert
+	d1 := newTestDoc(1)
+	t1 := d1.GetText("t")
+	d1.Transact(func(txn *Transaction) { t1.Insert(txn, 0, "hello world", nil) })
+	seeds = append(seeds, EncodeStateAsUpdateV1(d1, nil))
+
+	// seed 2: insert + delete
+	d2 := newTestDoc(2)
+	t2 := d2.GetText("t")
+	d2.Transact(func(txn *Transaction) { t2.Insert(txn, 0, "abcde", nil) })
+	d2.Transact(func(txn *Transaction) { t2.Delete(txn, 1, 2) })
+	seeds = append(seeds, EncodeStateAsUpdateV1(d2, nil))
+
+	// seed 3: YMap
+	d3 := newTestDoc(3)
+	m3 := d3.GetMap("m")
+	d3.Transact(func(txn *Transaction) {
+		m3.Set(txn, "key", "value")
+		m3.Set(txn, "num", 42)
+	})
+	seeds = append(seeds, EncodeStateAsUpdateV1(d3, nil))
+
+	// seed 4: YArray with mixed types
+	d4 := newTestDoc(4)
+	a4 := d4.GetArray("a")
+	d4.Transact(func(txn *Transaction) {
+		a4.Insert(txn, 0, []any{"x", 1, true, nil})
+	})
+	seeds = append(seeds, EncodeStateAsUpdateV1(d4, nil))
+
+	// seed 5: concurrent merge (two clients)
+	d5a := newTestDoc(10)
+	d5b := newTestDoc(20)
+	t5a := d5a.GetText("t")
+	t5b := d5b.GetText("t")
+	d5a.Transact(func(txn *Transaction) { t5a.Insert(txn, 0, "Alice", nil) })
+	d5b.Transact(func(txn *Transaction) { t5b.Insert(txn, 0, "Bob", nil) })
+	u5a := EncodeStateAsUpdateV1(d5a, nil)
+	u5b := EncodeStateAsUpdateV1(d5b, nil)
+	merged, _ := MergeUpdatesV1(u5a, u5b)
+	seeds = append(seeds, merged)
+
+	// seed 6: empty
+	seeds = append(seeds, []byte{})
+
+	return seeds
+}
+
+func FuzzApplyUpdateV1(f *testing.F) {
+	for _, s := range fuzzSeedsV1() {
+		f.Add(s)
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		d := New()
 		_ = ApplyUpdateV1(d, data, nil) // must not panic regardless of input
@@ -349,13 +394,18 @@ func FuzzApplyUpdateV1(f *testing.F) {
 }
 
 func FuzzApplyUpdateV2(f *testing.F) {
-	makeSeed := func() []byte {
-		doc := newTestDoc(1)
-		txt := doc.GetText("c")
-		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
-		return EncodeStateAsUpdateV2(doc, nil)
+	// Re-encode all V1 seeds as V2 for broader coverage.
+	for _, s := range fuzzSeedsV1() {
+		v2, err := UpdateV1ToV2(s)
+		if err == nil {
+			f.Add(v2)
+		}
 	}
-	f.Add(makeSeed())
+	// A directly-encoded V2 seed.
+	d := newTestDoc(1)
+	tc := d.GetText("c")
+	d.Transact(func(txn *Transaction) { tc.Insert(txn, 0, "hello", nil) })
+	f.Add(EncodeStateAsUpdateV2(d, nil))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		d := New()

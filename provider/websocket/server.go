@@ -29,6 +29,58 @@ const (
 	msgQueryAwareness = uint64(3)
 )
 
+// PersistenceAdapter is implemented by storage backends that want to persist
+// room state across server restarts. It is called on every committed update so
+// implementations should be efficient (e.g. append-only log rather than full
+// re-encode on every write).
+type PersistenceAdapter interface {
+	// LoadDoc returns the full binary V1 update representing stored state for
+	// the room, or (nil, nil) if no state exists yet.
+	LoadDoc(room string) ([]byte, error)
+	// StoreUpdate is called with each incremental V1 update produced by a
+	// transaction in the room. The adapter is responsible for merging or
+	// appending updates as appropriate for its storage model.
+	StoreUpdate(room string, update []byte) error
+}
+
+// MemoryPersistence is a thread-safe in-memory PersistenceAdapter that merges
+// all updates into a single V1 snapshot per room. It is the default adapter
+// used when no external persistence is configured and is primarily useful in
+// tests and single-process deployments.
+type MemoryPersistence struct {
+	mu   sync.RWMutex
+	docs map[string][]byte // room → merged V1 update
+}
+
+// NewMemoryPersistence returns an empty MemoryPersistence.
+func NewMemoryPersistence() *MemoryPersistence {
+	return &MemoryPersistence{docs: make(map[string][]byte)}
+}
+
+// LoadDoc returns the merged V1 update for room, or nil if none exists.
+func (m *MemoryPersistence) LoadDoc(room string) ([]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.docs[room], nil
+}
+
+// StoreUpdate merges update into the stored snapshot for room.
+func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	existing := m.docs[room]
+	if len(existing) == 0 {
+		m.docs[room] = update
+		return nil
+	}
+	merged, err := crdt.MergeUpdatesV1(existing, update)
+	if err != nil {
+		return err
+	}
+	m.docs[room] = merged
+	return nil
+}
+
 // room holds the shared document and awareness state for one named room.
 type room struct {
 	mu        sync.Mutex
@@ -49,12 +101,13 @@ type peer struct {
 // Server is a net/http-compatible WebSocket handler.
 // Each distinct room name maps to an independent Yjs document.
 type Server struct {
-	upgrader gws.Upgrader
-	rmu      sync.RWMutex
-	rooms    map[string]*room
+	upgrader    gws.Upgrader
+	rmu         sync.RWMutex
+	rooms       map[string]*room
+	persistence PersistenceAdapter
 }
 
-// NewServer returns a new Server with an empty room store.
+// NewServer returns a new Server with an empty room store and no persistence.
 func NewServer() *Server {
 	return &Server{
 		upgrader: gws.Upgrader{
@@ -62,6 +115,14 @@ func NewServer() *Server {
 		},
 		rooms: make(map[string]*room),
 	}
+}
+
+// NewServerWithPersistence returns a Server that loads and stores room state
+// via the given PersistenceAdapter on every room creation and transaction.
+func NewServerWithPersistence(p PersistenceAdapter) *Server {
+	s := NewServer()
+	s.persistence = p
+	return s
 }
 
 // GetDoc returns the document for the given room, or nil if no peer has
@@ -85,6 +146,17 @@ func (s *Server) getOrCreateRoom(name string) *room {
 		doc:       crdt.New(),
 		awareness: awareness.New(0),
 		peers:     make(map[*peer]struct{}),
+	}
+	if s.persistence != nil {
+		// Bootstrap the document from persisted state (ignore errors — start
+		// with an empty doc if loading fails).
+		if data, err := s.persistence.LoadDoc(name); err == nil && len(data) > 0 {
+			_ = crdt.ApplyUpdateV1(r.doc, data, nil)
+		}
+		// Persist every incremental update produced by transactions in this room.
+		r.doc.OnUpdate(func(update []byte, _ any) {
+			_ = s.persistence.StoreUpdate(name, update)
+		})
 	}
 	s.rooms[name] = r
 	return r

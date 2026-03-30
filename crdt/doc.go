@@ -45,14 +45,15 @@ type Doc struct {
 
 	mu sync.Mutex
 
-	// update observers — called after each committed transaction.
-	onUpdate []func(origin any)
+	// update observers — called after each committed transaction with the
+	// encoded incremental V1 update bytes and the transaction origin.
+	onUpdate []func(update []byte, origin any)
 }
 
 // New creates a new Doc with a randomly generated ClientID.
 func New(opts ...DocOption) *Doc {
 	d := &Doc{
-		ClientID: ClientID(rand.Uint64()),
+		ClientID: ClientID(rand.Uint32()), // uint32 keeps IDs within JS Number.MAX_SAFE_INTEGER
 		GC:       true,
 		store:    newStructStore(),
 		share:    make(map[string]sharedType),
@@ -224,14 +225,20 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 		}
 	}
 
-	for _, fn := range d.onUpdate {
-		fn(orig)
+	if len(d.onUpdate) > 0 {
+		// Encode only the items added in this transaction so observers get
+		// the minimal incremental update rather than the full document state.
+		update := encodeV1Locked(d, txn.beforeState)
+		for _, fn := range d.onUpdate {
+			fn(update, orig)
+		}
 	}
 }
 
 // OnUpdate registers a callback that fires after every committed transaction.
-// Returns an unsubscribe function.
-func (d *Doc) OnUpdate(fn func(origin any)) func() {
+// The callback receives the incremental V1 update bytes for that transaction
+// and the origin value passed to Transact. Returns an unsubscribe function.
+func (d *Doc) OnUpdate(fn func(update []byte, origin any)) func() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onUpdate = append(d.onUpdate, fn)

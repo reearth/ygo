@@ -78,6 +78,27 @@ func EncodeSyncStep2(doc *crdt.Doc, step1msg []byte) ([]byte, error) {
 	return enc.Bytes(), nil
 }
 
+// ReadSyncMessage parses the header of a sync message and returns the message
+// type constant and raw payload bytes without applying anything to a document.
+// Useful for routing or inspecting messages before deciding how to handle them.
+func ReadSyncMessage(msg []byte) (msgType int, payload []byte, err error) {
+	dec := encoding.NewDecoder(msg)
+	t, e := dec.ReadVarUint()
+	if e != nil {
+		return 0, nil, ErrUnexpectedEOF
+	}
+	switch t {
+	case MsgSyncStep1, MsgSyncStep2, MsgUpdate:
+		b, e := dec.ReadVarBytes()
+		if e != nil {
+			return 0, nil, ErrUnexpectedEOF
+		}
+		return int(t), b, nil
+	default:
+		return int(t), nil, ErrUnknownMessage
+	}
+}
+
 // EncodeUpdate wraps a raw V1 update in a sync update message (type 2).
 // Use this to broadcast incremental updates to peers after a local change.
 func EncodeUpdate(update []byte) []byte {

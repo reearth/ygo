@@ -175,7 +175,8 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 
 // RunGC replaces the content of deleted items with lightweight ContentDeleted
 // tombstones, freeing memory while preserving the structural position information
-// required for CRDT correctness.
+// required for CRDT correctness. It then merges adjacent ContentDeleted items
+// from the same client into single nodes, compacting the linked list.
 //
 // This is a no-op when doc.GC is false. After RunGC runs, RestoreDocument can
 // no longer reconstruct states that predate the GC'd deletions — take snapshots
@@ -186,7 +187,9 @@ func RunGC(doc *Doc) {
 	}
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
-	for _, items := range doc.store.clients {
+
+	for client, items := range doc.store.clients {
+		// Pass 1: replace deleted item content with ContentDeleted tombstones.
 		for _, item := range items {
 			if item.Deleted {
 				if _, alreadyGC := item.Content.(*ContentDeleted); !alreadyGC {
@@ -194,5 +197,47 @@ func RunGC(doc *Doc) {
 				}
 			}
 		}
+
+		// Pass 2: merge adjacent ContentDeleted items that are consecutive in
+		// both the store slice and the linked list. Merging them reduces the
+		// number of nodes future origin lookups must traverse.
+		kept := make([]*Item, 0, len(items))
+		for _, item := range items {
+			prevCD, prevIsCDItem := func() (*ContentDeleted, bool) {
+				if len(kept) == 0 {
+					return nil, false
+				}
+				p := kept[len(kept)-1]
+				cd, ok := p.Content.(*ContentDeleted)
+				return cd, ok
+			}()
+			itemCD, itemIsCD := item.Content.(*ContentDeleted)
+
+			// Merge only when both are tombstones, directly adjacent in the
+			// linked list (no gap, no interleaving items), and clocks are
+			// contiguous (prev.Clock+prev.Len == item.Clock).
+			prev := func() *Item {
+				if len(kept) == 0 {
+					return nil
+				}
+				return kept[len(kept)-1]
+			}()
+			if prevIsCDItem && itemIsCD &&
+				prev.Right == item && item.Left == prev &&
+				prev.ID.Clock+uint64(prev.Content.Len()) == item.ID.Clock {
+				// Absorb item into prev: extend the tombstone length, rewire
+				// the linked list, and drop item from the store slice.
+				prevCD.length += itemCD.length
+				prev.Right = item.Right
+				if item.Right != nil {
+					item.Right.Left = prev
+				}
+				// item is discarded from kept — it no longer exists as a
+				// separate node.
+				continue
+			}
+			kept = append(kept, item)
+		}
+		doc.store.clients[client] = kept
 	}
 }

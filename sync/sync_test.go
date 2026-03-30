@@ -174,3 +174,67 @@ func TestInteg_Origin_PassedThrough(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hello", docB.GetText("t").ToString())
 }
+
+func TestInteg_Sync_ThreePeers_Convergence(t *testing.T) {
+	// Three peers each start with independent content, then fully sync via
+	// pairwise bidirectional step-1/step-2 exchanges. All three must converge.
+	docA := newDoc(1, "Alice")
+	docB := newDoc(2, "Bob")
+	docC := newDoc(3, "Carol")
+
+	// bidirectionalSync exchanges step-1/step-2 in both directions between
+	// two documents, leaving both peers with each other's content.
+	bidirectionalSync := func(d1, d2 *crdt.Doc) {
+		t.Helper()
+		s1 := sync.EncodeSyncStep1(d1)
+		s2, err := sync.EncodeSyncStep2(d2, s1)
+		require.NoError(t, err)
+		_, err = sync.ApplySyncMessage(d1, s2, nil)
+		require.NoError(t, err)
+
+		s1b := sync.EncodeSyncStep1(d2)
+		s2b, err := sync.EncodeSyncStep2(d1, s1b)
+		require.NoError(t, err)
+		_, err = sync.ApplySyncMessage(d2, s2b, nil)
+		require.NoError(t, err)
+	}
+
+	// Sync A↔B, then A↔C, then B↔C (one round is enough for pairwise exchange).
+	bidirectionalSync(docA, docB)
+	bidirectionalSync(docA, docC)
+	bidirectionalSync(docB, docC)
+
+	textA := docA.GetText("t").ToString()
+	textB := docB.GetText("t").ToString()
+	textC := docC.GetText("t").ToString()
+
+	assert.Equal(t, textA, textB, "peers A and B must converge")
+	assert.Equal(t, textB, textC, "peers B and C must converge")
+	assert.NotEmpty(t, textA, "converged content must be non-empty")
+}
+
+// ── Fuzz ──────────────────────────────────────────────────────────────────────
+
+// FuzzApplySyncMessage verifies that no arbitrary byte sequence causes a panic
+// in the sync message handler.
+func FuzzApplySyncMessage(f *testing.F) {
+	// Seed with well-formed messages of each type.
+	doc := crdt.New()
+	f.Add(sync.EncodeSyncStep1(doc))
+	step1 := sync.EncodeSyncStep1(crdt.New())
+	if step2, err := sync.EncodeSyncStep2(doc, step1); err == nil {
+		f.Add(step2)
+	}
+	raw := crdt.EncodeStateAsUpdateV1(doc, nil)
+	f.Add(sync.EncodeUpdate(raw))
+	// Seed with edge cases.
+	f.Add([]byte{})
+	f.Add([]byte{0x00})
+	f.Add([]byte{0xff})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		target := crdt.New()
+		// Must never panic regardless of input.
+		_, _ = sync.ApplySyncMessage(target, data, nil)
+	})
+}

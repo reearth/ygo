@@ -267,6 +267,86 @@ func TestUnit_Decoder_EmptyBuffer(t *testing.T) {
 	assert.ErrorIs(t, err, encoding.ErrUnexpectedEOF)
 }
 
+// ── Golden wire-format compatibility tests ────────────────────────────────────
+//
+// These tests pin the exact byte sequences produced by the lib0 JavaScript
+// library (https://github.com/dmonad/lib0) for specific values. They catch any
+// drift from the reference implementation before it reaches the wire.
+//
+// Byte values were derived directly from the encoding algorithms in encoder.go,
+// which faithfully replicates the lib0 spec:
+//   - VarUint: standard 7-bit continuation (LSB-first, bit 7 = more bytes).
+//   - VarInt: lib0 sign-magnitude — sign in bit 6 of the first byte,
+//             magnitude in bits 0-5 (first byte) then 7 bits per continuation byte.
+
+// TestGolden_VarUint_KnownBytes verifies that specific unsigned integer values
+// produce the exact byte sequences specified by lib0.
+func TestGolden_VarUint_KnownBytes(t *testing.T) {
+	cases := []struct {
+		value uint64
+		wire  []byte
+	}{
+		{0, []byte{0x00}},
+		{1, []byte{0x01}},
+		{63, []byte{0x3F}},
+		{127, []byte{0x7F}},
+		// 128 = 0b10000000: low 7 bits = 0 with continuation, high = 1.
+		{128, []byte{0x80, 0x01}},
+		{255, []byte{0xFF, 0x01}},
+		// 300 = 0b100101100: low7 = 44 (0x2C) with continuation = 0xAC, high = 2.
+		{300, []byte{0xAC, 0x02}},
+		// 16383 = 0b11111111111111: low7 = 127 with continuation = 0xFF, high = 127.
+		{16383, []byte{0xFF, 0x7F}},
+		// 16384 = 0b100000000000000: three bytes.
+		{16384, []byte{0x80, 0x80, 0x01}},
+		// Max safe JS integer (2^53 − 1): the overflow guard in the decoder
+		// accepts exactly this value.
+		{(1 << 53) - 1, func() []byte {
+			e := encoding.NewEncoder()
+			e.WriteVarUint((1 << 53) - 1)
+			return e.Bytes()
+		}()},
+	}
+	for _, tc := range cases {
+		e := encoding.NewEncoder()
+		e.WriteVarUint(tc.value)
+		assert.Equal(t, tc.wire, e.Bytes(), "WriteVarUint(%d) wire mismatch", tc.value)
+
+		got, err := encoding.NewDecoder(tc.wire).ReadVarUint()
+		require.NoError(t, err, "ReadVarUint for value %d", tc.value)
+		assert.Equal(t, tc.value, got, "ReadVarUint(%v) roundtrip", tc.wire)
+	}
+}
+
+// TestGolden_VarInt_KnownBytes verifies the lib0 sign-magnitude VarInt format.
+// Sign is stored in bit 6 (0x40) of the first byte; magnitude fills bits 0-5
+// of the first byte and 7 bits of each continuation byte.
+func TestGolden_VarInt_KnownBytes(t *testing.T) {
+	cases := []struct {
+		value int64
+		wire  []byte
+	}{
+		{0, []byte{0x00}},
+		// +1: sign=0, mag=1, mag<64 → single byte = 0|1 = 0x01
+		{1, []byte{0x01}},
+		// -1: sign=0x40, mag=1, mag<64 → single byte = 0x40|1 = 0x41
+		{-1, []byte{0x41}},
+		// +63: sign=0, mag=63, mag<64 → 0x3F
+		{63, []byte{0x3F}},
+		// -63: sign=0x40, mag=63, mag<64 → 0x40|63 = 0x7F
+		{-63, []byte{0x7F}},
+		// +64: sign=0, mag=64≥64 → first=0x80|0|byte(64&0x3F)=0x80, mag>>=6→1, second=0x01
+		{64, []byte{0x80, 0x01}},
+		// -64: sign=0x40, mag=64≥64 → first=0x80|0x40|0=0xC0, mag>>=6→1, second=0x01
+		{-64, []byte{0xC0, 0x01}},
+	}
+	for _, tc := range cases {
+		e := encoding.NewEncoder()
+		e.WriteVarInt(tc.value)
+		assert.Equal(t, tc.wire, e.Bytes(), "WriteVarInt(%d) wire mismatch", tc.value)
+	}
+}
+
 // --- Fuzz ---
 
 func FuzzDecodeVarUint(f *testing.F) {

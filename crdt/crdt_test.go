@@ -382,7 +382,7 @@ func TestUnit_Item_Delete_RecordedInDeleteSet(t *testing.T) {
 func TestUnit_Doc_Transact_ObserverFiresOnce(t *testing.T) {
 	doc := newTestDoc(1)
 	calls := 0
-	doc.OnUpdate(func(_ any) { calls++ })
+	doc.OnUpdate(func(_ []byte, _ any) { calls++ })
 
 	doc.Transact(func(txn *Transaction) {
 		root := newTestType(doc)
@@ -397,7 +397,7 @@ func TestUnit_Doc_Transact_ObserverFiresOnce(t *testing.T) {
 func TestUnit_Doc_Transact_OriginForwarded(t *testing.T) {
 	doc := newTestDoc(1)
 	var gotOrigin any
-	doc.OnUpdate(func(origin any) { gotOrigin = origin })
+	doc.OnUpdate(func(_ []byte, origin any) { gotOrigin = origin })
 
 	doc.Transact(func(_ *Transaction) {}, "my-origin")
 
@@ -407,7 +407,7 @@ func TestUnit_Doc_Transact_OriginForwarded(t *testing.T) {
 func TestUnit_Doc_Transact_Unsubscribe(t *testing.T) {
 	doc := newTestDoc(1)
 	calls := 0
-	unsub := doc.OnUpdate(func(_ any) { calls++ })
+	unsub := doc.OnUpdate(func(_ []byte, _ any) { calls++ })
 
 	doc.Transact(func(_ *Transaction) {})
 	unsub()
@@ -657,7 +657,7 @@ func TestUnit_Doc_Destroy_ClearsState(t *testing.T) {
 	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
 
 	var updateCalls int
-	doc.OnUpdate(func(_ any) { updateCalls++ })
+	doc.OnUpdate(func(_ []byte, _ any) { updateCalls++ })
 
 	doc.Destroy()
 
