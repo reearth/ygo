@@ -124,20 +124,23 @@ When a transaction closes, consecutive `ContentString` items from the same clien
 
 ## LRU position cache
 
-Linear search through the linked list to find index `n` is O(n). Yjs maintains a cache of the 80 most-recently-accessed `(type, index) → *Item` mappings. ygo implements the same cache to match reference performance for random-access editing patterns.
+Linear search through the linked list to find index `n` is O(n). `abstractType` embeds a fixed-size array of 80 `(cumulativeIndex → *Item)` entries. `leftNeighbourAt` finds the cached entry with the largest index ≤ the requested position and resumes scanning from there, giving O(1) amortised cost for sequential and nearby insertions.
+
+The cache is invalidated (cleared) only when an item is inserted in the **middle** of the list (`item.Right != nil`). End-appends (`item.Right == nil`) leave all existing entries valid and skip the invalidation, which is the critical optimisation for the sequential-typing workload in the B4 benchmark.
 
 ## Garbage collection walk
 
-When `doc.GC = true`, at the end of each transaction:
+When `doc.GC = true`, `RunGC` uses a two-pass algorithm:
 
-1. Walk the linked list of every changed type.
-2. For each deleted item whose `Content` is not `ContentDeleted`:
-   - Replace content with `ContentDeleted{Len: item.Content.Len()}`.
-   - Attempt to merge with adjacent deleted items (reduces list length).
-3. Recursively GC deleted `ContentType` items (their child lists).
+**Pass 1 — tombstone replacement:** Walk the linked list of every type in the document. For each deleted item whose content is not already `ContentDeleted`, replace it with `ContentDeleted{Len: item.Content.Len()}`. This frees memory for the original content (strings, binaries, etc.) while preserving the item's position in the list so other items' `Origin` pointers remain valid.
 
-GC is skipped for items that are referenced by an active `Snapshot` state vector.
+**Pass 2 — tombstone merging:** Scan the per-client slice in `StructStore`. Adjacent `ContentDeleted` items that are contiguous in both the linked list (`prev.Right == item`) and clock space are collapsed into a single item, reducing list length.
+
+GC is skipped for items whose clock falls within the state vector of an active `Snapshot`.
 
 ## Known divergences from JS reference
 
-None intentional. Any divergence is a bug. The `TestCompat_*` suite is the authoritative check.
+- **ClientID range:** ygo generates client IDs using `rand.Uint32()` (32-bit), while the JS reference uses `Math.random() * 2^32` (also 32-bit effective range). IDs are encoded as VarUint on the wire; the 53-bit limit imposed by `ReadVarUint` is never exceeded.
+- **`OnUpdate` callback:** ygo passes `(update []byte, origin any)` — the incremental binary update is included. The JS `doc.on('update', handler)` also receives the update bytes; this matches that behaviour.
+
+Any other divergence is a bug. The `TestCompat_*` suite is the authoritative check.

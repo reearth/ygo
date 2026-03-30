@@ -313,15 +313,15 @@ End-to-end test: two goroutines connect to the WebSocket handler over an in-memo
 
 ### Tasks
 
-- [ ] Implement the [B4 editing trace benchmark](https://github.com/dmonad/crdt-benchmarks) (260 k real-world text edits)
-- [ ] `BenchmarkB4_Apply` — apply the full trace from scratch
-- [ ] `BenchmarkB4_Encode` — encode resulting document as V1
-- [ ] `BenchmarkB4_EncodeV2` — encode as V2
-- [ ] `BenchmarkB4_Decode` — decode V1 from bytes
-- [ ] Register all benchmarks in `make bench` and CI benchmark workflow
+- [x] Implement the [B4 editing trace benchmark](https://github.com/dmonad/crdt-benchmarks) (260 k real-world text edits)
+- [x] `BenchmarkB4_Apply` — apply the full trace from scratch
+- [x] `BenchmarkB4_Encode` — encode resulting document as V1
+- [x] `BenchmarkB4_EncodeV2` — encode as V2
+- [x] `BenchmarkB4_Decode` — decode V1 from bytes
+- [x] Register all benchmarks in `make bench` and CI benchmark workflow
 - [ ] Profile with `pprof` and resolve top-3 hotspots
-- [ ] LRU position cache (80 entries) for O(1) average-case index lookup
-- [ ] Document baseline numbers in `benchmarks/README.md`
+- [x] LRU position cache (80 entries) for O(1) average-case index lookup
+- [x] Document baseline numbers in `benchmarks/README.md`
 
 ### Targets
 

@@ -144,6 +144,8 @@ Three message types (matching the [y-protocols spec](https://github.com/yjs/y-pr
 | `SyncStep2` | 1 | Respond with missing update (diff against received SV) |
 | `Update` | 2 | Incremental update after initial sync |
 
+`ReadSyncMessage(msg []byte) (msgType int, payload []byte, err error)` parses any incoming message into its type and raw payload, making it easy to dispatch in custom transport handlers.
+
 The protocol is **transport-agnostic**: messages are plain `[]byte` and work over WebSocket, HTTP, WebRTC, or in-process pipes.
 
 ---
@@ -153,7 +155,7 @@ The protocol is **transport-agnostic**: messages are plain `[]byte` and work ove
 Separate from document updates. Stores `map[ClientID]AwarenessState{Clock uint64, State any}`.
 
 - Last-write-wins per client by `Clock`.
-- States expire after 30 s of inactivity.
+- States expire after 30 s of inactivity. Call `StartAutoExpiry(timeout)` to run expiry automatically in a background goroutine; it returns a stop function.
 - Encoded as `VarUint(numClients)` + per-client `(clientID, clock, jsonState)`.
 
 ---
@@ -162,7 +164,16 @@ Separate from document updates. Stores `map[ClientID]AwarenessState{Clock uint64
 
 ### `provider/websocket/`
 
-`net/http`-compatible handler. One `Doc` per named room. On connect: exchanges `SyncStep1/2` and awareness state. On message: applies update and broadcasts to all other peers in the room. Accepts a `PersistenceAdapter` interface for pluggable storage backends.
+`net/http`-compatible handler. One `Doc` per named room. On connect: exchanges `SyncStep1/2` and awareness state. On message: applies update and broadcasts to all other peers in the room.
+
+**Persistence** is pluggable via the `PersistenceAdapter` interface:
+```go
+type PersistenceAdapter interface {
+    LoadDoc(room string) ([]byte, error)
+    StoreUpdate(room string, update []byte) error
+}
+```
+Pass an implementation to `NewServerWithPersistence(p)`. The built-in `MemoryPersistence` (returned by `NewMemoryPersistence()`) merges updates in memory and is suitable for single-process deployments.
 
 ### `provider/http/`
 
