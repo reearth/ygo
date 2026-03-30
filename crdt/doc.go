@@ -225,6 +225,11 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 		}
 	}
 
+	// Merge adjacent same-client ContentString runs created in this transaction.
+	// Must run after observers (so they see individual items) and before
+	// encodeV1Locked (so the update sent to peers is already compact).
+	squashRuns(txn)
+
 	if len(d.onUpdate) > 0 {
 		// Encode only the items added in this transaction so observers get
 		// the minimal incremental update rather than the full document state.

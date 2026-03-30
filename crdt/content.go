@@ -34,19 +34,28 @@ func (c *ContentDeleted) Splice(offset int) Content {
 // ContentString holds a run of UTF-8 text from a single client.
 // Multiple consecutive characters typed by the same client are squashed into
 // one item, keeping the linked list short.
-type ContentString struct{ Str string }
+//
+// runeLen caches utf8.RuneCountInString(Str) so that Len() is O(1).
+// Any code that mutates Str directly must also update runeLen.
+type ContentString struct {
+	Str     string
+	runeLen int
+}
 
-func NewContentString(s string) *ContentString { return &ContentString{s} }
+func NewContentString(s string) *ContentString {
+	return &ContentString{Str: s, runeLen: utf8.RuneCountInString(s)}
+}
 
 // Len returns the number of Unicode code points (runes), matching Yjs's
 // character-count semantics for indexing into text.
-func (c *ContentString) Len() int          { return utf8.RuneCountInString(c.Str) }
+func (c *ContentString) Len() int          { return c.runeLen }
 func (c *ContentString) IsCountable() bool { return true }
-func (c *ContentString) Copy() Content     { return &ContentString{c.Str} }
+func (c *ContentString) Copy() Content     { return &ContentString{Str: c.Str, runeLen: c.runeLen} }
 func (c *ContentString) Splice(offset int) Content {
 	runes := []rune(c.Str)
-	right := &ContentString{string(runes[offset:])}
+	right := &ContentString{Str: string(runes[offset:]), runeLen: len(runes) - offset}
 	c.Str = string(runes[:offset])
+	c.runeLen = offset
 	return right
 }
 

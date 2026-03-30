@@ -33,10 +33,22 @@ type abstractType struct {
 	name          string           // root type name; used during V1 update encoding
 	deepObservers []func(*Transaction)
 
-	// posCache is a small LRU cache of (cumulativeIndex → *Item) pairs used
-	// by leftNeighbourAt to skip linear scan from t.start on repeat accesses.
+	// posCache is a small circular cache of (cumulativeIndex → *Item) pairs
+	// used by leftNeighbourAt to skip linear scan from t.start on repeat
+	// accesses. posCacheLen tracks how many slots are filled (capped at
+	// posLRUSize). posCacheWr is the next write position; it wraps around once
+	// the cache is full, giving O(1) FIFO eviction instead of the previous
+	// O(posLRUSize) min-scan.
 	posCache    [posLRUSize]posCacheEntry
 	posCacheLen int
+	posCacheWr  int
+
+	// insertHint is set by Insert callers to the logical index of an imminent
+	// local insertion. When non-zero, item.integrate uses partial cache
+	// invalidation (discarding only entries ≥ insertHint) instead of clearing
+	// the entire cache, so that entries before the insertion point survive for
+	// subsequent nearby lookups. Zero means "no hint; do a full clear".
+	insertHint int
 }
 
 // invalidatePosCache clears all cached position entries. Must be called
@@ -44,27 +56,42 @@ type abstractType struct {
 // in this type's linked list.
 func (t *abstractType) invalidatePosCache() {
 	t.posCacheLen = 0
+	t.posCacheWr = 0
 }
 
-// storePosCache records the entry (index, item) in the LRU cache. When the
-// cache is full it evicts the entry with the smallest index, since forward
-// sequential scans only benefit from entries ahead of the current position.
+// invalidatePosCacheFrom removes all cached entries with cumulative index ≥ pos.
+// Entries before pos remain valid and can be reused by the next leftNeighbourAt
+// call near the same location, avoiding a full O(n) rescan from t.start.
+func (t *abstractType) invalidatePosCacheFrom(pos int) {
+	n := 0
+	for i := 0; i < t.posCacheLen; i++ {
+		if t.posCache[i].index < pos {
+			t.posCache[n] = t.posCache[i]
+			n++
+		}
+	}
+	t.posCacheLen = n
+	t.posCacheWr = 0 // reset write cursor; the compacted entries sit at [0..n-1]
+}
+
+// storePosCache records the entry (index, item) in the circular cache.
+// When the cache is not yet full entries are appended; once full the oldest
+// entry is overwritten in FIFO order. This gives O(1) insertion cost vs the
+// previous O(posLRUSize) min-scan eviction strategy.
 func (t *abstractType) storePosCache(index int, item *Item) {
 	if t.posCacheLen < posLRUSize {
 		t.posCache[t.posCacheLen] = posCacheEntry{index, item}
 		t.posCacheLen++
 		return
 	}
-	// Find and replace the minimum-index entry.
-	minI, minIdx := 0, t.posCache[0].index
-	for i := 1; i < posLRUSize; i++ {
-		if t.posCache[i].index < minIdx {
-			minI = i
-			minIdx = t.posCache[i].index
-		}
+	// Cache full: circular overwrite.
+	t.posCache[t.posCacheWr] = posCacheEntry{index, item}
+	t.posCacheWr++
+	if t.posCacheWr >= posLRUSize {
+		t.posCacheWr = 0
 	}
-	t.posCache[minI] = posCacheEntry{index, item}
 }
+
 
 // leftNeighbourAt returns the item that should be the left neighbour when
 // inserting at logical position index, plus the offset within that item.

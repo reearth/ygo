@@ -82,6 +82,11 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 		Parent:      t,
 		Content:     NewContentString(text),
 	}
+	// Signal to integrate that this is a local insert at a known position so
+	// it can do a partial cache invalidation instead of a full clear.
+	if index > 0 {
+		t.insertHint = index
+	}
 	item.integrate(txn, 0)
 }
 

@@ -20,17 +20,27 @@ func (s *StructStore) Append(item *Item) {
 
 // Find returns the Item that contains the given ID, or nil if not found.
 // An item with Clock c and length l contains IDs with clocks [c, c+l).
+//
+// The binary search uses only the start Clock (a plain integer comparison) to
+// avoid calling Content.Len() — which requires a utf8.RuneCountInString scan —
+// inside the hot O(log n) predicate. A single Content.Len() call after the
+// search verifies that id.Clock falls within the candidate item's range.
 func (s *StructStore) Find(id ID) *Item {
 	items := s.clients[id.Client]
-	if len(items) == 0 {
+	n := len(items)
+	if n == 0 {
 		return nil
 	}
-	// Binary search for the item whose clock range contains id.Clock.
-	idx := sort.Search(len(items), func(i int) bool {
-		return items[i].ID.Clock+uint64(items[i].Content.Len()) > id.Clock
-	})
-	if idx < len(items) && items[idx].ID.Clock <= id.Clock {
-		return items[idx]
+	// Find the last item whose start Clock is ≤ id.Clock.
+	idx := sort.Search(n, func(i int) bool {
+		return items[i].ID.Clock > id.Clock
+	}) - 1
+	if idx < 0 {
+		return nil
+	}
+	item := items[idx]
+	if item.ID.Clock+uint64(item.Content.Len()) > id.Clock {
+		return item
 	}
 	return nil
 }

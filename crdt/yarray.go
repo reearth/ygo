@@ -53,6 +53,10 @@ func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
 		Parent:      t,
 		Content:     NewContentAny(vals...),
 	}
+	// Signal to integrate the logical index for partial cache invalidation.
+	if index > 0 {
+		t.insertHint = index
+	}
 	item.integrate(txn, 0)
 }
 
@@ -174,6 +178,13 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 	if length <= 0 {
 		return
+	}
+	// For local transactions, invalidate only the cache entries at and after the
+	// deletion start. Entries before index remain valid and can be reused by a
+	// subsequent leftNeighbourAt call near the same location.
+	// For remote transactions, item.delete handles cache invalidation.
+	if txn.Local {
+		t.invalidatePosCacheFrom(index)
 	}
 	counted := 0
 	item := t.start

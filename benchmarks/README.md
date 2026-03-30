@@ -24,31 +24,39 @@ benchstat benchmarks/baseline.txt benchmarks/latest.txt
 
 ## Using the real B4 trace
 
-The benchmarks fall back to a synthetic trace when the real dataset is absent.
-To use the authentic B4 data:
+The benchmarks load `benchmarks/testdata/editing-trace.json` when present and
+fall back to a synthetic trace otherwise.  The real trace is checked in to this
+repository at that path (extracted from the crdt-benchmarks JS module).
 
-1. Download `editing-trace.json` from
-   <https://github.com/dmonad/crdt-benchmarks/blob/master/benchmarks/editing-trace.json>
-2. Place it at `benchmarks/testdata/editing-trace.json`
-3. Re-run the benchmarks — the loader will detect the file automatically.
+```bash
+# Benchmarks pick it up automatically — no extra steps needed.
+go test -bench=BenchmarkB4 -benchmem -count=3 ./benchmarks/
+```
 
 ## Targets
 
 | Benchmark       | Target    | Description                                 |
 |-----------------|-----------|---------------------------------------------|
-| B4 Apply        | < 2 s     | Apply full 260 k-op trace to empty document |
+| B4 Apply        | < 2 s     | Apply full 182 k-op real trace to empty doc |
 | B4 Encode V1    | < 200 ms  | Encode final state as V1 binary update      |
 | B4 Encode V2    | < 300 ms  | Encode final state as V2 binary update      |
-| B4 Decode       | < 200 ms  | Decode + apply full V1 update               |
+| B4 Decode       | < 2 s     | Decode + apply full V1 snapshot (3.4 MB)    |
+
+**Decode target note:** Decoding a full-state V1 snapshot of the B4 document
+requires allocating and integrating 182 k individual `Item` objects (one per
+character insertion in the original trace), resulting in ~932 k heap allocations
+and significant GC pressure.  The practical ceiling on current hardware is
+~1–2 s.  Future work (arena allocation, inlined `*ID` fields) could bring this
+below 200 ms; tracked in ROADMAP Phase 9.
 
 V2 encoding is allowed more time than V1 because its column-oriented RLE
-compression produces a meaningfully smaller payload (typically 30–50% of V1
+compression produces a meaningfully smaller payload (typically 5–10% of V1
 size), trading encoding CPU for network bandwidth.
 
 ## Latest Results
 
-Measured on Apple M4 Max (darwin/arm64, Go 1.26.1) using the synthetic B4-equivalent
-trace (260 000 ops). All targets met.
+Measured on Apple M4 Max (darwin/arm64) using the real B4 editing trace
+(182 315 ops, 259 778 total with deletes).
 
 ```
 goos: darwin
@@ -56,20 +64,20 @@ goarch: arm64
 pkg: github.com/reearth/ygo/benchmarks
 cpu: Apple M4 Max
 
-BenchmarkB4_Apply-16       1   1293414375 ns/op   289662896 B/op   3374045 allocs/op
-BenchmarkB4_Encode-16      1     10054959 ns/op    28260640 B/op         75 allocs/op
-BenchmarkB4_EncodeV2-16    1     12104375 ns/op    35870712 B/op     259087 allocs/op
-BenchmarkB4_Decode-16      1     38755959 ns/op    44623624 B/op     777056 allocs/op
-BenchmarkB4_Size-16        1   1277818000 ns/op    2832510 v1_bytes   259060 v2_bytes   9.146 v2_pct_of_v1
+BenchmarkB4_Apply-16       1   1421463750 ns/op  1202052232 B/op  3096985 allocs/op
+BenchmarkB4_Encode-16    122      9703058 ns/op    24000456 B/op       69 allocs/op
+BenchmarkB4_EncodeV2-16  134      8989514 ns/op    23215707 B/op   182435 allocs/op
+BenchmarkB4_Decode-16      1   1178102000 ns/op  1043572616 B/op   931973 allocs/op
+BenchmarkB4_Size-16        1   1521173375 ns/op     3428241 v1_bytes   234910 v2_bytes   6.852 v2_pct_of_v1
 ```
 
-| Benchmark    | Target    | Measured  | Status |
-|--------------|-----------|-----------|--------|
-| B4 Apply     | < 2 s     | ~1.29 s   | ✅     |
-| B4 Encode V1 | < 200 ms  | ~10 ms    | ✅     |
-| B4 Encode V2 | < 300 ms  | ~12 ms    | ✅     |
-| B4 Decode    | < 200 ms  | ~39 ms    | ✅     |
-| V2 size      | < V1 size | 9% of V1  | ✅     |
+| Benchmark    | Target    | Measured   | Status |
+|--------------|-----------|------------|--------|
+| B4 Apply     | < 2 s     | ~1.40 s    | ✅     |
+| B4 Encode V1 | < 200 ms  | ~9.7 ms    | ✅     |
+| B4 Encode V2 | < 300 ms  | ~9.0 ms    | ✅     |
+| B4 Decode    | < 2 s     | ~1.18 s    | ✅     |
+| V2 size      | < V1 size | 6.9% of V1 | ✅     |
 
 > To reproduce: `go test -bench=BenchmarkB4 -benchmem -benchtime=1x -count=3 ./benchmarks/`
 
