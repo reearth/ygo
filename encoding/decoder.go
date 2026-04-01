@@ -6,6 +6,11 @@ import (
 	"math"
 )
 
+// maxStringBytes is the maximum number of bytes accepted for a single
+// VarBytes / VarString field. A crafted 4 GB length prefix before the guard
+// would cause multi-GB allocation; this cap prevents that.
+const maxStringBytes = 16 << 20 // 16 MiB
+
 var (
 	// ErrUnexpectedEOF is returned when the buffer is exhausted before decoding completes.
 	ErrUnexpectedEOF = errors.New("encoding: unexpected end of input")
@@ -13,6 +18,11 @@ var (
 	// ErrOverflow is returned when a VarUint exceeds the 53-bit safe integer range.
 	// This matches JavaScript's Number.MAX_SAFE_INTEGER constraint in the Yjs protocol.
 	ErrOverflow = errors.New("encoding: varuint overflow (> 53 bits)")
+
+	// ErrUnknownTag is returned by ReadAny when the tag byte does not correspond
+	// to a known Any variant. Returning an error (rather than nil, nil) prevents
+	// crafted payloads from silently injecting nil values into the document.
+	ErrUnknownTag = errors.New("encoding: unknown Any tag")
 )
 
 // Decoder reads values from a byte slice using the lib0 encoding format.
@@ -113,10 +123,15 @@ func (d *Decoder) ReadVarString() (string, error) {
 
 // ReadVarBytes decodes a length-prefixed byte slice.
 // The returned slice is a sub-slice of the decoder's buffer; copy if you need to retain it.
+// Returns ErrOverflow if the declared length exceeds maxStringBytes (16 MiB) to prevent
+// OOM from a crafted 4 GB length prefix.
 func (d *Decoder) ReadVarBytes() ([]byte, error) {
 	n, err := d.ReadVarUint()
 	if err != nil {
 		return nil, err
+	}
+	if n > maxStringBytes {
+		return nil, ErrOverflow
 	}
 	end := d.pos + int(n)
 	if end > len(d.buf) {
@@ -250,6 +265,6 @@ func (d *Decoder) readAny(depth int) (any, error) {
 		}
 		return out, nil
 	default:
-		return nil, nil
+		return nil, ErrUnknownTag
 	}
 }

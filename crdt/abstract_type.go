@@ -20,6 +20,14 @@ type sharedType interface {
 	fire(txn *Transaction, keysChanged map[string]struct{})
 }
 
+// deepSub pairs a unique subscription ID with an ObserveDeep callback.
+// The ID-based design allows out-of-order unsubscription without the
+// index-capture bug that affects slice-index closures.
+type deepSub struct {
+	id uint64
+	fn func(*Transaction)
+}
+
 // abstractType is the base embedded in every shared type (YArray, YMap, YText).
 // It owns the doubly-linked list of Items that backs the type's content and
 // provides the bookkeeping that Item integration needs.
@@ -31,7 +39,10 @@ type abstractType struct {
 	item          *Item            // the Item containing this type when nested
 	owner         sharedType       // back-pointer to the concrete wrapper
 	name          string           // root type name; used during V1 update encoding
-	deepObservers []func(*Transaction)
+	// deepSubIDGen issues unique IDs for ObserveDeep subscriptions so that
+	// out-of-order unsubscription removes the correct entry (C5).
+	deepSubIDGen  uint64
+	deepObservers []deepSub
 
 	// posCache is a small circular cache of (cumulativeIndex → *Item) pairs
 	// used by leftNeighbourAt to skip linear scan from t.start on repeat
@@ -148,4 +159,21 @@ func (t *abstractType) leftNeighbourAt(index int) (*Item, int) {
 	}
 	// index >= length: insert after the last item (append).
 	return lastItem, 0
+}
+
+// observeDeep registers fn to be called after any transaction that modifies
+// this type or any nested shared type within it. Returns an unsubscribe
+// function. Uses an ID-based lookup so out-of-order unsubscription is safe.
+func (t *abstractType) observeDeep(fn func(*Transaction)) func() {
+	t.deepSubIDGen++
+	id := t.deepSubIDGen
+	t.deepObservers = append(t.deepObservers, deepSub{id: id, fn: fn})
+	return func() {
+		for i, s := range t.deepObservers {
+			if s.id == id {
+				t.deepObservers = append(t.deepObservers[:i], t.deepObservers[i+1:]...)
+				return
+			}
+		}
+	}
 }

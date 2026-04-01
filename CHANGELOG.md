@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-04-01
+
+### Added
+- `YArray.ToJSON()`, `YMap.ToJSON()`, `YText.ToJSON()` — convenience JSON serialisation methods.
+- `YArray.Move(txn, fromIndex, toIndex)` — moves an element to a new logical position within the array.
+- `UndoManager.WithTrackedOrigins(...any)` — restricts capture to transactions whose `Origin` matches one of the supplied values; enables per-user undo in multi-author documents.
+- `YTextEvent.Delta` is now populated on every observer callback with a Quill-compatible insert/delete/retain changeset for the transaction.
+
+### Fixed
+
+**Security:**
+- **C1 — Room memory leak (WebSocket)**: Rooms were never removed from `s.rooms` when all peers disconnected. Fixed: `handleDisconnect` now deletes the room from the server map under the write lock when the last peer leaves.
+- **C2 — CORS bypass (WebSocket)**: `CheckOrigin` always returned `true`, enabling Cross-Site WebSocket Hijacking. Fixed: new `AllowedOrigins []string` field on `Server`; when empty, a same-origin check is applied (Origin host must match HTTP Host header); use `"*"` to explicitly allow all origins.
+- **C3 — Unbounded VarBytes/VarString allocation (Encoding)**: `ReadVarBytes` allocated a slice sized by an attacker-controlled VarUint before verifying the buffer contained that many bytes. Fixed: length fields exceeding `maxStringBytes` (16 MiB) now return `ErrOverflow`.
+- **C4 — Goroutine-unsafe read methods (CRDT types)**: `YArray.Get/ToSlice/ForEach/Slice`, `YText.ToString/ToDelta`, `YMap.Get/Has/Keys/Entries` walked the item linked list without holding the document lock. Fixed: `doc.mu` changed to `sync.RWMutex`; all read methods acquire `RLock` on entry. Read methods must not be called from inside a `Transact` callback.
+- **C5 — Observer unsubscribe index-capture bug**: All type-level `Observe` / `ObserveDeep` methods captured the slice index at subscription time; out-of-order unsubscription removed the wrong handler. Fixed: ID-based lookup pattern (same as `Doc.OnUpdate`) applied to `YArray`, `YText`, `YMap`, `YXmlFragment`, `YXmlElement`, and all `ObserveDeep` methods.
+- **H1 — Goroutine leak per peer (WebSocket)**: The context-watcher goroutine started in `ServeHTTP` had no guaranteed exit path on normal client disconnect. Fixed: `peer.done chan struct{}` is closed by the read loop; the goroutine selects on it as a third case.
+- **H2 — Broadcast-to-closed-peer race (WebSocket)**: `broadcast` snapshots peers then releases the room lock; between snapshot and write, `handleDisconnect` could close `conn`. Fixed: `peer.closed bool` (guarded by `wmu`) is set before the connection is torn down; `write` skips the send if `closed` is true.
+- **H3 — Awareness JSON depth unbounded**: `json.Unmarshal` on state strings has no depth limit; a 1 MiB payload of `[[[[...]]]]` triggers quadratic parsing. Fixed: `checkJSONDepth` scans the raw string and rejects inputs exceeding 20 nesting levels before unmarshalling.
+- **H5 — Unknown ReadAny tag silent nil**: The default case of `readAny` returned `(nil, nil)`, silently injecting nil into documents. Fixed: returns `(nil, ErrUnknownTag)`.
+- **H6 — POST accepts any Content-Type (HTTP)**: `handlePost` applied no Content-Type validation. Fixed: requests with a Content-Type other than `application/octet-stream` are rejected with 415 Unsupported Media Type.
+- **L4 — Room name not validated (WebSocket)**: Room names were taken from the URL path without length or character validation. Fixed: `isValidRoomName` enforces max 255 bytes and allows only letters, digits, hyphen, underscore, and dot; invalid names return 400.
+- **M2 — Awareness clock uint64 overflow**: `a.clock++` wrapped to 0 after 2^64 increments, making new states appear older. Fixed: saturates at `math.MaxUint64` instead of wrapping.
+
 ## [1.0.0] — 2026-04-01
 
 ### Added

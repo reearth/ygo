@@ -34,6 +34,21 @@ func WithCaptureTimeout(d time.Duration) UndoManagerOption {
 	return func(u *UndoManager) { u.captureTimeout = d }
 }
 
+// WithTrackedOrigins restricts the UndoManager to only capture transactions
+// whose Origin matches one of the provided values. By default (no option set)
+// all local transactions are captured regardless of origin.
+//
+// This is useful for multi-user documents where each user has a distinct
+// origin tag and should only be able to undo their own changes.
+func WithTrackedOrigins(origins ...any) UndoManagerOption {
+	return func(u *UndoManager) {
+		u.trackedOrigins = make(map[any]struct{}, len(origins))
+		for _, o := range origins {
+			u.trackedOrigins[o] = struct{}{}
+		}
+	}
+}
+
 // UndoManager tracks local transactions on one or more shared types and
 // provides Undo / Redo operations. Only transactions originating on this
 // peer (txn.Local == true) are captured; remote updates are ignored.
@@ -56,6 +71,11 @@ type UndoManager struct {
 	unsubscribe    func()
 	captureTimeout time.Duration
 	lastTxnTime    time.Time
+
+	// trackedOrigins, when non-nil, limits capture to transactions whose
+	// Origin matches one of the keys. When nil, all local transactions are
+	// captured (default behaviour).
+	trackedOrigins map[any]struct{}
 
 	onStackItemAdded []func(*StackItem, bool)
 }
@@ -192,6 +212,13 @@ func (u *UndoManager) StopCapturing() {
 func (u *UndoManager) captureTransaction(txn *Transaction) {
 	if !txn.Local {
 		return
+	}
+	// If tracked origins are configured, only capture transactions whose Origin
+	// is in the set. When the set is empty, capture all local transactions.
+	if len(u.trackedOrigins) > 0 {
+		if _, ok := u.trackedOrigins[txn.Origin]; !ok {
+			return
+		}
 	}
 	if !u.txnAffectsScope(txn) {
 		return

@@ -58,7 +58,11 @@ type Doc struct {
 	store *StructStore
 	share map[string]sharedType // named root types
 
-	mu sync.Mutex
+	// mu guards all document state. Transact and observer registration hold the
+	// write lock; read-only methods (Get, ToSlice, Keys, etc.) hold the read
+	// lock. Read methods must NOT be called from inside a Transact callback —
+	// Transact holds the write lock and a nested RLock would deadlock.
+	mu sync.RWMutex
 
 	// subIDGen is a monotonically increasing counter used to issue unique IDs
 	// to each observer subscription, enabling correct out-of-order unsubscribe.
@@ -271,7 +275,9 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 			firedDeep[current] = struct{}{}
 			if len(current.deepObservers) > 0 {
 				fns := make([]func(*Transaction), len(current.deepObservers))
-				copy(fns, current.deepObservers)
+				for i, s := range current.deepObservers {
+					fns[i] = s.fn
+				}
 				deepSnap = append(deepSnap, deepEntry{fns})
 			}
 			if current.item != nil {

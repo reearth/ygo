@@ -40,6 +40,7 @@ func doGET(t *testing.T, h http.Handler, room, svBase64 string) *httptest.Respon
 func doPOST(t *testing.T, h http.Handler, room string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/doc/"+room, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/octet-stream")
 	req.SetPathValue("room", room)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)

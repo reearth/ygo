@@ -120,6 +120,13 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, room string) 
 }
 
 func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, room string) {
+	// Require application/octet-stream to prevent browsers from accidentally
+	// POSTing JSON or form-encoded data that would fail with a cryptic decode error.
+	if ct := r.Header.Get("Content-Type"); ct != "application/octet-stream" {
+		http.Error(w, "unsupported media type: Content-Type must be application/octet-stream", http.StatusUnsupportedMediaType)
+		return
+	}
+
 	// Reject bodies exceeding maxUpdateBytes before buffering the entire payload.
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpdateBytes)
 	body, err := io.ReadAll(r.Body)

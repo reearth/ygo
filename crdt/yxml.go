@@ -12,13 +12,20 @@ type xmlNode interface {
 	baseXMLType() *abstractType
 }
 
+// xmlSub pairs a unique subscription ID with a YXmlEvent callback.
+type xmlSub struct {
+	id uint64
+	fn func(YXmlEvent)
+}
+
 // ── YXmlFragment ──────────────────────────────────────────────────────────────
 
 // YXmlFragment is an ordered container of XML child nodes. It is the base
 // type for YXmlElement and can also be used directly as a root XML type.
 type YXmlFragment struct {
 	abstractType
-	observers []func(YXmlEvent)
+	subIDGen  uint64
+	observers []xmlSub
 }
 
 func (f *YXmlFragment) baseType() *abstractType    { return &f.abstractType }
@@ -29,8 +36,8 @@ func (f *YXmlFragment) fire(txn *Transaction, keysChanged map[string]struct{}) {
 		return
 	}
 	ev := YXmlEvent{Target: f, Txn: txn, KeysChanged: keysChanged}
-	for _, fn := range f.observers {
-		fn(ev)
+	for _, s := range f.observers {
+		s.fn(ev)
 	}
 }
 
@@ -128,12 +135,19 @@ func (f *YXmlFragment) ToXML() string {
 }
 
 // Observe registers fn to be called after every transaction that modifies this
-// fragment. Returns an unsubscribe function.
+// fragment. Returns an unsubscribe function. Uses ID-based lookup so out-of-order
+// unsubscription removes the correct entry (C5).
 func (f *YXmlFragment) Observe(fn func(YXmlEvent)) func() {
-	f.observers = append(f.observers, fn)
-	idx := len(f.observers) - 1
+	f.subIDGen++
+	id := f.subIDGen
+	f.observers = append(f.observers, xmlSub{id: id, fn: fn})
 	return func() {
-		f.observers = append(f.observers[:idx], f.observers[idx+1:]...)
+		for i, s := range f.observers {
+			if s.id == id {
+				f.observers = append(f.observers[:i], f.observers[i+1:]...)
+				return
+			}
+		}
 	}
 }
 
@@ -147,8 +161,9 @@ func (f *YXmlFragment) Observe(fn func(YXmlEvent)) func() {
 // ParentSub = "".
 type YXmlElement struct {
 	YXmlFragment
-	NodeName string
-	elemObs  []func(YXmlEvent)
+	NodeName    string
+	elemSubGen uint64
+	elemObs    []xmlSub
 }
 
 // baseType and baseXMLType both route to the single embedded abstractType.
@@ -162,8 +177,8 @@ func (e *YXmlElement) fire(txn *Transaction, keysChanged map[string]struct{}) {
 		return
 	}
 	ev := YXmlEvent{Target: e, Txn: txn, KeysChanged: keysChanged}
-	for _, fn := range e.elemObs {
-		fn(ev)
+	for _, s := range e.elemObs {
+		s.fn(ev)
 	}
 }
 
@@ -248,12 +263,19 @@ func (e *YXmlElement) ToXML() string {
 
 // Observe registers fn to be called after every transaction that modifies this
 // element (children added/removed or attributes changed). Returns an
-// unsubscribe function.
+// unsubscribe function. Uses ID-based lookup so out-of-order unsubscription
+// removes the correct entry (C5).
 func (e *YXmlElement) Observe(fn func(YXmlEvent)) func() {
-	e.elemObs = append(e.elemObs, fn)
-	idx := len(e.elemObs) - 1
+	e.elemSubGen++
+	id := e.elemSubGen
+	e.elemObs = append(e.elemObs, xmlSub{id: id, fn: fn})
 	return func() {
-		e.elemObs = append(e.elemObs[:idx], e.elemObs[idx+1:]...)
+		for i, s := range e.elemObs {
+			if s.id == id {
+				e.elemObs = append(e.elemObs[:i], e.elemObs[i+1:]...)
+				return
+			}
+		}
 	}
 }
 

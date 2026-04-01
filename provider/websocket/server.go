@@ -12,9 +12,12 @@ package websocket
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"path"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	gws "github.com/gorilla/websocket"
 
@@ -105,7 +108,11 @@ type room struct {
 type peer struct {
 	conn      *gws.Conn
 	wmu       sync.Mutex // serialises concurrent writes
+	closed    bool       // H2: true after handleDisconnect; guarded by wmu
 	room      *room
+	roomName  string  // C1: name used to delete room when empty
+	server    *Server // C1: back-reference for room map cleanup
+	done      chan struct{} // H1: closed when the read loop exits
 	clientIDs map[uint64]struct{} // awareness clientIDs controlled by this peer
 	cidMu     sync.Mutex
 }
@@ -126,17 +133,65 @@ type Server struct {
 	// with 401 Unauthorized. Use this hook for token validation, session checks,
 	// or IP allow-lists. If nil, all connections are accepted.
 	AuthFunc func(r *http.Request) bool
+
+	// AllowedOrigins is the list of origins permitted to open WebSocket
+	// connections (C2 — CORS). Each entry must be a full origin string, e.g.
+	// "https://example.com". Use "*" to allow any origin.
+	//
+	// If the slice is empty the server falls back to a same-origin check:
+	// the request Origin header must match the HTTP Host header. Non-browser
+	// clients that omit the Origin header are always permitted.
+	AllowedOrigins []string
+}
+
+// checkOrigin validates the WebSocket upgrade request's Origin header.
+// When AllowedOrigins is empty, a same-origin check is performed (Origin host
+// must equal the HTTP Host header). Non-browser clients that omit Origin are
+// always allowed. Use AllowedOrigins = []string{"*"} to allow any origin.
+func (s *Server) checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Non-browser clients (curl, native apps) don't send Origin; permit them.
+		return true
+	}
+	if len(s.AllowedOrigins) == 0 {
+		// Same-origin fallback: compare the origin's host to the HTTP Host header.
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return strings.EqualFold(u.Host, r.Host)
+	}
+	for _, allowed := range s.AllowedOrigins {
+		if allowed == "*" || strings.EqualFold(allowed, origin) {
+			return true
+		}
+	}
+	return false
+}
+
+// isValidRoomName reports whether name is a safe, non-empty room identifier.
+// Allowed characters: letters, digits, hyphen, underscore, dot. Max 255 bytes.
+func isValidRoomName(name string) bool {
+	if len(name) == 0 || len(name) > 255 {
+		return false
+	}
+	for _, r := range name {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_' && r != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // NewServer returns a new Server with an empty room store and no persistence.
 func NewServer() *Server {
-	return &Server{
-		upgrader: gws.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
+	s := &Server{
 		rooms:      make(map[string]*room),
 		shutdownCh: make(chan struct{}),
 	}
+	s.upgrader = gws.Upgrader{CheckOrigin: s.checkOrigin}
+	return s
 }
 
 // Shutdown closes all active peer connections and waits for their goroutines
@@ -224,6 +279,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = path.Base(r.URL.Path)
 	}
+	if !isValidRoomName(name) {
+		http.Error(w, "invalid room name", http.StatusBadRequest)
+		return
+	}
 
 	rm := s.getOrCreateRoom(name)
 
@@ -239,6 +298,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p := &peer{
 		conn:      ws,
 		room:      rm,
+		roomName:  name,
+		server:    s,
+		done:      make(chan struct{}),
 		clientIDs: make(map[uint64]struct{}),
 	}
 
@@ -247,6 +309,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rm.mu.Unlock()
 
 	defer func() {
+		close(p.done) // H1: unblock the context-watcher goroutine
 		p.handleDisconnect()
 		_ = ws.Close()
 	}()
@@ -261,6 +324,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = ws.Close()
 		case <-s.shutdownCh:
 			_ = ws.Close()
+		case <-p.done: // H1: read loop exited normally; nothing to do
 		}
 	}()
 
@@ -361,9 +425,27 @@ func (p *peer) trackAwarenessClients(payload []byte) {
 // handleDisconnect removes the peer from the room and broadcasts awareness
 // removal for all clientIDs the peer owned.
 func (p *peer) handleDisconnect() {
-	p.room.mu.Lock()
-	delete(p.room.peers, p)
-	p.room.mu.Unlock()
+	// H2: mark closed so concurrent broadcast writes skip this peer.
+	p.wmu.Lock()
+	p.closed = true
+	p.wmu.Unlock()
+
+	rm := p.room
+	rm.mu.Lock()
+	delete(rm.peers, p)
+	empty := len(rm.peers) == 0
+	rm.mu.Unlock()
+
+	// C1: delete the room from the server map when the last peer leaves so the
+	// map does not grow unboundedly. Re-check emptiness under the server write
+	// lock to guard against a concurrent getOrCreateRoom racing us.
+	if empty {
+		p.server.rmu.Lock()
+		if r, ok := p.server.rooms[p.roomName]; ok && len(r.peers) == 0 {
+			delete(p.server.rooms, p.roomName)
+		}
+		p.server.rmu.Unlock()
+	}
 
 	p.cidMu.Lock()
 	clientIDs := make([]uint64, 0, len(p.clientIDs))
@@ -477,9 +559,13 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 // write sends a raw binary WebSocket message, serialising concurrent writes.
 // A per-write deadline of writeTimeout is applied so that a slow or unresponsive
 // peer does not block the broadcast loop for all other peers in the room.
+// H2: skips the write if the peer has already been marked closed by handleDisconnect.
 func (p *peer) write(data []byte) {
 	p.wmu.Lock()
 	defer p.wmu.Unlock()
+	if p.closed {
+		return
+	}
 	_ = p.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	_ = p.conn.WriteMessage(gws.BinaryMessage, data)
 }

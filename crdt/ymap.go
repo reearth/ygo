@@ -1,12 +1,21 @@
 package crdt
 
+import "encoding/json"
+
+// mapSub pairs a unique subscription ID with a YMapEvent callback.
+type mapSub struct {
+	id uint64
+	fn func(YMapEvent)
+}
+
 // YMap is a shared key-value store with last-write-wins semantics.
 // It embeds abstractType, which owns the underlying doubly-linked Item list.
 // Every key maps to at most one live Item; concurrent writes to the same key
 // are resolved deterministically: the item with the higher ClientID wins.
 type YMap struct {
 	abstractType
-	observers []func(YMapEvent)
+	subIDGen  uint64
+	observers []mapSub
 }
 
 func (m *YMap) baseType() *abstractType { return &m.abstractType }
@@ -16,8 +25,8 @@ func (m *YMap) fire(txn *Transaction, keysChanged map[string]struct{}) {
 		return
 	}
 	e := YMapEvent{Target: m, Txn: txn, KeysChanged: keysChanged}
-	for _, fn := range m.observers {
-		fn(e)
+	for _, s := range m.observers {
+		s.fn(e)
 	}
 }
 
@@ -56,7 +65,12 @@ func (m *YMap) Delete(txn *Transaction, key string) {
 }
 
 // Get returns the value for key and whether the key exists.
+// Must not be called from inside a Transact callback.
 func (m *YMap) Get(key string) (any, bool) {
+	if doc := m.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	t := &m.abstractType
 	item, ok := t.itemMap[key]
 	if !ok || item.Deleted {
@@ -70,14 +84,24 @@ func (m *YMap) Get(key string) (any, bool) {
 }
 
 // Has reports whether key has a live (non-deleted) entry.
+// Must not be called from inside a Transact callback.
 func (m *YMap) Has(key string) bool {
+	if doc := m.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	t := &m.abstractType
 	item, ok := t.itemMap[key]
 	return ok && !item.Deleted
 }
 
 // Keys returns all keys with live entries.
+// Must not be called from inside a Transact callback.
 func (m *YMap) Keys() []string {
+	if doc := m.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	t := &m.abstractType
 	keys := make([]string, 0)
 	for k, item := range t.itemMap {
@@ -89,7 +113,12 @@ func (m *YMap) Keys() []string {
 }
 
 // Entries returns a snapshot of all live key-value pairs.
+// Must not be called from inside a Transact callback.
 func (m *YMap) Entries() map[string]any {
+	if doc := m.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	t := &m.abstractType
 	out := make(map[string]any, len(t.itemMap))
 	for k, item := range t.itemMap {
@@ -103,23 +132,31 @@ func (m *YMap) Entries() map[string]any {
 	return out
 }
 
+// ToJSON returns the map serialised as a JSON object.
+// Must not be called from inside a Transact callback.
+func (m *YMap) ToJSON() ([]byte, error) {
+	return json.Marshal(m.Entries())
+}
+
 // Observe registers fn to be called after every transaction that modifies this
-// map. Returns an unsubscribe function.
+// map. Returns an unsubscribe function. Uses ID-based lookup so out-of-order
+// unsubscription removes the correct entry (C5).
 func (m *YMap) Observe(fn func(YMapEvent)) func() {
-	m.observers = append(m.observers, fn)
-	idx := len(m.observers) - 1
+	m.subIDGen++
+	id := m.subIDGen
+	m.observers = append(m.observers, mapSub{id: id, fn: fn})
 	return func() {
-		m.observers = append(m.observers[:idx], m.observers[idx+1:]...)
+		for i, s := range m.observers {
+			if s.id == id {
+				m.observers = append(m.observers[:i], m.observers[i+1:]...)
+				return
+			}
+		}
 	}
 }
 
 // ObserveDeep registers fn to be called after any transaction that modifies
 // this map or any nested shared type within it. Returns an unsubscribe function.
 func (m *YMap) ObserveDeep(fn func(*Transaction)) func() {
-	m.deepObservers = append(m.deepObservers, fn)
-	idx := len(m.deepObservers) - 1
-	return func() {
-		obs := m.deepObservers
-		m.deepObservers = append(obs[:idx], obs[idx+1:]...)
-	}
+	return m.abstractType.observeDeep(fn)
 }

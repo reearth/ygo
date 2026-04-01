@@ -1,10 +1,19 @@
 package crdt
 
+import "encoding/json"
+
+// arraySub pairs a unique subscription ID with a YArrayEvent callback.
+type arraySub struct {
+	id uint64
+	fn func(YArrayEvent)
+}
+
 // YArray is a shared ordered list that supports arbitrary-type elements.
 // It embeds abstractType, which owns the underlying doubly-linked Item list.
 type YArray struct {
 	abstractType
-	observers []func(YArrayEvent)
+	subIDGen  uint64
+	observers []arraySub
 }
 
 func (a *YArray) baseType() *abstractType { return &a.abstractType }
@@ -14,8 +23,8 @@ func (a *YArray) fire(txn *Transaction, _ map[string]struct{}) {
 		return
 	}
 	e := YArrayEvent{Target: a, Txn: txn}
-	for _, fn := range a.observers {
-		fn(e)
+	for _, s := range a.observers {
+		s.fn(e)
 	}
 }
 
@@ -66,7 +75,13 @@ func (a *YArray) Push(txn *Transaction, vals []any) {
 }
 
 // Get returns the element at logical position index, or nil if out of bounds.
+// Must not be called from inside a Transact callback — acquires a read lock
+// that would deadlock with the write lock held by Transact.
 func (a *YArray) Get(index int) any {
+	if doc := a.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	t := &a.abstractType
 	counted := 0
 	for item := t.start; item != nil; item = item.Right {
@@ -91,7 +106,12 @@ func (a *YArray) Delete(txn *Transaction, index, length int) {
 }
 
 // ToSlice returns all non-deleted elements as a new slice.
+// Must not be called from inside a Transact callback.
 func (a *YArray) ToSlice() []any {
+	if doc := a.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	t := &a.abstractType
 	result := make([]any, 0, t.length)
 	for item := t.start; item != nil; item = item.Right {
@@ -105,30 +125,43 @@ func (a *YArray) ToSlice() []any {
 	return result
 }
 
+// ToJSON returns the array serialised as a JSON array.
+// Must not be called from inside a Transact callback.
+func (a *YArray) ToJSON() ([]byte, error) {
+	return json.Marshal(a.ToSlice())
+}
+
 // Observe registers fn to be called after every transaction that modifies this
-// array. Returns an unsubscribe function.
+// array. Returns an unsubscribe function. Uses ID-based lookup so out-of-order
+// unsubscription removes the correct entry (C5).
 func (a *YArray) Observe(fn func(YArrayEvent)) func() {
-	a.observers = append(a.observers, fn)
-	idx := len(a.observers) - 1
+	a.subIDGen++
+	id := a.subIDGen
+	a.observers = append(a.observers, arraySub{id: id, fn: fn})
 	return func() {
-		a.observers = append(a.observers[:idx], a.observers[idx+1:]...)
+		for i, s := range a.observers {
+			if s.id == id {
+				a.observers = append(a.observers[:i], a.observers[i+1:]...)
+				return
+			}
+		}
 	}
 }
 
 // ObserveDeep registers fn to be called after any transaction that modifies
 // this array or any nested shared type within it. Returns an unsubscribe function.
 func (a *YArray) ObserveDeep(fn func(*Transaction)) func() {
-	a.deepObservers = append(a.deepObservers, fn)
-	idx := len(a.deepObservers) - 1
-	return func() {
-		obs := a.deepObservers
-		a.deepObservers = append(obs[:idx], obs[idx+1:]...)
-	}
+	return a.abstractType.observeDeep(fn)
 }
 
 // Slice returns elements in the half-open range [start, end).
 // Clamps end to Len() if it exceeds the array length.
+// Must not be called from inside a Transact callback.
 func (a *YArray) Slice(start, end int) []any {
+	if doc := a.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	t := &a.abstractType
 	if end > t.length {
 		end = t.length
@@ -158,7 +191,12 @@ func (a *YArray) Slice(start, end int) []any {
 }
 
 // ForEach calls fn for every non-deleted element in index order.
+// Must not be called from inside a Transact callback.
 func (a *YArray) ForEach(fn func(index int, value any)) {
+	if doc := a.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	t := &a.abstractType
 	index := 0
 	for item := t.start; item != nil; item = item.Right {
@@ -172,6 +210,22 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 			}
 		}
 	}
+}
+
+// Move removes the element at fromIndex and reinserts it at toIndex.
+// Both indices are in terms of the logical (non-deleted) position.
+// Note: this is a simplified delete-then-insert implementation; the moved
+// element receives a new Item ID and loses its original causal history.
+func (a *YArray) Move(txn *Transaction, fromIndex, toIndex int) {
+	if fromIndex == toIndex {
+		return
+	}
+	elem := a.Get(fromIndex)
+	a.Delete(txn, fromIndex, 1)
+	if toIndex > fromIndex {
+		toIndex--
+	}
+	a.Insert(txn, toIndex, []any{elem})
 }
 
 // deleteRange is shared by YArray and YText to delete a logical range.

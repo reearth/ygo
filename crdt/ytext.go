@@ -1,13 +1,23 @@
 package crdt
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
+
+// textSub pairs a unique subscription ID with a YTextEvent callback.
+type textSub struct {
+	id uint64
+	fn func(YTextEvent)
+}
 
 // YText is a shared rich-text type. Characters are stored as ContentString
 // items; formatting spans are ContentFormat items (which do not count toward
 // logical length).
 type YText struct {
 	abstractType
-	observers []func(YTextEvent)
+	subIDGen  uint64
+	observers []textSub
 }
 
 func (txt *YText) baseType() *abstractType { return &txt.abstractType }
@@ -16,10 +26,50 @@ func (txt *YText) fire(txn *Transaction, _ map[string]struct{}) {
 	if len(txt.observers) == 0 {
 		return
 	}
-	e := YTextEvent{Target: txt, Txn: txn}
-	for _, fn := range txt.observers {
-		fn(e)
+	delta := txt.computeDelta(txn)
+	e := YTextEvent{Target: txt, Txn: txn, Delta: delta}
+	for _, s := range txt.observers {
+		s.fn(e)
 	}
+}
+
+// computeDelta builds a Quill-compatible delta for the changes in txn.
+// Each ContentString item is classified as Insert (new in this txn),
+// Delete (removed by this txn), or Retain (unchanged and visible).
+// A trailing Retain is omitted following the Quill convention.
+func (txt *YText) computeDelta(txn *Transaction) []Delta {
+	var ops []Delta
+	retain := 0
+
+	flushRetain := func() {
+		if retain > 0 {
+			ops = append(ops, Delta{Op: DeltaOpRetain, Retain: retain})
+			retain = 0
+		}
+	}
+
+	for item := txt.start; item != nil; item = item.Right {
+		cs, isStr := item.Content.(*ContentString)
+		if !isStr {
+			continue
+		}
+		beforeClock := txn.beforeState.Clock(item.ID.Client)
+		isNew := item.ID.Clock >= beforeClock
+		if isNew {
+			if !item.Deleted {
+				flushRetain()
+				ops = append(ops, Delta{Op: DeltaOpInsert, Insert: cs.Str})
+			}
+			// inserted and immediately deleted in the same txn → net no-op; skip
+		} else if txn.deleteSet.IsDeleted(item.ID) {
+			flushRetain()
+			ops = append(ops, Delta{Op: DeltaOpDelete, Delete: cs.Len()})
+		} else if !item.Deleted {
+			retain += cs.Len()
+		}
+	}
+	// Trailing retain omitted (Quill convention).
+	return ops
 }
 
 // Len returns the number of non-deleted Unicode code points.
@@ -131,7 +181,12 @@ func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) 
 
 // ToString returns the concatenation of all non-deleted character runs,
 // excluding format markers.
+// Must not be called from inside a Transact callback.
 func (txt *YText) ToString() string {
+	if doc := txt.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	t := &txt.abstractType
 	var sb strings.Builder
 	for item := t.start; item != nil; item = item.Right {
@@ -144,6 +199,12 @@ func (txt *YText) ToString() string {
 	return sb.String()
 }
 
+// ToJSON returns the text content serialised as a JSON string.
+// Must not be called from inside a Transact callback.
+func (txt *YText) ToJSON() ([]byte, error) {
+	return json.Marshal(txt.ToString())
+}
+
 // ToDelta returns a Quill-compatible delta representing the current document
 // state as a sequence of insert operations.
 //
@@ -151,7 +212,12 @@ func (txt *YText) ToString() string {
 // Formatting attributes accumulated from ContentFormat markers are attached to
 // the text run they precede. A nil attribute value signals the end of a span
 // and is omitted from the output attributes map.
+// Must not be called from inside a Transact callback.
 func (txt *YText) ToDelta() []Delta {
+	if doc := txt.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	var deltas []Delta
 	currentAttrs := make(Attributes)
 
@@ -182,22 +248,24 @@ func (txt *YText) ToDelta() []Delta {
 }
 
 // Observe registers fn to be called after every transaction that modifies this
-// text. Returns an unsubscribe function.
+// text. Returns an unsubscribe function. Uses ID-based lookup so out-of-order
+// unsubscription removes the correct entry (C5).
 func (txt *YText) Observe(fn func(YTextEvent)) func() {
-	txt.observers = append(txt.observers, fn)
-	idx := len(txt.observers) - 1
+	txt.subIDGen++
+	id := txt.subIDGen
+	txt.observers = append(txt.observers, textSub{id: id, fn: fn})
 	return func() {
-		txt.observers = append(txt.observers[:idx], txt.observers[idx+1:]...)
+		for i, s := range txt.observers {
+			if s.id == id {
+				txt.observers = append(txt.observers[:i], txt.observers[i+1:]...)
+				return
+			}
+		}
 	}
 }
 
 // ObserveDeep registers fn to be called after any transaction that modifies
 // this text or any nested shared type within it. Returns an unsubscribe function.
 func (txt *YText) ObserveDeep(fn func(*Transaction)) func() {
-	txt.deepObservers = append(txt.deepObservers, fn)
-	idx := len(txt.deepObservers) - 1
-	return func() {
-		obs := txt.deepObservers
-		txt.deepObservers = append(obs[:idx], obs[idx+1:]...)
-	}
+	return txt.abstractType.observeDeep(fn)
 }

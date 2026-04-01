@@ -3,6 +3,7 @@ package awareness
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"sync"
 	"time"
 
@@ -10,6 +11,30 @@ import (
 )
 
 const DefaultTimeout = 30 * time.Second
+
+// maxJSONDepth is the maximum nesting depth accepted for a client state JSON
+// string. Go's encoding/json has no depth limit, so a payload of deeply nested
+// arrays/maps triggers quadratic parsing. States exceeding this depth are
+// treated as null (removed).
+const maxJSONDepth = 20
+
+// checkJSONDepth reports whether the JSON string s has at most maxJSONDepth
+// levels of nesting. It scans bytes rather than parsing, so it runs in O(n).
+func checkJSONDepth(s string) bool {
+	depth := 0
+	for _, c := range s {
+		switch c {
+		case '{', '[':
+			depth++
+			if depth > maxJSONDepth {
+				return false
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return true
+}
 
 // maxAwarenessClients is the maximum number of client entries accepted in a
 // single ApplyUpdate call. Prevents OOM from a crafted message that claims a
@@ -78,7 +103,11 @@ func (a *Awareness) ClientID() uint64 {
 // Passing nil removes the local client from the awareness set.
 func (a *Awareness) SetLocalState(state map[string]any) {
 	a.mu.Lock()
-	a.clock++
+	// Saturate at MaxUint64 rather than wrapping: a wrap-around would make new
+	// states appear older than existing ones, breaking monotonicity.
+	if a.clock < math.MaxUint64 {
+		a.clock++
+	}
 	var added, updated, removed []uint64
 
 	prev, exists := a.states[a.clientID]
@@ -269,11 +298,14 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 
 		wasActive := exists && current.State != nil
 
-		// Decode JSON state.
+		// Decode JSON state. Reject deeply nested payloads before unmarshalling
+		// to prevent quadratic parse cost from crafted inputs like [[[[...]]]].
 		isNull := e.jsonStr == "null" || e.jsonStr == ""
 		var state map[string]any
 		if !isNull {
-			if err := json.Unmarshal([]byte(e.jsonStr), &state); err != nil {
+			if !checkJSONDepth(e.jsonStr) {
+				isNull = true
+			} else if err := json.Unmarshal([]byte(e.jsonStr), &state); err != nil {
 				isNull = true
 			}
 			if state == nil {
