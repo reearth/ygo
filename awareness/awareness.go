@@ -20,18 +20,38 @@ const maxJSONDepth = 20
 
 // checkJSONDepth reports whether the JSON string s has at most maxJSONDepth
 // levels of nesting. It scans bytes rather than parsing, so it runs in O(n).
+//
+// It tracks string context to avoid counting bracket characters inside JSON
+// string values. Without this, {"key": "[[[["}  would be counted as depth 5
+// instead of the correct depth 1, causing false-positive rejections (N-C3).
 func checkJSONDepth(s string) bool {
 	depth := 0
-	for _, c := range s {
-		switch c {
-		case '{', '[':
-			depth++
-			if depth > maxJSONDepth {
-				return false
+	inString := false
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if inString {
+			if c == '\\' {
+				i += 2 // skip escaped character (handles \" correctly)
+				continue
 			}
-		case '}', ']':
-			depth--
+			if c == '"' {
+				inString = false
+			}
+		} else {
+			switch c {
+			case '"':
+				inString = true
+			case '{', '[':
+				depth++
+				if depth > maxJSONDepth {
+					return false
+				}
+			case '}', ']':
+				depth--
+			}
 		}
+		i++
 	}
 	return true
 }

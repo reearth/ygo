@@ -344,3 +344,65 @@ func TestInteg_YText_SequentialEdits_Correct(t *testing.T) {
 
 	assert.Equal(t, "Hello Go!!", txt.ToString())
 }
+
+// ── YTextEvent.Delta tests ────────────────────────────────────────────────────
+
+func TestUnit_YText_Delta_InsertOnly(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	var got []Delta
+	txt.Observe(func(e YTextEvent) { got = e.Delta })
+
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+
+	require.Len(t, got, 1)
+	assert.Equal(t, DeltaOpInsert, got[0].Op)
+	assert.Equal(t, "hello", got[0].Insert)
+}
+
+func TestUnit_YText_Delta_DeleteOnly(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+
+	var got []Delta
+	txt.Observe(func(e YTextEvent) { got = e.Delta })
+	doc.Transact(func(txn *Transaction) { txt.Delete(txn, 0, 5) })
+
+	require.Len(t, got, 1)
+	assert.Equal(t, DeltaOpDelete, got[0].Op)
+	assert.Equal(t, 5, got[0].Delete)
+}
+
+func TestUnit_YText_Delta_InsertAndDelete(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello world", nil) })
+
+	var got []Delta
+	txt.Observe(func(e YTextEvent) { got = e.Delta })
+	// Replace "world" with "Go": delete 5 chars at index 6, insert "Go" at index 6.
+	doc.Transact(func(txn *Transaction) {
+		txt.Delete(txn, 6, 5)
+		txt.Insert(txn, 6, "Go", nil)
+	})
+
+	// Expect: retain 6, insert "Go", delete 5 (trailing retain omitted).
+	retains := 0
+	inserts := 0
+	deletes := 0
+	for _, d := range got {
+		switch d.Op {
+		case DeltaOpRetain:
+			retains += d.Retain
+		case DeltaOpInsert:
+			inserts++
+		case DeltaOpDelete:
+			deletes++
+		}
+	}
+	assert.Equal(t, 6, retains, "should retain 'hello '")
+	assert.Equal(t, 1, inserts, "should have one insert op")
+	assert.Equal(t, 1, deletes, "should have one delete op")
+	assert.Equal(t, "hello Go", txt.ToString())
+}

@@ -179,3 +179,62 @@ func TestInteg_RoundTrip_NilState(t *testing.T) {
 	// B should no longer have client 1.
 	assert.NotContains(t, peerB.GetStates(), uint64(1))
 }
+
+// ── checkJSONDepth string-context tests (N-C3) ─────────────────────────────
+
+func TestUnit_Awareness_JSONDepth_BracketsInsideString(t *testing.T) {
+	// A JSON object with brackets inside a string value must NOT be rejected.
+	// Before the N-C3 fix, {"key": "[[[["}  was counted as depth 5.
+	a := awareness.New(1)
+	peerB := awareness.New(2)
+
+	// Build an update where the state contains brackets in a string value.
+	a.SetLocalState(map[string]any{"cursor": "[[[[in a string]]]]"})
+	update := a.EncodeUpdate(nil)
+
+	err := peerB.ApplyUpdate(update, nil)
+	require.NoError(t, err)
+
+	states := peerB.GetStates()
+	require.Contains(t, states, uint64(1))
+	assert.Equal(t, "[[[[in a string]]]]", states[1].State["cursor"])
+}
+
+func TestUnit_Awareness_JSONDepth_ActuallyDeepPayload(t *testing.T) {
+	// A genuinely deeply-nested JSON payload must still be rejected.
+	a := awareness.New(1)
+
+	// Build a 25-deep nested array string directly and apply it as raw bytes.
+	deep := ""
+	for i := 0; i < 25; i++ {
+		deep += "{"
+	}
+	for i := 0; i < 25; i++ {
+		deep += "}"
+	}
+	// Manually encode an awareness update with this deep state JSON.
+	enc := func() []byte {
+		// 1 client, clientID=99, clock=1, jsonStr=deep
+		b := []byte{}
+		writeVarUint := func(v uint64) {
+			for v >= 0x80 {
+				b = append(b, byte(v)|0x80)
+				v >>= 7
+			}
+			b = append(b, byte(v))
+		}
+		writeStr := func(s string) {
+			writeVarUint(uint64(len(s)))
+			b = append(b, s...)
+		}
+		writeVarUint(1)   // numClients
+		writeVarUint(99)  // clientID
+		writeVarUint(1)   // clock
+		writeStr(deep)    // state JSON
+		return b
+	}()
+	err := a.ApplyUpdate(enc, nil)
+	require.NoError(t, err)
+	// The deep state should have been treated as null (removed).
+	assert.NotContains(t, a.GetStates(), uint64(99))
+}

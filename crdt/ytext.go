@@ -22,14 +22,23 @@ type YText struct {
 
 func (txt *YText) baseType() *abstractType { return &txt.abstractType }
 
-func (txt *YText) fire(txn *Transaction, _ map[string]struct{}) {
+// prepareFire snapshots the current observer slice inside the document write
+// lock and returns a closure that fires all snapshotted observers (N-C1).
+// computeDelta is called here (under the lock) so it sees a consistent view of
+// the item list; calling it outside the lock after releasing would risk racing
+// with the next transaction.
+func (txt *YText) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 	if len(txt.observers) == 0 {
-		return
+		return nil
 	}
 	delta := txt.computeDelta(txn)
+	snap := make([]textSub, len(txt.observers))
+	copy(snap, txt.observers)
 	e := YTextEvent{Target: txt, Txn: txn, Delta: delta}
-	for _, s := range txt.observers {
-		s.fn(e)
+	return func() {
+		for _, s := range snap {
+			s.fn(e)
+		}
 	}
 }
 
@@ -103,13 +112,13 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 		originRight = &id
 	}
 
-	clock := txn.doc.store.NextClock(txn.doc.ClientID)
+	clock := txn.doc.store.NextClock(txn.doc.clientID)
 
 	if len(attrs) > 0 {
 		// Insert an opening ContentFormat item for each attribute.
 		for k, v := range attrs {
 			fmtItem := &Item{
-				ID:          ID{Client: txn.doc.ClientID, Clock: clock},
+				ID:          ID{Client: txn.doc.clientID, Clock: clock},
 				Origin:      origin,
 				OriginRight: originRight,
 				Left:        left,
@@ -120,12 +129,12 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 			left = fmtItem
 			origin = &ID{Client: fmtItem.ID.Client, Clock: fmtItem.ID.Clock}
 			originRight = nil
-			clock = txn.doc.store.NextClock(txn.doc.ClientID)
+			clock = txn.doc.store.NextClock(txn.doc.clientID)
 		}
 	}
 
 	item := &Item{
-		ID:          ID{Client: txn.doc.ClientID, Clock: clock},
+		ID:          ID{Client: txn.doc.clientID, Clock: clock},
 		Origin:      origin,
 		OriginRight: originRight,
 		Left:        left,
@@ -166,7 +175,7 @@ func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) 
 
 	for k, v := range attrs {
 		fmtItem := &Item{
-			ID:      ID{Client: txn.doc.ClientID, Clock: txn.doc.store.NextClock(txn.doc.ClientID)},
+			ID:      ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
 			Origin:  origin,
 			Left:    left,
 			Parent:  t,
@@ -250,11 +259,23 @@ func (txt *YText) ToDelta() []Delta {
 // Observe registers fn to be called after every transaction that modifies this
 // text. Returns an unsubscribe function. Uses ID-based lookup so out-of-order
 // unsubscription removes the correct entry (C5).
+//
+// Acquiring doc.mu.Lock() serialises registration against Transact (N-C1).
+// Do not call Observe from inside a Transact callback — that would deadlock.
 func (txt *YText) Observe(fn func(YTextEvent)) func() {
+	doc := txt.doc
+	if doc != nil {
+		doc.mu.Lock()
+		defer doc.mu.Unlock()
+	}
 	txt.subIDGen++
 	id := txt.subIDGen
 	txt.observers = append(txt.observers, textSub{id: id, fn: fn})
 	return func() {
+		if doc := txt.doc; doc != nil {
+			doc.mu.Lock()
+			defer doc.mu.Unlock()
+		}
 		for i, s := range txt.observers {
 			if s.id == id {
 				txt.observers = append(txt.observers[:i], txt.observers[i+1:]...)

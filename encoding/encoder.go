@@ -2,7 +2,9 @@ package encoding
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
+	"sort"
 )
 
 // Encoder writes values into a growing byte buffer using the lib0 encoding format.
@@ -49,7 +51,13 @@ func (e *Encoder) WriteVarInt(v int64) {
 	var mag uint64
 	if v < 0 {
 		sign = 0x40
-		mag = uint64(-v)
+		// Special-case MinInt64: uint64(-math.MinInt64) overflows in Go's
+		// two's complement arithmetic because +2^63 cannot fit in int64 (N-C4).
+		if v == math.MinInt64 {
+			mag = 1 << 63
+		} else {
+			mag = uint64(-v)
+		}
 	} else {
 		mag = uint64(v)
 	}
@@ -158,11 +166,20 @@ func (e *Encoder) WriteAny(v any) {
 	case map[string]any:
 		e.WriteUint8(118)
 		e.WriteVarUint(uint64(len(val)))
-		for k, item := range val {
+		// Sort keys for deterministic encoding; Go map iteration is random (N-M3).
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
 			e.WriteVarString(k)
-			e.WriteAny(item)
+			e.WriteAny(val[k])
 		}
 	default:
-		e.WriteUint8(126) // unknown types encoded as null
+		// Silently encoding unsupported types as null causes data loss. Panic
+		// loudly so programming errors (channels, funcs, etc.) are caught
+		// immediately rather than silently corrupting documents (N-M2).
+		panic(fmt.Sprintf("encoding: unsupported type %T passed to WriteAny", v))
 	}
 }

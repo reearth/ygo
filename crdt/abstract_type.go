@@ -17,7 +17,14 @@ type posCacheEntry struct {
 // each transaction without knowing the concrete type.
 type sharedType interface {
 	baseType() *abstractType
-	fire(txn *Transaction, keysChanged map[string]struct{})
+	// prepareFire is called inside the document write lock in Transact.
+	// It snapshots the current observer slice and builds the event struct,
+	// then returns a closure that calls all snapshotted observers. The closure
+	// is invoked after the lock is released, so observers may safely call back
+	// into any Doc method. Returning nil means there are no observers to fire.
+	// This pattern eliminates the data race between concurrent Observe() calls
+	// and the observer fire loop (N-C1).
+	prepareFire(txn *Transaction, keysChanged map[string]struct{}) func()
 }
 
 // deepSub pairs a unique subscription ID with an ObserveDeep callback.
@@ -164,11 +171,23 @@ func (t *abstractType) leftNeighbourAt(index int) (*Item, int) {
 // observeDeep registers fn to be called after any transaction that modifies
 // this type or any nested shared type within it. Returns an unsubscribe
 // function. Uses an ID-based lookup so out-of-order unsubscription is safe.
+//
+// Acquiring doc.mu.Lock() here serialises observer registration against
+// Transact, which reads deepObservers under the same lock (N-C1).
 func (t *abstractType) observeDeep(fn func(*Transaction)) func() {
+	doc := t.doc
+	if doc != nil {
+		doc.mu.Lock()
+		defer doc.mu.Unlock()
+	}
 	t.deepSubIDGen++
 	id := t.deepSubIDGen
 	t.deepObservers = append(t.deepObservers, deepSub{id: id, fn: fn})
 	return func() {
+		if doc := t.doc; doc != nil {
+			doc.mu.Lock()
+			defer doc.mu.Unlock()
+		}
 		for i, s := range t.deepObservers {
 			if s.id == id {
 				t.deepObservers = append(t.deepObservers[:i], t.deepObservers[i+1:]...)

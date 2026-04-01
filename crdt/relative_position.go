@@ -59,6 +59,12 @@ type AbsolutePosition struct {
 // reference implementation.
 func CreateRelativePositionFromIndex(t sharedType, index int, assoc int) RelativePosition {
 	at := t.baseType()
+	// Acquire a read lock for the duration of the walk so that a concurrent
+	// Transact cannot mutate the item linked list mid-traversal (N-H3).
+	if doc := at.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
 	name := at.name
 
 	if assoc < 0 {

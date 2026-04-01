@@ -234,3 +234,45 @@ func TestInteg_YArray_SequentialInserts_Converge(t *testing.T) {
 
 	assert.Equal(t, []any{"a", "b", "c"}, arr.ToSlice())
 }
+
+// ── YArray.Move tests ─────────────────────────────────────────────────────────
+
+func TestUnit_YArray_Move_ForwardByOne(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("list")
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"a", "b", "c"}) })
+	doc.Transact(func(txn *Transaction) { arr.Move(txn, 0, 1) }) // move "a" after "b"
+	assert.Equal(t, []any{"b", "a", "c"}, arr.ToSlice())
+}
+
+func TestUnit_YArray_Move_BackwardByOne(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("list")
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"a", "b", "c"}) })
+	doc.Transact(func(txn *Transaction) { arr.Move(txn, 2, 1) }) // move "c" before "b"
+	assert.Equal(t, []any{"a", "c", "b"}, arr.ToSlice())
+}
+
+func TestUnit_YArray_Move_ToStart(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("list")
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"a", "b", "c"}) })
+	doc.Transact(func(txn *Transaction) { arr.Move(txn, 2, 0) }) // move "c" to front
+	assert.Equal(t, []any{"c", "a", "b"}, arr.ToSlice())
+}
+
+func TestUnit_YArray_Move_ToEnd(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("list")
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"a", "b", "c"}) })
+	doc.Transact(func(txn *Transaction) { arr.Move(txn, 0, 3) }) // move "a" to end
+	assert.Equal(t, []any{"b", "c", "a"}, arr.ToSlice())
+}
+
+func TestUnit_YArray_Move_NoopSameIndex(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("list")
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"a", "b", "c"}) })
+	doc.Transact(func(txn *Transaction) { arr.Move(txn, 1, 1) }) // no-op
+	assert.Equal(t, []any{"a", "b", "c"}, arr.ToSlice())
+}

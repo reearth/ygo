@@ -108,7 +108,7 @@ func EqualSnapshots(a, b *Snapshot) bool {
 // present in the snapshot's DeleteSet are applied.
 //
 // The original doc must still contain the full item history — either
-// doc.GC was false, or RunGC has not yet discarded items relevant to the
+// doc.gc was false, or RunGC has not yet discarded items relevant to the
 // snapshot.
 func RestoreDocument(doc *Doc, snap *Snapshot) (*Doc, error) {
 	doc.mu.Lock()
@@ -178,11 +178,11 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 // required for CRDT correctness. It then merges adjacent ContentDeleted items
 // from the same client into single nodes, compacting the linked list.
 //
-// This is a no-op when doc.GC is false. After RunGC runs, RestoreDocument can
+// This is a no-op when doc.gc is false. After RunGC runs, RestoreDocument can
 // no longer reconstruct states that predate the GC'd deletions — take snapshots
 // before calling RunGC if you need to preserve history.
 func RunGC(doc *Doc) {
-	if !doc.GC {
+	if !doc.gc {
 		return
 	}
 	doc.mu.Lock()

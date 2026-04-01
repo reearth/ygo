@@ -58,6 +58,12 @@ func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock u
 	if end == clock {
 		return item
 	}
+	// Guard against malformed updates where clock < item.ID.Clock: the
+	// subtraction would underflow, producing a huge splitAt that causes a
+	// panic in Splice (N-H2).
+	if clock < item.ID.Clock {
+		return item
+	}
 	// Split so the left half ends exactly at clock.
 	splitAt := int(clock - item.ID.Clock + 1)
 	splitItem(txn, item, splitAt)

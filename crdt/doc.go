@@ -26,13 +26,13 @@ type DocOption func(*Doc)
 // WithClientID sets a fixed ClientID instead of generating a random one.
 // Useful in tests and server-side scenarios where the ID must be deterministic.
 func WithClientID(id ClientID) DocOption {
-	return func(d *Doc) { d.ClientID = id }
+	return func(d *Doc) { d.clientID = id }
 }
 
 // WithGC controls whether deleted item content is freed at the end of each
 // transaction. Default is true. Set to false to preserve history for snapshots.
 func WithGC(gc bool) DocOption {
-	return func(d *Doc) { d.GC = gc }
+	return func(d *Doc) { d.gc = gc }
 }
 
 // updateSub pairs a unique subscription ID with its callback so that
@@ -52,8 +52,8 @@ type transactionSub struct {
 // Doc is the root of a Yjs collaborative document.
 // All shared types (YArray, YMap, YText, …) live inside a Doc.
 type Doc struct {
-	ClientID ClientID
-	GC       bool
+	clientID ClientID
+	gc       bool
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -79,11 +79,16 @@ type Doc struct {
 	onAfterTxn []transactionSub
 }
 
+// ClientID returns the document's client identifier (read-only after creation).
+func (d *Doc) ClientID() ClientID {
+	return d.clientID
+}
+
 // New creates a new Doc with a randomly generated ClientID.
 func New(opts ...DocOption) *Doc {
 	d := &Doc{
-		ClientID: ClientID(rand.Uint32()), // uint32 keeps IDs within JS Number.MAX_SAFE_INTEGER
-		GC:       true,
+		clientID: ClientID(rand.Uint32()), // uint32 keeps IDs within JS Number.MAX_SAFE_INTEGER
+		gc:       true,
 		store:    newStructStore(),
 		share:    make(map[string]sharedType),
 	}
@@ -100,8 +105,10 @@ type rawType struct {
 	abstractType
 }
 
-func (r *rawType) baseType() *abstractType                    { return &r.abstractType }
-func (r *rawType) fire(_ *Transaction, _ map[string]struct{}) {}
+func (r *rawType) baseType() *abstractType { return &r.abstractType }
+func (r *rawType) prepareFire(_ *Transaction, _ map[string]struct{}) func() {
+	return nil // rawType has no observers
+}
 
 // getOrCreateType returns the abstractType for a named root type, creating a
 // rawType placeholder if none exists yet. Must be called with d.mu already held
@@ -248,15 +255,16 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 		updateBytes = encodeV1Locked(d, txn.beforeState)
 	}
 
-	// Snapshot per-type changed entries.
-	type changedEntry struct {
-		t    *abstractType
-		keys map[string]struct{}
-	}
-	changedSnap := make([]changedEntry, 0, len(txn.changed))
+	// Snapshot per-type observer closures while the write lock is held.
+	// prepareFire copies each type's observer slice and builds the event struct,
+	// so concurrent Observe/Unobserve calls (which also hold the write lock)
+	// cannot race with the fire loop below (N-C1).
+	fireFns := make([]func(), 0, len(txn.changed))
 	for t, keys := range txn.changed {
 		if t.owner != nil {
-			changedSnap = append(changedSnap, changedEntry{t, keys})
+			if fn := t.owner.prepareFire(txn, keys); fn != nil {
+				fireFns = append(fireFns, fn)
+			}
 		}
 	}
 
@@ -301,8 +309,8 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 	d.mu.Unlock()
 	// ── Phase 2: fire all observers OUTSIDE the lock ──────────────────────────
 
-	for _, ce := range changedSnap {
-		ce.t.owner.fire(txn, ce.keys)
+	for _, fn := range fireFns {
+		fn()
 	}
 
 	for _, de := range deepSnap {

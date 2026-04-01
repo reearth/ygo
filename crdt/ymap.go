@@ -20,13 +20,19 @@ type YMap struct {
 
 func (m *YMap) baseType() *abstractType { return &m.abstractType }
 
-func (m *YMap) fire(txn *Transaction, keysChanged map[string]struct{}) {
+// prepareFire snapshots the current observer slice inside the document write
+// lock and returns a closure that fires all snapshotted observers (N-C1).
+func (m *YMap) prepareFire(txn *Transaction, keysChanged map[string]struct{}) func() {
 	if len(m.observers) == 0 {
-		return
+		return nil
 	}
+	snap := make([]mapSub, len(m.observers))
+	copy(snap, m.observers)
 	e := YMapEvent{Target: m, Txn: txn, KeysChanged: keysChanged}
-	for _, s := range m.observers {
-		s.fn(e)
+	return func() {
+		for _, s := range snap {
+			s.fn(e)
+		}
 	}
 }
 
@@ -46,7 +52,7 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 	}
 
 	item := &Item{
-		ID:        ID{Client: txn.doc.ClientID, Clock: txn.doc.store.NextClock(txn.doc.ClientID)},
+		ID:        ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
 		Origin:    origin,
 		Left:      left,
 		Parent:    t,
@@ -141,11 +147,23 @@ func (m *YMap) ToJSON() ([]byte, error) {
 // Observe registers fn to be called after every transaction that modifies this
 // map. Returns an unsubscribe function. Uses ID-based lookup so out-of-order
 // unsubscription removes the correct entry (C5).
+//
+// Acquiring doc.mu.Lock() serialises registration against Transact (N-C1).
+// Do not call Observe from inside a Transact callback — that would deadlock.
 func (m *YMap) Observe(fn func(YMapEvent)) func() {
+	doc := m.doc
+	if doc != nil {
+		doc.mu.Lock()
+		defer doc.mu.Unlock()
+	}
 	m.subIDGen++
 	id := m.subIDGen
 	m.observers = append(m.observers, mapSub{id: id, fn: fn})
 	return func() {
+		if doc := m.doc; doc != nil {
+			doc.mu.Lock()
+			defer doc.mu.Unlock()
+		}
 		for i, s := range m.observers {
 			if s.id == id {
 				m.observers = append(m.observers[:i], m.observers[i+1:]...)

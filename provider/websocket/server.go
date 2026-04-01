@@ -44,6 +44,12 @@ const (
 // preventing OOM from a single crafted large message.
 const maxWSMessageBytes int64 = 64 << 20 // 64 MiB
 
+// maxAwarenessClientsPerPeer caps the number of awareness clientIDs one peer
+// may claim ownership of. Without this cap an attacker can send an awareness
+// update listing 1,000,000 clientIDs and cause an OOM when handleDisconnect
+// builds the removal slice (N-H4).
+const maxAwarenessClientsPerPeer = 10_000
+
 // PersistenceAdapter is implemented by storage backends that want to persist
 // room state across server restarts. It is called on every committed update so
 // implementations should be efficient (e.g. append-only log rather than full
@@ -142,6 +148,16 @@ type Server struct {
 	// the request Origin header must match the HTTP Host header. Non-browser
 	// clients that omit the Origin header are always permitted.
 	AllowedOrigins []string
+
+	// MaxConnections is the server-wide cap on simultaneous WebSocket peers.
+	// Upgrade requests that would exceed this limit are rejected with 503.
+	// Zero (the default) means unlimited (N-H5).
+	MaxConnections int
+
+	// MaxPeersPerRoom is the per-room cap on simultaneous WebSocket peers.
+	// Upgrade requests that would exceed this limit are rejected with 503.
+	// Zero (the default) means unlimited (N-H5).
+	MaxPeersPerRoom int
 }
 
 // checkOrigin validates the WebSocket upgrade request's Origin header.
@@ -258,8 +274,11 @@ func (s *Server) getOrCreateRoom(name string) *room {
 			_ = crdt.ApplyUpdateV1(r.doc, data, nil)
 		}
 		// Persist every incremental update produced by transactions in this room.
+		// Run StoreUpdate in a separate goroutine so that a slow storage backend
+		// does not block the Transact caller and the broadcast loop (N-H7).
+		// PersistenceAdapter implementations must be safe for concurrent use.
 		r.doc.OnUpdate(func(update []byte, _ any) {
-			_ = s.persistence.StoreUpdate(name, update)
+			go func() { _ = s.persistence.StoreUpdate(name, update) }()
 		})
 	}
 	s.rooms[name] = r
@@ -285,6 +304,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rm := s.getOrCreateRoom(name)
+
+	// Enforce per-room and server-wide connection limits before upgrading so
+	// that rejected requests get a clean HTTP 503 rather than an abrupt close
+	// after the WebSocket handshake (N-H5).
+	if s.MaxPeersPerRoom > 0 {
+		rm.mu.Lock()
+		current := len(rm.peers)
+		rm.mu.Unlock()
+		if current >= s.MaxPeersPerRoom {
+			http.Error(w, "room full", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	if s.MaxConnections > 0 {
+		s.rmu.RLock()
+		total := 0
+		for _, r := range s.rooms {
+			r.mu.Lock()
+			total += len(r.peers)
+			r.mu.Unlock()
+		}
+		s.rmu.RUnlock()
+		if total >= s.MaxConnections {
+			http.Error(w, "too many connections", http.StatusServiceUnavailable)
+			return
+		}
+	}
 
 	ws, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -418,7 +464,11 @@ func (p *peer) trackAwarenessClients(payload []byte) {
 		if _, err = dec.ReadVarString(); err != nil { // state JSON
 			return
 		}
-		p.clientIDs[clientID] = struct{}{}
+		// Cap the number of clientIDs a single peer may claim to prevent OOM
+		// when handleDisconnect builds the removal slice (N-H4).
+		if len(p.clientIDs) < maxAwarenessClientsPerPeer {
+			p.clientIDs[clientID] = struct{}{}
+		}
 	}
 }
 
@@ -551,8 +601,13 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 	}
 	p.room.mu.Unlock()
 
+	// Write to each peer concurrently so that a single slow or unresponsive
+	// peer cannot stall the broadcast loop for all others (N-H6).
+	// Each peer.write() holds peer.wmu and sets a per-write deadline, so
+	// concurrent goroutines targeting different peers are safe. The data slice
+	// is read-only after this point, so sharing it across goroutines is safe.
 	for _, other := range targets {
-		other.write(data)
+		go other.write(data)
 	}
 }
 

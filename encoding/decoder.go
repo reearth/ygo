@@ -191,6 +191,12 @@ func (d *Decoder) readVarIntWithSign() (magnitude uint64, negative bool, err err
 // deeply-nested arrays or maps would otherwise exhaust the goroutine stack.
 const maxAnyDepth = 100
 
+// maxAnyElements caps the number of elements allocated for a single array or
+// map inside ReadAny. Without this cap, a crafted payload could claim 1,000,000
+// elements with 1 byte each, passing the d.Remaining() guard but still causing
+// make([]any, n) to allocate ~8 MiB for the slice header alone (N-C2).
+const maxAnyElements = 100_000
+
 // ErrDepthExceeded is returned when a nested Any value exceeds maxAnyDepth levels.
 var ErrDepthExceeded = errors.New("encoding: nested Any exceeds maximum depth")
 
@@ -235,6 +241,12 @@ func (d *Decoder) readAny(depth int) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Guard against OOM: even if each element needs only 1 byte, a
+		// large n would allocate ~8 MiB for the slice header alone before
+		// any elements are decoded (N-C2).
+		if n > maxAnyElements {
+			return nil, ErrDepthExceeded
+		}
 		if n > uint64(d.Remaining()) {
 			return nil, ErrUnexpectedEOF
 		}
@@ -249,6 +261,10 @@ func (d *Decoder) readAny(depth int) (any, error) {
 		n, err := d.ReadVarUint()
 		if err != nil {
 			return nil, err
+		}
+		// Same OOM guard as the array case (N-C2).
+		if n > maxAnyElements {
+			return nil, ErrDepthExceeded
 		}
 		if n > uint64(d.Remaining()) {
 			return nil, ErrUnexpectedEOF

@@ -216,6 +216,40 @@ ygo targets compatibility with:
 
 Compatibility is verified by golden-file tests that compare binary output byte-for-byte with Yjs-generated fixtures.
 
+## Gotchas
+
+### No read methods or observer registration inside `Transact`
+
+`Transact` acquires the document **write lock** for the duration of its callback.
+Calling any of the read methods (`Get`, `ToSlice`, `Keys`, `Entries`, `ToString`,
+`ToDelta`) or registering/unregistering observers (`Observe`, `ObserveDeep`) from
+**inside** a `Transact` callback will **deadlock** because those operations try to
+acquire the same lock.
+
+```go
+// ✗ WRONG — deadlocks
+doc.Transact(func(txn *crdt.Transaction) {
+    arr.Get(0)         // tries to RLock — deadlock
+    arr.Observe(fn)    // tries to Lock  — deadlock
+})
+
+// ✓ CORRECT — acquire references and register observers before Transact
+arr.Observe(func(e crdt.YArrayEvent) { /* ... */ })
+doc.Transact(func(txn *crdt.Transaction) {
+    arr.Push(txn, []any{"value"})
+})
+fmt.Println(arr.ToSlice()) // read after Transact returns
+```
+
+This constraint applies to `YArray`, `YText`, `YMap`, `YXmlFragment`, and
+`YXmlElement`. UndoManager callbacks (`OnStackItemAdded`) also run outside
+the lock and are safe to use normally.
+
+### `Doc.ClientID` is read-only after creation
+
+Use `crdt.WithClientID(id)` at construction time. Changing the ID after the
+document has started accepting operations will corrupt the item store.
+
 ## Contributing
 
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.

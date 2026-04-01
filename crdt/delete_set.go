@@ -90,14 +90,28 @@ func (ds *DeleteSet) Clients() []ClientID {
 
 // applyTo marks items in the document as deleted according to the ranges in ds.
 // Called when applying a remote update that carries a delete set.
+//
+// The naive triple-loop (clients × ranges × items) is O(n²) for large stores.
+// We use binary search to jump directly to the first item in each range and
+// break as soon as we pass the range end, giving O(m log n + k) where m is the
+// number of ranges, n is items per client, and k is items actually deleted (N-H1).
 func (ds *DeleteSet) applyTo(txn *Transaction) {
 	for client, ranges := range ds.clients {
 		items := txn.doc.store.clients[client]
+		if len(items) == 0 {
+			continue
+		}
 		for _, r := range ranges {
-			for _, item := range items {
-				if item.ID.Clock >= r.Clock && item.ID.Clock < r.Clock+r.Len {
-					item.delete(txn)
+			// Binary search: find the first item with Clock >= r.Clock.
+			lo := sort.Search(len(items), func(i int) bool {
+				return items[i].ID.Clock+uint64(items[i].Content.Len()) > r.Clock
+			})
+			for i := lo; i < len(items); i++ {
+				item := items[i]
+				if item.ID.Clock >= r.Clock+r.Len {
+					break // past the end of this range
 				}
+				item.delete(txn)
 			}
 		}
 	}

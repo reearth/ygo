@@ -666,3 +666,116 @@ func TestUnit_Doc_Destroy_ClearsState(t *testing.T) {
 	assert.Equal(t, StateVector{}, doc.StateVector())
 	assert.Equal(t, 0, updateCalls, "OnUpdate must not fire after Destroy")
 }
+
+// ── Concurrency / race-detector tests ────────────────────────────────────────
+
+func TestRace_Transact_ConcurrentFromGoroutines(t *testing.T) {
+	// Run 100 concurrent transactions from separate goroutines.
+	// The race detector will flag any data races in Transact, observer
+	// snapshotting, or store access.
+	doc := New()
+	arr := doc.GetArray("list")
+
+	done := make(chan struct{})
+	const workers = 10
+	const iters = 10
+	for w := 0; w < workers; w++ {
+		go func() {
+			for i := 0; i < iters; i++ {
+				doc.Transact(func(txn *Transaction) {
+					arr.Push(txn, []any{i})
+				})
+			}
+			done <- struct{}{}
+		}()
+	}
+	for w := 0; w < workers; w++ {
+		<-done
+	}
+	assert.Equal(t, workers*iters, arr.Len())
+}
+
+func TestRace_Observe_ConcurrentWithFire(t *testing.T) {
+	// Register and unsubscribe observers from one goroutine while transactions
+	// fire from another goroutine. Race detector verifies no unsafe reads/writes
+	// on the observer slices (N-C1).
+	doc := New()
+	arr := doc.GetArray("list")
+
+	stop := make(chan struct{})
+	// Goroutine 1: fire transactions continuously.
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{1}) })
+			}
+		}
+	}()
+	// Goroutine 2: register and unregister observers repeatedly.
+	for i := 0; i < 200; i++ {
+		unsub := arr.Observe(func(_ YArrayEvent) {})
+		unsub()
+	}
+	close(stop)
+}
+
+// ── RelativePosition assoc < 0 tests ─────────────────────────────────────────
+
+func TestUnit_RelativePosition_Assoc_Negative_RoundTrip(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+
+	// Create a position at the end with assoc < 0 (end-of-type anchor).
+	rp := CreateRelativePositionFromIndex(txt, 5, -1)
+	assert.NotNil(t, rp.Item, "assoc<0 at end should anchor to last item")
+	assert.Equal(t, -1, rp.Assoc)
+
+	// Encode and decode round-trip.
+	encoded := EncodeRelativePosition(rp)
+	decoded, err := DecodeRelativePosition(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, rp, decoded)
+
+	// Resolve to absolute position.
+	abs, ok := ToAbsolutePosition(doc, decoded)
+	require.True(t, ok)
+	assert.Equal(t, 5, abs.Index, "should resolve to end of 'hello'")
+	assert.Equal(t, -1, abs.Assoc)
+}
+
+func TestUnit_RelativePosition_Assoc_Zero_RoundTrip(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+
+	// Position in the middle with default assoc (>= 0).
+	rp := CreateRelativePositionFromIndex(txt, 2, 0)
+	encoded := EncodeRelativePosition(rp)
+	decoded, err := DecodeRelativePosition(encoded)
+	require.NoError(t, err)
+
+	abs, ok := ToAbsolutePosition(doc, decoded)
+	require.True(t, ok)
+	assert.Equal(t, 2, abs.Index)
+}
+
+func TestUnit_RelativePosition_StableAfterInsertBefore(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "world", nil) })
+
+	// Anchor at index 2 (inside "world").
+	rp := CreateRelativePositionFromIndex(txt, 2, 0)
+
+	// Insert 3 chars before the anchor.
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hi ", nil) })
+
+	abs, ok := ToAbsolutePosition(doc, rp)
+	require.True(t, ok)
+	// The anchor should now be at index 5 (2 + 3 inserted before it).
+	assert.Equal(t, 5, abs.Index)
+}

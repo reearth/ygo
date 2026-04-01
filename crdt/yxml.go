@@ -31,13 +31,19 @@ type YXmlFragment struct {
 func (f *YXmlFragment) baseType() *abstractType    { return &f.abstractType }
 func (f *YXmlFragment) baseXMLType() *abstractType { return &f.abstractType }
 
-func (f *YXmlFragment) fire(txn *Transaction, keysChanged map[string]struct{}) {
+// prepareFire snapshots the current observer slice inside the document write
+// lock and returns a closure that fires all snapshotted observers (N-C1).
+func (f *YXmlFragment) prepareFire(txn *Transaction, keysChanged map[string]struct{}) func() {
 	if len(f.observers) == 0 {
-		return
+		return nil
 	}
+	snap := make([]xmlSub, len(f.observers))
+	copy(snap, f.observers)
 	ev := YXmlEvent{Target: f, Txn: txn, KeysChanged: keysChanged}
-	for _, s := range f.observers {
-		s.fn(ev)
+	return func() {
+		for _, s := range snap {
+			s.fn(ev)
+		}
 	}
 }
 
@@ -91,7 +97,7 @@ func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 		}
 
 		item := &Item{
-			ID:          ID{Client: txn.doc.ClientID, Clock: txn.doc.store.NextClock(txn.doc.ClientID)},
+			ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
 			Origin:      origin,
 			OriginRight: originRight,
 			Left:        left,
@@ -137,11 +143,23 @@ func (f *YXmlFragment) ToXML() string {
 // Observe registers fn to be called after every transaction that modifies this
 // fragment. Returns an unsubscribe function. Uses ID-based lookup so out-of-order
 // unsubscription removes the correct entry (C5).
+//
+// Acquiring doc.mu.Lock() serialises registration against Transact (N-C1).
+// Do not call Observe from inside a Transact callback — that would deadlock.
 func (f *YXmlFragment) Observe(fn func(YXmlEvent)) func() {
+	doc := f.doc
+	if doc != nil {
+		doc.mu.Lock()
+		defer doc.mu.Unlock()
+	}
 	f.subIDGen++
 	id := f.subIDGen
 	f.observers = append(f.observers, xmlSub{id: id, fn: fn})
 	return func() {
+		if doc := f.doc; doc != nil {
+			doc.mu.Lock()
+			defer doc.mu.Unlock()
+		}
 		for i, s := range f.observers {
 			if s.id == id {
 				f.observers = append(f.observers[:i], f.observers[i+1:]...)
@@ -170,15 +188,19 @@ type YXmlElement struct {
 func (e *YXmlElement) baseType() *abstractType    { return &e.abstractType }
 func (e *YXmlElement) baseXMLType() *abstractType { return &e.abstractType }
 
-// fire fires element-level observers. Fragment-level observers are not used
-// for YXmlElement — always register via YXmlElement.Observe.
-func (e *YXmlElement) fire(txn *Transaction, keysChanged map[string]struct{}) {
+// prepareFire overrides YXmlFragment.prepareFire to use the element observer
+// list (elemObs) rather than the fragment observer list (N-C1).
+func (e *YXmlElement) prepareFire(txn *Transaction, keysChanged map[string]struct{}) func() {
 	if len(e.elemObs) == 0 {
-		return
+		return nil
 	}
+	snap := make([]xmlSub, len(e.elemObs))
+	copy(snap, e.elemObs)
 	ev := YXmlEvent{Target: e, Txn: txn, KeysChanged: keysChanged}
-	for _, s := range e.elemObs {
-		s.fn(ev)
+	return func() {
+		for _, s := range snap {
+			s.fn(ev)
+		}
 	}
 }
 
@@ -193,7 +215,7 @@ func (e *YXmlElement) SetAttribute(txn *Transaction, key, value string) {
 		origin = &id
 	}
 	item := &Item{
-		ID:        ID{Client: txn.doc.ClientID, Clock: txn.doc.store.NextClock(txn.doc.ClientID)},
+		ID:        ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
 		Origin:    origin,
 		Left:      left,
 		Parent:    t,
@@ -265,11 +287,23 @@ func (e *YXmlElement) ToXML() string {
 // element (children added/removed or attributes changed). Returns an
 // unsubscribe function. Uses ID-based lookup so out-of-order unsubscription
 // removes the correct entry (C5).
+//
+// Acquiring doc.mu.Lock() serialises registration against Transact (N-C1).
+// Do not call Observe from inside a Transact callback — that would deadlock.
 func (e *YXmlElement) Observe(fn func(YXmlEvent)) func() {
+	doc := e.doc
+	if doc != nil {
+		doc.mu.Lock()
+		defer doc.mu.Unlock()
+	}
 	e.elemSubGen++
 	id := e.elemSubGen
 	e.elemObs = append(e.elemObs, xmlSub{id: id, fn: fn})
 	return func() {
+		if doc := e.doc; doc != nil {
+			doc.mu.Lock()
+			defer doc.mu.Unlock()
+		}
 		for i, s := range e.elemObs {
 			if s.id == id {
 				e.elemObs = append(e.elemObs[:i], e.elemObs[i+1:]...)

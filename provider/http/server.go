@@ -47,7 +47,9 @@ func (s *Server) getOrCreateDoc(room string) *crdt.Doc {
 	if doc, ok := s.docs[room]; ok {
 		return doc
 	}
-	doc := crdt.New(crdt.WithClientID(crdt.ClientID(rand.Uint64())))
+	// Use Uint32 to stay within Yjs wire protocol's 53-bit VarUint limit and
+	// match crdt/doc.go's default generation (N-M1).
+	doc := crdt.New(crdt.WithClientID(crdt.ClientID(rand.Uint32())))
 	s.docs[room] = doc
 	return doc
 }
@@ -138,7 +140,9 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, room string)
 	doc := s.getOrCreateDoc(room)
 
 	if err := crdt.ApplyUpdateV1(doc, body, r.RemoteAddr); err != nil {
-		http.Error(w, "failed to apply update: "+err.Error(), http.StatusBadRequest)
+		// Return a generic message — err.Error() may contain internal decoder
+		// details that are unhelpful to callers and leak implementation info (N-M4).
+		http.Error(w, "failed to apply update", http.StatusBadRequest)
 		return
 	}
 
