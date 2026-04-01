@@ -172,7 +172,7 @@ func (a *YArray) Observe(fn func(YArrayEvent)) func() {
 // ObserveDeep registers fn to be called after any transaction that modifies
 // this array or any nested shared type within it. Returns an unsubscribe function.
 func (a *YArray) ObserveDeep(fn func(*Transaction)) func() {
-	return a.abstractType.observeDeep(fn)
+	return a.observeDeep(fn)
 }
 
 // Slice returns elements in the half-open range [start, end).

@@ -227,10 +227,10 @@ func TestUnit_Awareness_JSONDepth_ActuallyDeepPayload(t *testing.T) {
 			writeVarUint(uint64(len(s)))
 			b = append(b, s...)
 		}
-		writeVarUint(1)   // numClients
-		writeVarUint(99)  // clientID
-		writeVarUint(1)   // clock
-		writeStr(deep)    // state JSON
+		writeVarUint(1)  // numClients
+		writeVarUint(99) // clientID
+		writeVarUint(1)  // clock
+		writeStr(deep)   // state JSON
 		return b
 	}()
 	err := a.ApplyUpdate(enc, nil)

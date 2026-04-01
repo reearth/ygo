@@ -176,5 +176,5 @@ func (m *YMap) Observe(fn func(YMapEvent)) func() {
 // ObserveDeep registers fn to be called after any transaction that modifies
 // this map or any nested shared type within it. Returns an unsubscribe function.
 func (m *YMap) ObserveDeep(fn func(*Transaction)) func() {
-	return m.abstractType.observeDeep(fn)
+	return m.observeDeep(fn)
 }

@@ -179,7 +179,7 @@ func (f *YXmlFragment) Observe(fn func(YXmlEvent)) func() {
 // ParentSub = "".
 type YXmlElement struct {
 	YXmlFragment
-	NodeName    string
+	NodeName   string
 	elemSubGen uint64
 	elemObs    []xmlSub
 }

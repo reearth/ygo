@@ -116,9 +116,9 @@ type peer struct {
 	wmu       sync.Mutex // serialises concurrent writes
 	closed    bool       // H2: true after handleDisconnect; guarded by wmu
 	room      *room
-	roomName  string  // C1: name used to delete room when empty
-	server    *Server // C1: back-reference for room map cleanup
-	done      chan struct{} // H1: closed when the read loop exits
+	roomName  string              // C1: name used to delete room when empty
+	server    *Server             // C1: back-reference for room map cleanup
+	done      chan struct{}       // H1: closed when the read loop exits
 	clientIDs map[uint64]struct{} // awareness clientIDs controlled by this peer
 	cidMu     sync.Mutex
 }

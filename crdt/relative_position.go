@@ -130,7 +130,7 @@ func ToAbsolutePosition(doc *Doc, rp RelativePosition) (AbsolutePosition, bool) 
 	// diff is the 0-based offset of the anchor clock within the item.
 	// For assoc < 0 we add 1 so that the resolved index is to the LEFT of the
 	// anchor character (i.e. includes the anchor in the count).
-	diff := int(rp.Item.Clock-item.ID.Clock)
+	diff := int(rp.Item.Clock - item.ID.Clock)
 	if rp.Assoc < 0 {
 		diff++
 	}

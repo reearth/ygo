@@ -288,5 +288,5 @@ func (txt *YText) Observe(fn func(YTextEvent)) func() {
 // ObserveDeep registers fn to be called after any transaction that modifies
 // this text or any nested shared type within it. Returns an unsubscribe function.
 func (txt *YText) ObserveDeep(fn func(*Transaction)) func() {
-	return txt.abstractType.observeDeep(fn)
+	return txt.observeDeep(fn)
 }

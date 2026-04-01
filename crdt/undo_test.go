@@ -18,7 +18,7 @@ func TestUnit_UndoManager_BasicUndoRedo(t *testing.T) {
 
 	ok := um.Undo()
 	require.True(t, ok)
-	assert.Equal(t, "", txt.ToString())
+	assert.Empty(t, txt.ToString())
 
 	ok = um.Redo()
 	require.True(t, ok)

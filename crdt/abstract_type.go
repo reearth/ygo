@@ -39,13 +39,13 @@ type deepSub struct {
 // It owns the doubly-linked list of Items that backs the type's content and
 // provides the bookkeeping that Item integration needs.
 type abstractType struct {
-	doc           *Doc
-	start         *Item
-	itemMap       map[string]*Item // last live item per key; non-nil only for map-based types
-	length        int              // logical length (non-deleted, countable items only)
-	item          *Item            // the Item containing this type when nested
-	owner         sharedType       // back-pointer to the concrete wrapper
-	name          string           // root type name; used during V1 update encoding
+	doc     *Doc
+	start   *Item
+	itemMap map[string]*Item // last live item per key; non-nil only for map-based types
+	length  int              // logical length (non-deleted, countable items only)
+	item    *Item            // the Item containing this type when nested
+	owner   sharedType       // back-pointer to the concrete wrapper
+	name    string           // root type name; used during V1 update encoding
 	// deepSubIDGen issues unique IDs for ObserveDeep subscriptions so that
 	// out-of-order unsubscription removes the correct entry (C5).
 	deepSubIDGen  uint64
@@ -109,7 +109,6 @@ func (t *abstractType) storePosCache(index int, item *Item) {
 		t.posCacheWr = 0
 	}
 }
-
 
 // leftNeighbourAt returns the item that should be the left neighbour when
 // inserting at logical position index, plus the offset within that item.
