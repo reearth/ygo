@@ -27,11 +27,6 @@ jobs:
       - run: npm ci
         working-directory: testutil
       - run: go test -race ./...
-      - name: Extract release notes from CHANGELOG
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          awk "/^## \[${VERSION}\]/{found=1; next} found && /^(## \[|---$)/{exit} found{print}" CHANGELOG.md \
-            | sed '/^[[:space:]]*$/d' > release_notes.md
       - uses: softprops/action-gh-release@v2
         with:
-          body_path: release_notes.md
+          body_path: RELEASE_NOTES.md
