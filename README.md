@@ -262,6 +262,6 @@ Please report security vulnerabilities by following the process in [SECURITY.md]
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+MIT License — see [LICENSE](LICENSE).
 
 This project is not affiliated with the Yjs authors. Yjs is developed by [Kevin Jahns](https://github.com/dmonad) and contributors.
