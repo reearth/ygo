@@ -1,6 +1,7 @@
 package encoding
 
 import (
+	"math"
 	"strings"
 	"unicode/utf8"
 )
@@ -60,6 +61,9 @@ func (d *RleByteDecoder) Read() (byte, error) {
 			cnt, err := d.dec.ReadVarUint()
 			if err != nil {
 				return 0, err
+			}
+			if cnt > math.MaxInt32 {
+				return 0, ErrOverflow
 			}
 			d.count = int(cnt) + 1
 		} else {
@@ -149,6 +153,9 @@ func (d *UintOptRleDecoder) Read() (uint64, error) {
 			cnt, err := d.dec.ReadVarUint()
 			if err != nil {
 				return 0, err
+			}
+			if cnt > math.MaxInt32 {
+				return 0, ErrOverflow
 			}
 			d.count = int(cnt) + 2
 		}
@@ -242,6 +249,9 @@ func (d *IntDiffOptRleDecoder) Read() (int64, error) {
 			cnt, err := d.dec.ReadVarUint()
 			if err != nil {
 				return 0, err
+			}
+			if cnt > math.MaxInt32 {
+				return 0, ErrOverflow
 			}
 			d.count = int(cnt) + 2
 		}

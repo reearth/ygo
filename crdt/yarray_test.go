@@ -55,7 +55,7 @@ func TestUnit_YArray_Insert_InMiddle(t *testing.T) {
 		arr.Insert(txn, 1, []any{10})
 	})
 
-	assert.Equal(t, []any{1, 10, 2, 3}, arr.ToSlice())
+	assert.Equal(t, []any{int64(1), int64(10), int64(2), int64(3)}, arr.ToSlice())
 }
 
 func TestUnit_YArray_Delete(t *testing.T) {
@@ -69,7 +69,7 @@ func TestUnit_YArray_Delete(t *testing.T) {
 		arr.Delete(txn, 1, 2) // remove 2 and 3
 	})
 
-	assert.Equal(t, []any{1, 4, 5}, arr.ToSlice())
+	assert.Equal(t, []any{int64(1), int64(4), int64(5)}, arr.ToSlice())
 	assert.Equal(t, 3, arr.Len())
 }
 
@@ -98,7 +98,7 @@ func TestUnit_YArray_ToSlice_MixedTypes(t *testing.T) {
 
 	got := arr.ToSlice()
 	require.Len(t, got, 4)
-	assert.Equal(t, 1, got[0])
+	assert.Equal(t, int64(1), got[0])
 	assert.Equal(t, "two", got[1])
 	assert.Equal(t, true, got[2])
 	assert.Nil(t, got[3])
@@ -139,10 +139,10 @@ func TestUnit_YArray_Slice(t *testing.T) {
 		arr.Push(txn, []any{0, 1, 2, 3, 4})
 	})
 
-	assert.Equal(t, []any{1, 2, 3}, arr.Slice(1, 4))
-	assert.Equal(t, []any{0, 1, 2, 3, 4}, arr.Slice(0, 5))
-	assert.Equal(t, []any{0, 1, 2, 3, 4}, arr.Slice(0, 99)) // clamps to Len()
-	assert.Equal(t, []any{4}, arr.Slice(4, 5))
+	assert.Equal(t, []any{int64(1), int64(2), int64(3)}, arr.Slice(1, 4))
+	assert.Equal(t, []any{int64(0), int64(1), int64(2), int64(3), int64(4)}, arr.Slice(0, 5))
+	assert.Equal(t, []any{int64(0), int64(1), int64(2), int64(3), int64(4)}, arr.Slice(0, 99)) // clamps to Len()
+	assert.Equal(t, []any{int64(4)}, arr.Slice(4, 5))
 	assert.Empty(t, arr.Slice(2, 2)) // empty range
 }
 
@@ -174,7 +174,7 @@ func TestUnit_YArray_ForEach_SkipsDeleted(t *testing.T) {
 
 	var result []any
 	arr.ForEach(func(_ int, v any) { result = append(result, v) })
-	assert.Equal(t, []any{10, 30}, result)
+	assert.Equal(t, []any{int64(10), int64(30)}, result)
 }
 
 // ── YArray integration ────────────────────────────────────────────────────────
@@ -275,4 +275,28 @@ func TestUnit_YArray_Move_NoopSameIndex(t *testing.T) {
 	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"a", "b", "c"}) })
 	doc.Transact(func(txn *Transaction) { arr.Move(txn, 1, 1) }) // no-op
 	assert.Equal(t, []any{"a", "b", "c"}, arr.ToSlice())
+}
+
+func TestUnit_YArray_Slice_StartGreaterThanEnd_ReturnsNil(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{1, 2, 3}) })
+
+	assert.Nil(t, arr.Slice(5, 2))            // start > end
+	assert.Nil(t, arr.Slice(10, 0))           // start >> end after clamp
+	assert.Equal(t, []any{}, arr.Slice(0, 0)) // empty range, not nil
+}
+
+func TestUnit_YArray_Get_NestedYMap_ReturnsType(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	nested := doc.GetMap("nested")
+	doc.Transact(func(txn *Transaction) {
+		nested.Set(txn, "key", "val")
+		arr.Push(txn, []any{nested})
+	})
+	got := arr.Get(0)
+	require.NotNil(t, got, "Get() must return nested type, not nil")
+	_, ok := got.(*YMap)
+	assert.True(t, ok, "should be *YMap")
 }

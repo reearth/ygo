@@ -23,7 +23,7 @@ func TestUnit_YMap_SetGet(t *testing.T) {
 
 	v, ok = m.Get("age")
 	assert.True(t, ok)
-	assert.Equal(t, 30, v)
+	assert.Equal(t, int64(30), v)
 }
 
 func TestUnit_YMap_Get_Missing(t *testing.T) {
@@ -83,7 +83,7 @@ func TestUnit_YMap_MultipleKeys(t *testing.T) {
 
 	entries := m.Entries()
 	assert.Equal(t, "Alice", entries["name"])
-	assert.Equal(t, 30, entries["age"])
+	assert.Equal(t, int64(30), entries["age"])
 	assert.Equal(t, true, entries["active"])
 }
 
@@ -179,6 +179,30 @@ func TestInteg_YMap_ConcurrentSet_HigherClientIDWins(t *testing.T) {
 	v2, _ := m2.Get("key")
 	assert.Equal(t, v1, v2, "both peers must converge to the same value")
 	assert.Equal(t, "from-client2", v1, "higher clientID (2) must win")
+}
+
+func TestUnit_YMap_ForEach_IteratesLiveKeys(t *testing.T) {
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	doc.Transact(func(txn *Transaction) {
+		m.Set(txn, "a", 1)
+		m.Set(txn, "b", 2)
+		m.Set(txn, "c", 3)
+	})
+	doc.Transact(func(txn *Transaction) { m.Delete(txn, "b") })
+
+	collected := map[string]any{}
+	m.ForEach(func(k string, v any) { collected[k] = v })
+
+	assert.Equal(t, map[string]any{"a": int64(1), "c": int64(3)}, collected)
+}
+
+func TestUnit_YMap_ForEach_EmptyMap(t *testing.T) {
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	count := 0
+	m.ForEach(func(_ string, _ any) { count++ })
+	assert.Equal(t, 0, count)
 }
 
 func TestInteg_YMap_ConcurrentSet_Convergent(t *testing.T) {

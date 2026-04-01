@@ -53,7 +53,7 @@ func checkJSONDepth(s string) bool {
 		}
 		i++
 	}
-	return true
+	return !inString // unterminated string is malformed → reject
 }
 
 // maxAwarenessClients is the maximum number of client entries accepted in a
@@ -99,10 +99,11 @@ type Awareness struct {
 	// states stores all known clients including those with nil State (removed).
 	// Clients with nil State have been removed but their clock is retained so
 	// removal messages can be properly encoded with an up-to-date clock.
-	states    map[uint64]ClientState
-	meta      map[uint64]time.Time // last update time, for expiry (only active clients)
-	clock     uint64               // local client's clock
-	observers []*observer
+	states     map[uint64]ClientState
+	meta       map[uint64]time.Time // last update time, for expiry (only active clients)
+	clock      uint64               // local client's clock
+	observers  []*observer
+	stopExpiry func() // set by StartAutoExpiry; stopped by Destroy
 }
 
 // New creates an Awareness instance for the given client.
@@ -223,8 +224,9 @@ func fireObservers(fns []func(ChangeEvent), evt ChangeEvent) {
 }
 
 // EncodeUpdate encodes the current state of the given client IDs into a
-// binary awareness update message. Pass nil to encode all known clients
-// (including those stored internally with nil State).
+// binary awareness update message. Pass nil to encode all known clients,
+// including those with a nil (removed) State, which encodes as JSON null
+// and signals removal to peers.
 func (a *Awareness) EncodeUpdate(clientIDs []uint64) []byte {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -232,10 +234,8 @@ func (a *Awareness) EncodeUpdate(clientIDs []uint64) []byte {
 	var ids []uint64
 	if clientIDs == nil {
 		ids = make([]uint64, 0, len(a.states))
-		for id, cs := range a.states {
-			if cs.State != nil {
-				ids = append(ids, id)
-			}
+		for id := range a.states {
+			ids = append(ids, id)
 		}
 	} else {
 		ids = clientIDs
@@ -369,6 +369,7 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 // RemoveExpired(timeout). The goroutine ticks at timeout/2 so that clients
 // are expired within one tick period after their deadline. The returned
 // function stops the goroutine; it must be called to avoid a goroutine leak.
+// The stop function is also stored internally and will be called by Destroy.
 func (a *Awareness) StartAutoExpiry(timeout time.Duration) func() {
 	ticker := time.NewTicker(timeout / 2)
 	done := make(chan struct{})
@@ -383,7 +384,23 @@ func (a *Awareness) StartAutoExpiry(timeout time.Duration) func() {
 			}
 		}
 	}()
-	return func() { close(done) }
+	stop := func() { close(done) }
+	a.mu.Lock()
+	a.stopExpiry = stop
+	a.mu.Unlock()
+	return stop
+}
+
+// Destroy stops the auto-expiry goroutine (if started) and releases
+// associated resources. Safe to call more than once.
+func (a *Awareness) Destroy() {
+	a.mu.Lock()
+	stop := a.stopExpiry
+	a.stopExpiry = nil
+	a.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
 }
 
 // RemoveExpired removes clients whose last update is older than timeout.

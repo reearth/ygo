@@ -162,9 +162,9 @@ func TestUnit_Any_AllVariants(t *testing.T) {
 		{"nil", nil},
 		{"bool_true", true},
 		{"bool_false", false},
-		{"int_zero", int(0)},
-		{"int_positive", int(42)},
-		{"int_negative", int(-99)},
+		{"int_zero", int64(0)},
+		{"int_positive", int64(42)},
+		{"int_negative", int64(-99)},
 		{"float32", float32(1.5)},
 		{"float64_pi", math.Pi},
 		{"string_empty", ""},
@@ -173,9 +173,9 @@ func TestUnit_Any_AllVariants(t *testing.T) {
 		{"bytes_empty", []byte{}},
 		{"bytes", []byte{0xde, 0xad, 0xbe, 0xef}},
 		{"array_empty", []any{}},
-		{"array_mixed", []any{int(1), "two", true, nil}},
+		{"array_mixed", []any{int64(1), "two", true, nil}},
 		{"map_empty", map[string]any{}},
-		{"map_basic", map[string]any{"key": "val", "n": int(7)}},
+		{"map_basic", map[string]any{"key": "val", "n": int64(7)}},
 	}
 
 	for _, tc := range cases {
@@ -192,7 +192,7 @@ func TestUnit_Any_AllVariants(t *testing.T) {
 func TestUnit_Any_NestedStructure(t *testing.T) {
 	v := map[string]any{
 		"name":  "Alice",
-		"score": int(100),
+		"score": int64(100),
 		"tags":  []any{"go", "crdt"},
 		"meta":  map[string]any{"active": true},
 	}
@@ -204,12 +204,12 @@ func TestUnit_Any_NestedStructure(t *testing.T) {
 }
 
 func TestUnit_Any_IntAlias(t *testing.T) {
-	// WriteAny accepts plain int; ReadAny returns int.
+	// WriteAny accepts plain int; ReadAny returns int64 to preserve full precision.
 	e := encoding.NewEncoder()
 	e.WriteAny(int(42))
 	got, err := encoding.NewDecoder(e.Bytes()).ReadAny()
 	require.NoError(t, err)
-	assert.Equal(t, int(42), got)
+	assert.Equal(t, int64(42), got)
 }
 
 // --- Encoder reset ---
@@ -345,6 +345,55 @@ func TestGolden_VarInt_KnownBytes(t *testing.T) {
 		e.WriteVarInt(tc.value)
 		assert.Equal(t, tc.wire, e.Bytes(), "WriteVarInt(%d) wire mismatch", tc.value)
 	}
+}
+
+// --- Fix 1: WriteVarInt range enforcement ---
+
+func TestUnit_WriteVarInt_ExceedsRange_Panics(t *testing.T) {
+	assert.Panics(t, func() {
+		e := encoding.NewEncoder()
+		e.WriteVarInt(math.MinInt64)
+	})
+	assert.Panics(t, func() {
+		e := encoding.NewEncoder()
+		e.WriteVarInt(math.MinInt64 + 1)
+	})
+}
+
+func TestUnit_WriteVarInt_MaxRange_RoundTrips(t *testing.T) {
+	maxMag := int64((1 << 55) - 1)
+	for _, v := range []int64{0, 1, -1, maxMag, -maxMag} {
+		e := encoding.NewEncoder()
+		e.WriteVarInt(v)
+		d := encoding.NewDecoder(e.Bytes())
+		got, err := d.ReadVarInt()
+		require.NoError(t, err, "value %d", v)
+		assert.Equal(t, v, got, "value %d", v)
+	}
+}
+
+// --- Fix 2: RLE uint64→int overflow guard ---
+
+func TestUnit_VarUint_MaxInt32_Boundary(t *testing.T) {
+	// Ensure uint64 values above MaxInt32 are representable in VarUint
+	e := encoding.NewEncoder()
+	e.WriteVarUint(math.MaxInt32 + 1)
+	d := encoding.NewDecoder(e.Bytes())
+	v, err := d.ReadVarUint()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(math.MaxInt32+1), v)
+}
+
+// --- Fix 3: ReadAny tag 125 returns int64 ---
+
+func TestUnit_Any_Int64Precision(t *testing.T) {
+	// WriteAny(int64) round-trips as int64, preserving full 55-bit range.
+	large := int64((1 << 55) - 1)
+	e := encoding.NewEncoder()
+	e.WriteAny(large)
+	got, err := encoding.NewDecoder(e.Bytes()).ReadAny()
+	require.NoError(t, err)
+	assert.Equal(t, large, got)
 }
 
 // --- Fuzz ---

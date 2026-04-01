@@ -43,7 +43,7 @@ func TestUnit_UpdateV1_RoundTrip_ArrayInsert(t *testing.T) {
 	doc2 := New(WithClientID(2))
 	require.NoError(t, ApplyUpdateV1(doc2, update, nil))
 
-	assert.Equal(t, []any{1, "two", true}, doc2.GetArray("list").ToSlice())
+	assert.Equal(t, []any{int64(1), "two", true}, doc2.GetArray("list").ToSlice())
 }
 
 func TestUnit_UpdateV1_RoundTrip_MapSet(t *testing.T) {
@@ -62,7 +62,7 @@ func TestUnit_UpdateV1_RoundTrip_MapSet(t *testing.T) {
 	v1, _ := doc2.GetMap("m").Get("key")
 	v2, _ := doc2.GetMap("m").Get("num")
 	assert.Equal(t, "value", v1)
-	assert.Equal(t, 42, v2)
+	assert.Equal(t, int64(42), v2)
 }
 
 func TestUnit_UpdateV1_RoundTrip_WithDeletes(t *testing.T) {
@@ -96,9 +96,9 @@ func TestUnit_UpdateV1_MultipleTypes(t *testing.T) {
 	require.NoError(t, ApplyUpdateV1(doc2, update, nil))
 
 	assert.Equal(t, "hello", doc2.GetText("txt").ToString())
-	assert.Equal(t, []any{1, 2, 3}, doc2.GetArray("arr").ToSlice())
+	assert.Equal(t, []any{int64(1), int64(2), int64(3)}, doc2.GetArray("arr").ToSlice())
 	vx, _ := doc2.GetMap("mp").Get("x")
-	assert.Equal(t, 99, vx)
+	assert.Equal(t, int64(99), vx)
 }
 
 func TestUnit_UpdateV2_SmallerThanV1(t *testing.T) {

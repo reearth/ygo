@@ -138,6 +138,24 @@ func (m *YMap) Entries() map[string]any {
 	return out
 }
 
+// ForEach calls fn for every live (non-deleted) key-value pair in the map,
+// in an unspecified order. Must not be called from inside a Transact callback.
+func (m *YMap) ForEach(fn func(key string, value any)) {
+	if doc := m.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
+	t := &m.abstractType
+	for k, item := range t.itemMap {
+		if item.Deleted {
+			continue
+		}
+		if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
+			fn(k, ca.Vals[0])
+		}
+	}
+}
+
 // ToJSON returns the map serialised as a JSON object.
 // Must not be called from inside a Transact callback.
 func (m *YMap) ToJSON() ([]byte, error) {

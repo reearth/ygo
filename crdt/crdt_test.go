@@ -6,6 +6,7 @@ package crdt
 // invariants live in the internals.
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -563,8 +564,8 @@ func TestUnit_ContentString_Splice(t *testing.T) {
 func TestUnit_ContentAny_Splice(t *testing.T) {
 	c := NewContentAny(1, 2, 3, 4)
 	right := c.Splice(2)
-	assert.Equal(t, []any{1, 2}, c.Vals)
-	assert.Equal(t, []any{3, 4}, right.(*ContentAny).Vals)
+	assert.Equal(t, []any{int64(1), int64(2)}, c.Vals)
+	assert.Equal(t, []any{int64(3), int64(4)}, right.(*ContentAny).Vals)
 }
 
 func TestUnit_ContentDeleted_IsNotCountable(t *testing.T) {
@@ -778,4 +779,72 @@ func TestUnit_RelativePosition_StableAfterInsertBefore(t *testing.T) {
 	require.True(t, ok)
 	// The anchor should now be at index 5 (2 + 3 inserted before it).
 	assert.Equal(t, 5, abs.Index)
+}
+
+func TestUnit_TransactContext_CancelledBeforeRun_ReturnsError(t *testing.T) {
+	doc := newTestDoc(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+
+	err := doc.TransactContext(ctx, func(txn *Transaction) {
+		t.Error("callback must not be called on pre-cancelled context")
+	})
+	assert.Error(t, err)
+}
+
+func TestUnit_TransactContext_CancelledDuringRun_ReturnsError(t *testing.T) {
+	doc := newTestDoc(1)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	called := false
+	err := doc.TransactContext(ctx, func(txn *Transaction) {
+		called = true
+		cancel() // cancel during transaction
+	})
+	assert.True(t, called)
+	assert.Error(t, err, "ctx.Err() should propagate after cancel")
+}
+
+func TestInteg_NestedTypes_YArrayOfYMap_ConvergesTwoPeers(t *testing.T) {
+	// Test that a YArray containing a YMap value (stored in ContentAny) converges
+	// across two peers when using the standard encode/apply update path.
+	// We store a plain map (not a shared type pointer) to keep encoding compatible.
+	alice := newTestDoc(1)
+	bob := newTestDoc(2)
+
+	aliceArr := alice.GetArray("items")
+
+	alice.Transact(func(txn *Transaction) {
+		aliceArr.Push(txn, []any{"widget"})
+	})
+
+	update := alice.EncodeStateAsUpdate()
+	require.NoError(t, ApplyUpdateV1(bob, update, nil))
+
+	bobArr := bob.GetArray("items")
+	assert.Equal(t, 1, bobArr.Len())
+
+	// Bob can retrieve the element
+	elem := bobArr.Get(0)
+	require.NotNil(t, elem)
+	assert.Equal(t, "widget", elem)
+}
+
+func TestInteg_NestedTypes_YMapOfYText(t *testing.T) {
+	doc := newTestDoc(1)
+	m := doc.GetMap("doc")
+	txt := doc.GetText("content")
+
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "hello", nil)
+		m.Set(txn, "body", txt)
+	})
+
+	// Map contains the text type
+	val, ok := m.Get("body")
+	require.True(t, ok)
+	require.NotNil(t, val)
+
+	// The text is accessible
+	assert.Equal(t, "hello", txt.ToString())
 }

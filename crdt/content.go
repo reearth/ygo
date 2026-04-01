@@ -117,9 +117,22 @@ func (c *ContentBinary) Splice(_ int) Content { panic("crdt: ContentBinary is no
 // Used by YArray when storing heterogeneous elements.
 type ContentAny struct{ Vals []any }
 
-func NewContentAny(vals ...any) *ContentAny { return &ContentAny{vals} }
-func (c *ContentAny) Len() int              { return len(c.Vals) }
-func (c *ContentAny) IsCountable() bool     { return true }
+// NewContentAny creates a ContentAny, normalising Go int values to int64 so
+// that locally-stored integers are wire-compatible with values decoded from
+// V1/V2 updates (ReadAny returns int64 for VarInt-encoded integers).
+func NewContentAny(vals ...any) *ContentAny {
+	normalized := make([]any, len(vals))
+	for i, v := range vals {
+		if n, ok := v.(int); ok {
+			normalized[i] = int64(n)
+		} else {
+			normalized[i] = v
+		}
+	}
+	return &ContentAny{normalized}
+}
+func (c *ContentAny) Len() int          { return len(c.Vals) }
+func (c *ContentAny) IsCountable() bool { return true }
 func (c *ContentAny) Copy() Content {
 	cp := make([]any, len(c.Vals))
 	copy(cp, c.Vals)

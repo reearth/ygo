@@ -60,7 +60,7 @@ func TestCompat_ApplyJSUpdate_YArray(t *testing.T) {
 	arr := doc.GetArray("list")
 	got := arr.ToSlice()
 	require.Len(t, got, 5)
-	assert.Equal(t, int(1), got[0])
+	assert.Equal(t, int64(1), got[0])
 	assert.Equal(t, "two", got[1])
 	assert.Equal(t, true, got[2])
 	assert.Nil(t, got[3])
@@ -78,7 +78,7 @@ func TestCompat_ApplyJSUpdate_YMap(t *testing.T) {
 
 	age, ok := m.Get("age")
 	require.True(t, ok)
-	assert.Equal(t, int(30), age)
+	assert.Equal(t, int64(30), age)
 
 	active, ok := m.Get("active")
 	require.True(t, ok)

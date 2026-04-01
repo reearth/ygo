@@ -93,3 +93,44 @@ func TestUnit_UndoManager_OnStackItemAdded(t *testing.T) {
 
 	assert.Len(t, items, 2, "OnStackItemAdded must fire for each new stack item")
 }
+
+func TestUnit_UndoManager_WithYArray_UndoRedo(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	um := NewUndoManager(doc, []sharedType{arr})
+	defer um.Destroy()
+
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"x", "y"}) })
+	assert.Equal(t, 2, arr.Len())
+
+	ok := um.Undo()
+	require.True(t, ok)
+	assert.Equal(t, 0, arr.Len())
+
+	ok = um.Redo()
+	require.True(t, ok)
+	assert.Equal(t, 2, arr.Len())
+}
+
+func TestUnit_UndoManager_WithYMap_UndoRedo(t *testing.T) {
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	um := NewUndoManager(doc, []sharedType{m})
+	defer um.Destroy()
+
+	doc.Transact(func(txn *Transaction) { m.Set(txn, "k", "v") })
+	v, ok := m.Get("k")
+	assert.True(t, ok)
+	assert.Equal(t, "v", v)
+
+	undone := um.Undo()
+	require.True(t, undone)
+	_, ok = m.Get("k")
+	assert.False(t, ok)
+
+	redone := um.Redo()
+	require.True(t, redone)
+	v, ok = m.Get("k")
+	assert.True(t, ok)
+	assert.Equal(t, "v", v)
+}

@@ -81,7 +81,9 @@ func (txt *YText) computeDelta(txn *Transaction) []Delta {
 	return ops
 }
 
-// Len returns the number of non-deleted Unicode code points.
+// Len returns the number of non-deleted UTF-16 code units (not Unicode code
+// points). Supplementary characters (U+10000 and above) count as 2 units,
+// matching JavaScript's String.length semantics and the Yjs wire protocol.
 func (txt *YText) Len() int { return txt.length }
 
 // Insert inserts text at logical character position index.
@@ -173,18 +175,34 @@ func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) 
 		origin = &ID{Client: left.ID.Client, Clock: end}
 	}
 
+	var originRight *ID
+	if left != nil && left.Right != nil {
+		id := left.Right.ID
+		originRight = &id
+	} else if t.start != nil && left == nil {
+		id := t.start.ID
+		originRight = &id
+	}
+
 	for k, v := range attrs {
 		fmtItem := &Item{
-			ID:      ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
-			Origin:  origin,
-			Left:    left,
-			Parent:  t,
-			Content: NewContentFormat(k, v),
+			ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
+			Origin:      origin,
+			OriginRight: originRight,
+			Left:        left,
+			Parent:      t,
+			Content:     NewContentFormat(k, v),
 		}
 		fmtItem.integrate(txn, 0)
 		left = fmtItem
 		id := fmtItem.ID
 		origin = &id
+		if left.Right != nil {
+			rid := left.Right.ID
+			originRight = &rid
+		} else {
+			originRight = nil
+		}
 	}
 }
 
@@ -281,6 +299,35 @@ func (txt *YText) Observe(fn func(YTextEvent)) func() {
 				txt.observers = append(txt.observers[:i], txt.observers[i+1:]...)
 				return
 			}
+		}
+	}
+}
+
+// ApplyDelta applies a Quill-compatible delta to the text within the given
+// transaction. Each Delta must have exactly one of Op set:
+//   - DeltaOpInsert: inserts d.Insert at the current cursor position with optional d.Attributes
+//   - DeltaOpDelete: deletes d.Delete UTF-16 code units at the current cursor position
+//   - DeltaOpRetain: advances the cursor by d.Retain UTF-16 code units; if d.Attributes is
+//     non-nil, applies formatting to the retained range
+//
+// The cursor starts at position 0. ApplyDelta must be called from inside a
+// Transact callback.
+func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
+	pos := 0
+	for _, d := range delta {
+		switch d.Op {
+		case DeltaOpInsert:
+			if s, ok := d.Insert.(string); ok {
+				txt.Insert(txn, pos, s, d.Attributes)
+				pos += utf16Len(s)
+			}
+		case DeltaOpDelete:
+			deleteRange(&txt.abstractType, txn, pos, d.Delete)
+		case DeltaOpRetain:
+			if len(d.Attributes) > 0 {
+				txt.Format(txn, pos, d.Retain, d.Attributes)
+			}
+			pos += d.Retain
 		}
 	}
 }

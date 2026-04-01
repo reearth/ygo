@@ -2,11 +2,13 @@ package awareness_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/awareness"
+	"github.com/reearth/ygo/encoding"
 )
 
 // ---------------------------------------------------------------------------
@@ -237,4 +239,145 @@ func TestUnit_Awareness_JSONDepth_ActuallyDeepPayload(t *testing.T) {
 	require.NoError(t, err)
 	// The deep state should have been treated as null (removed).
 	assert.NotContains(t, a.GetStates(), uint64(99))
+}
+
+// ---------------------------------------------------------------------------
+// Fix 1 — H4 + D2: EncodeUpdate(nil) must include removed clients
+// ---------------------------------------------------------------------------
+
+func TestUnit_EncodeUpdate_Nil_IncludesRemovedClient(t *testing.T) {
+	a := awareness.New(1)
+	a.SetLocalState(map[string]any{"x": 1})
+
+	// Peer b learns about client 1 while it was active.
+	b := awareness.New(2)
+	require.NoError(t, b.ApplyUpdate(a.EncodeUpdate(nil), nil))
+	require.Contains(t, b.GetStates(), uint64(1), "b must know client 1 before removal")
+
+	// Now a removes itself.
+	a.SetLocalState(nil)
+
+	// EncodeUpdate(nil) must include client 1 even though its state is now nil.
+	enc := a.EncodeUpdate(nil)
+	require.NotEmpty(t, enc)
+
+	// Use an observer on b to capture the removal event.
+	var removedIDs []uint64
+	b.OnChange(func(evt awareness.ChangeEvent) {
+		removedIDs = append(removedIDs, evt.Removed...)
+	})
+
+	err := b.ApplyUpdate(enc, nil)
+	require.NoError(t, err)
+
+	// b must have been notified that client 1 was removed.
+	assert.Contains(t, removedIDs, uint64(1), "b must receive removal notification for client 1")
+	// Client 1 must no longer appear in active states on b.
+	assert.NotContains(t, b.GetStates(), uint64(1), "client 1 must not appear in active states after removal")
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2 — M3: checkJSONDepth must reject unterminated strings
+// ---------------------------------------------------------------------------
+
+func TestUnit_JSONDepth_UnterminatedString_Rejected(t *testing.T) {
+	// Unterminated strings should cause ApplyUpdate to treat the state as null.
+	// We verify indirectly: craft a raw update whose JSON state is unterminated,
+	// then confirm the client does not appear in GetStates().
+	buildUpdate := func(jsonState string) []byte {
+		enc := encoding.NewEncoder()
+		enc.WriteVarUint(1)  // numClients
+		enc.WriteVarUint(99) // clientID
+		enc.WriteVarUint(1)  // clock
+		enc.WriteVarString(jsonState)
+		return enc.Bytes()
+	}
+
+	a := awareness.New(1)
+
+	// Unterminated string: {"key": "unterminated
+	err := a.ApplyUpdate(buildUpdate(`{"key": "unterminated`), nil)
+	require.NoError(t, err)
+	assert.NotContains(t, a.GetStates(), uint64(99), "unterminated string state must be treated as null")
+
+	// Unterminated bare string: "no closing quote
+	// Reset by applying a higher clock with a valid null state first so client
+	// 99 is unknown again from clock perspective — use a fresh instance.
+	a2 := awareness.New(1)
+	err = a2.ApplyUpdate(buildUpdate(`"no closing quote`), nil)
+	require.NoError(t, err)
+	assert.NotContains(t, a2.GetStates(), uint64(99), "bare unterminated string must be treated as null")
+
+	// Valid JSON must still be accepted.
+	a3 := awareness.New(1)
+	err = a3.ApplyUpdate(buildUpdate(`{"key": "value"}`), nil)
+	require.NoError(t, err)
+	assert.Contains(t, a3.GetStates(), uint64(99), "valid JSON must be accepted")
+
+	// Brackets inside a string value must not be miscounted.
+	a4 := awareness.New(1)
+	err = a4.ApplyUpdate(buildUpdate(`{"key": "with [brackets] inside"}`), nil)
+	require.NoError(t, err)
+	assert.Contains(t, a4.GetStates(), uint64(99), "brackets inside string must not cause false rejection")
+}
+
+// ---------------------------------------------------------------------------
+// Fix 3 — M4: Destroy() stops the auto-expiry goroutine
+// ---------------------------------------------------------------------------
+
+func TestUnit_Awareness_Destroy_StopsExpiry(t *testing.T) {
+	a := awareness.New(1)
+	a.SetLocalState(map[string]any{"x": 1})
+	stop := a.StartAutoExpiry(50 * time.Millisecond)
+	_ = stop // intentionally not calling stop; Destroy() should clean up
+
+	// Destroy should stop the goroutine without panic or hang.
+	done := make(chan struct{})
+	go func() {
+		a.Destroy()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Destroy() hung — goroutine not stopped")
+	}
+
+	// Calling Destroy() again must be a no-op.
+	a.Destroy()
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4 — T3: ErrTooManyClients and ErrStateTooLarge
+// ---------------------------------------------------------------------------
+
+func TestUnit_Awareness_ApplyUpdate_TooManyClients_Errors(t *testing.T) {
+	// Build an encoded update claiming maxAwarenessClients+1 clients (100_001).
+	// The check fires on the count field alone, before reading client data.
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(uint64(100_000) + 1) // numClients field exceeds the limit
+
+	a := awareness.New(1)
+	err := a.ApplyUpdate(enc.Bytes(), nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, awareness.ErrTooManyClients)
+}
+
+func TestUnit_Awareness_ApplyUpdate_StateTooLarge_Errors(t *testing.T) {
+	// Build an update with 1 client whose state JSON exceeds maxAwarenessStateBytes (1 MiB).
+	const maxAwarenessStateBytes = 1 << 20 // mirrors the constant in awareness.go
+	huge := make([]byte, maxAwarenessStateBytes+1)
+	for i := range huge {
+		huge[i] = 'x'
+	}
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(1)              // numClients
+	enc.WriteVarUint(999)            // clientID
+	enc.WriteVarUint(1)              // clock
+	enc.WriteVarString(string(huge)) // state (oversized)
+
+	a := awareness.New(1)
+	err := a.ApplyUpdate(enc.Bytes(), nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, awareness.ErrStateTooLarge)
 }

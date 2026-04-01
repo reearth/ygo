@@ -16,6 +16,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -104,10 +105,11 @@ func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
 
 // room holds the shared document and awareness state for one named room.
 type room struct {
-	mu        sync.Mutex
-	doc       *crdt.Doc
-	awareness *awareness.Awareness
-	peers     map[*peer]struct{}
+	mu          sync.Mutex
+	doc         *crdt.Doc
+	awareness   *awareness.Awareness
+	peers       map[*peer]struct{}
+	activePeers atomic.Int64 // atomic; live peers in this room
 }
 
 // peer is one connected WebSocket client.
@@ -158,6 +160,8 @@ type Server struct {
 	// Upgrade requests that would exceed this limit are rejected with 503.
 	// Zero (the default) means unlimited (N-H5).
 	MaxPeersPerRoom int
+
+	activeConns atomic.Int64 // atomic; total live WebSocket connections
 }
 
 // checkOrigin validates the WebSocket upgrade request's Origin header.
@@ -278,7 +282,17 @@ func (s *Server) getOrCreateRoom(name string) *room {
 		// does not block the Transact caller and the broadcast loop (N-H7).
 		// PersistenceAdapter implementations must be safe for concurrent use.
 		r.doc.OnUpdate(func(update []byte, _ any) {
-			go func() { _ = s.persistence.StoreUpdate(name, update) }()
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// Persistence panic must not crash the server.
+						// The update is lost for this client; the room doc
+						// remains consistent in memory.
+						_ = r
+					}
+				}()
+				_ = s.persistence.StoreUpdate(name, update)
+			}()
 		})
 	}
 	s.rooms[name] = r
@@ -308,25 +322,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Enforce per-room and server-wide connection limits before upgrading so
 	// that rejected requests get a clean HTTP 503 rather than an abrupt close
 	// after the WebSocket handshake (N-H5).
+	// Atomics are incremented optimistically before the upgrade; on failure
+	// they are decremented so the counts stay accurate (fixes TOCTOU race).
 	if s.MaxPeersPerRoom > 0 {
-		rm.mu.Lock()
-		current := len(rm.peers)
-		rm.mu.Unlock()
-		if current >= s.MaxPeersPerRoom {
+		if rm.activePeers.Add(1) > int64(s.MaxPeersPerRoom) {
+			rm.activePeers.Add(-1)
 			http.Error(w, "room full", http.StatusServiceUnavailable)
 			return
 		}
 	}
 	if s.MaxConnections > 0 {
-		s.rmu.RLock()
-		total := 0
-		for _, r := range s.rooms {
-			r.mu.Lock()
-			total += len(r.peers)
-			r.mu.Unlock()
-		}
-		s.rmu.RUnlock()
-		if total >= s.MaxConnections {
+		if s.activeConns.Add(1) > int64(s.MaxConnections) {
+			s.activeConns.Add(-1)
+			if s.MaxPeersPerRoom > 0 {
+				rm.activePeers.Add(-1) // undo per-room increment
+			}
 			http.Error(w, "too many connections", http.StatusServiceUnavailable)
 			return
 		}
@@ -334,6 +344,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ws, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		if s.MaxPeersPerRoom > 0 {
+			rm.activePeers.Add(-1)
+		}
+		if s.MaxConnections > 0 {
+			s.activeConns.Add(-1)
+		}
 		return
 	}
 	// Reject frames larger than maxWSMessageBytes before buffering them.
@@ -485,6 +501,14 @@ func (p *peer) handleDisconnect() {
 	delete(rm.peers, p)
 	empty := len(rm.peers) == 0
 	rm.mu.Unlock()
+
+	// Decrement atomic connection counters now that the peer has left.
+	if p.server.MaxPeersPerRoom > 0 {
+		rm.activePeers.Add(-1)
+	}
+	if p.server.MaxConnections > 0 {
+		p.server.activeConns.Add(-1)
+	}
 
 	// C1: delete the room from the server map when the last peer leaves so the
 	// map does not grow unboundedly. Re-check emptiness under the server write

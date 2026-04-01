@@ -98,8 +98,11 @@ func (a *YArray) Get(index int) any {
 		}
 		n := item.Content.Len()
 		if counted+n > index {
-			if ca, ok := item.Content.(*ContentAny); ok {
-				return ca.Vals[index-counted]
+			switch c := item.Content.(type) {
+			case *ContentAny:
+				return c.Vals[index-counted]
+			case *ContentType:
+				return c.Type.owner
 			}
 			return nil
 		}
@@ -186,6 +189,12 @@ func (a *YArray) Slice(start, end int) []any {
 	t := &a.abstractType
 	if end > t.length {
 		end = t.length
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start > end {
+		return nil
 	}
 	result := make([]any, 0, end-start)
 	counted := 0

@@ -426,7 +426,7 @@ func (d *Doc) TransactContext(ctx context.Context, fn func(*Transaction), origin
 	default:
 	}
 	d.Transact(fn, origin...)
-	return nil
+	return ctx.Err() // nil if not cancelled, error if cancelled during txn
 }
 
 // Destroy detaches all observers and clears internal state, releasing

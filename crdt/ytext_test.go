@@ -104,7 +104,7 @@ func TestUnit_YText_Unicode(t *testing.T) {
 	})
 
 	assert.Equal(t, "héllo", txt.ToString())
-	assert.Equal(t, 5, txt.Len(), "Len() must count runes, not bytes")
+	assert.Equal(t, 5, txt.Len(), "Len() must count UTF-16 code units, not bytes or runes")
 }
 
 func TestUnit_YText_Observe_FiresOnce(t *testing.T) {
@@ -405,4 +405,108 @@ func TestUnit_YText_Delta_InsertAndDelete(t *testing.T) {
 	assert.Equal(t, 1, inserts, "should have one insert op")
 	assert.Equal(t, 1, deletes, "should have one delete op")
 	assert.Equal(t, "hello Go", txt.ToString())
+}
+
+// ── Supplementary Unicode / Emoji tests ──────────────────────────────────────
+
+func TestUnit_YText_Len_SupplementaryUnicode(t *testing.T) {
+	// 👍 is U+1F44D, encoded as 2 UTF-16 code units (surrogate pair)
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "Hello👍", nil) // 5 ASCII + 2 UTF-16 for emoji = 7
+	})
+	assert.Equal(t, 7, txt.Len(), "👍 must count as 2 UTF-16 units")
+	assert.Equal(t, "Hello👍", txt.ToString())
+}
+
+func TestUnit_YText_Insert_AtSurrogateBoundary(t *testing.T) {
+	// Insert between two emoji, then verify ordering
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "😀😂", nil) // 4 UTF-16 units total (2+2)
+	})
+	assert.Equal(t, 4, txt.Len())
+
+	// Insert a character between the two emoji (at index 2)
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 2, "-", nil)
+	})
+	assert.Equal(t, "😀-😂", txt.ToString())
+	assert.Equal(t, 5, txt.Len())
+}
+
+func TestUnit_YText_Delete_SupplementaryUnicode(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "A👍B", nil) // 4 UTF-16 units
+	})
+	assert.Equal(t, 4, txt.Len())
+
+	// Delete the emoji (2 UTF-16 units at position 1)
+	doc.Transact(func(txn *Transaction) {
+		txt.Delete(txn, 1, 2)
+	})
+	assert.Equal(t, "AB", txt.ToString())
+	assert.Equal(t, 2, txt.Len())
+}
+
+// ── ApplyDelta tests ──────────────────────────────────────────────────────────
+
+func TestUnit_YText_ApplyDelta_InsertOnly(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.ApplyDelta(txn, []Delta{
+			{Op: DeltaOpInsert, Insert: "Hello"},
+		})
+	})
+	assert.Equal(t, "Hello", txt.ToString())
+}
+
+func TestUnit_YText_ApplyDelta_InsertDeleteRetain(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "Hello World", nil)
+	})
+	doc.Transact(func(txn *Transaction) {
+		txt.ApplyDelta(txn, []Delta{
+			{Op: DeltaOpRetain, Retain: 6},    // keep "Hello "
+			{Op: DeltaOpDelete, Delete: 5},    // delete "World"
+			{Op: DeltaOpInsert, Insert: "Go"}, // insert "Go"
+		})
+	})
+	assert.Equal(t, "Hello Go", txt.ToString())
+}
+
+func TestUnit_YText_ApplyDelta_RetainWithFormat(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "bold text", nil)
+	})
+	doc.Transact(func(txn *Transaction) {
+		txt.ApplyDelta(txn, []Delta{
+			{Op: DeltaOpRetain, Retain: 4, Attributes: Attributes{"bold": true}},
+		})
+	})
+	delta := txt.ToDelta()
+	// First 4 chars should be bold
+	require.NotEmpty(t, delta)
+	assert.Equal(t, true, delta[0].Attributes["bold"])
+}
+
+func TestUnit_YText_ApplyDelta_Emoji(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.ApplyDelta(txn, []Delta{
+			{Op: DeltaOpInsert, Insert: "A👍B"},
+		})
+	})
+	assert.Equal(t, 4, txt.Len()) // A=1 + 👍=2 + B=1
+	assert.Equal(t, "A👍B", txt.ToString())
 }

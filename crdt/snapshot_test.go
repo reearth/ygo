@@ -210,7 +210,7 @@ func TestInteg_RestoreDocument_YArray(t *testing.T) {
 	// Restored should have only [1, 2, 3].
 	restored, err := RestoreDocument(doc, snap)
 	require.NoError(t, err)
-	assert.Equal(t, []any{1, 2, 3}, restored.GetArray("a").ToSlice())
+	assert.Equal(t, []any{int64(1), int64(2), int64(3)}, restored.GetArray("a").ToSlice())
 }
 
 func TestInteg_EncodeStateFromSnapshot(t *testing.T) {

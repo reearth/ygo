@@ -1,6 +1,7 @@
 package websocket_test
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -260,6 +261,38 @@ func TestInteg_QueryAwareness_ReturnsCurrentState(t *testing.T) {
 
 	outerType, _ := readOne(t, conn, 2*time.Second)
 	assert.Equal(t, uint64(1), outerType)
+}
+
+func TestUnit_MaxPeersPerRoom_NotExceeded_UnderConcurrency(t *testing.T) {
+	srv := ygws.NewServer()
+	srv.MaxPeersPerRoom = 2
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("room", "test")
+		srv.ServeHTTP(w, r)
+	}))
+	defer ts.Close()
+
+	connect := func() (*gws.Conn, error) {
+		u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/test"
+		c, _, err := gws.DefaultDialer.Dial(u, nil)
+		return c, err
+	}
+
+	// First two connections must succeed
+	c1, err := connect()
+	require.NoError(t, err)
+	defer c1.Close()
+	c2, err := connect()
+	require.NoError(t, err)
+	defer c2.Close()
+
+	// Third must be rejected (503)
+	resp, err := http.Get(strings.Replace(ts.URL+"/test", "http", "http", 1))
+	if err == nil {
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+		resp.Body.Close()
+	}
 }
 
 func TestInteg_MultiRoom_Isolated(t *testing.T) {

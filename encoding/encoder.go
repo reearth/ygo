@@ -8,6 +8,7 @@ import (
 )
 
 // Encoder writes values into a growing byte buffer using the lib0 encoding format.
+// Encoder is not safe for concurrent use; each goroutine should use its own instance.
 type Encoder struct {
 	buf []byte
 }
@@ -46,20 +47,19 @@ func (e *Encoder) WriteVarUint(v uint64) {
 // matching the JavaScript lib0 library's writeVarInt.
 // The sign occupies bit 6 of the first byte; bits 0-5 hold the low 6 bits of
 // the magnitude. Continuation bytes carry 7 data bits each (bit 7 = more).
+// Panics if the magnitude of v exceeds (1<<55)-1, which is the maximum
+// encodable by the lib0 protocol (the decoder rejects anything larger).
 func (e *Encoder) WriteVarInt(v int64) {
 	sign := byte(0)
 	var mag uint64
 	if v < 0 {
 		sign = 0x40
-		// Special-case MinInt64: uint64(-math.MinInt64) overflows in Go's
-		// two's complement arithmetic because +2^63 cannot fit in int64 (N-C4).
-		if v == math.MinInt64 {
-			mag = 1 << 63
-		} else {
-			mag = uint64(-v)
-		}
+		mag = uint64(-v)
 	} else {
 		mag = uint64(v)
+	}
+	if mag > (1<<55)-1 {
+		panic(fmt.Sprintf("encoding: WriteVarInt value %d exceeds 55-bit lib0 VarInt range", v))
 	}
 	if mag < 64 {
 		e.buf = append(e.buf, sign|byte(mag))

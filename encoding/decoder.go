@@ -26,6 +26,7 @@ var (
 )
 
 // Decoder reads values from a byte slice using the lib0 encoding format.
+// Decoder is not safe for concurrent use; each goroutine should use its own instance.
 type Decoder struct {
 	buf []byte
 	pos int
@@ -86,7 +87,7 @@ func (d *Decoder) ReadVarUint() (uint64, error) {
 }
 
 // ReadVarInt decodes a lib0 sign-magnitude variable-length integer.
-// Returns ErrOverflow if the encoded magnitude exceeds 55 bits.
+// Returns ErrOverflow if the encoded magnitude exceeds 55 bits (the lib0 protocol's maximum).
 func (d *Decoder) ReadVarInt() (int64, error) {
 	b, err := d.readByte()
 	if err != nil {
@@ -227,7 +228,7 @@ func (d *Decoder) readAny(depth int) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return int(v), nil
+		return v, nil // v is already int64; preserve full precision
 	case 124:
 		return d.ReadFloat32()
 	case 123:
