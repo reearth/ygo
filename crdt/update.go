@@ -332,7 +332,7 @@ func typeClassOf(ct *ContentType) (byte, string) {
 	case *YXmlFragment:
 		return 4, ""
 	case *YXmlText:
-		return 5, ""
+		return 6, ""
 	default:
 		return 0, ""
 	}
@@ -714,7 +714,7 @@ func decodeTypeContent(dec *encoding.Decoder, doc *Doc, typeClass byte) (*abstra
 		frag.owner = frag
 		return &frag.abstractType, nil
 
-	case 5: // YXmlText
+	case 6: // YXmlText
 		xt := NewYXmlText()
 		xt.doc = doc
 		return &xt.abstractType, nil
