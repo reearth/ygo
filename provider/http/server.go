@@ -11,6 +11,16 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
+// maxUpdateBytes is the maximum accepted size for a POST body or sv parameter
+// payload. Requests exceeding this limit are rejected before being read into
+// memory, preventing OOM from large crafted uploads.
+const maxUpdateBytes int64 = 64 << 20 // 64 MiB
+
+// maxSVParamBytes is the maximum accepted length (bytes) of the base64-encoded
+// sv query parameter. A state vector cannot realistically exceed a few KB; this
+// cap prevents wasted allocation from oversized query strings.
+const maxSVParamBytes = 1 << 16 // 64 KiB
+
 // Server is an http.Handler that serves Yjs document sync over HTTP.
 // Each distinct {room} path segment maps to a separate in-memory document.
 //
@@ -86,6 +96,10 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, room string) 
 
 	svParam := r.URL.Query().Get("sv")
 	if svParam != "" {
+		if int64(len(svParam)) > maxSVParamBytes {
+			http.Error(w, "invalid sv parameter: too large", http.StatusBadRequest)
+			return
+		}
 		svBytes, err := base64.StdEncoding.DecodeString(svParam)
 		if err != nil {
 			http.Error(w, "invalid sv parameter: base64 decode failed", http.StatusBadRequest)
@@ -106,9 +120,11 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, room string) 
 }
 
 func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, room string) {
+	// Reject bodies exceeding maxUpdateBytes before buffering the entire payload.
+	r.Body = http.MaxBytesReader(w, r.Body, maxUpdateBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
+		http.Error(w, "failed to read body", http.StatusRequestEntityTooLarge)
 		return
 	}
 

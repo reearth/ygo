@@ -172,8 +172,24 @@ func (d *Decoder) readVarIntWithSign() (magnitude uint64, negative bool, err err
 	return result, negative, nil
 }
 
+// maxAnyDepth is the maximum nesting depth for ReadAny. A crafted payload with
+// deeply-nested arrays or maps would otherwise exhaust the goroutine stack.
+const maxAnyDepth = 100
+
+// ErrDepthExceeded is returned when a nested Any value exceeds maxAnyDepth levels.
+var ErrDepthExceeded = errors.New("encoding: nested Any exceeds maximum depth")
+
 // ReadAny decodes a tagged-union value written by Encoder.WriteAny.
+// Nested arrays and maps are limited to maxAnyDepth levels to prevent
+// stack-overflow DoS from crafted inputs.
 func (d *Decoder) ReadAny() (any, error) {
+	return d.readAny(0)
+}
+
+func (d *Decoder) readAny(depth int) (any, error) {
+	if depth > maxAnyDepth {
+		return nil, ErrDepthExceeded
+	}
 	tag, err := d.ReadUint8()
 	if err != nil {
 		return nil, err
@@ -209,7 +225,7 @@ func (d *Decoder) ReadAny() (any, error) {
 		}
 		out := make([]any, n)
 		for i := range out {
-			if out[i], err = d.ReadAny(); err != nil {
+			if out[i], err = d.readAny(depth + 1); err != nil {
 				return nil, err
 			}
 		}
@@ -228,7 +244,7 @@ func (d *Decoder) ReadAny() (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			if out[k], err = d.ReadAny(); err != nil {
+			if out[k], err = d.readAny(depth + 1); err != nil {
 				return nil, err
 			}
 		}

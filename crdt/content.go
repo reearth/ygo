@@ -1,11 +1,11 @@
 package crdt
 
-import "unicode/utf8"
-
 // Content is the payload carried by an Item.
 // Every concrete content type must implement this interface.
 type Content interface {
 	// Len returns how many logical positions this content occupies.
+	// For ContentString this is the number of UTF-16 code units, matching Yjs
+	// wire-protocol semantics (JavaScript's string length model).
 	Len() int
 	// IsCountable reports whether this content contributes to a type's length.
 	// Deleted and format-marker content do not count.
@@ -15,6 +15,39 @@ type Content interface {
 	// Splice splits the content at offset, mutates the receiver to hold [0, offset),
 	// and returns a new Content holding [offset, Len()).
 	Splice(offset int) Content
+}
+
+// utf16Len returns the number of UTF-16 code units in s.
+// Characters in the Basic Multilingual Plane (U+0000–U+FFFF) count as 1 unit;
+// supplementary characters (U+10000 and above, e.g. most emoji) count as 2.
+// This matches JavaScript's String.length and the Yjs wire-protocol index model.
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+// utf16ByteOffset returns the byte index in s that corresponds to utf16Units
+// UTF-16 code units from the start of s.
+func utf16ByteOffset(s string, utf16Units int) int {
+	u16 := 0
+	for i, r := range s {
+		if u16 >= utf16Units {
+			return i
+		}
+		if r > 0xFFFF {
+			u16 += 2
+		} else {
+			u16++
+		}
+	}
+	return len(s)
 }
 
 // ContentDeleted is a tombstone. It replaces real content when an item is
@@ -35,28 +68,36 @@ func (c *ContentDeleted) Splice(offset int) Content {
 // Multiple consecutive characters typed by the same client are squashed into
 // one item, keeping the linked list short.
 //
-// runeLen caches utf8.RuneCountInString(Str) so that Len() is O(1).
-// Any code that mutates Str directly must also update runeLen.
+// utf16Len caches the UTF-16 code unit length of Str so that Len() is O(1).
+// The Yjs wire protocol and JavaScript String.length both count in UTF-16 units,
+// so indices exchanged with JS peers must use the same unit. Characters in the
+// Basic Multilingual Plane count as 1; supplementary characters (e.g. most emoji)
+// count as 2.
+// Any code that mutates Str directly must also update utf16Len.
 type ContentString struct {
-	Str     string
-	runeLen int
+	Str      string
+	utf16Len int
 }
 
 func NewContentString(s string) *ContentString {
-	return &ContentString{Str: s, runeLen: utf8.RuneCountInString(s)}
+	return &ContentString{Str: s, utf16Len: utf16Len(s)}
 }
 
-// Len returns the number of Unicode code points (runes), matching Yjs's
-// character-count semantics for indexing into text.
-func (c *ContentString) Len() int          { return c.runeLen }
+// Len returns the number of UTF-16 code units, matching Yjs wire-protocol
+// index semantics. This is NOT the same as len(s) (bytes) or rune count when
+// the string contains characters outside the Basic Multilingual Plane.
+func (c *ContentString) Len() int          { return c.utf16Len }
 func (c *ContentString) IsCountable() bool { return true }
-func (c *ContentString) Copy() Content     { return &ContentString{Str: c.Str, runeLen: c.runeLen} }
+func (c *ContentString) Copy() Content {
+	return &ContentString{Str: c.Str, utf16Len: c.utf16Len}
+}
 func (c *ContentString) Splice(offset int) Content {
-	runes := []rune(c.Str)
-	right := &ContentString{Str: string(runes[offset:]), runeLen: len(runes) - offset}
-	c.Str = string(runes[:offset])
-	c.runeLen = offset
-	return right
+	splitByte := utf16ByteOffset(c.Str, offset)
+	rightStr := c.Str[splitByte:]
+	rightLen := c.utf16Len - offset
+	c.Str = c.Str[:splitByte]
+	c.utf16Len = offset
+	return &ContentString{Str: rightStr, utf16Len: rightLen}
 }
 
 // ContentBinary holds raw bytes (e.g. binary file attachments).

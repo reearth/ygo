@@ -2,6 +2,7 @@ package awareness
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -9,6 +10,21 @@ import (
 )
 
 const DefaultTimeout = 30 * time.Second
+
+// maxAwarenessClients is the maximum number of client entries accepted in a
+// single ApplyUpdate call. Prevents OOM from a crafted message that claims a
+// huge client count, causing make([]entry, 0, n) to allocate exabytes.
+const maxAwarenessClients = 100_000
+
+// maxAwarenessStateBytes is the maximum size (bytes) of a single client's
+// JSON state string. Prevents OOM from a peer broadcasting a multi-GB state.
+const maxAwarenessStateBytes = 1 << 20 // 1 MiB
+
+// ErrTooManyClients is returned when an update claims more clients than maxAwarenessClients.
+var ErrTooManyClients = errors.New("awareness: update exceeds maximum client count")
+
+// ErrStateTooLarge is returned when a single client state exceeds maxAwarenessStateBytes.
+var ErrStateTooLarge = errors.New("awareness: client state exceeds maximum size")
 
 // ClientState holds the clock and decoded state for one peer.
 type ClientState struct {
@@ -203,12 +219,17 @@ func (a *Awareness) EncodeUpdate(clientIDs []uint64) []byte {
 
 // ApplyUpdate decodes an incoming awareness update and merges it.
 // Only updates with a higher clock than the current one are applied.
+// Returns ErrTooManyClients if the update claims more than maxAwarenessClients
+// entries, or ErrStateTooLarge if any single state JSON exceeds maxAwarenessStateBytes.
 func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 	dec := encoding.NewDecoder(update)
 
 	numClients, err := dec.ReadVarUint()
 	if err != nil {
 		return err
+	}
+	if numClients > maxAwarenessClients {
+		return ErrTooManyClients
 	}
 
 	type entry struct {
@@ -229,6 +250,9 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 		jsonStr, err := dec.ReadVarString()
 		if err != nil {
 			return err
+		}
+		if len(jsonStr) > maxAwarenessStateBytes {
+			return ErrStateTooLarge
 		}
 		entries = append(entries, entry{clientID, clock, jsonStr})
 	}

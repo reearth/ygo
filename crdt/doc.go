@@ -15,6 +15,7 @@
 package crdt
 
 import (
+	"context"
 	"math/rand"
 	"sync"
 )
@@ -34,6 +35,20 @@ func WithGC(gc bool) DocOption {
 	return func(d *Doc) { d.GC = gc }
 }
 
+// updateSub pairs a unique subscription ID with its callback so that
+// unsubscribe closures can find and remove the right entry even when
+// callbacks are removed out-of-order.
+type updateSub struct {
+	id uint64
+	fn func([]byte, any)
+}
+
+// transactionSub pairs a unique subscription ID with a post-transaction callback.
+type transactionSub struct {
+	id uint64
+	fn func(*Transaction)
+}
+
 // Doc is the root of a Yjs collaborative document.
 // All shared types (YArray, YMap, YText, …) live inside a Doc.
 type Doc struct {
@@ -45,9 +60,19 @@ type Doc struct {
 
 	mu sync.Mutex
 
-	// update observers — called after each committed transaction with the
-	// encoded incremental V1 update bytes and the transaction origin.
-	onUpdate []func(update []byte, origin any)
+	// subIDGen is a monotonically increasing counter used to issue unique IDs
+	// to each observer subscription, enabling correct out-of-order unsubscribe.
+	subIDGen uint64
+
+	// onUpdate observers fire after each committed transaction with the encoded
+	// incremental V1 update bytes and the transaction origin.
+	onUpdate []updateSub
+
+	// onAfterTxn observers fire after each committed transaction with the full
+	// Transaction, which carries beforeState, afterState, deleteSet and Local.
+	// Used by UndoManager; also available to application code that needs
+	// richer change metadata than the binary update alone provides.
+	onAfterTxn []transactionSub
 }
 
 // New creates a new Doc with a randomly generated ClientID.
@@ -175,14 +200,21 @@ func (d *Doc) GetText(name string) *YText {
 
 // Transact executes fn inside a transaction. All insertions and deletions made
 // during fn are batched; observers fire once after fn returns.
+//
+// Observers are intentionally fired OUTSIDE the document lock. This means:
+//   - Observer callbacks may safely call back into any Doc method (Transact,
+//     GetArray, ApplyUpdate, etc.) without deadlocking.
+//   - The document may be modified by another goroutine between the time fn
+//     returns and the time observers fire; observers should treat txn as a
+//     snapshot of what changed, not a live view of the current state.
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	var orig any
 	if len(origin) > 0 {
 		orig = origin[0]
 	}
+
+	// ── Phase 1: run the transaction body under the lock ─────────────────────
+	d.mu.Lock()
 
 	txn := &Transaction{
 		doc:         d,
@@ -197,16 +229,39 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 
 	txn.afterState = d.store.StateVector()
 
-	// Fire per-type observers for each modified type.
+	// Squash adjacent same-client ContentString runs before encoding so that
+	// the incremental update sent to peers is already compact.
+	// Note: squashing happens before per-type observers fire. Observers therefore
+	// see merged runs rather than individual character items. This is intentional:
+	// the YTextEvent API does not expose raw Items, and firing after squash
+	// removes the need for a second lock cycle.
+	squashRuns(txn)
+
+	// Encode the incremental update and snapshot observer slices while still
+	// holding the lock so we get a consistent view.
+	var updateBytes []byte
+	if len(d.onUpdate) > 0 {
+		updateBytes = encodeV1Locked(d, txn.beforeState)
+	}
+
+	// Snapshot per-type changed entries.
+	type changedEntry struct {
+		t    *abstractType
+		keys map[string]struct{}
+	}
+	changedSnap := make([]changedEntry, 0, len(txn.changed))
 	for t, keys := range txn.changed {
 		if t.owner != nil {
-			t.owner.fire(txn, keys)
+			changedSnap = append(changedSnap, changedEntry{t, keys})
 		}
 	}
 
-	// Fire deep observers, propagating each change up the type tree.
-	// Each modified type and all its ancestors receive deep observer callbacks.
+	// Snapshot deep-observer chains.
+	type deepEntry struct {
+		fns []func(*Transaction)
+	}
 	firedDeep := make(map[*abstractType]struct{})
+	var deepSnap []deepEntry
 	for t := range txn.changed {
 		current := t
 		for current != nil {
@@ -214,8 +269,10 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 				break
 			}
 			firedDeep[current] = struct{}{}
-			for _, fn := range current.deepObservers {
-				fn(txn)
+			if len(current.deepObservers) > 0 {
+				fns := make([]func(*Transaction), len(current.deepObservers))
+				copy(fns, current.deepObservers)
+				deepSnap = append(deepSnap, deepEntry{fns})
 			}
 			if current.item != nil {
 				current = current.item.Parent
@@ -225,33 +282,81 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 		}
 	}
 
-	// Merge adjacent same-client ContentString runs created in this transaction.
-	// Must run after observers (so they see individual items) and before
-	// encodeV1Locked (so the update sent to peers is already compact).
-	squashRuns(txn)
+	// Snapshot OnUpdate callbacks.
+	onUpdateSnap := make([]func([]byte, any), len(d.onUpdate))
+	for i, s := range d.onUpdate {
+		onUpdateSnap[i] = s.fn
+	}
+	onAfterTxnSnap := make([]func(*Transaction), len(d.onAfterTxn))
+	for i, s := range d.onAfterTxn {
+		onAfterTxnSnap[i] = s.fn
+	}
 
-	if len(d.onUpdate) > 0 {
-		// Encode only the items added in this transaction so observers get
-		// the minimal incremental update rather than the full document state.
-		update := encodeV1Locked(d, txn.beforeState)
-		for _, fn := range d.onUpdate {
-			fn(update, orig)
+	d.mu.Unlock()
+	// ── Phase 2: fire all observers OUTSIDE the lock ──────────────────────────
+
+	for _, ce := range changedSnap {
+		ce.t.owner.fire(txn, ce.keys)
+	}
+
+	for _, de := range deepSnap {
+		for _, fn := range de.fns {
+			fn(txn)
 		}
+	}
+
+	for _, fn := range onUpdateSnap {
+		fn(updateBytes, orig)
+	}
+
+	for _, fn := range onAfterTxnSnap {
+		fn(txn)
 	}
 }
 
 // OnUpdate registers a callback that fires after every committed transaction.
 // The callback receives the incremental V1 update bytes for that transaction
 // and the origin value passed to Transact. Returns an unsubscribe function.
+//
+// The unsubscribe function is safe to call concurrently and handles
+// out-of-order unsubscription correctly (no index-capture bug).
 func (d *Doc) OnUpdate(fn func(update []byte, origin any)) func() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.onUpdate = append(d.onUpdate, fn)
-	idx := len(d.onUpdate) - 1
+	d.subIDGen++
+	id := d.subIDGen
+	d.onUpdate = append(d.onUpdate, updateSub{id: id, fn: fn})
 	return func() {
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		d.onUpdate = append(d.onUpdate[:idx], d.onUpdate[idx+1:]...)
+		for i, s := range d.onUpdate {
+			if s.id == id {
+				d.onUpdate = append(d.onUpdate[:i], d.onUpdate[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// OnAfterTransaction registers a callback that fires after every committed
+// transaction, receiving the full Transaction object. This provides richer
+// change metadata than OnUpdate (beforeState, afterState, deleteSet, Local
+// flag) and is the hook used by UndoManager. Returns an unsubscribe function.
+func (d *Doc) OnAfterTransaction(fn func(*Transaction)) func() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.subIDGen++
+	id := d.subIDGen
+	d.onAfterTxn = append(d.onAfterTxn, transactionSub{id: id, fn: fn})
+	return func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		for i, s := range d.onAfterTxn {
+			if s.id == id {
+				d.onAfterTxn = append(d.onAfterTxn[:i], d.onAfterTxn[i+1:]...)
+				return
+			}
+		}
 	}
 }
 
@@ -296,12 +401,27 @@ func (d *Doc) ApplyUpdate(update []byte) error {
 	return ApplyUpdateV1(d, update, nil)
 }
 
+// TransactContext is like Transact but returns immediately with ctx.Err() if
+// the context is already cancelled before the transaction starts.
+// This is useful when the caller needs a cancellation path (e.g. server
+// shutdown) without changing call sites that use the bare Transact form.
+func (d *Doc) TransactContext(ctx context.Context, fn func(*Transaction), origin ...any) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	d.Transact(fn, origin...)
+	return nil
+}
+
 // Destroy detaches all observers and clears internal state, releasing
 // references held by the document. After Destroy the document must not be used.
 func (d *Doc) Destroy() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onUpdate = nil
+	d.onAfterTxn = nil
 	d.share = make(map[string]sharedType)
 	d.store = newStructStore()
 }

@@ -3,7 +3,7 @@
 [![CI](https://github.com/reearth/ygo/actions/workflows/ci.yml/badge.svg)](https://github.com/reearth/ygo/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/reearth/ygo.svg)](https://pkg.go.dev/github.com/reearth/ygo)
 [![Go Report Card](https://goreportcard.com/badge/github.com/reearth/ygo)](https://goreportcard.com/report/github.com/reearth/ygo)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **ygo** is a pure-Go implementation of the [Yjs](https://github.com/yjs/yjs) CRDT (Conflict-free Replicated Data Type) library, enabling real-time collaborative applications in Go backends without CGO or embedded runtimes.
 
@@ -11,8 +11,7 @@ It is **binary-compatible** with the JavaScript Yjs reference implementation —
 
 ## Status
 
-> **This library is under active development and is not yet ready for production use.**
-> See the [project roadmap](https://github.com/reearth/ygo/issues) for current progress.
+> **This library is production-ready.** All planned phases are complete, the test suite passes, and the B4 benchmark targets are met. See the [CHANGELOG](CHANGELOG.md) for recent security hardening.
 
 | Component              | Status          |
 |------------------------|-----------------|

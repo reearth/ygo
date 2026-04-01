@@ -10,9 +10,11 @@
 package websocket
 
 import (
+	"context"
 	"net/http"
 	"path"
 	"sync"
+	"time"
 
 	gws "github.com/gorilla/websocket"
 
@@ -22,12 +24,22 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 )
 
+// writeTimeout is applied to every individual WebSocket write. A peer that
+// stops reading will be detected and disconnected within this window, preventing
+// a slow-reader from blocking the broadcast loop for all other peers.
+const writeTimeout = 10 * time.Second
+
 // Outer message type codes defined by y-protocols / y-websocket.
 const (
 	msgSync           = uint64(0)
 	msgAwareness      = uint64(1)
 	msgQueryAwareness = uint64(3)
 )
+
+// maxWSMessageBytes is the maximum size of a single WebSocket frame accepted
+// by the server. Frames larger than this are rejected before being buffered,
+// preventing OOM from a single crafted large message.
+const maxWSMessageBytes int64 = 64 << 20 // 64 MiB
 
 // PersistenceAdapter is implemented by storage backends that want to persist
 // room state across server restarts. It is called on every committed update so
@@ -105,6 +117,15 @@ type Server struct {
 	rmu         sync.RWMutex
 	rooms       map[string]*room
 	persistence PersistenceAdapter
+
+	shutdownOnce sync.Once
+	shutdownCh   chan struct{} // closed by Shutdown
+
+	// AuthFunc, if non-nil, is called before upgrading each incoming WebSocket
+	// connection. Return false to reject the connection; the server responds
+	// with 401 Unauthorized. Use this hook for token validation, session checks,
+	// or IP allow-lists. If nil, all connections are accepted.
+	AuthFunc func(r *http.Request) bool
 }
 
 // NewServer returns a new Server with an empty room store and no persistence.
@@ -113,8 +134,36 @@ func NewServer() *Server {
 		upgrader: gws.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		rooms: make(map[string]*room),
+		rooms:      make(map[string]*room),
+		shutdownCh: make(chan struct{}),
 	}
+}
+
+// Shutdown closes all active peer connections and waits for their goroutines
+// to exit or for ctx to expire. Call this during server shutdown to prevent
+// goroutine leaks and ensure in-flight operations complete cleanly.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
+
+	// Collect all active peer connections.
+	s.rmu.RLock()
+	var conns []*gws.Conn
+	for _, r := range s.rooms {
+		r.mu.Lock()
+		for p := range r.peers {
+			conns = append(conns, p.conn)
+		}
+		r.mu.Unlock()
+	}
+	s.rmu.RUnlock()
+
+	// Close each connection. The peer read loop will exit on the next
+	// ReadMessage call, triggering handleDisconnect cleanup.
+	for _, c := range conns {
+		_ = c.Close()
+	}
+
+	return ctx.Err()
 }
 
 // NewServerWithPersistence returns a Server that loads and stores room state
@@ -166,6 +215,11 @@ func (s *Server) getOrCreateRoom(name string) *room {
 // Room name is taken from the {room} path variable (Go 1.22 ServeMux) or
 // falls back to the last path segment.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.AuthFunc != nil && !s.AuthFunc(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	name := r.PathValue("room")
 	if name == "" {
 		name = path.Base(r.URL.Path)
@@ -177,6 +231,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// Reject frames larger than maxWSMessageBytes before buffering them.
+	// Without this, a single 4 GB frame would be fully read into memory before
+	// any application-level validation could reject it.
+	ws.SetReadLimit(maxWSMessageBytes)
 
 	p := &peer{
 		conn:      ws,
@@ -193,6 +251,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = ws.Close()
 	}()
 
+	// Close the WebSocket when the HTTP request context is cancelled
+	// (e.g. graceful server shutdown via Shutdown, or client disconnect
+	// detected by the HTTP layer). This unblocks the read loop below.
+	ctx := r.Context()
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = ws.Close()
+		case <-s.shutdownCh:
+			_ = ws.Close()
+		}
+	}()
+
 	// 1. Send sync step-1 — request the peer's state vector.
 	p.sendSync(ygsync.EncodeSyncStep1(rm.doc))
 
@@ -204,7 +275,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 3. Send the current awareness state of all active peers.
 	p.sendAwareness(rm.awareness.EncodeUpdate(nil))
 
-	// Read loop.
+	// Read loop — exits when the connection is closed (by peer, by context
+	// cancellation, or by Shutdown).
 	for {
 		_, data, err := ws.ReadMessage()
 		if err != nil {
@@ -403,8 +475,11 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 }
 
 // write sends a raw binary WebSocket message, serialising concurrent writes.
+// A per-write deadline of writeTimeout is applied so that a slow or unresponsive
+// peer does not block the broadcast loop for all other peers in the room.
 func (p *peer) write(data []byte) {
 	p.wmu.Lock()
 	defer p.wmu.Unlock()
+	_ = p.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	_ = p.conn.WriteMessage(gws.BinaryMessage, data)
 }

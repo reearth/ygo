@@ -3,7 +3,6 @@ package crdt
 import (
 	"sort"
 	"strings"
-	"unicode/utf8"
 )
 
 // Transaction batches a set of insertions and deletions into a single atomic
@@ -127,7 +126,7 @@ func squashRuns(txn *Transaction) {
 				// invalidate the position cache once for the whole run.
 				cs := left.Content.(*ContentString)
 				cs.Str = sb.String()
-				cs.runeLen = utf8.RuneCountInString(cs.Str)
+				cs.utf16Len = utf16Len(cs.Str)
 				if left.Parent != nil {
 					left.Parent.invalidatePosCache()
 				}

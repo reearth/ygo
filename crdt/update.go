@@ -373,7 +373,17 @@ func encodeDeleteSet(enc *encoding.Encoder, ds DeleteSet) {
 
 // ── V1 decoding ───────────────────────────────────────────────────────────────
 
-func applyV1Txn(txn *Transaction, update []byte) error {
+func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
+	// Recover from panics emitted by Content.Splice on non-splittable types
+	// (ContentBinary, ContentEmbed, ContentFormat, ContentType, ContentDoc).
+	// A malicious update can encode such a type with a clock offset that forces
+	// a split; without recovery the server would crash instead of returning an error.
+	defer func() {
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+		}
+	}()
+
 	dec := encoding.NewDecoder(update)
 
 	// Snapshot state vector before applying anything (used for skip/offset logic).
@@ -387,10 +397,15 @@ func applyV1Txn(txn *Transaction, update []byte) error {
 		return ErrInvalidUpdate
 	}
 
+	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
 		numStructs, err := dec.ReadVarUint()
 		if err != nil {
 			return wrapUpdateErr(err)
+		}
+		totalStructs += numStructs
+		if totalStructs > maxV2Items {
+			return ErrInvalidUpdate
 		}
 		clientU, err := dec.ReadVarUint()
 		if err != nil {

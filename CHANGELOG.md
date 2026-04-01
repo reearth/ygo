@@ -5,9 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] — 2026-04-01
 
 ### Added
+- `crdt.RelativePosition` / `AbsolutePosition` — stable cursor positions that survive concurrent insertions and deletions. `CreateRelativePositionFromIndex`, `ToAbsolutePosition`, `EncodeRelativePosition`, `DecodeRelativePosition`. Wire format compatible with the Yjs JS reference implementation.
+- `crdt.UndoManager` — tracks local transactions on one or more shared types and supports `Undo()` / `Redo()`. Consecutive transactions within a configurable capture timeout (default 500 ms) are merged into a single undo stack item. `OnStackItemAdded` callback hook for attaching cursor metadata. `StopCapturing()` forces an explicit undo boundary.
+- `crdt.Doc.OnAfterTransaction` — lower-level observer that fires with the full `*Transaction` (beforeState, afterState, deleteSet, Local flag) after each committed transaction. Used internally by UndoManager; also useful for application code that needs richer change metadata.
+- `provider/websocket.Server.AuthFunc` — optional `func(*http.Request) bool` hook called before upgrading each WebSocket connection. Return false to reject with 401 Unauthorized. Use for token validation, session checks, or IP allow-lists.
 - Initial repository structure and CI/CD pipeline
 - Project architecture documentation
 - `sync.ReadSyncMessage` — parses incoming y-protocol messages into type + payload
@@ -21,9 +25,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ClientID` generation changed from `rand.Uint64()` to `rand.Uint32()` to stay within the Yjs wire protocol's 53-bit VarUint limit
 
 ### Fixed
+- `OnUpdate` unsubscribe closure captured the slice index at subscription time; removing subscribers out-of-order removed the wrong callback. Subscriptions now use a unique uint64 ID and search by ID on unsubscribe.
 - ClientID values ≥ 2^53 caused encode/decode round-trip failures (~1 in 256 documents with the old random generation)
 - Sequential insertions into large documents degraded to O(n²) because the LRU position cache was cleared on every insertion; cache is now only invalidated on middle insertions
 - Crafted binary inputs could trigger multi-GB allocations in all V1/V2 decoder loops; OOM guards added throughout
 - `RunGC` rewrote with a correct two-pass algorithm: first pass replaces deleted content with tombstones, second pass merges adjacent tombstones without breaking linked-list references
 
-[Unreleased]: https://github.com/reearth/ygo/compare/HEAD...HEAD
+### Security (pre-release hardening — 2026-04-01)
+
+**Critical fixes:**
+
+- **C1 — Observer deadlock**: `Doc.Transact` previously fired all observer callbacks while holding the document mutex. Any callback that called back into `Transact`, `ApplyUpdate`, or any locked `Doc` method would deadlock permanently. Observers are now snapshotted under the lock and fired after releasing it.
+- **C2 — ReadAny stack overflow DoS**: `encoding.Decoder.ReadAny` recursed without a depth limit. A crafted payload with 100 000-deep nested arrays/maps exhausted the goroutine stack. Recursion is now capped at `maxAnyDepth = 100` levels; deeper inputs return `ErrDepthExceeded`.
+- **C3 — V2 readLen integer overflow**: `v2Decoder.readLen()` cast `uint64 → int` without bounds checking, silently wrapping large values into negatives that bypassed downstream size guards. Values exceeding `math.MaxInt32` now return `ErrInvalidUpdate`.
+- **C4 — YText UTF-16 indexing**: `ContentString.Len()` and `Splice()` previously operated on Unicode rune counts. Yjs and JavaScript use UTF-16 code units. Emoji and other supplementary characters caused index misalignment between ygo and JS peers, silently corrupting collaborative documents. All `ContentString` length arithmetic now uses UTF-16 code units.
+- **C6 — Unbounded WebSocket / HTTP body**: The WebSocket server had no per-frame size limit; the HTTP provider had no body size limit. Both accepted arbitrarily large inputs before any validation, enabling OOM with a single request. WebSocket frames are now capped at 64 MiB via `conn.SetReadLimit`; HTTP POST bodies via `http.MaxBytesReader`.
+- **C7 — Awareness OOM**: `Awareness.ApplyUpdate` allocated a slice sized by the attacker-controlled `numClients` field before any validation. Sending `numClients = 2^63` caused a multi-exabyte allocation attempt. Inputs are now rejected if `numClients > maxAwarenessClients (100 000)` or any single state JSON exceeds `maxAwarenessStateBytes (1 MiB)`.
+- **C9 — V1 struct count unbounded**: V2 decoding already capped the total item count via `maxV2Items`; V1 decoding did not. A crafted V1 update could loop indefinitely allocating items. V1 now applies the same `totalStructs ≤ maxV2Items` check.
+- **C10 — Panic on unsplittable content**: A crafted update could encode a `ContentBinary`, `ContentEmbed`, `ContentFormat`, `ContentType`, or `ContentDoc` item at a clock offset that forced a split, triggering `panic("… is not splittable")` in the receiving process. `applyV1Txn` and `applyV2Txn` now recover such panics and return `ErrInvalidUpdate`.
+- **C11 — LICENSE mismatch**: The README badge incorrectly claimed "Apache 2.0"; the LICENSE file has always been MIT. Badge corrected.
+- **C12 — No context / shutdown support**: `Doc.TransactContext` added for context-aware transaction entry. WebSocket `Server.Shutdown(ctx)` closes all peer connections and returns. The per-peer read loop now exits when the HTTP request context is cancelled (e.g. on graceful server shutdown). A `writeTimeout` write deadline is set on every WebSocket write to prevent slow readers from blocking the broadcast loop.
+
+[1.0.0]: https://github.com/reearth/ygo/releases/tag/v1.0.0

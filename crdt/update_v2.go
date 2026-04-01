@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
@@ -261,7 +262,16 @@ func (d *v2Decoder) readTypeRef() (byte, error) {
 
 func (d *v2Decoder) readLen() (int, error) {
 	v, err := d.lenDec.Read()
-	return int(v), err
+	if err != nil {
+		return 0, err
+	}
+	// Guard against silent wrap: uint64 values larger than MaxInt32 would
+	// produce a negative int on 32-bit platforms and a misleading huge value
+	// on 64-bit platforms that bypasses downstream bounds checks.
+	if v > math.MaxInt32 {
+		return 0, ErrInvalidUpdate
+	}
+	return int(v), nil
 }
 
 func (d *v2Decoder) readKey() (string, error) {
@@ -504,7 +514,15 @@ func encodeDeleteSetV2(enc *v2Encoder, ds DeleteSet) {
 
 // ── V2 decoding ───────────────────────────────────────────────────────────────
 
-func applyV2Txn(txn *Transaction, update []byte) error {
+func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
+	// Same panic recovery as applyV1Txn — guard against crafted V2 updates
+	// that force a Splice on non-splittable content types.
+	defer func() {
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+		}
+	}()
+
 	dec, err := newV2Decoder(update)
 	if err != nil {
 		return err
