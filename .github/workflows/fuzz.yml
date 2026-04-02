@@ -27,7 +27,7 @@ jobs:
           go-version: "1.23"
           cache: true
       - name: Run fuzzer
-        run: go test -fuzz=${{ matrix.target.func }} -fuzztime=300s ${{ matrix.target.pkg }}
+        run: go test -run=^$ -fuzz=${{ matrix.target.func }} -fuzztime=300s ${{ matrix.target.pkg }}
       - name: Upload crash corpus
         if: failure()
         uses: actions/upload-artifact@v4
