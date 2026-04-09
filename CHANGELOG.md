@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] — 2026-04-09
+
+### Fixed
+
+- **GC'd YMap origins crash `StoreUpdate` and break real-time sync**: When a Yjs client sends updates containing GC structs from repeated `YMap.Set` on the same key, the decoder errored with "N items with unresolvable parents" and rejected the entire update — crashing persistence and dropping broadcasts for the whole room. Fixed: the decoder now stores orphaned items gracefully (matching y-websocket JS server behavior), and the encoder re-encodes them as GC structs for valid clock accounting. Multi-client documents resolve the parent from other clients' items when available.
+- **Encoder wrote corrupt parent info for items with GC'd origins**: `EncodeStateAsUpdateV1`/V2 wrote origin references pointing to parentless GC placeholders, which receivers couldn't decode. Fixed: the encoder detects GC'd origins and falls back to explicit parent info (named root type or container item ID).
+
 ## [1.0.2] — 2026-04-09
 
 ### Added
@@ -108,6 +115,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.0.3]: https://github.com/reearth/ygo/releases/tag/v1.0.3
 [1.0.2]: https://github.com/reearth/ygo/releases/tag/v1.0.2
 [1.0.1]: https://github.com/reearth/ygo/releases/tag/v1.0.1
 [1.0.0]: https://github.com/reearth/ygo/releases/tag/v1.0.0
