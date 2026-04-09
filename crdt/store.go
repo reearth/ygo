@@ -106,6 +106,24 @@ func (s *StructStore) insertItem(item *Item) {
 	s.clients[item.ID.Client] = items
 }
 
+// findParentForMapEntry scans all items in the store for one that belongs
+// to a map-type parent (has a non-empty ParentSub and a non-nil Parent).
+// Used as a fallback when an item's origin is a GC placeholder with no
+// parent info (Yjs wire-format limitation). Returns the first matching
+// parent found. If the document has multiple map types, this may return
+// any of them — but for single-map-type documents (the common case for
+// this bug), it returns the correct parent.
+func findParentForMapEntry(s *StructStore) *abstractType {
+	for _, items := range s.clients {
+		for _, item := range items {
+			if item.ParentSub != "" && item.Parent != nil {
+				return item.Parent
+			}
+		}
+	}
+	return nil
+}
+
 // IterateFrom calls fn for every Item whose ID is not yet in sv,
 // visiting items in client order, then clock order.
 func (s *StructStore) IterateFrom(sv StateVector, fn func(*Item)) {

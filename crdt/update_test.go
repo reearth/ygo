@@ -588,6 +588,66 @@ func TestUnit_WithGUID(t *testing.T) {
 	assert.Empty(t, doc2.GUID())
 }
 
+func TestUnit_MergeUpdatesV1_YMapWithGCdOrigins(t *testing.T) {
+	// Reproduce: repeated YMap.Set on same key → delete+insert cycles.
+	// After merge (which creates a fresh gc=true doc), deleted items become
+	// GC structs. The encoder must fall back to explicit parent info when
+	// the origin item is a GC placeholder.
+	doc := New(WithClientID(1))
+	m := doc.GetMap("meta")
+
+	var updates [][]byte
+	doc.OnUpdate(func(update []byte, _ any) {
+		updates = append(updates, update)
+	})
+
+	for i := 0; i < 5; i++ {
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "title", i)
+		})
+	}
+
+	// Fold updates one at a time (simulates MemoryPersistence).
+	var merged []byte
+	for i, u := range updates {
+		if len(merged) == 0 {
+			merged = u
+		} else {
+			var err error
+			merged, err = MergeUpdatesV1(merged, u)
+			require.NoError(t, err, "merge failed at update %d", i)
+		}
+	}
+
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, merged, nil))
+
+	val, ok := doc2.GetMap("meta").Get("title")
+	require.True(t, ok, "key 'title' not found")
+	assert.Equal(t, int64(4), val)
+}
+
+func TestUnit_EncodeState_YMapGCdOrigins_RoundTrip(t *testing.T) {
+	// Create a doc with GC'd YMap items, encode full state, decode on fresh doc.
+	doc := New(WithClientID(1))
+	m := doc.GetMap("data")
+
+	for i := 0; i < 10; i++ {
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "key", i)
+		})
+	}
+	RunGC(doc)
+
+	update := EncodeStateAsUpdateV1(doc, nil)
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, update, nil))
+
+	val, ok := doc2.GetMap("data").Get("key")
+	require.True(t, ok)
+	assert.Equal(t, int64(9), val)
+}
+
 func TestUnit_ApplyUpdateV1_CrossClientMultiHop(t *testing.T) {
 	// Three clients where dependencies chain: 100→200→300.
 	// All items end up in the same YText "t".

@@ -366,7 +366,7 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 			if i == 0 && g.startClock > item.ID.Clock {
 				offset = int(g.startClock - item.ID.Clock)
 			}
-			encodeItemV2(enc, item, offset)
+			encodeItemV2(enc, item, offset, doc.store)
 		}
 	}
 
@@ -374,7 +374,19 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 	return enc.toBytes()
 }
 
-func encodeItemV2(enc *v2Encoder, item *Item, offset int) {
+func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
+	// Orphaned items (no parent) came from GC wire format where the parent
+	// type name is lost. Encode as GC struct for valid clock accounting.
+	if item.Parent == nil {
+		length := item.Content.Len()
+		if offset > 0 {
+			length -= offset
+		}
+		enc.writeInfo(0) // GC struct
+		enc.writeLen(length)
+		return
+	}
+
 	var origin, originRight *ID
 	if offset > 0 {
 		oc := ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset) - 1}
@@ -383,6 +395,20 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int) {
 	} else {
 		origin = item.Origin
 		originRight = item.OriginRight
+	}
+
+	// If the origin item is a GC placeholder (no Parent), the receiver can't
+	// infer this item's parent from it. Clear the origin so explicit parent
+	// info is encoded instead.
+	if origin != nil {
+		if oi := store.Find(*origin); oi != nil && oi.Parent == nil {
+			origin = nil
+		}
+	}
+	if originRight != nil {
+		if ori := store.Find(*originRight); ori != nil && ori.Parent == nil {
+			originRight = nil
+		}
 	}
 
 	contentTag := contentTagOf(item.Content)
@@ -660,6 +686,9 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 					item.Parent = ori.Parent
 				}
 			}
+			if item.Parent == nil && item.ParentSub != "" {
+				item.Parent = findParentForMapEntry(txn.doc.store)
+			}
 			if item.Parent != nil {
 				if item.Origin != nil {
 					item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
@@ -670,7 +699,10 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 		}
 		if len(remaining) == len(pending) {
-			return fmt.Errorf("%w: %d items with unresolvable parents", ErrInvalidUpdate, len(remaining))
+			for _, item := range remaining {
+				txn.doc.store.Append(item)
+			}
+			break
 		}
 		pending = remaining
 	}

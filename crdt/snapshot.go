@@ -163,7 +163,7 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 		enc.WriteVarUint(uint64(g.client))
 		enc.WriteVarUint(0) // startClock = 0 (encoding from the beginning)
 		for _, item := range g.items {
-			encodeItem(enc, item, 0)
+			encodeItem(enc, item, 0, doc.store)
 		}
 	}
 
