@@ -198,6 +198,19 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 }
 
 func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStore) {
+	// Orphaned items (no parent) came from GC wire format where the parent
+	// type name is lost. Encode them as GC structs so receivers get valid
+	// clock accounting instead of corrupt data.
+	if item.Parent == nil {
+		length := item.Content.Len()
+		if offset > 0 {
+			length -= offset
+		}
+		enc.WriteUint8(0) // GC struct info byte
+		enc.WriteVarUint(uint64(length))
+		return
+	}
+
 	var tag byte
 	switch item.Content.(type) {
 	case *ContentDeleted:
@@ -515,6 +528,14 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 					item.Parent = ori.Parent
 				}
 			}
+			// If the origin is a GC placeholder (no parent), search the
+			// entire store for an item with the same ParentSub that does
+			// have a parent. This handles the Yjs wire-format case where
+			// deleted YMap entries become GC structs and the parent type
+			// name is lost.
+			if item.Parent == nil && item.ParentSub != "" {
+				item.Parent = findParentForMapEntry(txn.doc.store)
+			}
 			if item.Parent != nil {
 				if item.Origin != nil {
 					item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
@@ -525,7 +546,15 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 		}
 		if len(remaining) == len(pending) {
-			return fmt.Errorf("%w: %d items with unresolvable parents", ErrInvalidUpdate, len(remaining))
+			// Items whose parents are truly unresolvable (e.g. all
+			// predecessors are GC structs from the Yjs wire format with
+			// no parent info). Store them in the struct store without
+			// integration so they survive re-encoding — the encoder
+			// will write explicit parent info for late-joining clients.
+			for _, item := range remaining {
+				txn.doc.store.Append(item)
+			}
+			break
 		}
 		pending = remaining
 	}
