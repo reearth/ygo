@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-04-09
+
+### Fixed
+
+- **Room-splitting race in WebSocket server**: `handleDisconnect` checked room emptiness without holding the room lock under the server map lock, allowing a concurrent join to slip in between the check and room deletion. This could fork one logical document into two independent rooms for the same name. Fixed: peer removal and room deletion are now atomic under both `server.rmu` and `room.mu` (consistent lock ordering); peer addition in `ServeHTTP` holds `server.rmu.RLock` to prevent concurrent room deletion.
+- **Invalid awareness updates broadcast to all peers**: The `msgAwareness` handler ignored the return value of `Awareness.ApplyUpdate` and broadcast the raw payload unconditionally. A malicious peer could fan out rejected payloads to every client in the room. Fixed: updates that fail server-side validation are now dropped silently.
+- **Persistence failures silently converted to success**: `LoadDoc` and `ApplyUpdateV1` errors during room bootstrap were ignored, and `StoreUpdate` ran in fire-and-forget goroutines that swallowed both panics and errors. After a restart, accepted edits could vanish. Fixed: `getOrCreateRoom` propagates persistence errors (returns HTTP 500); `StoreUpdate` writes are serialised through a per-room buffered channel with error/panic logging; `Shutdown` waits for all persistence goroutines to drain.
+
 ## [1.0.0] — 2026-04-01
 
 ### Added
@@ -83,4 +91,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.0.1]: https://github.com/reearth/ygo/releases/tag/v1.0.1
 [1.0.0]: https://github.com/reearth/ygo/releases/tag/v1.0.0

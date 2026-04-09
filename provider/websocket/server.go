@@ -11,6 +11,8 @@ package websocket
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -110,6 +112,11 @@ type room struct {
 	awareness   *awareness.Awareness
 	peers       map[*peer]struct{}
 	activePeers atomic.Int64 // atomic; live peers in this room
+
+	// Persistence write queue. nil when no PersistenceAdapter is configured.
+	persistCh   chan []byte   // buffered channel for serialised writes
+	persistStop chan struct{} // closed to signal goroutine to drain and exit
+	persistDone chan struct{} // closed when persistence goroutine exits
 }
 
 // peer is one connected WebSocket client.
@@ -220,15 +227,19 @@ func NewServer() *Server {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
 
-	// Collect all active peer connections.
+	// Collect all active peer connections and persistence channels.
 	s.rmu.RLock()
 	var conns []*gws.Conn
+	var persistDones []chan struct{}
 	for _, r := range s.rooms {
 		r.mu.Lock()
 		for p := range r.peers {
 			conns = append(conns, p.conn)
 		}
 		r.mu.Unlock()
+		if r.persistDone != nil {
+			persistDones = append(persistDones, r.persistDone)
+		}
 	}
 	s.rmu.RUnlock()
 
@@ -236,6 +247,21 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// ReadMessage call, triggering handleDisconnect cleanup.
 	for _, c := range conns {
 		_ = c.Close()
+	}
+
+	// Wait for all persistence goroutines to drain in-flight writes.
+	// Disconnect handlers (triggered by the connection closes above) signal
+	// persistence goroutines to stop as rooms become empty.
+	done := make(chan struct{})
+	go func() {
+		for _, ch := range persistDones {
+			<-ch
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
 	}
 
 	return ctx.Err()
@@ -260,11 +286,11 @@ func (s *Server) GetDoc(name string) *crdt.Doc {
 	return nil
 }
 
-func (s *Server) getOrCreateRoom(name string) *room {
+func (s *Server) getOrCreateRoom(name string) (*room, error) {
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
 	if r, ok := s.rooms[name]; ok {
-		return r
+		return r, nil
 	}
 	r := &room{
 		doc:       crdt.New(),
@@ -272,31 +298,59 @@ func (s *Server) getOrCreateRoom(name string) *room {
 		peers:     make(map[*peer]struct{}),
 	}
 	if s.persistence != nil {
-		// Bootstrap the document from persisted state (ignore errors — start
-		// with an empty doc if loading fails).
-		if data, err := s.persistence.LoadDoc(name); err == nil && len(data) > 0 {
-			_ = crdt.ApplyUpdateV1(r.doc, data, nil)
+		data, err := s.persistence.LoadDoc(name)
+		if err != nil {
+			return nil, fmt.Errorf("loading room %q: %w", name, err)
 		}
-		// Persist every incremental update produced by transactions in this room.
-		// Run StoreUpdate in a separate goroutine so that a slow storage backend
-		// does not block the Transact caller and the broadcast loop (N-H7).
-		// PersistenceAdapter implementations must be safe for concurrent use.
-		r.doc.OnUpdate(func(update []byte, _ any) {
-			go func() {
+		if len(data) > 0 {
+			if err := crdt.ApplyUpdateV1(r.doc, data, nil); err != nil {
+				return nil, fmt.Errorf("bootstrapping room %q: %w", name, err)
+			}
+		}
+		// Serialise persistence writes through a buffered channel so that a
+		// slow storage backend does not block the Transact caller (N-H7) and
+		// writes arrive in order.
+		r.persistCh = make(chan []byte, 256)
+		r.persistStop = make(chan struct{})
+		r.persistDone = make(chan struct{})
+		go func() {
+			defer close(r.persistDone)
+			store := func(update []byte) {
 				defer func() {
-					if r := recover(); r != nil {
-						// Persistence panic must not crash the server.
-						// The update is lost for this client; the room doc
-						// remains consistent in memory.
-						_ = r
+					if rv := recover(); rv != nil {
+						log.Printf("ygo/websocket: StoreUpdate panic for room %q: %v", name, rv)
 					}
 				}()
-				_ = s.persistence.StoreUpdate(name, update)
-			}()
+				if err := s.persistence.StoreUpdate(name, update); err != nil {
+					log.Printf("ygo/websocket: StoreUpdate for room %q: %v", name, err)
+				}
+			}
+			for {
+				select {
+				case update := <-r.persistCh:
+					store(update)
+				case <-r.persistStop:
+					// Drain buffered updates before exiting.
+					for {
+						select {
+						case update := <-r.persistCh:
+							store(update)
+						default:
+							return
+						}
+					}
+				}
+			}
+		}()
+		r.doc.OnUpdate(func(update []byte, _ any) {
+			select {
+			case r.persistCh <- update:
+			case <-r.persistStop:
+			}
 		})
 	}
 	s.rooms[name] = r
-	return r
+	return r, nil
 }
 
 // ServeHTTP upgrades the request to WebSocket and runs the peer sync loop.
@@ -317,7 +371,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rm := s.getOrCreateRoom(name)
+	rm, err := s.getOrCreateRoom(name)
+	if err != nil {
+		http.Error(w, "room unavailable", http.StatusInternalServerError)
+		return
+	}
 
 	// Enforce per-room and server-wide connection limits before upgrading so
 	// that rejected requests get a clean HTTP 503 rather than an abrupt close
@@ -366,9 +424,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		clientIDs: make(map[uint64]struct{}),
 	}
 
+	// Verify the room is still in the server map before adding the peer.
+	// Holding rmu.RLock prevents handleDisconnect from deleting the room
+	// (it needs rmu.Lock), closing the TOCTOU window between getOrCreateRoom
+	// and peer addition.
+	s.rmu.RLock()
+	if current, ok := s.rooms[name]; !ok || current != rm {
+		s.rmu.RUnlock()
+		if s.MaxPeersPerRoom > 0 {
+			rm.activePeers.Add(-1)
+		}
+		if s.MaxConnections > 0 {
+			s.activeConns.Add(-1)
+		}
+		_ = ws.Close()
+		return
+	}
 	rm.mu.Lock()
 	rm.peers[p] = struct{}{}
 	rm.mu.Unlock()
+	s.rmu.RUnlock()
 
 	defer func() {
 		close(p.done) // H1: unblock the context-watcher goroutine
@@ -451,7 +526,9 @@ func (p *peer) handleMessage(data []byte) {
 			return
 		}
 		p.trackAwarenessClients(awBytes)
-		_ = p.room.awareness.ApplyUpdate(awBytes, p)
+		if err := p.room.awareness.ApplyUpdate(awBytes, p); err != nil {
+			return // Drop invalid awareness updates; do not broadcast.
+		}
 		p.broadcastAwareness(awBytes)
 
 	case msgQueryAwareness:
@@ -497,10 +574,24 @@ func (p *peer) handleDisconnect() {
 	p.wmu.Unlock()
 
 	rm := p.room
+
+	// Acquire both locks (server map first, then room) to atomically remove
+	// the peer and, if the room is now empty, delete the room from the server
+	// map and stop the persistence goroutine. This prevents a TOCTOU race
+	// where a new peer joins between the emptiness check and room deletion,
+	// which would fork the logical document into two rooms.
+	p.server.rmu.Lock()
 	rm.mu.Lock()
 	delete(rm.peers, p)
 	empty := len(rm.peers) == 0
+	if empty {
+		delete(p.server.rooms, p.roomName)
+		if rm.persistStop != nil {
+			close(rm.persistStop)
+		}
+	}
 	rm.mu.Unlock()
+	p.server.rmu.Unlock()
 
 	// Decrement atomic connection counters now that the peer has left.
 	if p.server.MaxPeersPerRoom > 0 {
@@ -510,15 +601,10 @@ func (p *peer) handleDisconnect() {
 		p.server.activeConns.Add(-1)
 	}
 
-	// C1: delete the room from the server map when the last peer leaves so the
-	// map does not grow unboundedly. Re-check emptiness under the server write
-	// lock to guard against a concurrent getOrCreateRoom racing us.
-	if empty {
-		p.server.rmu.Lock()
-		if r, ok := p.server.rooms[p.roomName]; ok && len(r.peers) == 0 {
-			delete(p.server.rooms, p.roomName)
-		}
-		p.server.rmu.Unlock()
+	// Wait for the persistence goroutine to drain buffered writes before the
+	// room reference becomes garbage. This runs outside the locks above.
+	if empty && rm.persistDone != nil {
+		<-rm.persistDone
 	}
 
 	p.cidMu.Lock()

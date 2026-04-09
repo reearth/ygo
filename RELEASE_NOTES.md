@@ -1,16 +1,13 @@
-## Highlights
+## Fixes
 
-- Pure-Go Yjs CRDT library, binary-compatible with the Yjs v13.x JS reference implementation
-- `RelativePosition` / `AbsolutePosition` — stable cursors that survive concurrent insertions and deletions
-- `UndoManager` with undo/redo and per-user origin tracking
-- `YText.ApplyDelta` — ingest Quill-compatible deltas from JS clients
-- WebSocket provider with auth hook, per-room connection limits, and pluggable persistence
-- 17 security vulnerabilities fixed; all packages pass the race detector at 90% test coverage
+- **Room-splitting race**: concurrent join + disconnect could fork a document into two rooms for the same name
+- **Awareness validation bypass**: invalid awareness payloads were broadcast to all peers even after server-side rejection
+- **Silent persistence failures**: `LoadDoc`/`StoreUpdate` errors were swallowed; writes are now serialised per room with error logging, and `Shutdown` waits for in-flight persistence
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.0.0
+go get github.com/reearth/ygo@v1.0.1
 ```
 
-See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for the full list of changes.
+See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
