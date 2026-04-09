@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] — 2026-04-09
+
+### Added
+- `Doc.GUID()` accessor and `WithGUID(string)` option for subdocument identity.
+
+### Fixed
+
+- **V1 GC struct decoding (tag 0)**: Yjs encodes garbage-collected items as `{info=0, VarUint(length)}`. The V1 decoder didn't recognize tag 0, misaligning the decoder for all subsequent items. Fixed: tag 0 returns a `ContentDeleted` placeholder added directly to the store.
+- **V1 skip struct decoding (tag 10)**: Yjs uses skip structs for clock-range placeholders in partial updates. The V1 decoder rejected them as "unknown content tag: 10". Fixed: tag 10 is decoded and the clock advances without storing anything, matching V2 behavior.
+- **Cross-client parent resolution (V1 and V2)**: When items from a lower-client-ID group reference items from a higher-client-ID group via `Origin`, the parent resolution failed because the higher group hadn't been decoded yet. Fixed: unresolvable items are collected in a pending queue and retried in a loop after all client groups are decoded.
+- **ContentDoc discarded subdocument GUID**: Both V1 and V2 decoders read the subdocument GUID from the wire but discarded it, creating an empty Doc. Fixed: GUID is preserved via `WithGUID` and correctly round-trips through V1 and V2 encoding.
+- **Room name validation too restrictive**: `isValidRoomName` only allowed `[A-Za-z0-9._-]`, rejecting room names with spaces or Unicode that the y-websocket JS client permits. Fixed: now allows all printable characters (rejects only control chars, empty string, `"."`, `".."`, and names > 255 bytes).
+- **y-websocket auth message (type 2) unhandled**: Message type 2 (auth) is defined by y-websocket but was not explicitly handled. Fixed: silently ignored with a documented `case msgAuth`.
+
+### Changed
+- `YArray.Move` godoc now warns that it is not CRDT-safe for concurrent multi-client use (delete-then-insert loses causal history).
+
 ## [1.0.1] — 2026-04-09
 
 ### Fixed
@@ -91,5 +108,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.0.2]: https://github.com/reearth/ygo/releases/tag/v1.0.2
 [1.0.1]: https://github.com/reearth/ygo/releases/tag/v1.0.1
 [1.0.0]: https://github.com/reearth/ygo/releases/tag/v1.0.0

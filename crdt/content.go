@@ -206,3 +206,15 @@ func (c *ContentDoc) Len() int             { return 1 }
 func (c *ContentDoc) IsCountable() bool    { return true }
 func (c *ContentDoc) Copy() Content        { return &ContentDoc{c.Doc} }
 func (c *ContentDoc) Splice(_ int) Content { panic("crdt: ContentDoc is not splittable") }
+
+// contentSkip is a decode-only placeholder for V1 skip structs (tag 10).
+// Skip structs represent clock ranges the sender intentionally omits.
+// They are consumed during decoding and never stored in the document.
+type contentSkip struct{ length int }
+
+func (s *contentSkip) Len() int          { return s.length }
+func (s *contentSkip) IsCountable() bool { return false }
+func (s *contentSkip) Copy() Content     { return &contentSkip{s.length} }
+func (s *contentSkip) Splice(_ int) Content {
+	panic("crdt: contentSkip is not splittable")
+}

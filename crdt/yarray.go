@@ -244,8 +244,13 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 
 // Move removes the element at fromIndex and reinserts it at toIndex.
 // Both indices are in terms of the logical (non-deleted) position.
-// Note: this is a simplified delete-then-insert implementation; the moved
-// element receives a new Item ID and loses its original causal history.
+//
+// WARNING: Move is NOT safe for concurrent use across multiple clients.
+// It is implemented as delete-then-insert: the moved element receives a new
+// Item ID and loses its original causal history. If two peers concurrently
+// move the same element, the result may contain duplicates or lose the
+// element entirely. Use Move only in single-writer scenarios or when
+// application-level conflict resolution is in place.
 //
 // Move walks the linked list directly instead of calling Get() because Get()
 // acquires doc.mu.RLock() while Move is called from inside a Transact callback

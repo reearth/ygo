@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/encoding"
 )
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -411,4 +413,225 @@ func FuzzApplyUpdateV2(f *testing.F) {
 		d := New()
 		_ = ApplyUpdateV2(d, data, nil) // must not panic regardless of input
 	})
+}
+
+// ── GC struct and cross-client tests ─────────────────────────────────────────
+
+func TestUnit_ApplyUpdateV1_GCStructDecode(t *testing.T) {
+	// Yjs encodes GC items as {info=0, VarUint(length)}. Verify the V1
+	// decoder handles them without misaligning subsequent items.
+	enc := encoding.NewEncoder()
+
+	enc.WriteVarUint(1) // 1 client group
+	enc.WriteVarUint(2) // 2 structs
+	enc.WriteVarUint(1) // clientID = 1
+	enc.WriteVarUint(0) // startClock = 0
+
+	// Struct 0: GC (info=0, length=5)
+	enc.WriteUint8(0)
+	enc.WriteVarUint(5)
+
+	// Struct 1: string item at clock 5, parent = root "content"
+	enc.WriteUint8(wireString) // tag=4, no flags
+	enc.WriteUint8(1)          // parentInfo=1 → named root
+	enc.WriteVarString("content")
+	enc.WriteVarString("world")
+
+	enc.WriteVarUint(0) // empty delete set
+
+	doc := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc, enc.Bytes(), nil))
+	assert.Equal(t, "world", doc.GetText("content").ToString())
+}
+
+func TestUnit_ApplyUpdateV1_CrossClientParentResolution(t *testing.T) {
+	// Client 200 creates "hello" in YText "t". Client 100 appends " world"
+	// with origin={200,4}. Encoding order is by client ID: 100 before 200,
+	// so client 100's origin is not yet decoded when first encountered.
+	enc := encoding.NewEncoder()
+
+	enc.WriteVarUint(2) // 2 client groups
+
+	// Group 1: client=100
+	enc.WriteVarUint(1)   // 1 struct
+	enc.WriteVarUint(100) // clientID
+	enc.WriteVarUint(0)   // startClock
+
+	enc.WriteUint8(wireString | flagHasOrigin)
+	enc.WriteVarUint(200) // origin client
+	enc.WriteVarUint(4)   // origin clock (last char of "hello")
+	enc.WriteVarString(" world")
+
+	// Group 2: client=200
+	enc.WriteVarUint(1)   // 1 struct
+	enc.WriteVarUint(200) // clientID
+	enc.WriteVarUint(0)   // startClock
+
+	enc.WriteUint8(wireString) // no flags → explicit parent
+	enc.WriteUint8(1)          // named root
+	enc.WriteVarString("t")
+	enc.WriteVarString("hello")
+
+	enc.WriteVarUint(0) // empty delete set
+
+	doc := New(WithClientID(999))
+	require.NoError(t, ApplyUpdateV1(doc, enc.Bytes(), nil))
+	assert.Equal(t, "hello world", doc.GetText("t").ToString())
+}
+
+func TestUnit_ApplyUpdateV1_GCThenCrossClient(t *testing.T) {
+	// Combines both GC structs and cross-client references in one update.
+	// Client 100: GC(len=3) at clock 0, then string " end" at clock 3
+	//             with origin={200, 1} (cross-client).
+	// Client 200: string "ab" at clock 0, parent = root "t".
+	enc := encoding.NewEncoder()
+
+	enc.WriteVarUint(2) // 2 client groups
+
+	// Group 1: client=100
+	enc.WriteVarUint(2)   // 2 structs
+	enc.WriteVarUint(100) // clientID
+	enc.WriteVarUint(0)   // startClock
+
+	// GC struct: clock 0, length 3
+	enc.WriteUint8(0)
+	enc.WriteVarUint(3)
+
+	// String item: clock 3, origin={200, 1}
+	enc.WriteUint8(wireString | flagHasOrigin)
+	enc.WriteVarUint(200) // origin client
+	enc.WriteVarUint(1)   // origin clock
+	enc.WriteVarString(" end")
+
+	// Group 2: client=200
+	enc.WriteVarUint(1)   // 1 struct
+	enc.WriteVarUint(200) // clientID
+	enc.WriteVarUint(0)   // startClock
+
+	enc.WriteUint8(wireString) // no flags → explicit parent
+	enc.WriteUint8(1)          // named root
+	enc.WriteVarString("t")
+	enc.WriteVarString("ab")
+
+	enc.WriteVarUint(0) // empty delete set
+
+	doc := New(WithClientID(999))
+	require.NoError(t, ApplyUpdateV1(doc, enc.Bytes(), nil))
+	assert.Equal(t, "ab end", doc.GetText("t").ToString())
+}
+
+func TestUnit_ApplyUpdateV1_SkipStruct(t *testing.T) {
+	// Skip structs (tag 10) represent clock gaps the sender intentionally
+	// omits. Verify the V1 decoder handles them without error and that
+	// regular items after the skip decode correctly.
+	enc := encoding.NewEncoder()
+
+	enc.WriteVarUint(1) // 1 client group
+	enc.WriteVarUint(2) // 2 structs
+	enc.WriteVarUint(1) // clientID = 1
+	enc.WriteVarUint(0) // startClock = 0
+
+	// Skip struct: info byte with tag=10, then VarUint(length)
+	enc.WriteUint8(10)  // tag=10 (skip), no flags
+	enc.WriteVarUint(5) // skip 5 clock values
+
+	// Regular string at clock 5
+	enc.WriteUint8(wireString)
+	enc.WriteUint8(1) // named root
+	enc.WriteVarString("t")
+	enc.WriteVarString("hello")
+
+	enc.WriteVarUint(0) // empty delete set
+
+	doc := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc, enc.Bytes(), nil))
+	assert.Equal(t, "hello", doc.GetText("t").ToString())
+}
+
+func TestUnit_ContentDoc_GUID_V1RoundTrip(t *testing.T) {
+	// Verify that a subdocument's GUID survives V1 encode → decode.
+	// Build a synthetic V1 update with a wireDoc content item.
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(1) // 1 client group
+	enc.WriteVarUint(1) // 1 struct
+	enc.WriteVarUint(1) // clientID = 1
+	enc.WriteVarUint(0) // startClock = 0
+
+	enc.WriteUint8(wireDoc) // tag=9 (wireDoc), no flags
+	enc.WriteUint8(1)       // parentInfo=1 → named root
+	enc.WriteVarString("subdocs")
+	enc.WriteVarBytes([]byte("my-subdoc-id")) // guid
+
+	enc.WriteVarUint(0) // empty delete set
+
+	doc := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc, enc.Bytes(), nil))
+
+	// Re-encode and decode again to verify GUID round-trips.
+	update2 := EncodeStateAsUpdateV1(doc, nil)
+	doc2 := New(WithClientID(3))
+	require.NoError(t, ApplyUpdateV1(doc2, update2, nil))
+
+	// Walk the store to find the ContentDoc and verify its GUID.
+	items := doc2.store.clients[1]
+	require.Len(t, items, 1)
+	cd, ok := items[0].Content.(*ContentDoc)
+	require.True(t, ok, "expected ContentDoc")
+	assert.Equal(t, "my-subdoc-id", cd.Doc.GUID())
+}
+
+func TestUnit_WithGUID(t *testing.T) {
+	doc := New(WithGUID("test-guid"))
+	assert.Equal(t, "test-guid", doc.GUID())
+
+	doc2 := New()
+	assert.Empty(t, doc2.GUID())
+}
+
+func TestUnit_ApplyUpdateV1_CrossClientMultiHop(t *testing.T) {
+	// Three clients where dependencies chain: 100→200→300.
+	// All items end up in the same YText "t".
+	//
+	// Client 300: "A" at clock 0 (root, no origin)
+	// Client 200: "B" at clock 0, origin={300, 0}
+	// Client 100: "C" at clock 0, origin={200, 0}
+	//
+	// Encoded order: 100, 200, 300. Neither 100 nor 200 can resolve
+	// parents on the first pass.
+	enc := encoding.NewEncoder()
+
+	enc.WriteVarUint(3) // 3 client groups
+
+	// Group 1: client=100
+	enc.WriteVarUint(1)
+	enc.WriteVarUint(100)
+	enc.WriteVarUint(0)
+	enc.WriteUint8(wireString | flagHasOrigin)
+	enc.WriteVarUint(200)
+	enc.WriteVarUint(0)
+	enc.WriteVarString("C")
+
+	// Group 2: client=200
+	enc.WriteVarUint(1)
+	enc.WriteVarUint(200)
+	enc.WriteVarUint(0)
+	enc.WriteUint8(wireString | flagHasOrigin)
+	enc.WriteVarUint(300)
+	enc.WriteVarUint(0)
+	enc.WriteVarString("B")
+
+	// Group 3: client=300
+	enc.WriteVarUint(1)
+	enc.WriteVarUint(300)
+	enc.WriteVarUint(0)
+	enc.WriteUint8(wireString)
+	enc.WriteUint8(1)
+	enc.WriteVarString("t")
+	enc.WriteVarString("A")
+
+	enc.WriteVarUint(0) // empty delete set
+
+	doc := New(WithClientID(999))
+	require.NoError(t, ApplyUpdateV1(doc, enc.Bytes(), nil))
+	assert.Equal(t, "ABC", doc.GetText("t").ToString())
 }
