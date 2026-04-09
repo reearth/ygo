@@ -20,7 +20,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	gws "github.com/gorilla/websocket"
 
@@ -39,6 +38,7 @@ const writeTimeout = 10 * time.Second
 const (
 	msgSync           = uint64(0)
 	msgAwareness      = uint64(1)
+	msgAuth           = uint64(2) // y-websocket auth; silently ignored
 	msgQueryAwareness = uint64(3)
 )
 
@@ -198,13 +198,19 @@ func (s *Server) checkOrigin(r *http.Request) bool {
 }
 
 // isValidRoomName reports whether name is a safe, non-empty room identifier.
-// Allowed characters: letters, digits, hyphen, underscore, dot. Max 255 bytes.
+// Rejected: empty string, names exceeding 255 bytes, names consisting solely
+// of "." or ".." (path traversal), and names containing control characters
+// (runes < 0x20). All other printable content, including spaces and Unicode,
+// is permitted — matching the permissive behavior of the y-websocket JS server.
 func isValidRoomName(name string) bool {
 	if len(name) == 0 || len(name) > 255 {
 		return false
 	}
+	if name == "." || name == ".." {
+		return false
+	}
 	for _, r := range name {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_' && r != '.' {
+		if r < 0x20 {
 			return false
 		}
 	}
@@ -530,6 +536,10 @@ func (p *peer) handleMessage(data []byte) {
 			return // Drop invalid awareness updates; do not broadcast.
 		}
 		p.broadcastAwareness(awBytes)
+
+	case msgAuth:
+		// Auth messages (type 2) are defined by y-websocket but not used by
+		// this server. Silently ignore.
 
 	case msgQueryAwareness:
 		p.sendAwareness(p.room.awareness.EncodeUpdate(nil))

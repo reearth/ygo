@@ -35,6 +35,12 @@ func WithGC(gc bool) DocOption {
 	return func(d *Doc) { d.gc = gc }
 }
 
+// WithGUID sets the document's subdocument identifier. When a Doc is embedded
+// inside another Doc via ContentDoc, the GUID identifies it across peers.
+func WithGUID(guid string) DocOption {
+	return func(d *Doc) { d.guid = guid }
+}
+
 // updateSub pairs a unique subscription ID with its callback so that
 // unsubscribe closures can find and remove the right entry even when
 // callbacks are removed out-of-order.
@@ -54,6 +60,7 @@ type transactionSub struct {
 type Doc struct {
 	clientID ClientID
 	gc       bool
+	guid     string // subdocument identifier; empty for root docs
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -82,6 +89,11 @@ type Doc struct {
 // ClientID returns the document's client identifier (read-only after creation).
 func (d *Doc) ClientID() ClientID {
 	return d.clientID
+}
+
+// GUID returns the document's subdocument identifier (empty for root docs).
+func (d *Doc) GUID() string {
+	return d.guid
 }
 
 // New creates a new Doc with a randomly generated ClientID.

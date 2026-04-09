@@ -312,7 +312,11 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 			enc.WriteAny(v)
 		}
 	case *ContentDoc:
-		enc.WriteVarBytes([]byte{})
+		guid := ""
+		if ct.Doc != nil {
+			guid = ct.Doc.GUID()
+		}
+		enc.WriteVarBytes([]byte(guid))
 	}
 }
 
@@ -397,6 +401,8 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		return ErrInvalidUpdate
 	}
 
+	var pending []*Item
+
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
 		numStructs, err := dec.ReadVarUint()
@@ -424,6 +430,14 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			if err != nil {
 				return wrapUpdateErr(err)
 			}
+
+			// Skip structs (tag 10) are clock-range placeholders that are
+			// never stored — just advance the clock.
+			if _, isSkip := item.Content.(*contentSkip); isSkip {
+				clock += uint64(item.Content.Len())
+				continue
+			}
+
 			contentLen := uint64(item.Content.Len())
 			itemEnd := clock + contentLen
 
@@ -439,6 +453,26 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 				offset = int(existingEnd - clock)
 			}
 
+			// GC items (tag 0) have no parent — add directly to the store
+			// without linked-list integration.
+			if item.Parent == nil && item.Deleted {
+				if offset > 0 {
+					item.ID.Clock += uint64(offset)
+					item.Content = item.Content.Splice(offset)
+				}
+				txn.doc.store.Append(item)
+				clock = itemEnd
+				continue
+			}
+
+			// Items whose parent can't be resolved yet (cross-client
+			// reference to a group not yet decoded) are deferred.
+			if item.Parent == nil {
+				pending = append(pending, item)
+				clock = itemEnd
+				continue
+			}
+
 			// Resolve left neighbor from the Origin ID so that integrate()
 			// starts its scan from the correct position in the linked list.
 			// (Local inserts set item.Left directly; remote items only have Origin.)
@@ -449,6 +483,36 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			item.integrate(txn, offset)
 			clock = itemEnd
 		}
+	}
+
+	// Retry items whose parent couldn't be resolved during the first pass
+	// because their origin items were in a later client group.
+	for len(pending) > 0 {
+		var remaining []*Item
+		for _, item := range pending {
+			if item.Origin != nil {
+				if oi := txn.doc.store.Find(*item.Origin); oi != nil {
+					item.Parent = oi.Parent
+				}
+			}
+			if item.Parent == nil && item.OriginRight != nil {
+				if ori := txn.doc.store.Find(*item.OriginRight); ori != nil {
+					item.Parent = ori.Parent
+				}
+			}
+			if item.Parent != nil {
+				if item.Origin != nil {
+					item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
+				}
+				item.integrate(txn, 0)
+			} else {
+				remaining = append(remaining, item)
+			}
+		}
+		if len(remaining) == len(pending) {
+			return fmt.Errorf("%w: %d items with unresolvable parents", ErrInvalidUpdate, len(remaining))
+		}
+		pending = remaining
 	}
 
 	ds, err := decodeDeleteSet(dec)
@@ -465,6 +529,35 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 		return nil, err
 	}
 	tag := info & 0x1F
+
+	// GC struct (tag 0): placeholder for garbage-collected content.
+	// Yjs encodes these as {info=0, VarUint(length)} — no origins, parent,
+	// or content fields. They fill clock gaps in the store.
+	if tag == 0 {
+		length, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		return &Item{
+			ID:      ID{Client: client, Clock: clock},
+			Content: NewContentDeleted(int(length)),
+			Deleted: true,
+		}, nil
+	}
+
+	// Skip struct (tag 10): clock-range placeholder the sender intentionally
+	// omits. Wire format: {info, VarUint(length)}. Not stored in the document.
+	if tag == 10 {
+		length, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		return &Item{
+			ID:      ID{Client: client, Clock: clock},
+			Content: &contentSkip{length: int(length)},
+		}, nil
+	}
+
 	hasOrigin := info&flagHasOrigin != 0
 	hasRightOrigin := info&flagHasRightOrigin != 0
 	hasParentSub := info&flagHasParentSub != 0
@@ -567,10 +660,8 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 		}
 	}
 
-	if item.Parent == nil {
-		return nil, fmt.Errorf("could not determine parent for item {%d,%d}", client, clock)
-	}
-
+	// item.Parent may be nil when origin items belong to a client group not
+	// yet decoded in this update. The caller retries these after all groups.
 	return item, nil
 }
 
@@ -665,10 +756,12 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentAny(vals...), nil
 
 	case wireDoc:
-		if _, err := dec.ReadVarBytes(); err != nil {
+		guidBytes, err := dec.ReadVarBytes()
+		if err != nil {
 			return nil, err
 		}
-		return NewContentDoc(New()), nil
+		guid := string(guidBytes)
+		return NewContentDoc(New(WithGUID(guid))), nil
 
 	default:
 		return nil, fmt.Errorf("unknown content tag: %d", tag)
