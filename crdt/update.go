@@ -189,7 +189,7 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 			if i == 0 && g.startClock > item.ID.Clock {
 				offset = int(g.startClock - item.ID.Clock)
 			}
-			encodeItem(enc, item, offset)
+			encodeItem(enc, item, offset, doc.store)
 		}
 	}
 
@@ -197,7 +197,7 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 	return enc.Bytes()
 }
 
-func encodeItem(enc *encoding.Encoder, item *Item, offset int) {
+func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStore) {
 	var tag byte
 	switch item.Content.(type) {
 	case *ContentDeleted:
@@ -231,6 +231,21 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int) {
 	} else {
 		origin = item.Origin
 		originRight = item.OriginRight
+	}
+
+	// If the origin item is a GC placeholder (no Parent), the receiver can't
+	// infer this item's parent from it. Clear the origin so that explicit
+	// parent info is encoded instead, allowing the receiver to resolve the
+	// parent directly from the named root type or container item ID.
+	if origin != nil {
+		if oi := store.Find(*origin); oi != nil && oi.Parent == nil {
+			origin = nil
+		}
+	}
+	if originRight != nil {
+		if ori := store.Find(*originRight); ori != nil && ori.Parent == nil {
+			originRight = nil
+		}
 	}
 
 	info := tag
