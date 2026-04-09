@@ -432,8 +432,8 @@ func TestUnit_ApplyUpdateV1_GCStructDecode(t *testing.T) {
 	enc.WriteVarUint(5)
 
 	// Struct 1: string item at clock 5, parent = root "content"
-	enc.WriteUint8(wireString)  // tag=4, no flags
-	enc.WriteUint8(1)           // parentInfo=1 → named root
+	enc.WriteUint8(wireString) // tag=4, no flags
+	enc.WriteUint8(1)          // parentInfo=1 → named root
 	enc.WriteVarString("content")
 	enc.WriteVarString("world")
 
@@ -532,7 +532,7 @@ func TestUnit_ApplyUpdateV1_SkipStruct(t *testing.T) {
 	enc.WriteVarUint(0) // startClock = 0
 
 	// Skip struct: info byte with tag=10, then VarUint(length)
-	enc.WriteUint8(10) // tag=10 (skip), no flags
+	enc.WriteUint8(10)  // tag=10 (skip), no flags
 	enc.WriteVarUint(5) // skip 5 clock values
 
 	// Regular string at clock 5
@@ -585,7 +585,7 @@ func TestUnit_WithGUID(t *testing.T) {
 	assert.Equal(t, "test-guid", doc.GUID())
 
 	doc2 := New()
-	assert.Equal(t, "", doc2.GUID())
+	assert.Empty(t, doc2.GUID())
 }
 
 func TestUnit_ApplyUpdateV1_CrossClientMultiHop(t *testing.T) {
