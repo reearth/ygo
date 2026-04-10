@@ -492,8 +492,8 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 	case *ContentBinary:
 		enc.restEnc.WriteVarBytes(ct.Data)
 	case *ContentString:
-		runes := []rune(ct.Str)
-		enc.writeString(string(runes[offset:]))
+		byteOff := utf16ByteOffset(ct.Str, offset)
+		enc.writeString(ct.Str[byteOff:])
 	case *ContentEmbed:
 		enc.restEnc.WriteAny(ct.Val)
 	case *ContentFormat:
