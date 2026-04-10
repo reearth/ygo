@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] — 2026-04-10
+
+### Fixed
+
+- **Nil panic on reconnect with GC'd YMap items**: `delete()` on orphaned GC placeholder items (Parent==nil) dereferenced `item.Parent` for length adjustment and `addChanged()`, adding nil to `txn.changed` and causing a panic in Transact's observer loop. Also fixed nil check in YATA conflict scanning when `store.Find()` returns nil for GC'd origins.
+- **Cross-browser sync corruption with emoji/supplementary characters**: ContentString encoding with offset used `[]rune` indexing (Unicode code points) but the offset is in UTF-16 code units. For emoji and supplementary characters (2 UTF-16 units each), the encoder produced corrupt binary that Yjs clients couldn't decode. Fixed in both V1 and V2 encoders to use `utf16ByteOffset()`.
+
 ## [1.0.3] — 2026-04-09
 
 ### Fixed
@@ -115,6 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.0.4]: https://github.com/reearth/ygo/releases/tag/v1.0.4
 [1.0.3]: https://github.com/reearth/ygo/releases/tag/v1.0.3
 [1.0.2]: https://github.com/reearth/ygo/releases/tag/v1.0.2
 [1.0.1]: https://github.com/reearth/ygo/releases/tag/v1.0.1
