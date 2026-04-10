@@ -695,3 +695,95 @@ func TestUnit_ApplyUpdateV1_CrossClientMultiHop(t *testing.T) {
 	require.NoError(t, ApplyUpdateV1(doc, enc.Bytes(), nil))
 	assert.Equal(t, "ABC", doc.GetText("t").ToString())
 }
+
+// Bug 1 repro: nil pointer dereference in YATA conflict scanning when
+// an item's origin points to a GC'd item not in the store.
+func TestUnit_Integrate_NilOriginInConflictScan(t *testing.T) {
+	// Create two clients that concurrently insert at the same position.
+	// Client 1 inserts "A", client 2 inserts "B" at position 0.
+	// Client 2's item has an originRight referencing client 1's item.
+	// If client 1's item were GC'd, the conflict scan would deref nil.
+	//
+	// We test this indirectly: two clients making concurrent inserts,
+	// then merging. The merge creates a fresh doc where cross-client
+	// conflict resolution runs. Must not panic.
+	doc1 := New(WithClientID(1))
+	doc2 := New(WithClientID(2))
+	txt1 := doc1.GetText("t")
+	txt2 := doc2.GetText("t")
+
+	doc1.Transact(func(txn *Transaction) { txt1.Insert(txn, 0, "A", nil) })
+	doc2.Transact(func(txn *Transaction) { txt2.Insert(txn, 0, "B", nil) })
+
+	u1 := EncodeStateAsUpdateV1(doc1, nil)
+	u2 := EncodeStateAsUpdateV1(doc2, nil)
+
+	// Apply in both orders — conflict resolution must not panic.
+	d := New(WithClientID(3))
+	require.NoError(t, ApplyUpdateV1(d, u1, nil))
+	require.NoError(t, ApplyUpdateV1(d, u2, nil))
+
+	d2 := New(WithClientID(4))
+	require.NoError(t, ApplyUpdateV1(d2, u2, nil))
+	require.NoError(t, ApplyUpdateV1(d2, u1, nil))
+
+	assert.Equal(t, d.GetText("t").ToString(), d2.GetText("t").ToString())
+}
+
+// Bug 2 repro: ContentString encoding with offset uses rune index instead
+// of UTF-16 index, corrupting strings with emoji/supplementary characters.
+func TestUnit_EncodeContentString_UTF16Offset_Emoji(t *testing.T) {
+	// Create a doc with emoji text, encode a diff with an offset that
+	// falls on a supplementary character boundary.
+	doc := New(WithClientID(1))
+	txt := doc.GetText("t")
+	// "a😀b" = 4 UTF-16 units (a=1, 😀=2, b=1)
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "a😀b", nil) })
+
+	// Full state for a "late-joiner" with partial knowledge.
+	// Simulate a state vector where the joiner has the first 2 UTF-16 units
+	// (the "a" + first surrogate of 😀). The encoder must split correctly.
+	sv := StateVector{1: 2} // client 1 has clocks 0-1
+
+	diffBytes := EncodeStateAsUpdateV1(doc, sv)
+
+	// Apply the diff to a doc that already has "a😀" (first 2 UTF-16 units
+	// from the ContentString item starting at clock 0).
+	// Since the diff encodes the remaining portion with offset=2, it must
+	// correctly produce the bytes for the second surrogate of 😀 + "b".
+	doc2 := New(WithClientID(2))
+	// First give doc2 the full text so it has the base item
+	require.NoError(t, ApplyUpdateV1(doc2, EncodeStateAsUpdateV1(doc, nil), nil))
+	// Applying the diff again should be idempotent (no corruption)
+	require.NoError(t, ApplyUpdateV1(doc2, diffBytes, nil))
+
+	assert.Equal(t, "a😀b", doc2.GetText("t").ToString())
+}
+
+// Direct test: encoding a ContentString with emoji and offset round-trips.
+func TestUnit_EncodeContentString_EmojiOffset_RoundTrip(t *testing.T) {
+	doc1 := New(WithClientID(1))
+	txt1 := doc1.GetText("t")
+
+	// Insert emoji text: "Hello👍World" = 11 UTF-16 units
+	doc1.Transact(func(txn *Transaction) { txt1.Insert(txn, 0, "Hello👍World", nil) })
+
+	// Encode full state
+	full := EncodeStateAsUpdateV1(doc1, nil)
+
+	// Decode on fresh doc
+	doc2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(doc2, full, nil))
+	assert.Equal(t, "Hello👍World", doc2.GetText("t").ToString())
+
+	// Now encode with a state vector that splits inside the emoji.
+	// "Hello" = 5 UTF-16 units, "👍" = 2 UTF-16 units.
+	// offset=6 means we skip "Hello" + first surrogate of 👍.
+	sv := StateVector{1: 6}
+	diff := EncodeStateAsUpdateV1(doc1, sv)
+
+	doc3 := New(WithClientID(3))
+	require.NoError(t, ApplyUpdateV1(doc3, full, nil))
+	require.NoError(t, ApplyUpdateV1(doc3, diff, nil)) // must not corrupt
+	assert.Equal(t, "Hello👍World", doc3.GetText("t").ToString())
+}

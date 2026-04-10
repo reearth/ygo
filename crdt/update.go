@@ -320,8 +320,8 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 	case *ContentBinary:
 		enc.WriteVarBytes(ct.Data)
 	case *ContentString:
-		runes := []rune(ct.Str)
-		enc.WriteVarString(string(runes[offset:]))
+		byteOff := utf16ByteOffset(ct.Str, offset)
+		enc.WriteVarString(ct.Str[byteOff:])
 	case *ContentEmbed:
 		enc.WriteAny(ct.Val)
 	case *ContentFormat:

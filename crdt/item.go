@@ -81,6 +81,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 				// origin lies before the conflict zone (beforeOrigin) or within
 				// it (conflicting). If inside, o belongs after us — skip it.
 				oOriginItem := txn.doc.store.Find(*o.Origin)
+				if oOriginItem == nil {
+					break
+				}
 				if _, inBefore := beforeOrigin[oOriginItem]; inBefore {
 					if _, inConflict := conflicting[oOriginItem]; !inConflict {
 						left = o
@@ -162,7 +165,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		}
 	}
 
-	txn.addChanged(item.Parent, item.ParentSub)
+	if item.Parent != nil {
+		txn.addChanged(item.Parent, item.ParentSub)
+	}
 }
 
 // delete marks this item as a tombstone. The item stays in the linked list so
@@ -178,14 +183,16 @@ func (item *Item) delete(txn *Transaction) {
 		return
 	}
 	item.Deleted = true
-	if item.Content.IsCountable() {
+	if item.Parent != nil && item.Content.IsCountable() {
 		item.Parent.length -= item.Content.Len()
 		if !txn.Local {
 			item.Parent.invalidatePosCache()
 		}
 	}
 	txn.deleteSet.add(item.ID, item.Content.Len())
-	txn.addChanged(item.Parent, item.ParentSub)
+	if item.Parent != nil {
+		txn.addChanged(item.Parent, item.ParentSub)
+	}
 }
 
 // splitItem splits item at offset, returning the new right half.
