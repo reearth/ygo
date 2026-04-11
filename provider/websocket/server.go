@@ -292,6 +292,44 @@ func (s *Server) GetDoc(name string) *crdt.Doc {
 	return nil
 }
 
+// ApplyUpdate applies a binary V1 update to the document in the named room
+// and broadcasts the change to all connected WebSocket peers. If no room
+// exists yet, one is created (and the update becomes the initial state).
+//
+// This is the safe way to inject server-side changes into a live document
+// without connecting as a WebSocket peer. The update is applied through the
+// same code path as peer-originated messages, so persistence and
+// broadcasting happen automatically.
+//
+// The update must be a valid Yjs V1 encoded update (e.g. from
+// Doc.EncodeStateAsUpdate on another Doc).
+func (s *Server) ApplyUpdate(name string, update []byte) error {
+	rm, err := s.getOrCreateRoom(name)
+	if err != nil {
+		return err
+	}
+
+	// Apply the update to the room's document.
+	if err := crdt.ApplyUpdateV1(rm.doc, update, nil); err != nil {
+		return fmt.Errorf("applying update to room %q: %w", name, err)
+	}
+
+	// Broadcast to all connected peers as a sync update message.
+	syncMsg := encodeSyncStep2Msg(update)
+	rm.mu.Lock()
+	targets := make([]*peer, 0, len(rm.peers))
+	for p := range rm.peers {
+		targets = append(targets, p)
+	}
+	rm.mu.Unlock()
+
+	for _, p := range targets {
+		go p.write(syncMsg)
+	}
+
+	return nil
+}
+
 func (s *Server) getOrCreateRoom(name string) (*room, error) {
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
