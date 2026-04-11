@@ -117,6 +117,13 @@ type room struct {
 	persistCh   chan []byte   // buffered channel for serialised writes
 	persistStop chan struct{} // closed to signal goroutine to drain and exit
 	persistDone chan struct{} // closed when persistence goroutine exits
+
+	// Server-side update injection queue. Updates queued here are applied
+	// to the document and broadcast to all peers by a dedicated goroutine,
+	// avoiding lock contention with the WebSocket read loops.
+	injectCh   chan []byte   // buffered channel for server-side updates
+	injectStop chan struct{} // closed to signal goroutine to drain and exit
+	injectDone chan struct{} // closed when inject goroutine exits
 }
 
 // peer is one connected WebSocket client.
@@ -246,6 +253,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		if r.persistDone != nil {
 			persistDones = append(persistDones, r.persistDone)
 		}
+		if r.injectDone != nil {
+			persistDones = append(persistDones, r.injectDone)
+		}
 	}
 	s.rmu.RUnlock()
 
@@ -292,42 +302,38 @@ func (s *Server) GetDoc(name string) *crdt.Doc {
 	return nil
 }
 
-// ApplyUpdate applies a binary V1 update to the document in the named room
-// and broadcasts the change to all connected WebSocket peers. If no room
+// InjectUpdate queues a binary V1 update to be applied to the document in
+// the named room and broadcast to all connected WebSocket peers. If no room
 // exists yet, one is created (and the update becomes the initial state).
 //
+// The update is processed asynchronously by a dedicated goroutine that
+// serialises injected updates with peer-originated messages, avoiding lock
+// contention with the WebSocket read loop.
+//
 // This is the safe way to inject server-side changes into a live document
-// without connecting as a WebSocket peer. The update is applied through the
-// same code path as peer-originated messages, so persistence and
-// broadcasting happen automatically.
+// without connecting as a WebSocket peer.
 //
 // The update must be a valid Yjs V1 encoded update (e.g. from
 // Doc.EncodeStateAsUpdate on another Doc).
-func (s *Server) ApplyUpdate(name string, update []byte) error {
+func (s *Server) InjectUpdate(name string, update []byte) error {
 	rm, err := s.getOrCreateRoom(name)
 	if err != nil {
 		return err
 	}
 
-	// Apply the update to the room's document.
-	if err := crdt.ApplyUpdateV1(rm.doc, update, nil); err != nil {
-		return fmt.Errorf("applying update to room %q: %w", name, err)
+	if rm.injectCh == nil {
+		// Room was created before InjectUpdate support — shouldn't happen
+		// with current code, but handle gracefully.
+		return fmt.Errorf("room %q has no injection channel", name)
 	}
 
-	// Broadcast to all connected peers as a sync update message.
-	syncMsg := encodeSyncStep2Msg(update)
-	rm.mu.Lock()
-	targets := make([]*peer, 0, len(rm.peers))
-	for p := range rm.peers {
-		targets = append(targets, p)
+	// Queue the update — non-blocking (buffered channel).
+	select {
+	case rm.injectCh <- update:
+		return nil
+	default:
+		return fmt.Errorf("injection channel full for room %q", name)
 	}
-	rm.mu.Unlock()
-
-	for _, p := range targets {
-		go p.write(syncMsg)
-	}
-
-	return nil
 }
 
 func (s *Server) getOrCreateRoom(name string) (*room, error) {
@@ -393,6 +399,51 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 			}
 		})
 	}
+	// Start the injection goroutine for server-side updates.
+	// This goroutine applies updates and broadcasts to peers without
+	// competing with WebSocket read loops for the doc lock.
+	r.injectCh = make(chan []byte, 64)
+	r.injectStop = make(chan struct{})
+	r.injectDone = make(chan struct{})
+	go func() {
+		defer close(r.injectDone)
+		for {
+			select {
+			case update := <-r.injectCh:
+				// Apply the update to the doc. This acquires d.mu.Lock
+				// but runs in its own goroutine so it waits for the
+				// read loop to release the lock between messages.
+				if err := crdt.ApplyUpdateV1(r.doc, update, "server"); err != nil {
+					log.Printf("ygo/websocket: InjectUpdate for room %q: %v", name, err)
+					continue
+				}
+
+				// Broadcast to all connected peers.
+				syncMsg := encodeSyncStep2Msg(update)
+				r.mu.Lock()
+				targets := make([]*peer, 0, len(r.peers))
+				for p := range r.peers {
+					targets = append(targets, p)
+				}
+				r.mu.Unlock()
+				for _, p := range targets {
+					go p.write(syncMsg)
+				}
+
+			case <-r.injectStop:
+				// Drain remaining updates before exiting.
+				for {
+					select {
+					case update := <-r.injectCh:
+						_ = crdt.ApplyUpdateV1(r.doc, update, "server")
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+
 	s.rooms[name] = r
 	return r, nil
 }
@@ -636,6 +687,9 @@ func (p *peer) handleDisconnect() {
 		delete(p.server.rooms, p.roomName)
 		if rm.persistStop != nil {
 			close(rm.persistStop)
+		}
+		if rm.injectStop != nil {
+			close(rm.injectStop)
 		}
 	}
 	rm.mu.Unlock()
