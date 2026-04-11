@@ -47,6 +47,12 @@ const (
 // preventing OOM from a single crafted large message.
 const maxWSMessageBytes int64 = 64 << 20 // 64 MiB
 
+// InjectOrigin is the transaction origin used by InjectUpdate. The persistence
+// callback checks for this origin and skips DB writes for injected updates,
+// since the caller is responsible for persistence. This prevents deadlocks
+// when the caller holds a database write lock (e.g., SQLite single-writer).
+var InjectOrigin any = "ygo:inject"
+
 // maxAwarenessClientsPerPeer caps the number of awareness clientIDs one peer
 // may claim ownership of. Without this cap an attacker can send an awareness
 // update listing 1,000,000 clientIDs and cause an OOM when handleDisconnect
@@ -392,7 +398,14 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 				}
 			}
 		}()
-		r.doc.OnUpdate(func(update []byte, _ any) {
+		r.doc.OnUpdate(func(update []byte, origin any) {
+			// Skip persistence for server-injected updates — the caller
+			// already wrote to the DB. Without this filter, the persistence
+			// goroutine would try to acquire a SQLite write lock while the
+			// caller's HTTP handler also holds one, causing a deadlock.
+			if origin == InjectOrigin {
+				return
+			}
 			select {
 			case r.persistCh <- update:
 			case <-r.persistStop:
@@ -413,7 +426,7 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 				// Apply the update to the doc. This acquires d.mu.Lock
 				// but runs in its own goroutine so it waits for the
 				// read loop to release the lock between messages.
-				if err := crdt.ApplyUpdateV1(r.doc, update, "server"); err != nil {
+				if err := crdt.ApplyUpdateV1(r.doc, update, InjectOrigin); err != nil {
 					log.Printf("ygo/websocket: InjectUpdate for room %q: %v", name, err)
 					continue
 				}
@@ -435,7 +448,7 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 				for {
 					select {
 					case update := <-r.injectCh:
-						_ = crdt.ApplyUpdateV1(r.doc, update, "server")
+						_ = crdt.ApplyUpdateV1(r.doc, update, InjectOrigin)
 					default:
 						return
 					}
