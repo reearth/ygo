@@ -216,6 +216,12 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 	}
 	item.Right = right
 	txn.doc.store.insertItem(right)
+	// The split shortens item's content, invalidating any cached boundary that
+	// pointed to item's old end position. Clear the entire position cache so
+	// subsequent leftNeighbourAt calls re-scan rather than using stale entries.
+	if item.Parent != nil {
+		item.Parent.invalidatePosCache()
+	}
 	return right
 }
 

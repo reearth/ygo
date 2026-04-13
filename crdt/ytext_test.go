@@ -510,3 +510,140 @@ func TestUnit_YText_ApplyDelta_Emoji(t *testing.T) {
 	assert.Equal(t, 4, txt.Len()) // A=1 + 👍=2 + B=1
 	assert.Equal(t, "A👍B", txt.ToString())
 }
+
+// ── computeDelta format change tests ──────────────────────────────────────────
+// These tests verify that the observer event delta correctly reflects
+// ContentFormat changes produced by Format() calls, not just ContentString
+// inserts and deletes.
+
+func TestUnit_YText_FormatDelta_AddAttribute(t *testing.T) {
+	// "Hello World" — Format() bolds "World". The observer delta must be
+	// [{retain:6}, {retain:5, attributes:{bold:true}}].
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "Hello World", nil)
+	})
+
+	var got []Delta
+	txt.Observe(func(e YTextEvent) { got = e.Delta })
+
+	doc.Transact(func(txn *Transaction) {
+		txt.Format(txn, 6, 5, Attributes{"bold": true})
+	})
+
+	require.Len(t, got, 2)
+	assert.Equal(t, DeltaOpRetain, got[0].Op)
+	assert.Equal(t, 6, got[0].Retain)
+	assert.Nil(t, got[0].Attributes)
+	assert.Equal(t, DeltaOpRetain, got[1].Op)
+	assert.Equal(t, 5, got[1].Retain)
+	assert.Equal(t, true, got[1].Attributes["bold"])
+}
+
+func TestUnit_YText_FormatDelta_RemoveAttribute(t *testing.T) {
+	// "Hello World" with "World" already bold. Format() removes bold.
+	// Observer delta must be [{retain:6}, {retain:5, attributes:{bold:null}}].
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "Hello ", nil)
+		txt.Insert(txn, 6, "World", Attributes{"bold": true})
+	})
+
+	var got []Delta
+	txt.Observe(func(e YTextEvent) { got = e.Delta })
+
+	doc.Transact(func(txn *Transaction) {
+		txt.Format(txn, 6, 5, Attributes{"bold": nil}) // remove bold
+	})
+
+	require.Len(t, got, 2)
+	assert.Equal(t, DeltaOpRetain, got[0].Op)
+	assert.Equal(t, 6, got[0].Retain)
+	assert.Nil(t, got[0].Attributes)
+	assert.Equal(t, DeltaOpRetain, got[1].Op)
+	assert.Equal(t, 5, got[1].Retain)
+	assert.Contains(t, got[1].Attributes, "bold")
+	assert.Nil(t, got[1].Attributes["bold"])
+}
+
+func TestUnit_YText_FormatDelta_MultipleAttributes(t *testing.T) {
+	// Format with two attrs at once — observer delta carries both.
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "Hi", nil)
+	})
+
+	var got []Delta
+	txt.Observe(func(e YTextEvent) { got = e.Delta })
+
+	doc.Transact(func(txn *Transaction) {
+		txt.Format(txn, 0, 2, Attributes{"bold": true, "italic": true})
+	})
+
+	// Exactly one retain covering the full text with both attrs (no preceding
+	// plain retain since format starts at index 0).
+	require.Len(t, got, 1)
+	assert.Equal(t, DeltaOpRetain, got[0].Op)
+	assert.Equal(t, 2, got[0].Retain)
+	assert.Equal(t, true, got[0].Attributes["bold"])
+	assert.Equal(t, true, got[0].Attributes["italic"])
+}
+
+func TestUnit_YText_FormatDelta_NoTrailingRetain(t *testing.T) {
+	// Format at the start leaves an unformatted tail. The tail must not appear
+	// in the delta (trailing plain retain is omitted per Quill convention).
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "Hello World", nil)
+	})
+
+	var got []Delta
+	txt.Observe(func(e YTextEvent) { got = e.Delta })
+
+	doc.Transact(func(txn *Transaction) {
+		txt.Format(txn, 0, 5, Attributes{"bold": true}) // bold "Hello"
+	})
+
+	// [{retain:5, attributes:{bold:true}}] — no trailing retain for " World".
+	require.Len(t, got, 1)
+	assert.Equal(t, DeltaOpRetain, got[0].Op)
+	assert.Equal(t, 5, got[0].Retain)
+	assert.Equal(t, true, got[0].Attributes["bold"])
+}
+
+func TestUnit_YText_FormatDelta_MixedInsertAndFormat(t *testing.T) {
+	// Same transaction inserts text AND applies formatting. Both must appear
+	// correctly in the observer delta.
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "Hello", nil)
+	})
+
+	var got []Delta
+	txt.Observe(func(e YTextEvent) { got = e.Delta })
+
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 5, " World", nil)            // append plain text
+		txt.Format(txn, 0, 5, Attributes{"bold": true}) // bold existing "Hello"
+	})
+
+	// Expect a retain (bold "Hello") and an insert (" World").
+	var retainOp, insertOp *Delta
+	for i := range got {
+		switch got[i].Op {
+		case DeltaOpRetain:
+			retainOp = &got[i]
+		case DeltaOpInsert:
+			insertOp = &got[i]
+		}
+	}
+	require.NotNil(t, retainOp, "expected a retain op for formatted text")
+	require.NotNil(t, insertOp, "expected an insert op for new text")
+	assert.Equal(t, true, retainOp.Attributes["bold"])
+	assert.Equal(t, " World", insertOp.Insert)
+}
