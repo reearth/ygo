@@ -110,6 +110,20 @@ func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 	}
 }
 
+// InsertElement inserts a YXmlElement at child position index.
+// This is the exported convenience wrapper for Insert — use it when inserting
+// XML elements from outside the crdt package.
+func (f *YXmlFragment) InsertElement(txn *Transaction, index int, elem *YXmlElement) {
+	f.Insert(txn, index, elem)
+}
+
+// InsertText inserts a YXmlText at child position index.
+// This is the exported convenience wrapper for Insert — use it when inserting
+// XML text nodes from outside the crdt package.
+func (f *YXmlFragment) InsertText(txn *Transaction, index int, txt *YXmlText) {
+	f.Insert(txn, index, txt)
+}
+
 // Delete removes length child nodes starting at child position index.
 func (f *YXmlFragment) Delete(txn *Transaction, index, length int) {
 	deleteChildRange(&f.abstractType, txn, index, length)
@@ -202,6 +216,16 @@ func (e *YXmlElement) prepareFire(txn *Transaction, keysChanged map[string]struc
 			s.fn(ev)
 		}
 	}
+}
+
+// InsertElement inserts a YXmlElement at child position index.
+func (e *YXmlElement) InsertElement(txn *Transaction, index int, elem *YXmlElement) {
+	e.Insert(txn, index, elem)
+}
+
+// InsertText inserts a YXmlText at child position index.
+func (e *YXmlElement) InsertText(txn *Transaction, index int, txt *YXmlText) {
+	e.Insert(txn, index, txt)
 }
 
 // SetAttribute sets the XML attribute key to value.

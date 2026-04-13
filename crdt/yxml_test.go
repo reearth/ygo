@@ -91,6 +91,94 @@ func TestUnit_YXmlFragment_Observe_Unsubscribe(t *testing.T) {
 	assert.Equal(t, 1, calls)
 }
 
+// ── YXmlFragment exported insert wrappers ─────────────────────────────────────
+
+func TestUnit_YXmlFragment_InsertElement_Exported(t *testing.T) {
+	doc := newTestDoc(1)
+	frag := doc.GetXmlFragment("root")
+	elem := NewYXmlElement("p")
+
+	doc.Transact(func(txn *Transaction) {
+		frag.InsertElement(txn, 0, elem)
+	})
+
+	children := frag.Children()
+	require.Len(t, children, 1)
+	assert.Equal(t, elem, children[0].(*YXmlElement))
+	assert.Equal(t, "<p></p>", frag.ToXML())
+}
+
+func TestUnit_YXmlFragment_InsertText_Exported(t *testing.T) {
+	doc := newTestDoc(1)
+	frag := doc.GetXmlFragment("root")
+	txt := NewYXmlText()
+
+	doc.Transact(func(txn *Transaction) {
+		frag.InsertText(txn, 0, txt)
+		txt.Insert(txn, 0, "hello", nil)
+	})
+
+	children := frag.Children()
+	require.Len(t, children, 1)
+	assert.Equal(t, txt, children[0].(*YXmlText))
+	assert.Equal(t, "hello", frag.ToXML())
+}
+
+func TestUnit_YXmlFragment_InsertElement_And_Text_Order(t *testing.T) {
+	doc := newTestDoc(1)
+	frag := doc.GetXmlFragment("root")
+	elem := NewYXmlElement("span")
+	txt := NewYXmlText()
+
+	doc.Transact(func(txn *Transaction) {
+		frag.InsertElement(txn, 0, elem)
+		frag.InsertText(txn, 1, txt)
+		txt.Insert(txn, 0, "world", nil)
+	})
+
+	children := frag.Children()
+	require.Len(t, children, 2)
+	assert.Equal(t, elem, children[0].(*YXmlElement))
+	assert.Equal(t, txt, children[1].(*YXmlText))
+}
+
+// ── YXmlElement exported insert wrappers ──────────────────────────────────────
+
+func TestUnit_YXmlElement_InsertElement_Exported(t *testing.T) {
+	doc := newTestDoc(1)
+	frag := doc.GetXmlFragment("root")
+	outer := NewYXmlElement("div")
+	inner := NewYXmlElement("p")
+
+	doc.Transact(func(txn *Transaction) {
+		frag.InsertElement(txn, 0, outer)
+		outer.InsertElement(txn, 0, inner)
+	})
+
+	children := outer.Children()
+	require.Len(t, children, 1)
+	assert.Equal(t, inner, children[0].(*YXmlElement))
+	assert.Equal(t, "<div><p></p></div>", frag.ToXML())
+}
+
+func TestUnit_YXmlElement_InsertText_Exported(t *testing.T) {
+	doc := newTestDoc(1)
+	frag := doc.GetXmlFragment("root")
+	elem := NewYXmlElement("p")
+	txt := NewYXmlText()
+
+	doc.Transact(func(txn *Transaction) {
+		frag.InsertElement(txn, 0, elem)
+		elem.InsertText(txn, 0, txt)
+		txt.Insert(txn, 0, "hello", nil)
+	})
+
+	children := elem.Children()
+	require.Len(t, children, 1)
+	assert.Equal(t, txt, children[0].(*YXmlText))
+	assert.Equal(t, "<p>hello</p>", frag.ToXML())
+}
+
 // ── YXmlElement ───────────────────────────────────────────────────────────────
 
 func TestUnit_YXmlElement_Attributes(t *testing.T) {
