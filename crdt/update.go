@@ -20,6 +20,8 @@ const (
 	wireType    byte = 7
 	wireAny     byte = 8
 	wireDoc     byte = 9
+	// Tag 10 is reserved for skip structs (decode-only, handled before the switch).
+	wireMove byte = 11 // ContentMove: CRDT-safe array move marker (ygo extension)
 )
 
 // Info byte flags for struct encoding.
@@ -231,6 +233,8 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 		tag = wireAny
 	case *ContentDoc:
 		tag = wireDoc
+	case *ContentMove:
+		tag = wireMove
 	default:
 		tag = wireAny
 	}
@@ -345,6 +349,10 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 			guid = ct.Doc.GUID()
 		}
 		enc.WriteVarBytes([]byte(guid))
+	case *ContentMove:
+		enc.WriteVarUint(uint64(ct.Target.Client))
+		enc.WriteVarUint(ct.Target.Clock)
+		enc.WriteVarUint(uint64(ct.TargetLen))
 	}
 }
 
@@ -806,6 +814,22 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		}
 		guid := string(guidBytes)
 		return NewContentDoc(New(WithGUID(guid))), nil
+
+	case wireMove:
+		clientU, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		clock, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		targetLen, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		target := &ID{Client: ClientID(clientU), Clock: clock}
+		return NewContentMove(target, int(targetLen)), nil
 
 	default:
 		return nil, fmt.Errorf("unknown content tag: %d", tag)

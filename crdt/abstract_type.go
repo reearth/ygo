@@ -155,7 +155,16 @@ func (t *abstractType) leftNeighbourAt(index int) (*Item, int) {
 			if newCounted >= index {
 				offset := index - counted
 				if offset == n {
+					// Position is at the very end of item — insert right after it.
 					return item, 0
+				}
+				if offset == 0 {
+					// Position is at the very start of item — insert right after
+					// lastItem (i.e. before this item). The cache can cause counted
+					// to equal index at the start of a scan, producing offset=0 for
+					// the first item encountered; returning that item would tell the
+					// caller to insert after it (too far right).
+					return lastItem, 0
 				}
 				return item, offset
 			}

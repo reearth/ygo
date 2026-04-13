@@ -43,42 +43,139 @@ func (txt *YText) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 }
 
 // computeDelta builds a Quill-compatible delta for the changes in txn.
-// Each ContentString item is classified as Insert (new in this txn),
-// Delete (removed by this txn), or Retain (unchanged and visible).
-// A trailing Retain is omitted following the Quill convention.
+//
+// In addition to ContentString inserts/deletes, it now accounts for
+// ContentFormat changes so that a Format() call produces the correct
+// Retain+Attributes ops in the observer delta.
+//
+// Two attribute maps are maintained as the item list is walked:
+//   - currentAttrs: formatting state in the document after the transaction.
+//   - oldAttrs:     formatting state before the transaction.
+//
+// When the two diverge at a retained text segment, a Retain+Attributes delta
+// is emitted expressing the diff. A trailing plain Retain is omitted per the
+// Quill convention; a trailing Retain with attributes is kept because it
+// expresses a real formatting change.
 func (txt *YText) computeDelta(txn *Transaction) []Delta {
 	var ops []Delta
 	retain := 0
+	currentAttrs := make(Attributes) // format state in the final document
+	oldAttrs := make(Attributes)     // format state before the transaction
 
+	// flushRetain emits any accumulated retain characters. If the formatting
+	// changed over this segment (currentAttrs ≠ oldAttrs), the retain carries
+	// the attribute diff. oldAttrs is NOT updated here — it only changes when
+	// pre-existing ContentFormat items are encountered (old/deleted), so that
+	// the diff for subsequent segments is computed against the true pre-txn state.
 	flushRetain := func() {
-		if retain > 0 {
-			ops = append(ops, Delta{Op: DeltaOpRetain, Retain: retain})
-			retain = 0
+		if retain <= 0 {
+			return
 		}
+		diff := attrDiff(currentAttrs, oldAttrs)
+		if len(diff) > 0 {
+			ops = append(ops, Delta{Op: DeltaOpRetain, Retain: retain, Attributes: diff})
+		} else {
+			ops = append(ops, Delta{Op: DeltaOpRetain, Retain: retain})
+		}
+		retain = 0
 	}
 
 	for item := txt.start; item != nil; item = item.Right {
-		cs, isStr := item.Content.(*ContentString)
-		if !isStr {
-			continue
-		}
 		beforeClock := txn.beforeState.Clock(item.ID.Client)
 		isNew := item.ID.Clock >= beforeClock
-		if isNew {
-			if !item.Deleted {
+
+		switch c := item.Content.(type) {
+		case *ContentString:
+			if isNew {
+				if !item.Deleted {
+					flushRetain()
+					d := Delta{Op: DeltaOpInsert, Insert: c.Str}
+					if len(currentAttrs) > 0 {
+						attrs := make(Attributes, len(currentAttrs))
+						for k, v := range currentAttrs {
+							attrs[k] = v
+						}
+						d.Attributes = attrs
+					}
+					ops = append(ops, d)
+				}
+				// new + immediately deleted → net no-op; skip
+			} else if txn.deleteSet.IsDeleted(item.ID) {
 				flushRetain()
-				ops = append(ops, Delta{Op: DeltaOpInsert, Insert: cs.Str})
+				ops = append(ops, Delta{Op: DeltaOpDelete, Delete: c.Len()})
+			} else if !item.Deleted {
+				retain += c.Len()
 			}
-			// inserted and immediately deleted in the same txn → net no-op; skip
-		} else if txn.deleteSet.IsDeleted(item.ID) {
-			flushRetain()
-			ops = append(ops, Delta{Op: DeltaOpDelete, Delete: cs.Len()})
-		} else if !item.Deleted {
-			retain += cs.Len()
+
+		case *ContentFormat:
+			if isNew {
+				if !item.Deleted {
+					// New format marker: flush the preceding retained text as a
+					// plain retain (pre-format characters are unaffected), then
+					// advance currentAttrs to reflect the new marker.
+					flushRetain()
+					if c.Val == nil {
+						delete(currentAttrs, c.Key)
+					} else {
+						currentAttrs[c.Key] = c.Val
+					}
+				}
+				// new + deleted → transient marker, no net effect; skip
+			} else if txn.deleteSet.IsDeleted(item.ID) {
+				// Pre-existing marker deleted in this txn: it was active before
+				// (update oldAttrs) but is gone now (leave currentAttrs alone).
+				if c.Val == nil {
+					delete(oldAttrs, c.Key)
+				} else {
+					oldAttrs[c.Key] = c.Val
+				}
+			} else if !item.Deleted {
+				// Unchanged pre-existing marker: advance both maps in sync.
+				if c.Val == nil {
+					delete(currentAttrs, c.Key)
+					delete(oldAttrs, c.Key)
+				} else {
+					currentAttrs[c.Key] = c.Val
+					oldAttrs[c.Key] = c.Val
+				}
+			}
 		}
 	}
-	// Trailing retain omitted (Quill convention).
+
+	// Trailing retain: emit only when there is a formatting change (plain
+	// trailing retain is omitted per Quill convention).
+	if retain > 0 {
+		diff := attrDiff(currentAttrs, oldAttrs)
+		if len(diff) > 0 {
+			ops = append(ops, Delta{Op: DeltaOpRetain, Retain: retain, Attributes: diff})
+		}
+	}
 	return ops
+}
+
+// attrDiff returns the attribute changes needed to go from old to current.
+// Keys present in current with a different value use the new value.
+// Keys present in old but absent from current map to nil (removal signal).
+// Returns nil when the two maps are equal.
+func attrDiff(current, old Attributes) Attributes {
+	var diff Attributes
+	for k, v := range current {
+		if oldV, exists := old[k]; !exists || oldV != v {
+			if diff == nil {
+				diff = make(Attributes)
+			}
+			diff[k] = v
+		}
+	}
+	for k := range old {
+		if _, exists := current[k]; !exists {
+			if diff == nil {
+				diff = make(Attributes)
+			}
+			diff[k] = nil
+		}
+	}
+	return diff
 }
 
 // Len returns the number of non-deleted UTF-16 code units (not Unicode code
@@ -157,32 +254,39 @@ func (txt *YText) Delete(txn *Transaction, index, length int) {
 }
 
 // Format applies attrs to the character range [index, index+length).
-// Each attribute is represented as a ContentFormat item inserted at the
-// start of the range.
+//
+// For each attribute being set (non-nil value) two ContentFormat items are
+// inserted: an opening marker at index and a closing nil marker at
+// index+length. This bounds the formatting to the requested range so that
+// text inserted after the range is not implicitly formatted.
+//
+// For attribute removal (nil value) only the opening nil marker is inserted.
+// The removal marker overrides any preceding non-nil marker for the same key
+// when the document state is read left-to-right by ToDelta.
+//
+// Note: removal of an attribute whose source marker was inserted by a
+// concurrent peer may not produce the intended result because YATA places the
+// removal marker before the source marker when both share the same origin.
+// Full concurrent attribute removal is tracked as a follow-up improvement.
 func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) {
 	if len(attrs) == 0 || length <= 0 {
 		return
 	}
 	t := &txt.abstractType
+
+	// ── Opening markers at position index ────────────────────────────────────
 	left, offset := t.leftNeighbourAt(index)
 	if offset > 0 {
 		splitItem(txn, left, offset)
 	}
 
-	var origin *ID
-	if left != nil {
-		end := left.ID.Clock + uint64(left.Content.Len()) - 1
-		origin = &ID{Client: left.ID.Client, Clock: end}
-	}
+	// Skip past any ContentFormat items already sitting at this boundary.
+	// Without this, a new format marker and an existing one can share the same
+	// origin (the last text item), causing YATA to place the new marker BEFORE
+	// the existing one — which produces incorrect read-order semantics.
+	left = skipFormatItems(left, t)
 
-	var originRight *ID
-	if left != nil && left.Right != nil {
-		id := left.Right.ID
-		originRight = &id
-	} else if t.start != nil && left == nil {
-		id := t.start.ID
-		originRight = &id
-	}
+	origin, originRight := itemOrigins(left, t)
 
 	for k, v := range attrs {
 		fmtItem := &Item{
@@ -204,6 +308,87 @@ func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) 
 			originRight = nil
 		}
 	}
+
+	// ── Closing nil markers at position index+length ──────────────────────────
+	// Only needed for attributes that are being SET (non-nil). Attributes being
+	// removed (nil value) already act as terminators for any preceding non-nil
+	// marker, so no additional closing marker is required.
+	endLeft, endOffset := t.leftNeighbourAt(index + length)
+	if endOffset > 0 {
+		splitItem(txn, endLeft, endOffset)
+	}
+
+	endLeft = skipFormatItems(endLeft, t)
+	endOrigin, endOriginRight := itemOrigins(endLeft, t)
+
+	for k, v := range attrs {
+		if v == nil {
+			continue // removal marker was already inserted above
+		}
+		closeItem := &Item{
+			ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
+			Origin:      endOrigin,
+			OriginRight: endOriginRight,
+			Left:        endLeft,
+			Parent:      t,
+			Content:     NewContentFormat(k, nil),
+		}
+		closeItem.integrate(txn, 0)
+		endLeft = closeItem
+		id := closeItem.ID
+		endOrigin = &id
+		if endLeft.Right != nil {
+			rid := endLeft.Right.ID
+			endOriginRight = &rid
+		} else {
+			endOriginRight = nil
+		}
+	}
+}
+
+// skipFormatItems advances left past any ContentFormat items that immediately
+// follow it in the linked list. This is used by Format() to ensure newly
+// inserted format markers are placed AFTER any existing ones at the same
+// logical position, avoiding YATA ordering conflicts (same-origin collisions).
+func skipFormatItems(left *Item, t *abstractType) *Item {
+	var next *Item
+	if left == nil {
+		next = t.start
+	} else {
+		next = left.Right
+	}
+	for next != nil {
+		if _, ok := next.Content.(*ContentFormat); !ok {
+			break
+		}
+		left = next
+		next = left.Right
+	}
+	return left
+}
+
+// itemOrigins returns the origin and originRight IDs for a new item to be
+// inserted immediately after left. Handles ContentFormat items (Len == 0)
+// correctly: their origin clock equals their own ID clock.
+func itemOrigins(left *Item, t *abstractType) (origin, originRight *ID) {
+	if left != nil {
+		n := left.Content.Len()
+		var clock uint64
+		if n > 0 {
+			clock = left.ID.Clock + uint64(n) - 1
+		} else {
+			clock = left.ID.Clock
+		}
+		origin = &ID{Client: left.ID.Client, Clock: clock}
+		if left.Right != nil {
+			id := left.Right.ID
+			originRight = &id
+		}
+	} else if t.start != nil {
+		id := t.start.ID
+		originRight = &id
+	}
+	return
 }
 
 // ToString returns the concatenation of all non-deleted character runs,

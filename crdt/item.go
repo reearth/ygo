@@ -14,6 +14,11 @@ type Item struct {
 	ParentSub   string // non-empty for YMap entries (the map key)
 	Content     Content
 	Deleted     bool
+	// MovedBy points to the winning ContentMove item that has claimed this item
+	// as its target. When non-nil, this item is rendered at the ContentMove's
+	// position instead of its original linked-list position. Set by integrate()
+	// during ContentMove priority arbitration.
+	MovedBy *Item
 }
 
 // integrate inserts this item into its parent's linked list using the YATA
@@ -140,6 +145,21 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// Register in the document store.
 	txn.doc.store.Append(item)
 
+	// ContentMove priority arbitration: resolve the target item (splitting if
+	// needed so it covers exactly TargetLen elements) and claim it if we are the
+	// winning move. Lower ClientID wins for concurrent moves from different peers;
+	// for same-client sequential moves the earlier (lower-clock) move stays as
+	// winner so that re-moves are not silently ignored — callers should delete
+	// the old ContentMove first when they want to supersede it.
+	if cm, ok := item.Content.(*ContentMove); ok && !item.Deleted && cm.Target != nil {
+		target := resolveMovedItem(txn, cm.Target, cm.TargetLen)
+		if target != nil {
+			if target.MovedBy == nil || item.ID.Client < target.MovedBy.ID.Client {
+				target.MovedBy = item
+			}
+		}
+	}
+
 	// Track ContentString items for end-of-transaction run squashing.
 	if _, ok := item.Content.(*ContentString); ok {
 		txn.newItems = append(txn.newItems, item)
@@ -216,6 +236,12 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 	}
 	item.Right = right
 	txn.doc.store.insertItem(right)
+	// The split shortens item's content, invalidating any cached boundary that
+	// pointed to item's old end position. Clear the entire position cache so
+	// subsequent leftNeighbourAt calls re-scan rather than using stale entries.
+	if item.Parent != nil {
+		item.Parent.invalidatePosCache()
+	}
 	return right
 }
 
@@ -228,4 +254,27 @@ func originIDEquals(a, b *ID) bool {
 		return false
 	}
 	return a.Client == b.Client && a.Clock == b.Clock
+}
+
+// resolveMovedItem finds the item at targetID and ensures it covers exactly
+// targetLen clock units starting at targetID.Clock. When the item is part of
+// a larger multi-value ContentAny (common when a delta update arrives without
+// the local splits a sender performed during Move()), splitItem is called to
+// carve out the exact boundary. Returns nil when no item contains targetID.
+func resolveMovedItem(txn *Transaction, targetID *ID, targetLen int) *Item {
+	si := txn.doc.store.Find(*targetID)
+	if si == nil {
+		return nil
+	}
+	// Trim leading prefix: ensure si starts exactly at targetID.Clock.
+	if si.ID.Clock < targetID.Clock {
+		prefix := int(targetID.Clock - si.ID.Clock)
+		si = splitItem(txn, si, prefix) // si is now the right half
+	}
+	// Trim trailing suffix: ensure si covers no more than targetLen units.
+	if targetLen > 0 && si.Content.Len() > targetLen {
+		splitItem(txn, si, targetLen)
+		// si (the left half) now has exactly targetLen units.
+	}
+	return si
 }

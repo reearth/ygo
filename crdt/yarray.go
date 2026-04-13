@@ -93,7 +93,29 @@ func (a *YArray) Get(index int) any {
 	t := &a.abstractType
 	counted := 0
 	for item := t.start; item != nil; item = item.Right {
-		if item.Deleted || !item.Content.IsCountable() {
+		if item.Deleted {
+			continue
+		}
+		if cm, ok := item.Content.(*ContentMove); ok {
+			if a.doc != nil {
+				target := a.doc.store.Find(*cm.Target)
+				if target != nil && target.MovedBy == item && !target.Deleted {
+					n := target.Content.Len()
+					if counted+n > index {
+						if ca, ok := target.Content.(*ContentAny); ok {
+							return ca.Vals[index-counted]
+						}
+						return nil
+					}
+					counted += n
+				}
+			}
+			continue
+		}
+		if !item.Content.IsCountable() {
+			continue
+		}
+		if item.MovedBy != nil {
 			continue
 		}
 		n := item.Content.Len()
@@ -126,7 +148,26 @@ func (a *YArray) ToSlice() []any {
 	t := &a.abstractType
 	result := make([]any, 0, t.length)
 	for item := t.start; item != nil; item = item.Right {
-		if item.Deleted || !item.Content.IsCountable() {
+		if item.Deleted {
+			continue
+		}
+		if cm, ok := item.Content.(*ContentMove); ok {
+			// Render the moved item at this position if this move won.
+			if a.doc != nil {
+				target := a.doc.store.Find(*cm.Target)
+				if target != nil && target.MovedBy == item && !target.Deleted {
+					if ca, ok := target.Content.(*ContentAny); ok {
+						result = append(result, ca.Vals...)
+					}
+				}
+			}
+			continue
+		}
+		if !item.Content.IsCountable() {
+			continue
+		}
+		if item.MovedBy != nil {
+			// Rendered at the ContentMove's position; skip here.
 			continue
 		}
 		if ca, ok := item.Content.(*ContentAny); ok {
@@ -199,7 +240,32 @@ func (a *YArray) Slice(start, end int) []any {
 	result := make([]any, 0, end-start)
 	counted := 0
 	for item := t.start; item != nil && counted < end; item = item.Right {
-		if item.Deleted || !item.Content.IsCountable() {
+		if item.Deleted {
+			continue
+		}
+		if cm, ok := item.Content.(*ContentMove); ok {
+			if a.doc != nil {
+				target := a.doc.store.Find(*cm.Target)
+				if target != nil && target.MovedBy == item && !target.Deleted {
+					if ca, ok := target.Content.(*ContentAny); ok {
+						for _, v := range ca.Vals {
+							if counted >= start && counted < end {
+								result = append(result, v)
+							}
+							counted++
+							if counted >= end {
+								break
+							}
+						}
+					}
+				}
+			}
+			continue
+		}
+		if !item.Content.IsCountable() {
+			continue
+		}
+		if item.MovedBy != nil {
 			continue
 		}
 		ca, ok := item.Content.(*ContentAny)
@@ -230,7 +296,27 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 	t := &a.abstractType
 	index := 0
 	for item := t.start; item != nil; item = item.Right {
-		if item.Deleted || !item.Content.IsCountable() {
+		if item.Deleted {
+			continue
+		}
+		if cm, ok := item.Content.(*ContentMove); ok {
+			if a.doc != nil {
+				target := a.doc.store.Find(*cm.Target)
+				if target != nil && target.MovedBy == item && !target.Deleted {
+					if ca, ok := target.Content.(*ContentAny); ok {
+						for _, v := range ca.Vals {
+							fn(index, v)
+							index++
+						}
+					}
+				}
+			}
+			continue
+		}
+		if !item.Content.IsCountable() {
+			continue
+		}
+		if item.MovedBy != nil {
 			continue
 		}
 		if ca, ok := item.Content.(*ContentAny); ok {
@@ -242,47 +328,132 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 	}
 }
 
-// Move removes the element at fromIndex and reinserts it at toIndex.
-// Both indices are in terms of the logical (non-deleted) position.
+// Move relocates the element at fromIndex to toIndex in a CRDT-safe manner.
+// Both indices are in terms of the logical (non-deleted) rendered position.
 //
-// WARNING: Move is NOT safe for concurrent use across multiple clients.
-// It is implemented as delete-then-insert: the moved element receives a new
-// Item ID and loses its original causal history. If two peers concurrently
-// move the same element, the result may contain duplicates or lose the
-// element entirely. Use Move only in single-writer scenarios or when
-// application-level conflict resolution is in place.
+// Unlike the previous delete-then-insert implementation, Move now creates a
+// ContentMove item at the destination position in the linked list. The original
+// item remains in place (marked as moved via its MovedBy field) and is rendered
+// at the ContentMove's position instead. This preserves causal history and
+// converges correctly under concurrent edits:
 //
-// Move walks the linked list directly instead of calling Get() because Get()
-// acquires doc.mu.RLock() while Move is called from inside a Transact callback
-// that already holds doc.mu.Lock() — acquiring RLock on top of Lock deadlocks.
+//   - Two peers moving DIFFERENT elements: both moves apply, each element ends
+//     up at its respective destination.
+//   - Two peers moving THE SAME element: the ContentMove with the lower ClientID
+//     wins; the element appears at the winner's destination.
+//
+// physPos formula: after splitting the target element into its own item, the
+// ContentMove is placed at physical position toIndex+1 when fromIndex < toIndex
+// (the target is still physically present and countable before being marked
+// moved), or at toIndex when fromIndex > toIndex.
+//
+// Move walks the linked list directly rather than calling Get() to avoid the
+// deadlock that would occur if RLock were acquired on top of the write lock held
+// by the enclosing Transact callback.
 func (a *YArray) Move(txn *Transaction, fromIndex, toIndex int) {
 	if fromIndex == toIndex {
 		return
 	}
-	// Find the element at fromIndex by walking the list (no lock acquisition).
 	t := &a.abstractType
+
+	// Walk the rendered array to find the physical item at fromIndex.
+	// ContentMove items are "expanded" in rendering order; items with MovedBy
+	// set are skipped at their original position.
 	counted := 0
-	var elem any
+	var targetItem *Item
+	var targetOff int
 	for item := t.start; item != nil; item = item.Right {
-		if item.Deleted || !item.Content.IsCountable() {
+		if item.Deleted {
+			continue
+		}
+		if cm, ok := item.Content.(*ContentMove); ok {
+			// ContentMove renders the target here if this move won.
+			if a.doc != nil {
+				target := a.doc.store.Find(*cm.Target)
+				if target != nil && target.MovedBy == item && !target.Deleted {
+					n := target.Content.Len()
+					if counted+n > fromIndex {
+						targetItem = target
+						targetOff = fromIndex - counted
+						break
+					}
+					counted += n
+				}
+			}
+			continue
+		}
+		if !item.Content.IsCountable() || item.MovedBy != nil {
 			continue
 		}
 		n := item.Content.Len()
 		if counted+n > fromIndex {
-			if ca, ok := item.Content.(*ContentAny); ok {
-				elem = ca.Vals[fromIndex-counted]
-			}
+			targetItem = item
+			targetOff = fromIndex - counted
 			break
 		}
 		counted += n
 	}
-	a.Delete(txn, fromIndex, 1)
-	// toIndex is the desired final position of the element in the result array.
-	// No index adjustment is required: after deleting fromIndex the caller's
-	// requested final position directly maps to the insertion offset in the
-	// modified array (the previous adjustment `toIndex--` was incorrect and
-	// caused adjacent forward-move to be a no-op).
-	a.Insert(txn, toIndex, []any{elem})
+	if targetItem == nil {
+		return // out of bounds
+	}
+
+	// Isolate the single element at targetOff so it occupies its own item.
+	if targetOff > 0 {
+		targetItem = splitItem(txn, targetItem, targetOff)
+	}
+	if targetItem.Content.Len() > 1 {
+		splitItem(txn, targetItem, 1)
+	}
+
+	// Compute physPos: the position in the PHYSICAL linked list (counting all
+	// non-deleted IsCountable items, including those with MovedBy != nil) at which
+	// the ContentMove item should be placed. After the move, the target item will
+	// be skipped (MovedBy != nil) and the ContentMove will render it at physPos.
+	//
+	// fromIndex < toIndex: the target is at physical position fromIndex+1 or later
+	// (since items before it are counted normally). physPos = toIndex+1 accounts for
+	// the target still being countable at its original physical position.
+	// fromIndex > toIndex: physPos = toIndex (the ContentMove slots in before the
+	// item that is currently at toIndex in physical count).
+	var physPos int
+	if fromIndex < toIndex {
+		physPos = toIndex + 1
+	} else {
+		physPos = toIndex
+	}
+
+	left, offset := t.leftNeighbourAt(physPos)
+	if offset > 0 {
+		splitItem(txn, left, offset)
+		// After split, left holds the [0,offset) part; its Right is the new right half.
+	}
+
+	var origin *ID
+	var originRight *ID
+	if left != nil {
+		end := left.ID.Clock + uint64(left.Content.Len()) - 1
+		origin = &ID{Client: left.ID.Client, Clock: end}
+		if left.Right != nil {
+			id := left.Right.ID
+			originRight = &id
+		}
+	} else if t.start != nil {
+		id := t.start.ID
+		originRight = &id
+	}
+
+	moveItem := &Item{
+		ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
+		Origin:      origin,
+		OriginRight: originRight,
+		Left:        left,
+		Parent:      t,
+		Content:     NewContentMove(&targetItem.ID, targetItem.Content.Len()),
+	}
+	if toIndex > 0 {
+		t.insertHint = toIndex
+	}
+	moveItem.integrate(txn, 0)
 }
 
 // deleteRange is shared by YArray and YText to delete a logical range.
