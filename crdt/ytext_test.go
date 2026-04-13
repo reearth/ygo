@@ -628,7 +628,7 @@ func TestUnit_YText_FormatDelta_MixedInsertAndFormat(t *testing.T) {
 	txt.Observe(func(e YTextEvent) { got = e.Delta })
 
 	doc.Transact(func(txn *Transaction) {
-		txt.Insert(txn, 5, " World", nil)            // append plain text
+		txt.Insert(txn, 5, " World", nil)               // append plain text
 		txt.Format(txn, 0, 5, Attributes{"bold": true}) // bold existing "Hello"
 	})
 
