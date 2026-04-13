@@ -474,6 +474,8 @@ func contentTagOf(c Content) byte {
 		return wireAny
 	case *ContentDoc:
 		return wireDoc
+	case *ContentMove:
+		return wireMove
 	default:
 		return wireAny
 	}
@@ -518,6 +520,10 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 		}
 		enc.writeString(guid)
 		enc.restEnc.WriteAny(nil)
+	case *ContentMove:
+		enc.restEnc.WriteVarUint(uint64(ct.Target.Client))
+		enc.restEnc.WriteVarUint(ct.Target.Clock)
+		enc.restEnc.WriteVarUint(uint64(ct.TargetLen))
 	}
 }
 
@@ -918,6 +924,22 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 			return nil, err
 		}
 		return NewContentDoc(New(WithGUID(guid))), nil
+
+	case wireMove:
+		clientU, err := dec.restDec.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		clock, err := dec.restDec.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		targetLen, err := dec.restDec.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		target := &ID{Client: ClientID(clientU), Clock: clock}
+		return NewContentMove(target, int(targetLen)), nil
 
 	default:
 		return nil, fmt.Errorf("unknown V2 content tag: %d", tag)

@@ -207,6 +207,36 @@ func (c *ContentDoc) IsCountable() bool    { return true }
 func (c *ContentDoc) Copy() Content        { return &ContentDoc{c.Doc} }
 func (c *ContentDoc) Splice(_ int) Content { panic("crdt: ContentDoc is not splittable") }
 
+// ContentMove is a CRDT-safe array move marker. It sits at the destination
+// position in the linked list and causes the target item to be rendered there
+// instead of at its original position. ContentMove is non-countable (it does
+// not contribute to the array's logical length) and occupies one clock slot.
+//
+// When two ContentMove items target the same item concurrently, the one with
+// the lower ClientID wins (deterministic convergence). The losing ContentMove
+// stays in the linked list but renders nothing because target.MovedBy points
+// to the winning item.
+//
+// TargetLen is the expected length of the target item (always 1 for
+// single-element moves). It is stored in the wire format so that receivers can
+// force-split a multi-value ContentAny item at the exact boundary when applying
+// delta updates, ensuring the same item granularity on all peers.
+type ContentMove struct {
+	Target    *ID
+	TargetLen int
+}
+
+func NewContentMove(target *ID, targetLen int) *ContentMove {
+	return &ContentMove{Target: target, TargetLen: targetLen}
+}
+func (c *ContentMove) Len() int          { return 1 }
+func (c *ContentMove) IsCountable() bool { return false }
+func (c *ContentMove) Copy() Content {
+	id := *c.Target
+	return &ContentMove{Target: &id, TargetLen: c.TargetLen}
+}
+func (c *ContentMove) Splice(_ int) Content { panic("crdt: ContentMove is not splittable") }
+
 // contentSkip is a decode-only placeholder for V1 skip structs (tag 10).
 // Skip structs represent clock ranges the sender intentionally omits.
 // They are consumed during decoding and never stored in the document.

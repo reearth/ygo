@@ -287,6 +287,108 @@ func TestUnit_YArray_Slice_StartGreaterThanEnd_ReturnsNil(t *testing.T) {
 	assert.Equal(t, []any{}, arr.Slice(0, 0)) // empty range, not nil
 }
 
+// ── CRDT-safe Move convergence ────────────────────────────────────────────────
+
+// TestInteg_YArray_Move_TwoPeer_DifferentItems checks that two peers each
+// moving a DIFFERENT element converge to the same state.
+//
+// Both moves send their element to the END of the array — past all existing
+// items. This avoids the YATA ordering constraint (lower ClientID goes first)
+// that arises when a higher-ClientID peer tries to insert before the lower
+// ClientID peer's items. The result is deterministic: both ContentMove items
+// share the same origin (the last item from client1) and no OriginRight, so
+// YATA places them in ClientID order: ContentMove1 (client1) then ContentMove2
+// (client2). The element that was moved to the end by client1 ("a") renders
+// before the element moved by client2 ("b").
+func TestInteg_YArray_Move_TwoPeer_DifferentItems(t *testing.T) {
+	doc1 := newTestDoc(1)
+	doc2 := newTestDoc(2)
+
+	arr1 := doc1.GetArray("list")
+	arr2 := doc2.GetArray("list")
+
+	// Both start from the same initial state pushed by doc1.
+	doc1.Transact(func(txn *Transaction) { arr1.Push(txn, []any{"a", "b", "c"}) })
+	update0 := EncodeStateAsUpdateV1(doc1, nil)
+	require.NoError(t, ApplyUpdateV1(doc2, update0, nil))
+
+	// doc1 moves "a" (index 0) to end (index 2) → local result [b, c, a]
+	doc1.Transact(func(txn *Transaction) { arr1.Move(txn, 0, 2) })
+	assert.Equal(t, []any{"b", "c", "a"}, arr1.ToSlice(), "doc1 local result")
+
+	// doc2 moves "b" (index 1) to end (index 2) → local result [a, c, b]
+	doc2.Transact(func(txn *Transaction) { arr2.Move(txn, 1, 2) })
+	assert.Equal(t, []any{"a", "c", "b"}, arr2.ToSlice(), "doc2 local result")
+
+	// Exchange delta updates.
+	sv1Before := doc1.store.StateVector()
+	sv2Before := doc2.store.StateVector()
+
+	update1to2 := EncodeStateAsUpdateV1(doc1, sv2Before)
+	update2to1 := EncodeStateAsUpdateV1(doc2, sv1Before)
+
+	require.NoError(t, ApplyUpdateV1(doc2, update1to2, nil))
+	require.NoError(t, ApplyUpdateV1(doc1, update2to1, nil))
+
+	// Both documents must converge to the same slice.
+	s1 := arr1.ToSlice()
+	s2 := arr2.ToSlice()
+	assert.Equal(t, s1, s2, "docs must converge")
+	assert.Len(t, s1, 3, "no elements lost")
+	// "c" (not moved) should appear first; "a" and "b" at the end in ClientID order.
+	assert.Equal(t, "c", s1[0], "'c' (unmoved) is first")
+	assert.Equal(t, "a", s1[1], "'a' (moved by client1) before 'b' (moved by client2)")
+	assert.Equal(t, "b", s1[2], "'b' (moved by client2) last")
+}
+
+// TestInteg_YArray_Move_TwoPeer_SameItem checks that two peers concurrently
+// moving THE SAME element converge: the peer with the lower ClientID wins, and
+// the element appears exactly once.
+func TestInteg_YArray_Move_TwoPeer_SameItem(t *testing.T) {
+	doc1 := newTestDoc(1) // lower ClientID → wins the race
+	doc2 := newTestDoc(2)
+
+	arr1 := doc1.GetArray("list")
+	arr2 := doc2.GetArray("list")
+
+	// Shared initial state from doc1.
+	doc1.Transact(func(txn *Transaction) { arr1.Push(txn, []any{"a", "b", "c"}) })
+	update0 := EncodeStateAsUpdateV1(doc1, nil)
+	require.NoError(t, ApplyUpdateV1(doc2, update0, nil))
+
+	// Both peers move element "a" (index 0) but to different destinations.
+	// doc1 moves "a" to index 1 (→ [b, a, c]); doc2 moves "a" to index 2 (→ [b, c, a]).
+	doc1.Transact(func(txn *Transaction) { arr1.Move(txn, 0, 1) })
+	doc2.Transact(func(txn *Transaction) { arr2.Move(txn, 0, 2) })
+
+	// Exchange delta updates.
+	sv1Before := doc1.store.StateVector()
+	sv2Before := doc2.store.StateVector()
+
+	update1to2 := EncodeStateAsUpdateV1(doc1, sv2Before)
+	update2to1 := EncodeStateAsUpdateV1(doc2, sv1Before)
+
+	require.NoError(t, ApplyUpdateV1(doc2, update1to2, nil))
+	require.NoError(t, ApplyUpdateV1(doc1, update2to1, nil))
+
+	s1 := arr1.ToSlice()
+	s2 := arr2.ToSlice()
+
+	// Must converge.
+	assert.Equal(t, s1, s2, "docs must converge")
+	// Element "a" must appear exactly once (no duplicates, no losses).
+	assert.Len(t, s1, 3, "length must be preserved")
+	aCount := 0
+	for _, v := range s1 {
+		if v == "a" {
+			aCount++
+		}
+	}
+	assert.Equal(t, 1, aCount, "element 'a' must appear exactly once")
+	// doc1 (ClientID=1) wins: "a" appears at the position doc1 chose (index 1).
+	assert.Equal(t, "a", s1[1], "lower ClientID (doc1) wins: 'a' at index 1")
+}
+
 func TestUnit_YArray_Get_NestedYMap_ReturnsType(t *testing.T) {
 	doc := newTestDoc(1)
 	arr := doc.GetArray("a")
