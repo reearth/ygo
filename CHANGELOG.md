@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] — 2026-04-13
+
+### Added
+
+- **CRDT-safe array Move**: `YArray.Move()` now creates a `ContentMove` marker item instead of deleting and reinserting. The moved element preserves causal history; concurrent moves of different elements both apply; concurrent moves of the same element converge to the lower-ClientID winner. `ContentMove` is included in V1 and V2 wire encoding (`wireMove = 11`).
+- **XML insert API**: `YXmlFragment.InsertElement`, `YXmlFragment.InsertText`, `YXmlElement.InsertElement`, and `YXmlElement.InsertText` are now exported, allowing external packages to build XML documents programmatically without reflection.
+
+### Fixed
+
+- **YText Format observer delta**: `YText.Format()` now emits an accurate `retain N + attributes` delta to observers. Previously the delta was missing or malformed, causing collaborative editors to show stale formatting to connected peers.
+
 ## [1.0.4] — 2026-04-10
 
 ### Fixed

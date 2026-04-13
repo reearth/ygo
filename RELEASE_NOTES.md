@@ -1,12 +1,13 @@
-## Fixes
+## What's new
 
-- **Nil panic on reconnect**: Server no longer panics when a reconnecting client sends state containing GC'd YMap replacement items. The `delete()` path now guards against orphaned items with no parent.
-- **Cross-browser sync with emoji**: ContentString offset encoding now correctly uses UTF-16 code units instead of Unicode code points. Fixes corrupt binary output when strings contain emoji or supplementary characters, which caused Yjs decode failures across different browser engines (V8 vs JavaScriptCore).
+- **CRDT-safe array Move**: `YArray.Move()` is now a proper CRDT primitive. The previous delete-then-insert approach lost causal history and diverged under concurrent edits. The new implementation uses a `ContentMove` marker so the element preserves its identity, concurrent moves of different elements both apply, and concurrent moves of the same element converge to the lower-ClientID winner. Included in V1 and V2 wire encoding.
+- **YText Format observer delta fix**: `YText.Format()` now emits an accurate `retain + attributes` delta to observers. Previously the delta was missing or reported the wrong range, which would cause collaborative editors to show stale formatting to peers.
+- **XML insert API**: `YXmlFragment` and `YXmlElement` now expose `InsertElement` and `InsertText` as exported methods, making it possible to build XML documents programmatically from outside the `crdt` package.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.0.4
+go get github.com/reearth/ygo@v1.0.5
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
