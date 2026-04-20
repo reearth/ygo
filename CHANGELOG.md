@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-04-20
+
+### Added
+
+- **Server-side document injection** for AI agents and backend APIs. Three new methods on `*websocket.Server` let server-side Go code push changes into a live room without simulating a WebSocket peer (issue #8):
+  - `BroadcastUpdate(ctx, room, update)` — fan a pre-encoded V1 update out to all connected peers. Does not mutate the server's doc; callers pair it with `crdt.ApplyUpdateV1` (or use `Apply`) to keep server state in sync. Validates ctx, room name, update size, and bytes before dispatch.
+  - `Apply(ctx, room, fn)` — run a callback that mutates the doc via a bound `transact` helper, capture the delta with an origin-scoped `OnUpdate` subscription, and broadcast it. Auto-creates the room if needed; persistence flows through the existing `OnUpdate` hook.
+  - `CloseRoom(name, force)` — explicit teardown for rooms that have no peers (typically ones created by `Apply`).
+- **Access-control hook:** `Server.OnInject func(ctx context.Context, info InjectInfo) error` gates both `BroadcastUpdate` and `Apply`. `InjectInfo.Op` (`OpBroadcastUpdate` | `OpApply`) and `InjectInfo.UpdateSize` let policy differ per path and per size. Refusals are wrapped with the new `ErrInjectRefused` sentinel.
+- **Resource caps:** `Server.MaxUpdateBytes` (per-update; default 64 MiB matching peer frame limit) and `Server.MaxRooms` (total rooms; default unlimited). `MaxRooms` applies uniformly to peer upgrades (HTTP 503) and `Apply` (`ErrTooManyRooms`).
+- **Error sentinels:** `ErrServerShutdown`, `ErrInvalidRoomName`, `ErrRoomNotFound`, `ErrRoomHasPeers`, `ErrInvalidUpdate`, `ErrUpdateTooLarge`, `ErrTooManyRooms`, `ErrNoChanges`, `ErrInjectRefused` — all comparable with `errors.Is`.
+
+### Changed
+
+- Peer upgrades past `MaxRooms` now return HTTP 503 (previously, unbounded room creation was only capped indirectly by `MaxConnections`).
+- Persistence goroutines now exit cleanly on `Server.Shutdown` even when their room has never had a connected peer. Previously this combination (reachable via `Apply` + persistence with no peers) hung `Shutdown`.
+
+### Security
+
+- Every server-side write path validates the room name via `isValidRoomName` — primary defense against path traversal in persistence adapters that key on room name.
+- `BroadcastUpdate` validates update bytes at the server boundary via a throwaway `ApplyUpdateV1`, rejecting malformed input with `ErrInvalidUpdate` before any peer sees it.
+- `MaxUpdateBytes` and `MaxRooms` close two DoS vectors enabled by the new API (oversized updates fanned out to all peers; unbounded room creation exhausting memory and persistence-backend connections).
+
 ## [1.0.5] — 2026-04-13
 
 ### Added
