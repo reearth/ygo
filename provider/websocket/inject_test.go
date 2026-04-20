@@ -235,3 +235,94 @@ func TestUnit_Apply_ContextAlreadyCancelled(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.False(t, fnCalled, "fn must not be called when ctx is already cancelled")
 }
+
+func TestUnit_Apply_MultipleTransacts_MergedAndBroadcastOnce(t *testing.T) {
+	srv := ygws.NewServer()
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	peerDoc := crdt.New()
+	drainHandshake(t, conn, peerDoc)
+
+	err := srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k1", "v1") })
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k2", "v2") })
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k3", "v3") })
+	})
+	require.NoError(t, err)
+
+	outerType, payload := readOne(t, conn, 2*time.Second)
+	assert.Equal(t, uint64(0), outerType)
+	_, _ = ygsync.ApplySyncMessage(peerDoc, payload, nil)
+
+	for key, want := range map[string]string{"k1": "v1", "k2": "v2", "k3": "v3"} {
+		got, ok := peerDoc.GetMap("m").Get(key)
+		require.True(t, ok, "peer missing key %s", key)
+		assert.Equal(t, want, got)
+	}
+
+	// No second message pending.
+	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	_, _, err = conn.ReadMessage()
+	assert.Error(t, err, "expected no further messages")
+}
+
+func TestUnit_Apply_AutoCreatesRoom(t *testing.T) {
+	srv := ygws.NewServer()
+	assert.Nil(t, srv.GetDoc("new-room"))
+
+	err := srv.Apply(context.Background(), "new-room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+	})
+	require.NoError(t, err)
+
+	doc := srv.GetDoc("new-room")
+	require.NotNil(t, doc)
+	got, ok := doc.GetMap("m").Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "v", got)
+}
+
+func TestUnit_Apply_MaxRoomsExceeded(t *testing.T) {
+	srv := ygws.NewServer()
+	srv.MaxRooms = 2
+
+	for i, name := range []string{"a", "b"} {
+		err := srv.Apply(context.Background(), name, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			m := doc.GetMap("m")
+			transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+		})
+		require.NoError(t, err, "room %d %q should succeed", i, name)
+	}
+
+	err := srv.Apply(context.Background(), "c", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {})
+	assert.ErrorIs(t, err, ygws.ErrTooManyRooms)
+	assert.Nil(t, srv.GetDoc("c"), "failed Apply must not leave a partial room")
+}
+
+func TestUnit_Apply_UpdateTooLarge(t *testing.T) {
+	srv := ygws.NewServer()
+	srv.MaxUpdateBytes = 32
+
+	err := srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		txt := doc.GetText("t")
+		transact(func(txn *crdt.Transaction) {
+			txt.Insert(txn, 0, strings.Repeat("x", 1000), nil)
+		})
+	})
+	assert.ErrorIs(t, err, ygws.ErrUpdateTooLarge)
+
+	// Doc HAS been mutated (post-hoc size check).
+	doc := srv.GetDoc("room")
+	require.NotNil(t, doc)
+	assert.Equal(t, 1000, doc.GetText("t").Len())
+}
+
+func TestUnit_Apply_AfterShutdown(t *testing.T) {
+	srv := ygws.NewServer()
+	require.NoError(t, srv.Shutdown(context.Background()))
+	err := srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {})
+	assert.ErrorIs(t, err, ygws.ErrServerShutdown)
+}
