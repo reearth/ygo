@@ -15,7 +15,7 @@ func TestUnit_InjectOp_String(t *testing.T) {
 	assert.Equal(t, "unknown", ygws.InjectOp(99).String())
 }
 
-func TestUnit_EffectiveMaxUpdateBytes_DefaultsTo64MiB(t *testing.T) {
+func TestUnit_Server_MaxUpdateBytesField_Exists(t *testing.T) {
 	srv := ygws.NewServer()
 	// MaxUpdateBytes defaults to 0 → effective value should be 64 MiB.
 	// We verify via behavior in later tasks; here we just assert field
