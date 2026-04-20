@@ -369,6 +369,16 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 							return
 						}
 					}
+				case <-s.shutdownCh:
+					// Server is shutting down; drain any remaining buffered updates.
+					for {
+						select {
+						case update := <-r.persistCh:
+							store(update)
+						default:
+							return
+						}
+					}
 				}
 			}
 		}()
