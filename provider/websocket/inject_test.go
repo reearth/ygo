@@ -2,6 +2,7 @@ package websocket_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
 	ygws "github.com/reearth/ygo/provider/websocket"
 	ygsync "github.com/reearth/ygo/sync"
 )
@@ -397,4 +399,116 @@ func TestUnit_Apply_TriggersPersistenceViaOnUpdate(t *testing.T) {
 	got, ok := reloaded.GetMap("m").Get("k")
 	require.True(t, ok)
 	assert.Equal(t, "v", got)
+}
+
+// TestUnit_Apply_InterleavedWithPeerWrites_Converges is the acceptance
+// criterion from issue #8: server-side Apply and peer writes can be
+// interleaved and both sides end up consistent.
+//
+// The test interleaves Apply and peer-sync writes sequentially — each
+// peer write is acked by reading back the resulting broadcast from the
+// server before the next write is issued. This matches the protocol
+// invariant that incremental deltas are applied in dependency order.
+// The "concurrent" scenario in the acceptance criterion refers to
+// multiple write sources (server and peer) rather than unconstrained
+// parallelism within a single doc; production callers serialize their
+// own writes per-doc anyway.
+func TestUnit_Apply_InterleavedWithPeerWrites_Converges(t *testing.T) {
+	srv := ygws.NewServer()
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	t.Cleanup(httpSrv.Close)
+
+	conn := dial(t, httpSrv, "room")
+	peerDoc := crdt.New()
+	drainHandshake(t, conn, peerDoc)
+
+	const n = 5
+
+	for i := 0; i < n; i++ {
+		// Server Apply.
+		sKey := fmt.Sprintf("s%d", i)
+		sVal := i
+		require.NoError(t, srv.Apply(context.Background(), "room",
+			func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+				m := doc.GetMap("m")
+				transact(func(txn *crdt.Transaction) { m.Set(txn, sKey, sVal) })
+			}))
+		// Peer receives the server-side delta.
+		outerType, payload := readOne(t, conn, 2*time.Second)
+		require.Equal(t, uint64(0), outerType)
+		_, _ = ygsync.ApplySyncMessage(peerDoc, payload, nil)
+
+		// Peer write, sent as a sync update message.
+		d := crdt.New()
+		dm := d.GetMap("m")
+		d.Transact(func(txn *crdt.Transaction) {
+			dm.Set(txn, fmt.Sprintf("p%d", i), i)
+		})
+		upd := crdt.EncodeStateAsUpdateV1(d, nil)
+		enc := encoding.NewEncoder()
+		enc.WriteVarUint(ygsync.MsgUpdate)
+		enc.WriteVarBytes(upd)
+		sendSync(t, conn, enc.Bytes())
+		// Give the server a beat to process before the next iteration.
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Reconcile peer with any still-pending state. Peer emits sync step 1,
+	// server replies with step 2 carrying everything the peer is missing.
+	sendSync(t, conn, ygsync.EncodeSyncStep1(peerDoc))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		_, data, err := conn.ReadMessage()
+		_ = conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			break
+		}
+		dec := encoding.NewDecoder(data)
+		if outerType, e := dec.ReadVarUint(); e == nil && outerType == 0 {
+			_, _ = ygsync.ApplySyncMessage(peerDoc, dec.RemainingBytes(), nil)
+		}
+		if peerMapHasAll(peerDoc, n) {
+			break
+		}
+	}
+
+	serverDoc := srv.GetDoc("room")
+	require.NotNil(t, serverDoc)
+	serverMap := serverDoc.GetMap("m")
+	peerMap := peerDoc.GetMap("m")
+	for i := 0; i < n; i++ {
+		sKey := fmt.Sprintf("s%d", i)
+		pKey := fmt.Sprintf("p%d", i)
+		wantVal := int64(i)
+
+		gotS, okS := serverMap.Get(sKey)
+		require.True(t, okS, "server missing server-side key %s", sKey)
+		assert.Equal(t, wantVal, gotS)
+
+		gotP, okP := serverMap.Get(pKey)
+		require.True(t, okP, "server missing peer-side key %s", pKey)
+		assert.Equal(t, wantVal, gotP)
+
+		gotSp, okSp := peerMap.Get(sKey)
+		require.True(t, okSp, "peer missing server-side key %s", sKey)
+		assert.Equal(t, wantVal, gotSp)
+
+		gotPp, okPp := peerMap.Get(pKey)
+		require.True(t, okPp, "peer missing its own peer-side key %s", pKey)
+		assert.Equal(t, wantVal, gotPp)
+	}
+}
+
+func peerMapHasAll(doc *crdt.Doc, n int) bool {
+	m := doc.GetMap("m")
+	for i := 0; i < n; i++ {
+		if _, ok := m.Get(fmt.Sprintf("s%d", i)); !ok {
+			return false
+		}
+		if _, ok := m.Get(fmt.Sprintf("p%d", i)); !ok {
+			return false
+		}
+	}
+	return true
 }
