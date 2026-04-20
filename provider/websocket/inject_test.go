@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	gws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -54,11 +53,8 @@ func TestUnit_PeerUpgrade_MaxRoomsExceeded_Returns503(t *testing.T) {
 	drainHandshake(t, connA, crdt.New())
 
 	// Peer attempting to open a second room fails with 503 on upgrade.
-	// Use a custom dialer to capture the HTTP response.
-	dialer := gws.Dialer{}
-	header := make(http.Header)
-	_, resp, _ := dialer.Dial(wsURL(httpSrv, "room-B"), header)
-	require.NotNil(t, resp)
+	resp, err := http.Get(httpSrv.URL + "/room-B")
+	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
