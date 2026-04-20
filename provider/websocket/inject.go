@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
@@ -305,4 +306,96 @@ func encodeBroadcastWire(update []byte) []byte {
 	enc.WriteVarUint(ygsync.MsgUpdate)
 	enc.WriteVarBytes(update)
 	return enc.Bytes()
+}
+
+// CloseRoom removes the named room from the server. Drains the room's
+// persistence write queue and deletes the room from the server's map so
+// that subsequent GetDoc / BroadcastUpdate / Apply calls do not see it.
+//
+// If peers are connected:
+//   - force=false: returns ErrRoomHasPeers without modifying state.
+//   - force=true:  closes each peer connection, waits for disconnect
+//     handlers to run, then deletes the room.
+//
+// CloseRoom is primarily intended for releasing rooms created by Apply
+// that never accumulated peer connections — without it, such rooms
+// linger until process exit.
+func (s *Server) CloseRoom(name string, force bool) error {
+	select {
+	case <-s.shutdownCh:
+		return ErrServerShutdown
+	default:
+	}
+	if !isValidRoomName(name) {
+		return ErrInvalidRoomName
+	}
+
+	s.rmu.Lock()
+	rm, ok := s.rooms[name]
+	if !ok {
+		s.rmu.Unlock()
+		return ErrRoomNotFound
+	}
+
+	rm.mu.Lock()
+	peerCount := len(rm.peers)
+	if peerCount > 0 && !force {
+		rm.mu.Unlock()
+		s.rmu.Unlock()
+		return ErrRoomHasPeers
+	}
+
+	// Collect connection handles and done channels for force-close.
+	var conns []*gws.Conn
+	var dones []chan struct{}
+	if peerCount > 0 {
+		conns = make([]*gws.Conn, 0, peerCount)
+		dones = make([]chan struct{}, 0, peerCount)
+		for p := range rm.peers {
+			conns = append(conns, p.conn)
+			dones = append(dones, p.done)
+		}
+	}
+	rm.mu.Unlock()
+	s.rmu.Unlock()
+
+	// Close each connection outside the locks. handleDisconnect reacquires
+	// s.rmu and rm.mu, so we MUST have released both before entering this
+	// block to avoid deadlock.
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	for _, d := range dones {
+		<-d
+	}
+
+	// Re-acquire locks to delete the room. Compare pointer identity so we
+	// don't delete a REPLACEMENT room that was created at the same key:
+	//   - handleDisconnect may have already deleted the original.
+	//   - A subsequent Apply or peer upgrade may have inserted a new room.
+	// In either case our work is done — return nil.
+	s.rmu.Lock()
+	fresh, ok := s.rooms[name]
+	if !ok || fresh != rm {
+		s.rmu.Unlock()
+		if rm.persistDone != nil {
+			<-rm.persistDone
+		}
+		return nil
+	}
+	delete(s.rooms, name)
+	if rm.persistStop != nil {
+		select {
+		case <-rm.persistStop:
+			// already closed by handleDisconnect
+		default:
+			close(rm.persistStop)
+		}
+	}
+	s.rmu.Unlock()
+
+	if rm.persistDone != nil {
+		<-rm.persistDone
+	}
+	return nil
 }

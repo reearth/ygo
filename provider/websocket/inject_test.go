@@ -637,3 +637,78 @@ func TestUnit_OnInject_CtxValue_PropagatesForTenantCheck(t *testing.T) {
 	}))
 	assert.Error(t, srv.Apply(badCtx, "room2", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {}))
 }
+
+func TestUnit_CloseRoom_EmptyRoom_Deletes(t *testing.T) {
+	srv := ygws.NewServer()
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+	}))
+	assert.NotNil(t, srv.GetDoc("room"))
+
+	require.NoError(t, srv.CloseRoom("room", false))
+	assert.Nil(t, srv.GetDoc("room"))
+}
+
+func TestUnit_CloseRoom_NonExistent_ErrRoomNotFound(t *testing.T) {
+	srv := ygws.NewServer()
+	err := srv.CloseRoom("ghost", false)
+	assert.ErrorIs(t, err, ygws.ErrRoomNotFound)
+}
+
+func TestUnit_CloseRoom_InvalidName(t *testing.T) {
+	srv := ygws.NewServer()
+	err := srv.CloseRoom("..", false)
+	assert.ErrorIs(t, err, ygws.ErrInvalidRoomName)
+}
+
+func TestUnit_CloseRoom_HasPeers_NoForce_ErrRoomHasPeers(t *testing.T) {
+	srv := ygws.NewServer()
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	drainHandshake(t, conn, crdt.New())
+	_ = conn
+
+	err := srv.CloseRoom("room", false)
+	assert.ErrorIs(t, err, ygws.ErrRoomHasPeers)
+	assert.NotNil(t, srv.GetDoc("room"))
+}
+
+func TestUnit_CloseRoom_HasPeers_Force_DisconnectsAndDeletes(t *testing.T) {
+	srv := ygws.NewServer()
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	drainHandshake(t, conn, crdt.New())
+
+	require.NoError(t, srv.CloseRoom("room", true))
+	assert.Nil(t, srv.GetDoc("room"))
+
+	// The peer connection should be closed — next ReadMessage errors.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := conn.ReadMessage()
+	assert.Error(t, err)
+}
+
+func TestUnit_CloseRoom_AfterShutdown(t *testing.T) {
+	srv := ygws.NewServer()
+	require.NoError(t, srv.Shutdown(context.Background()))
+	err := srv.CloseRoom("room", false)
+	assert.ErrorIs(t, err, ygws.ErrServerShutdown)
+}
+
+func TestUnit_CloseRoom_WithPersistence_DrainsBeforeReturn(t *testing.T) {
+	p := ygws.NewMemoryPersistence()
+	srv := ygws.NewServerWithPersistence(p)
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+	}))
+
+	require.NoError(t, srv.CloseRoom("room", false))
+
+	stored, err := p.LoadDoc("room")
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+}
