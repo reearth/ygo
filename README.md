@@ -121,6 +121,112 @@ func main() {
 }
 ```
 
+## Server-side document injection
+
+Backend services — AI agents, HTTP handlers, content pipelines — can push
+changes into a live room without simulating a WebSocket peer. Three APIs
+are available on `*websocket.Server`.
+
+### `BroadcastUpdate(ctx, room, update)`
+
+Fans a pre-encoded V1 update out to all peers currently connected to a
+room. Does **not** apply the update to the server's doc — callers who
+want the server's state to reflect the broadcast must call
+`crdt.ApplyUpdateV1` first (or use `Apply` below).
+
+```go
+doc := server.GetDoc("my-room")
+if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+    return err
+}
+if err := server.BroadcastUpdate(ctx, "my-room", update); err != nil {
+    return err
+}
+```
+
+**Skipping `ApplyUpdateV1` creates divergence.** Live peers see the
+update, but peers joining afterwards receive the server's stale state
+via sync step 2.
+
+### `Apply(ctx, room, fn)`
+
+Applies a callback to the doc and broadcasts the resulting delta atomically.
+Auto-creates the room if needed. Persistence runs via the existing
+`OnUpdate` hook — callers do not need to persist separately.
+
+```go
+err := server.Apply(ctx, "my-room",
+    func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+        frag := doc.GetXmlFragment("content") // OUTSIDE transact — see note
+        transact(func(txn *crdt.Transaction) {
+            elem := crdt.NewYXmlElement("p")
+            frag.InsertElement(txn, 0, elem)
+        })
+    },
+)
+```
+
+**Important:** calls to `doc.GetXmlFragment`, `doc.GetText`, `doc.GetMap`,
+and the other root-type accessors must happen **outside** the `transact`
+callback. These methods acquire the doc's write lock, which `transact`
+already holds — calling them inside deadlocks.
+
+`fn` should be fast. It runs inside the doc's write lock and blocks all
+peer reads and writes to the room for the duration.
+
+### `CloseRoom(name, force)`
+
+Explicit teardown for rooms created by `Apply` that never accumulated
+peer connections. Without `CloseRoom`, such rooms linger until process
+exit.
+
+```go
+if err := server.CloseRoom("my-room", false); err != nil { /* ... */ }
+// force=true closes connected peers first.
+```
+
+### Access control: `Server.OnInject`
+
+An optional hook gates all server-side writes:
+
+```go
+server.OnInject = func(ctx context.Context, info websocket.InjectInfo) error {
+    tenant, _ := ctx.Value(tenantKey{}).(string)
+    if !allowed(tenant, info.Room) {
+        return fmt.Errorf("tenant %q may not write to %q", tenant, info.Room)
+    }
+    if info.Op == websocket.OpBroadcastUpdate && info.UpdateSize > 1<<20 {
+        return errors.New("update too large for this tenant")
+    }
+    return nil
+}
+```
+
+`info.Op` is `OpBroadcastUpdate` or `OpApply`. `info.UpdateSize` is the
+length of the update bytes for `BroadcastUpdate`; zero for `Apply` (the
+delta has not yet been produced — size capping for `Apply` is handled
+by `MaxUpdateBytes`, post-hoc).
+
+Refusals are returned wrapped with `ErrInjectRefused`, so callers can
+match either the sentinel or the hook's own error via `errors.Is`.
+
+### Resource caps
+
+- `Server.MaxUpdateBytes` — per-update size cap, default 64 MiB (matches
+  the peer frame limit).
+- `Server.MaxRooms` — total-room cap applied uniformly to peer upgrades
+  (HTTP 503) and `Apply` (`ErrTooManyRooms`). Default unlimited.
+
+### Trust model
+
+`Server.Apply` and `Server.BroadcastUpdate` grant total write authority
+on the document. Treat the `*Server` handle with the same care as a
+database connection — do not expose it directly to untrusted code.
+`OnInject` is defense-in-depth, not a substitute for caller-side
+authorization. A caller who can reach either API can craft updates that
+spoof any client ID, which is equivalent to the authority already
+granted by `GetDoc` + `ApplyUpdateV1`.
+
 ## Performance
 
 ### Running the benchmarks
