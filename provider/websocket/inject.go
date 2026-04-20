@@ -6,6 +6,11 @@ package websocket
 import (
 	"context"
 	"errors"
+	"fmt"
+
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
+	ygsync "github.com/reearth/ygo/sync"
 )
 
 // InjectOp identifies which server-side write path is being invoked.
@@ -85,4 +90,84 @@ func (s *Server) effectiveMaxUpdateBytes() int {
 		return s.MaxUpdateBytes
 	}
 	return int(maxWSMessageBytes)
+}
+
+// BroadcastUpdate fans out a pre-encoded V1 update to all peers
+// currently connected to the named room. It does NOT apply the update
+// to the server's doc; callers who want the server's state to reflect
+// the broadcast must call crdt.ApplyUpdateV1 first (or use Apply).
+// Failing to do so creates divergence: live peers see the update, but
+// peers joining after the broadcast receive the server's stale state
+// via sync step 2.
+//
+// Peer write failures during fan-out do not produce an error: writes
+// are dispatched in goroutines with a per-write deadline (writeTimeout),
+// matching the existing peer-broadcast path. A slow peer cannot block
+// the broadcast to other peers.
+func (s *Server) BroadcastUpdate(ctx context.Context, room string, update []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-s.shutdownCh:
+		return ErrServerShutdown
+	default:
+	}
+	if !isValidRoomName(room) {
+		return ErrInvalidRoomName
+	}
+	if len(update) > s.effectiveMaxUpdateBytes() {
+		return ErrUpdateTooLarge
+	}
+	// Validate by applying to a throwaway doc. If the bytes are
+	// malformed, peers would reject them anyway; catching at the
+	// server boundary surfaces caller bugs eagerly.
+	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidUpdate, err)
+	}
+	if s.OnInject != nil {
+		if err := s.OnInject(ctx, InjectInfo{
+			Room:       room,
+			Op:         OpBroadcastUpdate,
+			UpdateSize: len(update),
+		}); err != nil {
+			return fmt.Errorf("ygo/websocket: inject refused: %w", err)
+		}
+	}
+	s.rmu.RLock()
+	rm, ok := s.rooms[room]
+	s.rmu.RUnlock()
+	if !ok {
+		return ErrRoomNotFound
+	}
+	rm.mu.Lock()
+	targets := make([]*peer, 0, len(rm.peers))
+	for p := range rm.peers {
+		targets = append(targets, p)
+	}
+	rm.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	data := encodeBroadcastWire(update)
+	for _, p := range targets {
+		go p.write(data)
+	}
+	return nil
+}
+
+// encodeBroadcastWire wraps a V1 update in the outer sync frame used by
+// both peer and server-side broadcasts:
+//
+//	[msgSync][MsgUpdate][VarBytes(update bytes)]
+//
+// The outer sync type byte is NOT VarBytes-wrapped (matching broadcastSync),
+// but the update payload inside the sync message IS VarBytes-wrapped (matching
+// what ApplySyncMessage expects for MsgUpdate and MsgSyncStep2 messages).
+func encodeBroadcastWire(update []byte) []byte {
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(msgSync)
+	enc.WriteVarUint(ygsync.MsgUpdate)
+	enc.WriteVarBytes(update)
+	return enc.Bytes()
 }
