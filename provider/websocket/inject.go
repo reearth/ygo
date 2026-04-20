@@ -6,8 +6,6 @@ package websocket
 import (
 	"context"
 	"errors"
-
-	"github.com/reearth/ygo/crdt"
 )
 
 // InjectOp identifies which server-side write path is being invoked.
@@ -80,7 +78,11 @@ var (
 	ErrNoChanges = errors.New("ygo/websocket: no changes produced")
 )
 
-// Suppress unused-import lint until later tasks add the function bodies
-// that use context and crdt.
-var _ context.Context
-var _ = crdt.New
+// effectiveMaxUpdateBytes returns the server's configured per-update
+// cap, or the default 64 MiB (matching the peer frame cap) when unset.
+func (s *Server) effectiveMaxUpdateBytes() int {
+	if s.MaxUpdateBytes > 0 {
+		return s.MaxUpdateBytes
+	}
+	return int(maxWSMessageBytes)
+}

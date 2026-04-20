@@ -168,6 +168,26 @@ type Server struct {
 	// Zero (the default) means unlimited (N-H5).
 	MaxPeersPerRoom int
 
+	// OnInject, if non-nil, is called before every server-side write
+	// (BroadcastUpdate or Apply). Return a non-nil error to refuse the
+	// operation; the error is wrapped and returned to the caller.
+	// For BroadcastUpdate, InjectInfo.UpdateSize is len(update); for
+	// Apply it is 0 (the delta has not yet been produced).
+	OnInject InjectHook
+
+	// MaxUpdateBytes is the maximum size of a single V1 update that
+	// BroadcastUpdate will fan out, or that Apply will produce and
+	// fan out. Zero means use the same 64 MiB default applied to
+	// WebSocket peer frames (maxWSMessageBytes).
+	MaxUpdateBytes int
+
+	// MaxRooms caps the total number of rooms the server will hold at
+	// once, across both peer-upgrade-created and Apply-created rooms.
+	// Zero means unlimited. Enforcement applies uniformly: peer upgrades
+	// past the cap receive HTTP 503; Apply past the cap returns
+	// ErrTooManyRooms.
+	MaxRooms int
+
 	activeConns atomic.Int64 // atomic; total live WebSocket connections
 }
 
