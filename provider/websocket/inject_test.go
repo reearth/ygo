@@ -141,7 +141,6 @@ func TestUnit_BroadcastUpdate_UpdateTooLarge(t *testing.T) {
 	t.Cleanup(httpSrv.Close)
 	conn := dial(t, httpSrv, "room")
 	drainHandshake(t, conn, crdt.New())
-	_ = conn
 
 	err := srv.BroadcastUpdate(context.Background(), "room", make([]byte, 32))
 	assert.ErrorIs(t, err, ygws.ErrUpdateTooLarge)
@@ -153,7 +152,6 @@ func TestUnit_BroadcastUpdate_InvalidUpdateBytes(t *testing.T) {
 	t.Cleanup(httpSrv.Close)
 	conn := dial(t, httpSrv, "room")
 	drainHandshake(t, conn, crdt.New())
-	_ = conn
 
 	err := srv.BroadcastUpdate(context.Background(), "room", []byte{0xff, 0xff, 0xff, 0xff})
 	assert.ErrorIs(t, err, ygws.ErrInvalidUpdate)
@@ -165,11 +163,10 @@ func TestUnit_BroadcastUpdate_DoesNotMutateServerDoc(t *testing.T) {
 	t.Cleanup(httpSrv.Close)
 	conn := dial(t, httpSrv, "room")
 	drainHandshake(t, conn, crdt.New())
-	_ = conn
 
 	external := crdt.New()
-	extMap2 := external.GetMap("m")
-	external.Transact(func(txn *crdt.Transaction) { extMap2.Set(txn, "k", "v") })
+	extMap := external.GetMap("m")
+	external.Transact(func(txn *crdt.Transaction) { extMap.Set(txn, "k", "v") })
 	update := crdt.EncodeStateAsUpdateV1(external, nil)
 
 	require.NoError(t, srv.BroadcastUpdate(context.Background(), "room", update))

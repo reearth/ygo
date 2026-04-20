@@ -1,6 +1,6 @@
-// Server-side document injection — types, error sentinels, and hook signature.
-// BroadcastUpdate, Apply, and CloseRoom are defined in this file; their
-// bodies are populated in later tasks.
+// Server-side document injection — BroadcastUpdate, Apply, and CloseRoom
+// plus their types, error sentinels, and hook signature. See doc.go for the
+// package-level overview.
 package websocket
 
 import (
@@ -81,6 +81,10 @@ var (
 	// ErrNoChanges is returned by Apply when fn produces no delta
 	// (either never called transact or called transact with a no-op body).
 	ErrNoChanges = errors.New("ygo/websocket: no changes produced")
+	// ErrInjectRefused is returned when the OnInject hook returns a
+	// non-nil error. The hook's error is wrapped as the cause and
+	// remains reachable via errors.Unwrap.
+	ErrInjectRefused = errors.New("ygo/websocket: inject refused")
 )
 
 // effectiveMaxUpdateBytes returns the server's configured per-update
@@ -123,7 +127,7 @@ func (s *Server) BroadcastUpdate(ctx context.Context, room string, update []byte
 	// malformed, peers would reject them anyway; catching at the
 	// server boundary surfaces caller bugs eagerly.
 	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidUpdate, err)
+		return fmt.Errorf("%w: %w", ErrInvalidUpdate, err)
 	}
 	if s.OnInject != nil {
 		if err := s.OnInject(ctx, InjectInfo{
@@ -131,7 +135,7 @@ func (s *Server) BroadcastUpdate(ctx context.Context, room string, update []byte
 			Op:         OpBroadcastUpdate,
 			UpdateSize: len(update),
 		}); err != nil {
-			return fmt.Errorf("ygo/websocket: inject refused: %w", err)
+			return fmt.Errorf("%w: %w", ErrInjectRefused, err)
 		}
 	}
 	s.rmu.RLock()
