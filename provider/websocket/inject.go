@@ -1,9 +1,6 @@
-// Package websocket: server-side document injection.
-//
-// This file adds APIs that let server-side Go code (AI agents, HTTP
-// handlers, content pipelines) push changes into a live room without
-// simulating a WebSocket peer. See docs/superpowers/specs/ for the
-// full design rationale.
+// Server-side document injection — types, error sentinels, and hook signature.
+// BroadcastUpdate, Apply, and CloseRoom are defined in this file; their
+// bodies are populated in later tasks.
 package websocket
 
 import (
