@@ -11,6 +11,7 @@ package websocket
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -318,6 +319,9 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 	if r, ok := s.rooms[name]; ok {
 		return r, nil
 	}
+	if s.MaxRooms > 0 && len(s.rooms) >= s.MaxRooms {
+		return nil, ErrTooManyRooms
+	}
 	r := &room{
 		doc:       crdt.New(),
 		awareness: awareness.New(0),
@@ -399,6 +403,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	rm, err := s.getOrCreateRoom(name)
 	if err != nil {
+		if errors.Is(err, ErrTooManyRooms) {
+			http.Error(w, "too many rooms", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "room unavailable", http.StatusInternalServerError)
 		return
 	}

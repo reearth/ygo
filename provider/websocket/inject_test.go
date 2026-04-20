@@ -2,10 +2,15 @@ package websocket_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/reearth/ygo/crdt"
 	ygws "github.com/reearth/ygo/provider/websocket"
 )
 
@@ -34,4 +39,26 @@ func TestUnit_Server_OnInjectField_Exists(t *testing.T) {
 	srv := ygws.NewServer()
 	srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error { return nil }
 	assert.NotNil(t, srv.OnInject)
+}
+
+func TestUnit_PeerUpgrade_MaxRoomsExceeded_Returns503(t *testing.T) {
+	srv := ygws.NewServer()
+	srv.MaxRooms = 1
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv.ServeHTTP(w, r)
+	}))
+	t.Cleanup(httpSrv.Close)
+
+	// First peer in room-A succeeds.
+	connA := dial(t, httpSrv, "room-A")
+	drainHandshake(t, connA, crdt.New())
+
+	// Peer attempting to open a second room fails with 503 on upgrade.
+	// Use a custom dialer to capture the HTTP response.
+	dialer := gws.Dialer{}
+	header := make(http.Header)
+	_, resp, _ := dialer.Dial(wsURL(httpSrv, "room-B"), header)
+	require.NotNil(t, resp)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
