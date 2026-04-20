@@ -173,6 +173,23 @@ func (s *Server) BroadcastUpdate(ctx context.Context, room string, update []byte
 // fn should be fast — it runs inside the doc's write lock and blocks
 // all peer reads and writes to the room for the duration.
 //
+// fn must not spawn goroutines that call transact after fn returns.
+// Any such late transact invocation will commit to the doc (the
+// origin is still recognized by the private OnUpdate listener until
+// the deferred unsub fires) but its delta will not be captured or
+// broadcast — Apply's captured-snapshot happens immediately after
+// fn returns. The doc state will drift from live peers in the same
+// way an unapplied BroadcastUpdate does.
+//
+// ctx is checked once at entry and not re-checked after fn returns.
+// Once fn's transaction commits, the update has already been queued
+// to persistence via the existing OnUpdate hook. Aborting the
+// broadcast on late context cancellation would leave live peers out
+// of sync with persisted state — the same hazard warned about on
+// BroadcastUpdate. Context cancellation during fn is therefore a
+// best-effort signal; the transaction completes unless fn itself
+// observes ctx and returns early.
+//
 // IMPORTANT: if fn calls doc.Transact directly (bypassing the supplied
 // transact helper), the delta is NOT captured and Apply returns
 // ErrNoChanges even though the doc has been mutated. This is a
