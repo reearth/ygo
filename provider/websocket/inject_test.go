@@ -2,6 +2,7 @@ package websocket_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -511,4 +512,128 @@ func peerMapHasAll(doc *crdt.Doc, n int) bool {
 		}
 	}
 	return true
+}
+
+func TestUnit_OnInject_BroadcastUpdate_ReceivesOpAndSize(t *testing.T) {
+	srv := ygws.NewServer()
+	var callCount int
+	var gotInfo ygws.InjectInfo
+	srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error {
+		callCount++
+		gotInfo = info
+		return nil
+	}
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	drainHandshake(t, conn, crdt.New())
+	_ = conn
+
+	d := crdt.New()
+	dm := d.GetMap("m")
+	d.Transact(func(txn *crdt.Transaction) { dm.Set(txn, "k", "v") })
+	update := crdt.EncodeStateAsUpdateV1(d, nil)
+
+	require.NoError(t, srv.BroadcastUpdate(context.Background(), "room", update))
+
+	assert.Equal(t, 1, callCount)
+	assert.Equal(t, "room", gotInfo.Room)
+	assert.Equal(t, ygws.OpBroadcastUpdate, gotInfo.Op)
+	assert.Equal(t, len(update), gotInfo.UpdateSize)
+}
+
+func TestUnit_OnInject_Apply_ReceivesOpAndZeroSize(t *testing.T) {
+	srv := ygws.NewServer()
+	var callCount int
+	var gotInfo ygws.InjectInfo
+	srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error {
+		callCount++
+		gotInfo = info
+		return nil
+	}
+
+	err := srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, callCount)
+	assert.Equal(t, "room", gotInfo.Room)
+	assert.Equal(t, ygws.OpApply, gotInfo.Op)
+	assert.Equal(t, 0, gotInfo.UpdateSize, "Apply's OnInject must see UpdateSize=0")
+}
+
+func TestUnit_OnInject_Refusal_BlocksOperation(t *testing.T) {
+	srv := ygws.NewServer()
+	refusal := errors.New("refused by policy")
+	srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error {
+		return refusal
+	}
+
+	// Build a valid update to pass BroadcastUpdate's parse check.
+	d := crdt.New()
+	dm := d.GetMap("m")
+	d.Transact(func(txn *crdt.Transaction) { dm.Set(txn, "k", "v") })
+	update := crdt.EncodeStateAsUpdateV1(d, nil)
+
+	errA := srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+	})
+	assert.ErrorIs(t, errA, refusal, "caller should see the hook's error via errors.Is")
+	assert.ErrorIs(t, errA, ygws.ErrInjectRefused, "caller can also match the sentinel")
+	assert.Nil(t, srv.GetDoc("room"), "refusal must not auto-create a room")
+
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "other")
+	drainHandshake(t, conn, crdt.New())
+	_ = conn
+
+	errB := srv.BroadcastUpdate(context.Background(), "other", update)
+	assert.ErrorIs(t, errB, refusal)
+	assert.ErrorIs(t, errB, ygws.ErrInjectRefused)
+}
+
+func TestUnit_OnInject_InvalidUpdate_ShortCircuitsBeforeInject(t *testing.T) {
+	// BroadcastUpdate's check order: ctx → shutdown → name → size →
+	// parse → inject. Malformed bytes are rejected BEFORE OnInject so
+	// the hook is never called.
+	srv := ygws.NewServer()
+	called := false
+	srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error {
+		called = true
+		return nil
+	}
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	drainHandshake(t, conn, crdt.New())
+	_ = conn
+
+	err := srv.BroadcastUpdate(context.Background(), "room", []byte{0xff, 0xff})
+	assert.ErrorIs(t, err, ygws.ErrInvalidUpdate)
+	assert.False(t, called, "OnInject must not be called when bytes fail parse")
+}
+
+func TestUnit_OnInject_CtxValue_PropagatesForTenantCheck(t *testing.T) {
+	type tenantKey struct{}
+	srv := ygws.NewServer()
+	srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error {
+		tenant, _ := ctx.Value(tenantKey{}).(string)
+		if tenant != "tenant-a" {
+			return errors.New("wrong tenant")
+		}
+		return nil
+	}
+
+	okCtx := context.WithValue(context.Background(), tenantKey{}, "tenant-a")
+	badCtx := context.WithValue(context.Background(), tenantKey{}, "tenant-b")
+
+	assert.NoError(t, srv.Apply(okCtx, "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+	}))
+	assert.Error(t, srv.Apply(badCtx, "room2", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {}))
 }
