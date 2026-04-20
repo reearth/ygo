@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
@@ -154,6 +155,119 @@ func (s *Server) BroadcastUpdate(ctx context.Context, room string, update []byte
 		return err
 	}
 	data := encodeBroadcastWire(update)
+	for _, p := range targets {
+		go p.write(data)
+	}
+	return nil
+}
+
+// Apply auto-creates the room if needed, runs fn with a bound transact
+// helper, captures the update(s) produced by fn's transaction(s), and
+// fans the result out to all connected peers.
+//
+// fn MUST call transact() to mutate the doc. Calls to doc.GetText,
+// doc.GetMap, doc.GetXmlFragment, etc. must happen OUTSIDE transact():
+// these acquire the doc's write lock, which transact() already holds,
+// so calling them inside would deadlock.
+//
+// fn should be fast — it runs inside the doc's write lock and blocks
+// all peer reads and writes to the room for the duration.
+//
+// IMPORTANT: if fn calls doc.Transact directly (bypassing the supplied
+// transact helper), the delta is NOT captured and Apply returns
+// ErrNoChanges even though the doc has been mutated. This is a
+// contract violation, but the behavior is well-defined.
+//
+// NOTE: a panic inside fn propagates to the caller. The OnUpdate
+// subscription is cleaned up via defer, so no listener leaks. However,
+// due to a pre-existing bug in crdt.Doc.Transact, a panic inside fn's
+// transaction also leaks the doc's write lock, wedging the room.
+// Callers MUST ensure fn does not panic.
+func (s *Server) Apply(
+	ctx context.Context,
+	room string,
+	fn func(doc *crdt.Doc, transact func(func(*crdt.Transaction))),
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-s.shutdownCh:
+		return ErrServerShutdown
+	default:
+	}
+	if !isValidRoomName(room) {
+		return ErrInvalidRoomName
+	}
+	if s.OnInject != nil {
+		if err := s.OnInject(ctx, InjectInfo{
+			Room:       room,
+			Op:         OpApply,
+			UpdateSize: 0,
+		}); err != nil {
+			return fmt.Errorf("%w: %w", ErrInjectRefused, err)
+		}
+	}
+	rm, err := s.getOrCreateRoom(room)
+	if err != nil {
+		return err
+	}
+
+	origin := new(struct{})
+	var (
+		captured   [][]byte
+		capturedMu sync.Mutex
+	)
+	unsub := rm.doc.OnUpdate(func(update []byte, o any) {
+		if o != origin {
+			return
+		}
+		// Mutex guards against the (unusual but legal) case where fn
+		// spawns a goroutine that calls transact() concurrently with
+		// the main fn body. Also guards against deep-observer chains
+		// that re-enter transact.
+		capturedMu.Lock()
+		captured = append(captured, update)
+		capturedMu.Unlock()
+	})
+	defer unsub()
+
+	transact := func(inner func(*crdt.Transaction)) {
+		rm.doc.Transact(inner, origin)
+	}
+	fn(rm.doc, transact)
+
+	capturedMu.Lock()
+	capturedCopy := make([][]byte, len(captured))
+	copy(capturedCopy, captured)
+	capturedMu.Unlock()
+
+	if len(capturedCopy) == 0 {
+		return ErrNoChanges
+	}
+
+	var merged []byte
+	if len(capturedCopy) == 1 {
+		merged = capturedCopy[0]
+	} else {
+		m, err := crdt.MergeUpdatesV1(capturedCopy...)
+		if err != nil {
+			return fmt.Errorf("ygo/websocket: merging captured updates: %w", err)
+		}
+		merged = m
+	}
+	if len(merged) > s.effectiveMaxUpdateBytes() {
+		return ErrUpdateTooLarge
+	}
+
+	rm.mu.Lock()
+	targets := make([]*peer, 0, len(rm.peers))
+	for p := range rm.peers {
+		targets = append(targets, p)
+	}
+	rm.mu.Unlock()
+
+	data := encodeBroadcastWire(merged)
 	for _, p := range targets {
 		go p.write(data)
 	}

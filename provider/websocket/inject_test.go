@@ -177,3 +177,61 @@ func TestUnit_BroadcastUpdate_DoesNotMutateServerDoc(t *testing.T) {
 	assert.False(t, ok)
 	assert.Nil(t, got)
 }
+
+func TestUnit_Apply_MutatesBroadcastsAndPersists(t *testing.T) {
+	srv := ygws.NewServer()
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	peerDoc := crdt.New()
+	drainHandshake(t, conn, peerDoc)
+
+	err := srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m") // MUST be outside transact — see spec
+		transact(func(txn *crdt.Transaction) {
+			m.Set(txn, "k", "v")
+		})
+	})
+	require.NoError(t, err)
+
+	// Peer receives the update.
+	outerType, payload := readOne(t, conn, 2*time.Second)
+	assert.Equal(t, uint64(0), outerType)
+	_, _ = ygsync.ApplySyncMessage(peerDoc, payload, nil)
+	got, ok := peerDoc.GetMap("m").Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "v", got)
+
+	// Server doc also reflects the change.
+	serverDoc := srv.GetDoc("room")
+	require.NotNil(t, serverDoc)
+	got, ok = serverDoc.GetMap("m").Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "v", got)
+}
+
+func TestUnit_Apply_EmptyFn_ErrNoChanges(t *testing.T) {
+	srv := ygws.NewServer()
+	err := srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		// never call transact
+	})
+	assert.ErrorIs(t, err, ygws.ErrNoChanges)
+}
+
+func TestUnit_Apply_InvalidRoomName(t *testing.T) {
+	srv := ygws.NewServer()
+	err := srv.Apply(context.Background(), "..", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {})
+	assert.ErrorIs(t, err, ygws.ErrInvalidRoomName)
+}
+
+func TestUnit_Apply_ContextAlreadyCancelled(t *testing.T) {
+	srv := ygws.NewServer()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fnCalled := false
+	err := srv.Apply(ctx, "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		fnCalled = true
+	})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.False(t, fnCalled, "fn must not be called when ctx is already cancelled")
+}
