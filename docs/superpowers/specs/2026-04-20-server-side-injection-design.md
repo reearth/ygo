@@ -210,8 +210,10 @@ var (
 2. `shutdownCh` closed → `ErrServerShutdown`.
 3. `isValidRoomName(room)` false → `ErrInvalidRoomName`.
 4. `len(update) > effectiveMaxUpdateBytes()` → `ErrUpdateTooLarge`.
-5. `crdt.ParseUpdateV1(update)` fails → wrap as `ErrInvalidUpdate`.
-   (Decodes structs and delete-set; does not apply.)
+5. `crdt.ApplyUpdateV1(crdt.New(), update, nil)` fails → wrap as
+   `ErrInvalidUpdate`. Applies to a throwaway doc as the cheapest
+   available full-structure validation; `crdt` does not currently
+   expose a decode-only parse helper.
 6. If `s.OnInject != nil`, call with `InjectInfo{Room: room, Op:
    OpBroadcastUpdate, UpdateSize: len(update)}`. Non-nil → wrap and return.
 7. Acquire `s.rmu.RLock()`; look up room. Absent → release, return

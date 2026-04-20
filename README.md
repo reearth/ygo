@@ -174,6 +174,12 @@ already holds — calling them inside deadlocks.
 `fn` should be fast. It runs inside the doc's write lock and blocks all
 peer reads and writes to the room for the duration.
 
+**On `ErrUpdateTooLarge`, the mutation sticks.** The size check runs
+after `fn`'s transaction commits and after persistence has enqueued the
+update, so the server's doc reflects `fn`'s changes and the update IS
+persisted — but peers do NOT see it. Size-bound `fn`'s effects
+explicitly or reconcile peers via a sync step 1/2 exchange.
+
 ### `CloseRoom(name, force)`
 
 Explicit teardown for rooms created by `Apply` that never accumulated

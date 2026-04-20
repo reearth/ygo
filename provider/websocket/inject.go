@@ -196,6 +196,14 @@ func (s *Server) BroadcastUpdate(ctx context.Context, room string, update []byte
 // ErrNoChanges even though the doc has been mutated. This is a
 // contract violation, but the behavior is well-defined.
 //
+// IMPORTANT: ErrUpdateTooLarge is post-hoc. The size check runs after
+// the transaction commits and after persistence has enqueued the
+// update. On this error the server's doc reflects fn's mutation and
+// the update IS persisted, but peers do NOT see it. This creates the
+// same divergence hazard as a BroadcastUpdate without ApplyUpdateV1.
+// Callers who set MaxUpdateBytes should size-bound fn's effects
+// explicitly or prepare to reconcile via a sync step 1/2 exchange.
+//
 // NOTE: a panic inside fn propagates to the caller. The OnUpdate
 // subscription is cleaned up via defer, so no listener leaks. However,
 // due to a pre-existing bug in crdt.Doc.Transact, a panic inside fn's
