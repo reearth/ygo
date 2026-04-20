@@ -154,10 +154,11 @@ OnInject InjectHook
 MaxUpdateBytes int
 
 // MaxRooms caps the total number of rooms the server will hold at once,
-// across both peer-created and Apply-created rooms. Zero means unlimited.
-// When exceeded, Apply's auto-create returns ErrTooManyRooms; peer
-// upgrades are not affected (a peer upgrade to an existing room never
-// creates a new room).
+// across both peer-upgrade-created and Apply-created rooms. Zero means
+// unlimited. Enforcement applies uniformly: peer upgrades to a new room
+// past the cap receive HTTP 503; Apply to a new room past the cap
+// returns ErrTooManyRooms. Upgrades or Apply calls to rooms that
+// already exist are unaffected by the cap (no room is being created).
 MaxRooms int
 ```
 
