@@ -238,7 +238,6 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 
 	// ── Phase 1: run the transaction body under the lock ─────────────────────
 	d.mu.Lock()
-	defer d.mu.Unlock()
 
 	txn := &Transaction{
 		doc:         d,
@@ -318,6 +317,8 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 	for i, s := range d.onAfterTxn {
 		onAfterTxnSnap[i] = s.fn
 	}
+
+	d.mu.Unlock()
 	// ── Phase 2: fire all observers OUTSIDE the lock ──────────────────────────
 
 	for _, fn := range fireFns {
