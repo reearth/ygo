@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	gws "github.com/gorilla/websocket"
+
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"

@@ -235,7 +235,7 @@ func TestUnit_Apply_ContextAlreadyCancelled(t *testing.T) {
 	err := srv.Apply(ctx, "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		fnCalled = true
 	})
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
 	assert.False(t, fnCalled, "fn must not be called when ctx is already cancelled")
 }
 
@@ -301,7 +301,7 @@ func TestUnit_Apply_MaxRoomsExceeded(t *testing.T) {
 	}
 
 	err := srv.Apply(context.Background(), "c", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {})
-	assert.ErrorIs(t, err, ygws.ErrTooManyRooms)
+	require.ErrorIs(t, err, ygws.ErrTooManyRooms)
 	assert.Nil(t, srv.GetDoc("c"), "failed Apply must not leave a partial room")
 }
 
@@ -315,7 +315,7 @@ func TestUnit_Apply_UpdateTooLarge(t *testing.T) {
 			txt.Insert(txn, 0, strings.Repeat("x", 1000), nil)
 		})
 	})
-	assert.ErrorIs(t, err, ygws.ErrUpdateTooLarge)
+	require.ErrorIs(t, err, ygws.ErrUpdateTooLarge)
 
 	// Doc HAS been mutated (post-hoc size check).
 	doc := srv.GetDoc("room")
@@ -367,7 +367,7 @@ func TestUnit_Apply_FnBypassesTransactHelper_ErrNoChangesButDocMutated(t *testin
 			m.Set(txn, "k", "v")
 		})
 	})
-	assert.ErrorIs(t, err, ygws.ErrNoChanges, "bypass should report ErrNoChanges")
+	require.ErrorIs(t, err, ygws.ErrNoChanges, "bypass should report ErrNoChanges")
 
 	// Doc IS mutated — well-defined but surprising behavior; documented.
 	serverDoc := srv.GetDoc("room")
@@ -581,8 +581,8 @@ func TestUnit_OnInject_Refusal_BlocksOperation(t *testing.T) {
 		m := doc.GetMap("m")
 		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
 	})
-	assert.ErrorIs(t, errA, refusal, "caller should see the hook's error via errors.Is")
-	assert.ErrorIs(t, errA, ygws.ErrInjectRefused, "caller can also match the sentinel")
+	require.ErrorIs(t, errA, refusal, "caller should see the hook's error via errors.Is")
+	require.ErrorIs(t, errA, ygws.ErrInjectRefused, "caller can also match the sentinel")
 	assert.Nil(t, srv.GetDoc("room"), "refusal must not auto-create a room")
 
 	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
@@ -592,8 +592,8 @@ func TestUnit_OnInject_Refusal_BlocksOperation(t *testing.T) {
 	_ = conn
 
 	errB := srv.BroadcastUpdate(context.Background(), "other", update)
-	assert.ErrorIs(t, errB, refusal)
-	assert.ErrorIs(t, errB, ygws.ErrInjectRefused)
+	require.ErrorIs(t, errB, refusal)
+	require.ErrorIs(t, errB, ygws.ErrInjectRefused)
 }
 
 func TestUnit_OnInject_InvalidUpdate_ShortCircuitsBeforeInject(t *testing.T) {
@@ -613,7 +613,7 @@ func TestUnit_OnInject_InvalidUpdate_ShortCircuitsBeforeInject(t *testing.T) {
 	_ = conn
 
 	err := srv.BroadcastUpdate(context.Background(), "room", []byte{0xff, 0xff})
-	assert.ErrorIs(t, err, ygws.ErrInvalidUpdate)
+	require.ErrorIs(t, err, ygws.ErrInvalidUpdate)
 	assert.False(t, called, "OnInject must not be called when bytes fail parse")
 }
 
@@ -631,11 +631,11 @@ func TestUnit_OnInject_CtxValue_PropagatesForTenantCheck(t *testing.T) {
 	okCtx := context.WithValue(context.Background(), tenantKey{}, "tenant-a")
 	badCtx := context.WithValue(context.Background(), tenantKey{}, "tenant-b")
 
-	assert.NoError(t, srv.Apply(okCtx, "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+	require.NoError(t, srv.Apply(okCtx, "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		m := doc.GetMap("m")
 		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
 	}))
-	assert.Error(t, srv.Apply(badCtx, "room2", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {}))
+	require.Error(t, srv.Apply(badCtx, "room2", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {}))
 }
 
 func TestUnit_CloseRoom_EmptyRoom_Deletes(t *testing.T) {
@@ -671,7 +671,7 @@ func TestUnit_CloseRoom_HasPeers_NoForce_ErrRoomHasPeers(t *testing.T) {
 	_ = conn
 
 	err := srv.CloseRoom("room", false)
-	assert.ErrorIs(t, err, ygws.ErrRoomHasPeers)
+	require.ErrorIs(t, err, ygws.ErrRoomHasPeers)
 	assert.NotNil(t, srv.GetDoc("room"))
 }
 
