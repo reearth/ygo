@@ -335,6 +335,59 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 		changed:     make(map[*abstractType]map[string]struct{}),
 	}
 
+	// The deferred block is responsible for:
+	//   1. Capturing any panic from fn / squashRuns via recover().
+	//   2. Best-effort finalizing txn so buildPhase2 has the state it needs.
+	//   3. Building the Phase 2 observer plan under a protective recover
+	//      so that a corrupt-state encoding does not mask the original panic.
+	//   4. Releasing d.mu — unconditionally, on every exit path.
+	//   5. Firing Phase 2 observers OUTSIDE the lock.
+	//   6. Re-raising the original panic to the caller.
+	//
+	// See docs/superpowers/specs/2026-04-21-transact-panic-safety-design.md
+	// for the full rationale. Matches the behavior of Yjs JS (try/finally
+	// fires observers on exception) and yrs (Drop::drop commits partial
+	// state). Rollback is not provided.
+	defer func() {
+		r := recover()
+
+		// Best-effort finalize on panic path. StateVector() might itself
+		// panic if the store is corrupt, so guard with an inner recover.
+		if r != nil {
+			func() {
+				defer func() { _ = recover() }()
+				if txn.afterState == nil {
+					txn.afterState = d.store.StateVector()
+				}
+			}()
+		}
+
+		// Build the Phase 2 plan under a protective recover: a secondary
+		// panic here (e.g. encodeV1Locked crashing on partial state) must
+		// not mask the caller's original panic. If buildPhase2 panics we
+		// simply skip observer firing.
+		var phase2 func()
+		func() {
+			defer func() { _ = recover() }()
+			phase2 = buildPhase2(d, txn)
+		}()
+
+		d.mu.Unlock()
+
+		// Fire observers outside the lock. Observer panics propagate as
+		// today — if both fn and an observer panic, the observer's panic
+		// wins and fn's panic value is lost. Pre-fix code could not reach
+		// this scenario because fn's panic wedged the lock; surfacing
+		// observer failures is preferred over silently swallowing them.
+		if phase2 != nil {
+			phase2()
+		}
+
+		if r != nil {
+			panic(r)
+		}
+	}()
+
 	fn(txn)
 
 	txn.afterState = d.store.StateVector()
@@ -346,15 +399,6 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 	// the YTextEvent API does not expose raw Items, and firing after squash
 	// removes the need for a second lock cycle.
 	squashRuns(txn)
-
-	phase2 := buildPhase2(d, txn)
-
-	d.mu.Unlock()
-	// ── Phase 2: fire all observers OUTSIDE the lock ──────────────────────────
-
-	if phase2 != nil {
-		phase2()
-	}
 }
 
 // OnUpdate registers a callback that fires after every committed transaction.

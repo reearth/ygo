@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -847,4 +848,39 @@ func TestInteg_NestedTypes_YMapOfYText(t *testing.T) {
 
 	// The text is accessible
 	assert.Equal(t, "hello", txt.ToString())
+}
+
+func TestTransact_PanicReleasesLock(t *testing.T) {
+	doc := New()
+
+	// First Transact panics. We recover to prevent the test from failing.
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			panic("boom")
+		})
+	}()
+
+	// If the lock leaked, any subsequent operation that acquires d.mu
+	// would deadlock. Use a short timeout to detect the hang.
+	// Note: GetMap acquires d.mu, so it must be called outside Transact.
+	m := doc.GetMap("m")
+	done := make(chan struct{})
+	go func() {
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "k", "v")
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// good — lock was released, second Transact completed
+	case <-time.After(2 * time.Second):
+		t.Fatal("Transact deadlocked — d.mu was not released after panic in fn")
+	}
+
+	got, ok := m.Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "v", got)
 }
