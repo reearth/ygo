@@ -11,6 +11,7 @@ package websocket
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -168,6 +169,26 @@ type Server struct {
 	// Zero (the default) means unlimited (N-H5).
 	MaxPeersPerRoom int
 
+	// OnInject, if non-nil, is called before every server-side write
+	// (BroadcastUpdate or Apply). Return a non-nil error to refuse the
+	// operation; the error is wrapped and returned to the caller.
+	// For BroadcastUpdate, InjectInfo.UpdateSize is len(update); for
+	// Apply it is 0 (the delta has not yet been produced).
+	OnInject InjectHook
+
+	// MaxUpdateBytes is the maximum size of a single V1 update that
+	// BroadcastUpdate will fan out, or that Apply will produce and
+	// fan out. Zero means use the same 64 MiB default applied to
+	// WebSocket peer frames (maxWSMessageBytes).
+	MaxUpdateBytes int
+
+	// MaxRooms caps the total number of rooms the server will hold at
+	// once, across both peer-upgrade-created and Apply-created rooms.
+	// Zero means unlimited. Enforcement applies uniformly: peer upgrades
+	// past the cap receive HTTP 503; Apply past the cap returns
+	// ErrTooManyRooms.
+	MaxRooms int
+
 	activeConns atomic.Int64 // atomic; total live WebSocket connections
 }
 
@@ -298,6 +319,9 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 	if r, ok := s.rooms[name]; ok {
 		return r, nil
 	}
+	if s.MaxRooms > 0 && len(s.rooms) >= s.MaxRooms {
+		return nil, ErrTooManyRooms
+	}
 	r := &room{
 		doc:       crdt.New(),
 		awareness: awareness.New(0),
@@ -345,6 +369,16 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 							return
 						}
 					}
+				case <-s.shutdownCh:
+					// Server is shutting down; drain any remaining buffered updates.
+					for {
+						select {
+						case update := <-r.persistCh:
+							store(update)
+						default:
+							return
+						}
+					}
 				}
 			}
 		}()
@@ -379,6 +413,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	rm, err := s.getOrCreateRoom(name)
 	if err != nil {
+		if errors.Is(err, ErrTooManyRooms) {
+			http.Error(w, "too many rooms", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "room unavailable", http.StatusInternalServerError)
 		return
 	}
