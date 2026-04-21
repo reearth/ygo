@@ -267,6 +267,14 @@ func (s *Server) Apply(
 		rm.doc.Transact(inner, origin)
 	}
 
+	// NOTE: the fan-out logic below is near-identical to the normal-path
+	// fan-out later in this function. The two paths diverge only in error
+	// handling: the normal path returns ErrNoChanges / ErrUpdateTooLarge /
+	// wrapped MergeUpdatesV1 errors to the caller, while fan() silently
+	// best-efforts these (no caller to return to on the panic path).
+	// Keep the two in sync — a divergence in size check, merge logic,
+	// target snapshot, or encodeBroadcastWire use would mean peers see
+	// different framing between normal and panic paths.
 	// fan broadcasts whatever has been captured so far to all connected peers.
 	// Called on both the normal path and the panic path so partial-state
 	// mutations are always propagated (matching the godoc contract).

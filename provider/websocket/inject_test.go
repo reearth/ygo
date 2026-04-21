@@ -442,6 +442,37 @@ func TestUnit_Apply_TriggersPersistenceViaOnUpdate(t *testing.T) {
 	assert.Equal(t, "v", got)
 }
 
+func TestUnit_Apply_FnPanic_TriggersPersistenceWithPartialState(t *testing.T) {
+	p := ygws.NewMemoryPersistence()
+	srv := ygws.NewServerWithPersistence(p)
+
+	// Apply that mutates then panics mid-transact.
+	func() {
+		defer func() { _ = recover() }()
+		_ = srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			m := doc.GetMap("m")
+			transact(func(txn *crdt.Transaction) {
+				m.Set(txn, "k", "v")
+				panic("boom")
+			})
+		})
+	}()
+
+	// Shutdown drains the persistence goroutine's queue before returning,
+	// so LoadDoc is guaranteed to see the partial update.
+	require.NoError(t, srv.Shutdown(context.Background()))
+
+	stored, err := p.LoadDoc("room")
+	require.NoError(t, err)
+	require.NotNil(t, stored, "partial state must be persisted on panic")
+
+	reloaded := crdt.New()
+	require.NoError(t, crdt.ApplyUpdateV1(reloaded, stored, nil))
+	got, ok := reloaded.GetMap("m").Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "v", got)
+}
+
 // TestUnit_Apply_InterleavedWithPeerWrites_Converges is the acceptance
 // criterion from issue #8: server-side Apply and peer writes can be
 // interleaved and both sides end up consistent.

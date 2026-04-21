@@ -167,6 +167,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.1.1]: https://github.com/reearth/ygo/releases/tag/v1.1.1
+[1.1.0]: https://github.com/reearth/ygo/releases/tag/v1.1.0
+[1.0.5]: https://github.com/reearth/ygo/releases/tag/v1.0.5
 [1.0.4]: https://github.com/reearth/ygo/releases/tag/v1.0.4
 [1.0.3]: https://github.com/reearth/ygo/releases/tag/v1.0.3
 [1.0.2]: https://github.com/reearth/ygo/releases/tag/v1.0.2

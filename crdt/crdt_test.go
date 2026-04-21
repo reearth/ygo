@@ -961,6 +961,46 @@ func TestTransact_NormalPathFiresOnUpdateOnce(t *testing.T) {
 	assert.Equal(t, 1, calls, "regression: normal-path OnUpdate must fire exactly once")
 }
 
+func TestTransact_PanicFiresPerTypeObserver(t *testing.T) {
+	doc := New()
+	m := doc.GetMap("m")
+
+	var events int
+	m.Observe(func(_ YMapEvent) {
+		events++
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "k", "v")
+			panic("boom")
+		})
+	}()
+
+	assert.Equal(t, 1, events, "per-type observer must fire for partial mutation on panic")
+}
+
+func TestTransact_PanicFiresDeepObserver(t *testing.T) {
+	doc := New()
+	m := doc.GetMap("m")
+
+	var deepEvents int
+	m.ObserveDeep(func(_ *Transaction) {
+		deepEvents++
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "k", "v")
+			panic("boom")
+		})
+	}()
+
+	assert.Equal(t, 1, deepEvents, "deep observer must fire for partial mutation on panic")
+}
+
 func TestTransact_PanicReleasesLock(t *testing.T) {
 	doc := New()
 
