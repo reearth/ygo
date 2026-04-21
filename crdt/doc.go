@@ -221,45 +221,13 @@ func (d *Doc) GetText(name string) *YText {
 	return txt
 }
 
-// Transact executes fn inside a transaction. All insertions and deletions made
-// during fn are batched; observers fire once after fn returns.
+// buildPhase2 runs under d.mu (called from Transact while the lock is held)
+// and returns a closure that fires all observers in the correct order.
+// The closure must be invoked OUTSIDE d.mu — observers may re-enter Doc
+// methods that acquire d.mu, which would deadlock under the lock.
 //
-// Observers are intentionally fired OUTSIDE the document lock. This means:
-//   - Observer callbacks may safely call back into any Doc method (Transact,
-//     GetArray, ApplyUpdate, etc.) without deadlocking.
-//   - The document may be modified by another goroutine between the time fn
-//     returns and the time observers fire; observers should treat txn as a
-//     snapshot of what changed, not a live view of the current state.
-func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
-	var orig any
-	if len(origin) > 0 {
-		orig = origin[0]
-	}
-
-	// ── Phase 1: run the transaction body under the lock ─────────────────────
-	d.mu.Lock()
-
-	txn := &Transaction{
-		doc:         d,
-		Origin:      orig,
-		Local:       true,
-		deleteSet:   newDeleteSet(),
-		beforeState: d.store.StateVector(),
-		changed:     make(map[*abstractType]map[string]struct{}),
-	}
-
-	fn(txn)
-
-	txn.afterState = d.store.StateVector()
-
-	// Squash adjacent same-client ContentString runs before encoding so that
-	// the incremental update sent to peers is already compact.
-	// Note: squashing happens before per-type observers fire. Observers therefore
-	// see merged runs rather than individual character items. This is intentional:
-	// the YTextEvent API does not expose raw Items, and firing after squash
-	// removes the need for a second lock cycle.
-	squashRuns(txn)
-
+// Returns nil only if there is nothing to fire (no observers of any kind).
+func buildPhase2(d *Doc, txn *Transaction) func() {
 	// Encode the incremental update and snapshot observer slices while still
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
@@ -318,26 +286,141 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 		onAfterTxnSnap[i] = s.fn
 	}
 
-	d.mu.Unlock()
-	// ── Phase 2: fire all observers OUTSIDE the lock ──────────────────────────
-
-	for _, fn := range fireFns {
-		fn()
+	if len(fireFns) == 0 && len(deepSnap) == 0 && len(onUpdateSnap) == 0 && len(onAfterTxnSnap) == 0 {
+		return nil
 	}
 
-	for _, de := range deepSnap {
-		for _, fn := range de.fns {
+	return func() {
+		for _, fn := range fireFns {
+			fn()
+		}
+		for _, de := range deepSnap {
+			for _, fn := range de.fns {
+				fn(txn)
+			}
+		}
+		for _, fn := range onUpdateSnap {
+			fn(updateBytes, txn.Origin)
+		}
+		for _, fn := range onAfterTxnSnap {
 			fn(txn)
 		}
 	}
+}
 
-	for _, fn := range onUpdateSnap {
-		fn(updateBytes, orig)
+// Transact executes fn inside a transaction. All insertions and deletions made
+// during fn are batched; observers fire once after fn returns.
+//
+// Observers are intentionally fired OUTSIDE the document lock. This means:
+//   - Observer callbacks may safely call back into any Doc method (Transact,
+//     GetArray, ApplyUpdate, etc.) without deadlocking.
+//   - The document may be modified by another goroutine between the time fn
+//     returns and the time observers fire; observers should treat txn as a
+//     snapshot of what changed, not a live view of the current state.
+//
+// Panic semantics:
+//   - If fn panics (or any Phase 1 work panics), d.mu is released via defer.
+//   - Observers fire with whatever partial state was committed before the
+//     panic: OnUpdate receives a V1 update describing the mutations that
+//     completed (non-empty if fn mutated; minimal but well-formed if fn
+//     panicked before mutating); per-type, deep, and OnAfterTransaction
+//     observers fire for what was recorded in txn.changed.
+//   - The original panic is re-raised to the caller after observers fire.
+//   - Rollback is NOT supported. The in-memory doc reflects fn's partial
+//     work. Callers who need atomicity must implement it above Transact.
+//     This matches the behavior of Yjs JS and the Rust yrs implementation;
+//     yrs explicitly directs users to UndoManager for transactional undo.
+//   - If fn panics and an observer callback also panics during the partial
+//     firing, the observer's panic reaches the caller and the original
+//     fn panic value is lost.
+func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
+	var orig any
+	if len(origin) > 0 {
+		orig = origin[0]
 	}
 
-	for _, fn := range onAfterTxnSnap {
-		fn(txn)
+	// ── Phase 1: run the transaction body under the lock ─────────────────────
+	d.mu.Lock()
+
+	txn := &Transaction{
+		doc:         d,
+		Origin:      orig,
+		Local:       true,
+		deleteSet:   newDeleteSet(),
+		beforeState: d.store.StateVector(),
+		changed:     make(map[*abstractType]map[string]struct{}),
 	}
+
+	// The deferred block is responsible for:
+	//   1. Capturing any panic from fn / squashRuns via recover().
+	//   2. Best-effort finalizing txn so buildPhase2 has the state it needs.
+	//   3. Building the Phase 2 observer plan under a protective recover
+	//      so that a corrupt-state encoding does not mask the original panic.
+	//   4. Releasing d.mu — unconditionally, on every exit path.
+	//   5. Firing Phase 2 observers OUTSIDE the lock.
+	//   6. Re-raising the original panic to the caller.
+	//
+	// See docs/superpowers/specs/2026-04-21-transact-panic-safety-design.md
+	// for the full rationale. Matches the behavior of Yjs JS (try/finally
+	// fires observers on exception) and yrs (Drop::drop commits partial
+	// state). Rollback is not provided.
+	defer func() {
+		r := recover()
+
+		// Best-effort finalize on panic path. StateVector() might itself
+		// panic if the store is corrupt, so guard with an inner recover.
+		if r != nil {
+			func() {
+				defer func() { _ = recover() }()
+				if txn.afterState == nil {
+					txn.afterState = d.store.StateVector()
+				}
+			}()
+		}
+
+		// Build the Phase 2 plan. On the panic path we wrap in a protective
+		// recover so a secondary panic (e.g. encodeV1Locked crashing on
+		// partial/corrupt state) does not mask the caller's original panic.
+		// On the normal path we let any panic from buildPhase2 propagate —
+		// silently dropping observer notifications would be a debuggability
+		// regression relative to pre-fix behavior.
+		var phase2 func()
+		if r != nil {
+			func() {
+				defer func() { _ = recover() }()
+				phase2 = buildPhase2(d, txn)
+			}()
+		} else {
+			phase2 = buildPhase2(d, txn)
+		}
+
+		d.mu.Unlock()
+
+		// Fire observers outside the lock. Observer panics propagate as
+		// today — if both fn and an observer panic, the observer's panic
+		// wins and fn's panic value is lost. Pre-fix code could not reach
+		// this scenario because fn's panic wedged the lock; surfacing
+		// observer failures is preferred over silently swallowing them.
+		if phase2 != nil {
+			phase2()
+		}
+
+		if r != nil {
+			panic(r)
+		}
+	}()
+
+	fn(txn)
+
+	txn.afterState = d.store.StateVector()
+
+	// Squash adjacent same-client ContentString runs before encoding so that
+	// the incremental update sent to peers is already compact.
+	// Note: squashing happens before per-type observers fire. Observers therefore
+	// see merged runs rather than individual character items. This is intentional:
+	// the YTextEvent API does not expose raw Items, and firing after squash
+	// removes the need for a second lock cycle.
+	squashRuns(txn)
 }
 
 // OnUpdate registers a callback that fires after every committed transaction.

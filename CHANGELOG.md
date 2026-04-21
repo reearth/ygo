@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-04-21
+
+### Fixed
+
+- **`Doc.Transact` lock leak on panic (#9)**: if `fn` (or any Phase 1 work) panicked, `d.mu` remained held forever, wedging the document. Any subsequent operation that needed the lock — `GetMap`, `GetText`, `ApplyUpdateV1`, a further `Transact`, an `OnUpdate` subscribe/unsubscribe — deadlocked. Transact now wraps its body in a deferred `recover()` that releases `d.mu` on every exit path.
+
+### Changed
+
+- **`Doc.Transact` panic semantics are now explicit.** On panic: observers fire with whatever partial state `fn` committed (matching Yjs JS and `yrs`), then the original panic is re-raised. Rollback is not provided — callers needing atomicity should recover and reconcile via sync or recreate the doc from persistence. Previously behavior was undefined (the caller deadlocked before any observer could run).
+- **`websocket.Server.Apply` godoc** updated: a panicking `fn` no longer wedges the room. The caveat is softened accordingly; partial-state broadcasts are now the documented behavior.
+
 ## [1.1.0] — 2026-04-20
 
 ### Added
@@ -156,6 +167,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.1.1]: https://github.com/reearth/ygo/releases/tag/v1.1.1
+[1.1.0]: https://github.com/reearth/ygo/releases/tag/v1.1.0
+[1.0.5]: https://github.com/reearth/ygo/releases/tag/v1.0.5
 [1.0.4]: https://github.com/reearth/ygo/releases/tag/v1.0.4
 [1.0.3]: https://github.com/reearth/ygo/releases/tag/v1.0.3
 [1.0.2]: https://github.com/reearth/ygo/releases/tag/v1.0.2

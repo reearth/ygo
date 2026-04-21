@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -847,4 +848,192 @@ func TestInteg_NestedTypes_YMapOfYText(t *testing.T) {
 
 	// The text is accessible
 	assert.Equal(t, "hello", txt.ToString())
+}
+
+func TestTransact_PanicFiresOnUpdateWithPartialState(t *testing.T) {
+	doc := New()
+	m := doc.GetMap("m")
+
+	var received [][]byte
+	doc.OnUpdate(func(update []byte, _ any) {
+		received = append(received, update)
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "k1", "v1")
+			m.Set(txn, "k2", "v2")
+			panic("boom")
+		})
+	}()
+
+	require.Len(t, received, 1, "OnUpdate should fire exactly once with partial state")
+	assert.NotEmpty(t, received[0], "partial update must be non-empty")
+
+	// Apply the partial update to a fresh doc and verify both keys are present.
+	replica := New()
+	require.NoError(t, ApplyUpdateV1(replica, received[0], nil))
+	got1, ok1 := replica.GetMap("m").Get("k1")
+	require.True(t, ok1)
+	assert.Equal(t, "v1", got1)
+	got2, ok2 := replica.GetMap("m").Get("k2")
+	require.True(t, ok2)
+	assert.Equal(t, "v2", got2)
+}
+
+func TestTransact_PanicFiresOnAfterTransaction(t *testing.T) {
+	doc := New()
+	m := doc.GetMap("m")
+
+	var txnSeen *Transaction
+	doc.OnAfterTransaction(func(txn *Transaction) {
+		txnSeen = txn
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "k", "v")
+			panic("boom")
+		})
+	}()
+
+	require.NotNil(t, txnSeen, "OnAfterTransaction should fire on panic")
+	assert.NotEmpty(t, txnSeen.changed, "txn.changed must reflect the partial mutation")
+}
+
+func TestTransact_PanicWithNoMutationsFiresOnUpdateWithMinimalPayload(t *testing.T) {
+	// When fn panics before any mutation, OnUpdate still fires (consistent
+	// with the normal-path behavior of a no-op Transact). The payload is a
+	// well-formed but minimal V1 update — not nil — so subscribers should
+	// not treat "nil update" as a sentinel for "no changes". We verify
+	// round-trip application succeeds against a fresh doc without error.
+	doc := New()
+
+	var received [][]byte
+	doc.OnUpdate(func(update []byte, _ any) {
+		received = append(received, update)
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			panic("immediate")
+		})
+	}()
+
+	require.Len(t, received, 1, "OnUpdate fires once per transaction, even on immediate-panic no-op")
+	require.NotNil(t, received[0])
+
+	// The payload applies cleanly to a fresh replica.
+	replica := New()
+	require.NoError(t, ApplyUpdateV1(replica, received[0], nil))
+}
+
+func TestTransact_PanicReraises(t *testing.T) {
+	doc := New()
+
+	var caught any
+	func() {
+		defer func() { caught = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			panic("original message")
+		})
+	}()
+
+	assert.Equal(t, "original message", caught, "original panic value must be re-raised")
+}
+
+func TestTransact_NormalPathFiresOnUpdateOnce(t *testing.T) {
+	doc := New()
+	m := doc.GetMap("m")
+
+	var calls int
+	doc.OnUpdate(func(update []byte, _ any) {
+		calls++
+	})
+
+	doc.Transact(func(txn *Transaction) {
+		m.Set(txn, "k", "v")
+	})
+
+	assert.Equal(t, 1, calls, "regression: normal-path OnUpdate must fire exactly once")
+}
+
+func TestTransact_PanicFiresPerTypeObserver(t *testing.T) {
+	doc := New()
+	m := doc.GetMap("m")
+
+	var events int
+	m.Observe(func(_ YMapEvent) {
+		events++
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "k", "v")
+			panic("boom")
+		})
+	}()
+
+	assert.Equal(t, 1, events, "per-type observer must fire for partial mutation on panic")
+}
+
+func TestTransact_PanicFiresDeepObserver(t *testing.T) {
+	doc := New()
+	m := doc.GetMap("m")
+
+	var deepEvents int
+	m.ObserveDeep(func(_ *Transaction) {
+		deepEvents++
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "k", "v")
+			panic("boom")
+		})
+	}()
+
+	assert.Equal(t, 1, deepEvents, "deep observer must fire for partial mutation on panic")
+}
+
+func TestTransact_PanicReleasesLock(t *testing.T) {
+	doc := New()
+
+	// First Transact panics. We recover to prevent the test from failing.
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			panic("boom")
+		})
+	}()
+
+	// If the lock leaked, any subsequent operation that acquires d.mu
+	// would deadlock. Use a short timeout to detect the hang.
+	// Acquire the map ref BEFORE starting the goroutine below. A leaked
+	// lock from the first Transact would hang this call too, serving as
+	// an implicit deadlock detector before the 2s timeout kicks in.
+	m := doc.GetMap("m")
+	done := make(chan struct{})
+	go func() {
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "k", "v")
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// good — lock was released, second Transact completed
+	case <-time.After(2 * time.Second):
+		t.Fatal("Transact deadlocked — d.mu was not released after panic in fn")
+	}
+
+	got, ok := m.Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "v", got)
 }

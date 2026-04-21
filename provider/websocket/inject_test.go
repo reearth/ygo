@@ -330,12 +330,52 @@ func TestUnit_Apply_AfterShutdown(t *testing.T) {
 	assert.ErrorIs(t, err, ygws.ErrServerShutdown)
 }
 
-// NOTE: a test that panics INSIDE transact is intentionally omitted.
-// The pre-existing crdt.Doc.Transact panic-unlock bug (tracked as a
-// separate follow-up issue) means such a panic leaves d.mu held, and
-// Apply's defer-unsub — which needs d.mu — deadlocks. Apply's doc
-// comment instructs callers: "fn MUST NOT panic." The BeforeTransact
-// test below is the maximal safety guarantee we can verify today.
+func TestUnit_Apply_FnPanic_InsideTransact_BroadcastsPartialState(t *testing.T) {
+	srv := ygws.NewServer()
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	peerDoc := crdt.New()
+	drainHandshake(t, conn, peerDoc)
+
+	// Apply that mutates then panics inside transact.
+	var panicked any
+	func() {
+		defer func() { panicked = recover() }()
+		_ = srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			m := doc.GetMap("m")
+			transact(func(txn *crdt.Transaction) {
+				m.Set(txn, "k", "v")
+				panic("boom")
+			})
+		})
+	}()
+	require.Equal(t, "boom", panicked, "original panic must propagate")
+
+	// Peer receives the partial-state broadcast — the Set completed before
+	// the panic, so the partial update carries "k" = "v".
+	outerType, payload := readOne(t, conn, 2*time.Second)
+	assert.Equal(t, uint64(0), outerType)
+	_, _ = ygsync.ApplySyncMessage(peerDoc, payload, nil)
+	got, ok := peerDoc.GetMap("m").Get("k")
+	require.True(t, ok, "peer should have received the partial mutation")
+	assert.Equal(t, "v", got)
+
+	// Server doc also reflects the partial mutation.
+	serverDoc := srv.GetDoc("room")
+	require.NotNil(t, serverDoc)
+	got, ok = serverDoc.GetMap("m").Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "v", got)
+
+	// Second Apply on the same room succeeds — proves the doc lock was
+	// released and the OnUpdate subscription from the first Apply was
+	// cleaned up via defer.
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k2", "v2") })
+	}))
+}
 
 func TestUnit_Apply_FnPanic_BeforeTransact_NoLeak(t *testing.T) {
 	srv := ygws.NewServer()
@@ -394,6 +434,37 @@ func TestUnit_Apply_TriggersPersistenceViaOnUpdate(t *testing.T) {
 	stored, err := p.LoadDoc("room")
 	require.NoError(t, err)
 	require.NotNil(t, stored)
+
+	reloaded := crdt.New()
+	require.NoError(t, crdt.ApplyUpdateV1(reloaded, stored, nil))
+	got, ok := reloaded.GetMap("m").Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "v", got)
+}
+
+func TestUnit_Apply_FnPanic_TriggersPersistenceWithPartialState(t *testing.T) {
+	p := ygws.NewMemoryPersistence()
+	srv := ygws.NewServerWithPersistence(p)
+
+	// Apply that mutates then panics mid-transact.
+	func() {
+		defer func() { _ = recover() }()
+		_ = srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			m := doc.GetMap("m")
+			transact(func(txn *crdt.Transaction) {
+				m.Set(txn, "k", "v")
+				panic("boom")
+			})
+		})
+	}()
+
+	// Shutdown drains the persistence goroutine's queue before returning,
+	// so LoadDoc is guaranteed to see the partial update.
+	require.NoError(t, srv.Shutdown(context.Background()))
+
+	stored, err := p.LoadDoc("room")
+	require.NoError(t, err)
+	require.NotNil(t, stored, "partial state must be persisted on panic")
 
 	reloaded := crdt.New()
 	require.NoError(t, crdt.ApplyUpdateV1(reloaded, stored, nil))
