@@ -362,15 +362,21 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 			}()
 		}
 
-		// Build the Phase 2 plan under a protective recover: a secondary
-		// panic here (e.g. encodeV1Locked crashing on partial state) must
-		// not mask the caller's original panic. If buildPhase2 panics we
-		// simply skip observer firing.
+		// Build the Phase 2 plan. On the panic path we wrap in a protective
+		// recover so a secondary panic (e.g. encodeV1Locked crashing on
+		// partial/corrupt state) does not mask the caller's original panic.
+		// On the normal path we let any panic from buildPhase2 propagate —
+		// silently dropping observer notifications would be a debuggability
+		// regression relative to pre-fix behavior.
 		var phase2 func()
-		func() {
-			defer func() { _ = recover() }()
+		if r != nil {
+			func() {
+				defer func() { _ = recover() }()
+				phase2 = buildPhase2(d, txn)
+			}()
+		} else {
 			phase2 = buildPhase2(d, txn)
-		}()
+		}
 
 		d.mu.Unlock()
 

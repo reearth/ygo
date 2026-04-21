@@ -863,7 +863,9 @@ func TestTransact_PanicReleasesLock(t *testing.T) {
 
 	// If the lock leaked, any subsequent operation that acquires d.mu
 	// would deadlock. Use a short timeout to detect the hang.
-	// Note: GetMap acquires d.mu, so it must be called outside Transact.
+	// Acquire the map ref BEFORE starting the goroutine below. A leaked
+	// lock from the first Transact would hang this call too, serving as
+	// an implicit deadlock detector before the 2s timeout kicks in.
 	m := doc.GetMap("m")
 	done := make(chan struct{})
 	go func() {
