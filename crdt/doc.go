@@ -317,6 +317,22 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 //   - The document may be modified by another goroutine between the time fn
 //     returns and the time observers fire; observers should treat txn as a
 //     snapshot of what changed, not a live view of the current state.
+//
+// Panic semantics:
+//   - If fn panics (or any Phase 1 work panics), d.mu is released via defer.
+//   - Observers fire with whatever partial state was committed before the
+//     panic: OnUpdate receives a V1 update describing the mutations that
+//     completed (non-empty if fn mutated; minimal but well-formed if fn
+//     panicked before mutating); per-type, deep, and OnAfterTransaction
+//     observers fire for what was recorded in txn.changed.
+//   - The original panic is re-raised to the caller after observers fire.
+//   - Rollback is NOT supported. The in-memory doc reflects fn's partial
+//     work. Callers who need atomicity must implement it above Transact.
+//     This matches the behavior of Yjs JS and the Rust yrs implementation;
+//     yrs explicitly directs users to UndoManager for transactional undo.
+//   - If fn panics and an observer callback also panics during the partial
+//     firing, the observer's panic reaches the caller and the original
+//     fn panic value is lost.
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 	var orig any
 	if len(origin) > 0 {
