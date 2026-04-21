@@ -227,7 +227,7 @@ func (d *Doc) GetText(name string) *YText {
 // methods that acquire d.mu, which would deadlock under the lock.
 //
 // Returns nil only if there is nothing to fire (no observers of any kind).
-func buildPhase2(d *Doc, txn *Transaction, orig any) func() {
+func buildPhase2(d *Doc, txn *Transaction) func() {
 	// Encode the incremental update and snapshot observer slices while still
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
@@ -300,7 +300,7 @@ func buildPhase2(d *Doc, txn *Transaction, orig any) func() {
 			}
 		}
 		for _, fn := range onUpdateSnap {
-			fn(updateBytes, orig)
+			fn(updateBytes, txn.Origin)
 		}
 		for _, fn := range onAfterTxnSnap {
 			fn(txn)
@@ -347,7 +347,7 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 	// removes the need for a second lock cycle.
 	squashRuns(txn)
 
-	phase2 := buildPhase2(d, txn, orig)
+	phase2 := buildPhase2(d, txn)
 
 	d.mu.Unlock()
 	// ── Phase 2: fire all observers OUTSIDE the lock ──────────────────────────
