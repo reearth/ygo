@@ -206,10 +206,14 @@ func (s *Server) BroadcastUpdate(ctx context.Context, room string, update []byte
 // explicitly or prepare to reconcile via a sync step 1/2 exchange.
 //
 // NOTE: a panic inside fn propagates to the caller. The OnUpdate
-// subscription is cleaned up via defer, so no listener leaks. However,
-// due to a pre-existing bug in crdt.Doc.Transact, a panic inside fn's
-// transaction also leaks the doc's write lock, wedging the room.
-// Callers MUST ensure fn does not panic.
+// subscription is cleaned up via defer, so no listener leaks. Starting
+// in v1.1.1, Doc.Transact is panic-safe: the doc lock is released and
+// observers fire with whatever partial state fn committed before the
+// panic. Apply therefore broadcasts that partial state to peers and
+// triggers persistence before re-raising the panic. Callers should
+// still avoid panicking fn bodies in production because the doc is
+// left with unrolled-back partial mutations; recover and either
+// reconcile via sync or recreate the doc from persistence.
 func (s *Server) Apply(
 	ctx context.Context,
 	room string,
@@ -262,7 +266,55 @@ func (s *Server) Apply(
 	transact := func(inner func(*crdt.Transaction)) {
 		rm.doc.Transact(inner, origin)
 	}
-	fn(rm.doc, transact)
+
+	// fan broadcasts whatever has been captured so far to all connected peers.
+	// Called on both the normal path and the panic path so partial-state
+	// mutations are always propagated (matching the godoc contract).
+	fan := func() {
+		capturedMu.Lock()
+		capturedCopy := make([][]byte, len(captured))
+		copy(capturedCopy, captured)
+		capturedMu.Unlock()
+
+		if len(capturedCopy) == 0 {
+			return
+		}
+		var merged []byte
+		if len(capturedCopy) == 1 {
+			merged = capturedCopy[0]
+		} else {
+			m, mergeErr := crdt.MergeUpdatesV1(capturedCopy...)
+			if mergeErr != nil {
+				return // best-effort on panic path
+			}
+			merged = m
+		}
+		if len(merged) > s.effectiveMaxUpdateBytes() {
+			return // size-limit: skip fan-out (same as ErrUpdateTooLarge on normal path)
+		}
+		rm.mu.Lock()
+		targets := make([]*peer, 0, len(rm.peers))
+		for p := range rm.peers {
+			targets = append(targets, p)
+		}
+		rm.mu.Unlock()
+		data := encodeBroadcastWire(merged)
+		for _, p := range targets {
+			go p.write(data)
+		}
+	}
+
+	// On panic: broadcast partial state, then re-raise so the caller
+	// receives the original panic value.
+	var fnPanic any
+	func() {
+		defer func() { fnPanic = recover() }()
+		fn(rm.doc, transact)
+	}()
+	if fnPanic != nil {
+		fan()
+		panic(fnPanic)
+	}
 
 	capturedMu.Lock()
 	capturedCopy := make([][]byte, len(captured))
