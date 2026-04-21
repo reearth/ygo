@@ -221,45 +221,13 @@ func (d *Doc) GetText(name string) *YText {
 	return txt
 }
 
-// Transact executes fn inside a transaction. All insertions and deletions made
-// during fn are batched; observers fire once after fn returns.
+// buildPhase2 runs under d.mu (called from Transact while the lock is held)
+// and returns a closure that fires all observers in the correct order.
+// The closure must be invoked OUTSIDE d.mu — observers may re-enter Doc
+// methods that acquire d.mu, which would deadlock under the lock.
 //
-// Observers are intentionally fired OUTSIDE the document lock. This means:
-//   - Observer callbacks may safely call back into any Doc method (Transact,
-//     GetArray, ApplyUpdate, etc.) without deadlocking.
-//   - The document may be modified by another goroutine between the time fn
-//     returns and the time observers fire; observers should treat txn as a
-//     snapshot of what changed, not a live view of the current state.
-func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
-	var orig any
-	if len(origin) > 0 {
-		orig = origin[0]
-	}
-
-	// ── Phase 1: run the transaction body under the lock ─────────────────────
-	d.mu.Lock()
-
-	txn := &Transaction{
-		doc:         d,
-		Origin:      orig,
-		Local:       true,
-		deleteSet:   newDeleteSet(),
-		beforeState: d.store.StateVector(),
-		changed:     make(map[*abstractType]map[string]struct{}),
-	}
-
-	fn(txn)
-
-	txn.afterState = d.store.StateVector()
-
-	// Squash adjacent same-client ContentString runs before encoding so that
-	// the incremental update sent to peers is already compact.
-	// Note: squashing happens before per-type observers fire. Observers therefore
-	// see merged runs rather than individual character items. This is intentional:
-	// the YTextEvent API does not expose raw Items, and firing after squash
-	// removes the need for a second lock cycle.
-	squashRuns(txn)
-
+// Returns nil only if there is nothing to fire (no observers of any kind).
+func buildPhase2(d *Doc, txn *Transaction, orig any) func() {
 	// Encode the incremental update and snapshot observer slices while still
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
@@ -318,25 +286,74 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 		onAfterTxnSnap[i] = s.fn
 	}
 
-	d.mu.Unlock()
-	// ── Phase 2: fire all observers OUTSIDE the lock ──────────────────────────
-
-	for _, fn := range fireFns {
-		fn()
+	if len(fireFns) == 0 && len(deepSnap) == 0 && len(onUpdateSnap) == 0 && len(onAfterTxnSnap) == 0 {
+		return nil
 	}
 
-	for _, de := range deepSnap {
-		for _, fn := range de.fns {
+	return func() {
+		for _, fn := range fireFns {
+			fn()
+		}
+		for _, de := range deepSnap {
+			for _, fn := range de.fns {
+				fn(txn)
+			}
+		}
+		for _, fn := range onUpdateSnap {
+			fn(updateBytes, orig)
+		}
+		for _, fn := range onAfterTxnSnap {
 			fn(txn)
 		}
 	}
+}
 
-	for _, fn := range onUpdateSnap {
-		fn(updateBytes, orig)
+// Transact executes fn inside a transaction. All insertions and deletions made
+// during fn are batched; observers fire once after fn returns.
+//
+// Observers are intentionally fired OUTSIDE the document lock. This means:
+//   - Observer callbacks may safely call back into any Doc method (Transact,
+//     GetArray, ApplyUpdate, etc.) without deadlocking.
+//   - The document may be modified by another goroutine between the time fn
+//     returns and the time observers fire; observers should treat txn as a
+//     snapshot of what changed, not a live view of the current state.
+func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
+	var orig any
+	if len(origin) > 0 {
+		orig = origin[0]
 	}
 
-	for _, fn := range onAfterTxnSnap {
-		fn(txn)
+	// ── Phase 1: run the transaction body under the lock ─────────────────────
+	d.mu.Lock()
+
+	txn := &Transaction{
+		doc:         d,
+		Origin:      orig,
+		Local:       true,
+		deleteSet:   newDeleteSet(),
+		beforeState: d.store.StateVector(),
+		changed:     make(map[*abstractType]map[string]struct{}),
+	}
+
+	fn(txn)
+
+	txn.afterState = d.store.StateVector()
+
+	// Squash adjacent same-client ContentString runs before encoding so that
+	// the incremental update sent to peers is already compact.
+	// Note: squashing happens before per-type observers fire. Observers therefore
+	// see merged runs rather than individual character items. This is intentional:
+	// the YTextEvent API does not expose raw Items, and firing after squash
+	// removes the need for a second lock cycle.
+	squashRuns(txn)
+
+	phase2 := buildPhase2(d, txn, orig)
+
+	d.mu.Unlock()
+	// ── Phase 2: fire all observers OUTSIDE the lock ──────────────────────────
+
+	if phase2 != nil {
+		phase2()
 	}
 }
 
