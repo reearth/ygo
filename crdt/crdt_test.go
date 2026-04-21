@@ -850,6 +850,117 @@ func TestInteg_NestedTypes_YMapOfYText(t *testing.T) {
 	assert.Equal(t, "hello", txt.ToString())
 }
 
+func TestTransact_PanicFiresOnUpdateWithPartialState(t *testing.T) {
+	doc := New()
+	m := doc.GetMap("m")
+
+	var received [][]byte
+	doc.OnUpdate(func(update []byte, _ any) {
+		received = append(received, update)
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "k1", "v1")
+			m.Set(txn, "k2", "v2")
+			panic("boom")
+		})
+	}()
+
+	require.Len(t, received, 1, "OnUpdate should fire exactly once with partial state")
+	assert.NotEmpty(t, received[0], "partial update must be non-empty")
+
+	// Apply the partial update to a fresh doc and verify both keys are present.
+	replica := New()
+	require.NoError(t, ApplyUpdateV1(replica, received[0], nil))
+	got1, ok1 := replica.GetMap("m").Get("k1")
+	require.True(t, ok1)
+	assert.Equal(t, "v1", got1)
+	got2, ok2 := replica.GetMap("m").Get("k2")
+	require.True(t, ok2)
+	assert.Equal(t, "v2", got2)
+}
+
+func TestTransact_PanicFiresOnAfterTransaction(t *testing.T) {
+	doc := New()
+	m := doc.GetMap("m")
+
+	var txnSeen *Transaction
+	doc.OnAfterTransaction(func(txn *Transaction) {
+		txnSeen = txn
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			m.Set(txn, "k", "v")
+			panic("boom")
+		})
+	}()
+
+	require.NotNil(t, txnSeen, "OnAfterTransaction should fire on panic")
+	assert.NotEmpty(t, txnSeen.changed, "txn.changed must reflect the partial mutation")
+}
+
+func TestTransact_PanicWithNoMutationsFiresOnUpdateWithMinimalPayload(t *testing.T) {
+	// When fn panics before any mutation, OnUpdate still fires (consistent
+	// with the normal-path behavior of a no-op Transact). The payload is a
+	// well-formed but minimal V1 update — not nil — so subscribers should
+	// not treat "nil update" as a sentinel for "no changes". We verify
+	// round-trip application succeeds against a fresh doc without error.
+	doc := New()
+
+	var received [][]byte
+	doc.OnUpdate(func(update []byte, _ any) {
+		received = append(received, update)
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			panic("immediate")
+		})
+	}()
+
+	require.Len(t, received, 1, "OnUpdate fires once per transaction, even on immediate-panic no-op")
+	require.NotNil(t, received[0])
+
+	// The payload applies cleanly to a fresh replica.
+	replica := New()
+	require.NoError(t, ApplyUpdateV1(replica, received[0], nil))
+}
+
+func TestTransact_PanicReraises(t *testing.T) {
+	doc := New()
+
+	var caught any
+	func() {
+		defer func() { caught = recover() }()
+		doc.Transact(func(txn *Transaction) {
+			panic("original message")
+		})
+	}()
+
+	assert.Equal(t, "original message", caught, "original panic value must be re-raised")
+}
+
+func TestTransact_NormalPathFiresOnUpdateOnce(t *testing.T) {
+	doc := New()
+	m := doc.GetMap("m")
+
+	var calls int
+	doc.OnUpdate(func(update []byte, _ any) {
+		calls++
+	})
+
+	doc.Transact(func(txn *Transaction) {
+		m.Set(txn, "k", "v")
+	})
+
+	assert.Equal(t, 1, calls, "regression: normal-path OnUpdate must fire exactly once")
+}
+
 func TestTransact_PanicReleasesLock(t *testing.T) {
 	doc := New()
 
