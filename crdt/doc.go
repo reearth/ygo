@@ -308,6 +308,72 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 	}
 }
 
+// transactInternal is the shared transaction entry point that Transact
+// and TransactContext both delegate to. It acquires d.mu, runs fn under
+// the lock with panic-safe cleanup, fires Phase 2 observers outside the
+// lock, and re-raises any panic to the caller. The ctx parameter is
+// stored on the Transaction struct and exposed to fn via Transaction.Ctx().
+//
+// See docs/superpowers/specs/2026-04-21-transact-panic-safety-design.md
+// for the full rationale on the defer/recover structure.
+func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction), origin ...any) {
+	var orig any
+	if len(origin) > 0 {
+		orig = origin[0]
+	}
+
+	d.mu.Lock()
+
+	txn := &Transaction{
+		doc:         d,
+		Origin:      orig,
+		Local:       true,
+		deleteSet:   newDeleteSet(),
+		beforeState: d.store.StateVector(),
+		changed:     make(map[*abstractType]map[string]struct{}),
+		ctx:         ctx,
+	}
+
+	defer func() {
+		r := recover()
+
+		if r != nil {
+			func() {
+				defer func() { _ = recover() }()
+				if txn.afterState == nil {
+					txn.afterState = d.store.StateVector()
+				}
+			}()
+		}
+
+		var phase2 func()
+		if r != nil {
+			func() {
+				defer func() { _ = recover() }()
+				phase2 = buildPhase2(d, txn)
+			}()
+		} else {
+			phase2 = buildPhase2(d, txn)
+		}
+
+		d.mu.Unlock()
+
+		if phase2 != nil {
+			phase2()
+		}
+
+		if r != nil {
+			panic(r)
+		}
+	}()
+
+	fn(txn)
+
+	txn.afterState = d.store.StateVector()
+
+	squashRuns(txn)
+}
+
 // Transact executes fn inside a transaction. All insertions and deletions made
 // during fn are batched; observers fire once after fn returns.
 //
@@ -334,94 +400,7 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 //     firing, the observer's panic reaches the caller and the original
 //     fn panic value is lost.
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
-	var orig any
-	if len(origin) > 0 {
-		orig = origin[0]
-	}
-
-	// ── Phase 1: run the transaction body under the lock ─────────────────────
-	d.mu.Lock()
-
-	txn := &Transaction{
-		doc:         d,
-		Origin:      orig,
-		Local:       true,
-		deleteSet:   newDeleteSet(),
-		beforeState: d.store.StateVector(),
-		changed:     make(map[*abstractType]map[string]struct{}),
-		ctx:         context.Background(),
-	}
-
-	// The deferred block is responsible for:
-	//   1. Capturing any panic from fn / squashRuns via recover().
-	//   2. Best-effort finalizing txn so buildPhase2 has the state it needs.
-	//   3. Building the Phase 2 observer plan under a protective recover
-	//      so that a corrupt-state encoding does not mask the original panic.
-	//   4. Releasing d.mu — unconditionally, on every exit path.
-	//   5. Firing Phase 2 observers OUTSIDE the lock.
-	//   6. Re-raising the original panic to the caller.
-	//
-	// See docs/superpowers/specs/2026-04-21-transact-panic-safety-design.md
-	// for the full rationale. Matches the behavior of Yjs JS (try/finally
-	// fires observers on exception) and yrs (Drop::drop commits partial
-	// state). Rollback is not provided.
-	defer func() {
-		r := recover()
-
-		// Best-effort finalize on panic path. StateVector() might itself
-		// panic if the store is corrupt, so guard with an inner recover.
-		if r != nil {
-			func() {
-				defer func() { _ = recover() }()
-				if txn.afterState == nil {
-					txn.afterState = d.store.StateVector()
-				}
-			}()
-		}
-
-		// Build the Phase 2 plan. On the panic path we wrap in a protective
-		// recover so a secondary panic (e.g. encodeV1Locked crashing on
-		// partial/corrupt state) does not mask the caller's original panic.
-		// On the normal path we let any panic from buildPhase2 propagate —
-		// silently dropping observer notifications would be a debuggability
-		// regression relative to pre-fix behavior.
-		var phase2 func()
-		if r != nil {
-			func() {
-				defer func() { _ = recover() }()
-				phase2 = buildPhase2(d, txn)
-			}()
-		} else {
-			phase2 = buildPhase2(d, txn)
-		}
-
-		d.mu.Unlock()
-
-		// Fire observers outside the lock. Observer panics propagate as
-		// today — if both fn and an observer panic, the observer's panic
-		// wins and fn's panic value is lost. Pre-fix code could not reach
-		// this scenario because fn's panic wedged the lock; surfacing
-		// observer failures is preferred over silently swallowing them.
-		if phase2 != nil {
-			phase2()
-		}
-
-		if r != nil {
-			panic(r)
-		}
-	}()
-
-	fn(txn)
-
-	txn.afterState = d.store.StateVector()
-
-	// Squash adjacent same-client ContentString runs before encoding so that
-	// the incremental update sent to peers is already compact.
-	// Note: squashing happens before per-type observers fire. Observers therefore
-	// see merged runs rather than individual character items. This is intentional:
-	// the YTextEvent API does not expose raw Items, and firing after squash
-	// removes the need for a second lock cycle.
-	squashRuns(txn)
+	d.transactInternal(context.Background(), fn, origin...)
 }
 
 // OnUpdate registers a callback that fires after every committed transaction.
@@ -516,13 +495,11 @@ func (d *Doc) ApplyUpdate(update []byte) error {
 // This is useful when the caller needs a cancellation path (e.g. server
 // shutdown) without changing call sites that use the bare Transact form.
 func (d *Doc) TransactContext(ctx context.Context, fn func(*Transaction), origin ...any) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	d.Transact(fn, origin...)
-	return ctx.Err() // nil if not cancelled, error if cancelled during txn
+	d.transactInternal(ctx, fn, origin...)
+	return ctx.Err()
 }
 
 // Destroy detaches all observers and clears internal state, releasing
