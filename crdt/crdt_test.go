@@ -793,17 +793,38 @@ func TestUnit_TransactContext_CancelledBeforeRun_ReturnsError(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestUnit_TransactContext_CancelledDuringRun_ReturnsError(t *testing.T) {
+func TestUnit_TransactContext_CancelledDuringRun_ReportsButDoesNotInterruptFn(t *testing.T) {
+	// Cancelling ctx during fn does NOT interrupt fn — Go has no safe
+	// mechanism for preempting arbitrary code. fn runs to completion;
+	// every mutation it makes is committed. TransactContext returns
+	// ctx.Err() after the commit as a "cancellation happened" signal
+	// so the caller can decide whether to compensate.
 	doc := newTestDoc(1)
+	m := doc.GetMap("m")
 	ctx, cancel := context.WithCancel(context.Background())
 
-	called := false
+	const n = 5
+	completed := 0
 	err := doc.TransactContext(ctx, func(txn *Transaction) {
-		called = true
-		cancel() // cancel during transaction
+		for i := 0; i < n; i++ {
+			if i == 2 {
+				cancel() // cancel in the middle; fn must not notice
+			}
+			m.Set(txn, "k"+string(rune('0'+i)), i)
+			completed++
+		}
 	})
-	assert.True(t, called)
-	assert.Error(t, err, "ctx.Err() should propagate after cancel")
+
+	assert.Equal(t, n, completed, "fn must run to completion regardless of ctx cancellation")
+	require.Error(t, err, "TransactContext must return ctx.Err() after a mid-fn cancel")
+	assert.ErrorIs(t, err, context.Canceled)
+
+	// Every mutation fn made is committed to the doc.
+	for i := 0; i < n; i++ {
+		got, ok := m.Get("k" + string(rune('0'+i)))
+		require.True(t, ok, "key k%d must be committed", i)
+		assert.Equal(t, int64(i), got)
+	}
 }
 
 func TestInteg_NestedTypes_YArrayOfYMap_ConvergesTwoPeers(t *testing.T) {
