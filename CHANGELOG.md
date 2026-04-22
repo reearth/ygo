@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-04-22
+
+### Added
+
+- **`Transaction.Ctx()` accessor (#10)**: fn running inside `Transact` or `TransactContext` can now call `txn.Ctx().Err()` or `<-txn.Ctx().Done()` to cooperatively detect cancellation and return early. Mutations made before the early return commit; those that would have happened after do not. `Transact` populates the ctx with `context.Background()` so bare callers see a non-cancellable context.
+
+### Changed
+
+- **`TransactContext` godoc rewritten** to document the cooperative-polling contract explicitly. Behavior is unchanged for existing callers: the entry-guard check still runs, fn still executes to completion if it does not poll, and ctx.Err() is still returned as a "cancellation happened" signal. The new godoc clarifies that Go cannot safely interrupt arbitrary fn code (same constraint as Yjs JS and yrs).
+
 ## [1.1.1] — 2026-04-21
 
 ### Fixed
@@ -167,6 +177,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.1.2]: https://github.com/reearth/ygo/releases/tag/v1.1.2
 [1.1.1]: https://github.com/reearth/ygo/releases/tag/v1.1.1
 [1.1.0]: https://github.com/reearth/ygo/releases/tag/v1.1.0
 [1.0.5]: https://github.com/reearth/ygo/releases/tag/v1.0.5
