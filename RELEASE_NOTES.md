@@ -1,13 +1,12 @@
 ## What's new
 
-- **`Doc.Transact` is now panic-safe (#9).** Previously, a panic inside the transaction callback left the document's write lock held forever, wedging every subsequent operation on the doc — including `websocket.Server.Apply`'s cleanup path. Transact now releases the lock on every exit path.
-- **Documented panic semantics.** On panic, observers fire with the partial state that was committed before the panic (matching Yjs JS and `yrs`), then the original panic is re-raised. Rollback is not supported; callers needing atomicity should recover and reconcile.
-- **`websocket.Server.Apply` no longer wedges rooms on panic.** The "fn MUST NOT panic" caveat is softened — panics now broadcast partial state to peers and trigger persistence, just like any other mutation.
+- **`Transaction.Ctx()` for cooperative cancellation (#10).** `fn` inside `Transact` or `TransactContext` can now poll `txn.Ctx()` to detect cancellation and return early. Mutations made before the early return commit; those that would follow do not. Closes a long-standing gap where `TransactContext` promised more than it delivered — Go cannot safely interrupt arbitrary `fn` code, so cooperative polling is the mechanism both Yjs JS and the Rust yrs implementation rely on too.
+- **`TransactContext` godoc rewritten** to document the contract explicitly. No behavior change for callers that ignore `txn.Ctx()`.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.1.1
+go get github.com/reearth/ygo@v1.1.2
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.

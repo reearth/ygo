@@ -72,7 +72,7 @@
 | **Before/after state** | ✅ `before_state()`, `after_state()`, `delete_set()` on txn | ✅ Exposed via `OnAfterTransaction` callback | — | — |
 | **Nested transactions** | ❌ Single active `TransactionMut` per Doc | ❌ Nested `Transact` calls not supported | — | Both match JS Yjs single-lock semantics |
 | **Read-only transactions** | ✅ `Transaction` type (cannot mutate) | ✅ Methods outside `Transact` acquire `RLock` | — | yrs enforces at type level; ygo enforces at runtime |
-| **Context-aware transaction** | ❌ Not present | ✅ `Doc.TransactContext(ctx, ...)` | — | ygo-only; useful for request-scoped cancellation |
+| **Context-aware transaction** | ❌ Not present | ✅ `Doc.TransactContext(ctx, ...)` | — | ygo-only; fn polls ctx to exit early; no mid-fn interrupt (matches yrs' no-cancel model) |
 
 ### 4.3 Updates and Encoding
 
@@ -196,7 +196,7 @@
 | **GUID** | ✅ Auto-UUID if not set | ✅ `WithGUID()`, `GUID()` | — | — |
 | **Doc options** | `client_id`, `guid`, `collection_id`, `offset_kind`, `skip_gc`, `auto_load`, `should_load` | `WithClientID`, `WithGUID`, `WithGC` | — | yrs has `offset_kind` and `collection_id`/`auto_load` that ygo lacks |
 | **offset_kind** | ✅ `Bytes` or `UTF16` — controls how text offsets are counted | ❌ Hardcoded UTF-16 (fixed in v1.0.4) | ⚠️ yrs default is `Bytes`; must be set to `UTF16` for JS client compat | **Critical JS-compat risk in yrs.** If Rust integrators don't set `offset_kind: UTF16`, their YText offsets will be wrong for emoji/supplementary chars. ygo is correct by default. |
-| **TransactContext** | ❌ Not present | ✅ `Doc.TransactContext(ctx, ...)` | — | ygo-only; enables request-scoped cancellation |
+| **TransactContext** | ❌ Not present | ✅ `Doc.TransactContext(ctx, ...)` | — | ygo-only; fn polls ctx to exit early; no mid-fn interrupt (matches yrs' no-cancel model) |
 
 ---
 

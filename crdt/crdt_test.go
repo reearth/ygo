@@ -793,17 +793,37 @@ func TestUnit_TransactContext_CancelledBeforeRun_ReturnsError(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestUnit_TransactContext_CancelledDuringRun_ReturnsError(t *testing.T) {
+func TestUnit_TransactContext_CancelledDuringRun_ReportsButDoesNotInterruptFn(t *testing.T) {
+	// Cancelling ctx during fn does NOT interrupt fn — Go has no safe
+	// mechanism for preempting arbitrary code. fn runs to completion;
+	// every mutation it makes is committed. TransactContext returns
+	// ctx.Err() after the commit as a "cancellation happened" signal
+	// so the caller can decide whether to compensate.
 	doc := newTestDoc(1)
+	m := doc.GetMap("m")
 	ctx, cancel := context.WithCancel(context.Background())
 
-	called := false
+	const n = 5
+	completed := 0
 	err := doc.TransactContext(ctx, func(txn *Transaction) {
-		called = true
-		cancel() // cancel during transaction
+		for i := 0; i < n; i++ {
+			if i == 2 {
+				cancel() // cancel in the middle; fn must not notice
+			}
+			m.Set(txn, "k"+string(rune('0'+i)), i)
+			completed++
+		}
 	})
-	assert.True(t, called)
-	assert.Error(t, err, "ctx.Err() should propagate after cancel")
+
+	assert.Equal(t, n, completed, "fn must run to completion regardless of ctx cancellation")
+	require.ErrorIs(t, err, context.Canceled, "TransactContext must return ctx.Err() after a mid-fn cancel")
+
+	// Every mutation fn made is committed to the doc.
+	for i := 0; i < n; i++ {
+		got, ok := m.Get("k" + string(rune('0'+i)))
+		require.True(t, ok, "key k%d must be committed", i)
+		assert.Equal(t, int64(i), got)
+	}
 }
 
 func TestInteg_NestedTypes_YArrayOfYMap_ConvergesTwoPeers(t *testing.T) {
@@ -1036,4 +1056,63 @@ func TestTransact_PanicReleasesLock(t *testing.T) {
 	got, ok := m.Get("k")
 	require.True(t, ok)
 	assert.Equal(t, "v", got)
+}
+
+func TestUnit_Transact_CtxReturnsBackground(t *testing.T) {
+	doc := New()
+
+	var ctxInFn context.Context
+	doc.Transact(func(txn *Transaction) {
+		ctxInFn = txn.Ctx()
+	})
+
+	require.NotNil(t, ctxInFn, "bare Transact must populate a non-nil ctx")
+	require.NoError(t, ctxInFn.Err(), "bare Transact ctx must not report an error")
+
+	// Done() must be a never-firing channel (not nil, non-receivable).
+	select {
+	case <-ctxInFn.Done():
+		t.Fatal("bare Transact ctx.Done() must never fire")
+	default:
+		// good
+	}
+}
+
+func TestUnit_TransactContext_CooperativeCancellationViaCtx(t *testing.T) {
+	// When fn cooperatively polls txn.Ctx(), it can detect cancellation
+	// and return early. Mutations made before the check commit; mutations
+	// that would have happened after the check do not.
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	const total = 10
+	const cancelAt = 3 // cancel after this many mutations
+	completed := 0
+	err := doc.TransactContext(ctx, func(txn *Transaction) {
+		for i := 0; i < total; i++ {
+			if err := txn.Ctx().Err(); err != nil {
+				return // cooperative early return
+			}
+			m.Set(txn, "k"+string(rune('0'+i)), i)
+			completed++
+			if completed == cancelAt {
+				cancel() // caller cancels after cancelAt completed
+			}
+		}
+	})
+
+	require.ErrorIs(t, err, context.Canceled, "TransactContext must return ctx.Err() after cooperative cancel")
+	assert.Equal(t, cancelAt, completed, "fn must have returned after the cancelAt-th iteration's ctx check")
+
+	// Exactly `cancelAt` mutations are committed; the remaining are not.
+	for i := 0; i < cancelAt; i++ {
+		got, ok := m.Get("k" + string(rune('0'+i)))
+		require.True(t, ok, "key k%d must be committed (before cancel)", i)
+		assert.Equal(t, int64(i), got)
+	}
+	for i := cancelAt; i < total; i++ {
+		_, ok := m.Get("k" + string(rune('0'+i)))
+		assert.False(t, ok, "key k%d must NOT be committed (after cancel)", i)
+	}
 }
