@@ -1037,3 +1037,23 @@ func TestTransact_PanicReleasesLock(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "v", got)
 }
+
+func TestUnit_Transact_CtxReturnsBackground(t *testing.T) {
+	doc := New()
+
+	var ctxInFn context.Context
+	doc.Transact(func(txn *Transaction) {
+		ctxInFn = txn.Ctx()
+	})
+
+	require.NotNil(t, ctxInFn, "bare Transact must populate a non-nil ctx")
+	assert.NoError(t, ctxInFn.Err(), "bare Transact ctx must not report an error")
+
+	// Done() must be a never-firing channel (not nil, non-receivable).
+	select {
+	case <-ctxInFn.Done():
+		t.Fatal("bare Transact ctx.Done() must never fire")
+	default:
+		// good
+	}
+}

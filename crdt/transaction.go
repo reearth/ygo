@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"context"
 	"sort"
 	"strings"
 )
@@ -20,6 +21,23 @@ type Transaction struct {
 	// newItems collects ContentString items integrated during this transaction.
 	// Used by squashRuns to merge adjacent same-client runs after observers fire.
 	newItems []*Item
+	// ctx is the context associated with this transaction. Set to
+	// context.Background() by Transact and to the caller's ctx by
+	// TransactContext. Exposed via the Ctx() method so fn can poll for
+	// cancellation.
+	ctx context.Context
+}
+
+// Ctx returns the context associated with this transaction. Transactions
+// started via Transact return context.Background(); transactions started
+// via TransactContext return the caller's ctx. fn can poll Ctx().Err()
+// or <-Ctx().Done() to detect cancellation and return early.
+//
+// Returning early from fn commits whatever mutations have been made so
+// far — there is no rollback. Callers needing atomicity should recover
+// and reconcile via sync or recreate the doc from persistence.
+func (t *Transaction) Ctx() context.Context {
+	return t.ctx
 }
 
 // squashRuns merges adjacent ContentString items that were both created in this

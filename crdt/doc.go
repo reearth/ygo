@@ -349,6 +349,7 @@ func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 		deleteSet:   newDeleteSet(),
 		beforeState: d.store.StateVector(),
 		changed:     make(map[*abstractType]map[string]struct{}),
+		ctx:         context.Background(),
 	}
 
 	// The deferred block is responsible for:
