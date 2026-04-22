@@ -490,10 +490,25 @@ func (d *Doc) ApplyUpdate(update []byte) error {
 	return ApplyUpdateV1(d, update, nil)
 }
 
-// TransactContext is like Transact but returns immediately with ctx.Err() if
-// the context is already cancelled before the transaction starts.
-// This is useful when the caller needs a cancellation path (e.g. server
-// shutdown) without changing call sites that use the bare Transact form.
+// TransactContext is like Transact but associates a context with the
+// transaction so fn can cooperatively observe cancellation.
+//
+// If ctx is already cancelled when TransactContext is called, fn is not
+// invoked and ctx.Err() is returned immediately.
+//
+// Inside fn, callers can poll txn.Ctx().Err() or <-txn.Ctx().Done() to
+// detect cancellation and return early. Any mutations fn completed
+// before returning are committed (no rollback, consistent with the
+// Transact panic-safety contract — see Transact's godoc).
+//
+// If ctx cancels during fn and fn does not poll, fn runs to completion —
+// Go has no safe mechanism for interrupting arbitrary fn code. ctx.Err()
+// is returned after the transaction commits as a "missed cancellation"
+// signal to the caller. It is not an error flag for the mutations; those
+// are committed either way.
+//
+// Neither Yjs JS nor the Rust yrs implementation offers mid-fn
+// interruption either; cooperative polling is the ecosystem norm.
 func (d *Doc) TransactContext(ctx context.Context, fn func(*Transaction), origin ...any) error {
 	if err := ctx.Err(); err != nil {
 		return err
