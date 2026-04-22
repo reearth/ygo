@@ -816,8 +816,7 @@ func TestUnit_TransactContext_CancelledDuringRun_ReportsButDoesNotInterruptFn(t 
 	})
 
 	assert.Equal(t, n, completed, "fn must run to completion regardless of ctx cancellation")
-	require.Error(t, err, "TransactContext must return ctx.Err() after a mid-fn cancel")
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled, "TransactContext must return ctx.Err() after a mid-fn cancel")
 
 	// Every mutation fn made is committed to the doc.
 	for i := 0; i < n; i++ {
@@ -1068,7 +1067,7 @@ func TestUnit_Transact_CtxReturnsBackground(t *testing.T) {
 	})
 
 	require.NotNil(t, ctxInFn, "bare Transact must populate a non-nil ctx")
-	assert.NoError(t, ctxInFn.Err(), "bare Transact ctx must not report an error")
+	require.NoError(t, ctxInFn.Err(), "bare Transact ctx must not report an error")
 
 	// Done() must be a never-firing channel (not nil, non-receivable).
 	select {
@@ -1103,8 +1102,7 @@ func TestUnit_TransactContext_CooperativeCancellationViaCtx(t *testing.T) {
 		}
 	})
 
-	require.Error(t, err, "TransactContext must return ctx.Err() after cooperative cancel")
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled, "TransactContext must return ctx.Err() after cooperative cancel")
 	assert.Equal(t, cancelAt, completed, "fn must have returned after the cancelAt-th iteration's ctx check")
 
 	// Exactly `cancelAt` mutations are committed; the remaining are not.
