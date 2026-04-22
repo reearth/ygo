@@ -1078,3 +1078,43 @@ func TestUnit_Transact_CtxReturnsBackground(t *testing.T) {
 		// good
 	}
 }
+
+func TestUnit_TransactContext_CooperativeCancellationViaCtx(t *testing.T) {
+	// When fn cooperatively polls txn.Ctx(), it can detect cancellation
+	// and return early. Mutations made before the check commit; mutations
+	// that would have happened after the check do not.
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	const total = 10
+	const cancelAt = 3 // cancel after this many mutations
+	completed := 0
+	err := doc.TransactContext(ctx, func(txn *Transaction) {
+		for i := 0; i < total; i++ {
+			if err := txn.Ctx().Err(); err != nil {
+				return // cooperative early return
+			}
+			m.Set(txn, "k"+string(rune('0'+i)), i)
+			completed++
+			if completed == cancelAt {
+				cancel() // caller cancels after cancelAt completed
+			}
+		}
+	})
+
+	require.Error(t, err, "TransactContext must return ctx.Err() after cooperative cancel")
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, cancelAt, completed, "fn must have returned after the cancelAt-th iteration's ctx check")
+
+	// Exactly `cancelAt` mutations are committed; the remaining are not.
+	for i := 0; i < cancelAt; i++ {
+		got, ok := m.Get("k" + string(rune('0'+i)))
+		require.True(t, ok, "key k%d must be committed (before cancel)", i)
+		assert.Equal(t, int64(i), got)
+	}
+	for i := cancelAt; i < total; i++ {
+		_, ok := m.Get("k" + string(rune('0'+i)))
+		assert.False(t, ok, "key k%d must NOT be committed (after cancel)", i)
+	}
+}
