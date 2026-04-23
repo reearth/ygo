@@ -7,10 +7,35 @@ import "sort"
 // This structure enables O(log n) lookup by ID via binary search and O(1) append.
 type StructStore struct {
 	clients map[ClientID][]*Item
+
+	// pending holds items whose Origin / OriginRight / Parent references
+	// clocks not yet integrated, and items that form a same-client clock
+	// gap with the integrated state. Retried at the end of every
+	// ApplyUpdateV1 / ApplyUpdateV2 call. nil when empty.
+	//
+	// See docs/superpowers/specs/2026-04-23-cross-update-origin-resolution-design.md
+	// for the full rationale. Matches Yjs JS's pendingStructs and yrs's Store.pending.
+	pending *pendingUpdate
+
+	// pendingDs holds delete-set entries targeting items not yet integrated.
+	// Accumulated across updates and retried whenever pending drains.
+	pendingDs DeleteSet
+}
+
+// pendingUpdate holds decoded items parked because of unresolved
+// dependencies, plus a per-client watermark of the store's clock at
+// park time. A retry is worth attempting when the store's current
+// clock for any client in `missing` has advanced past its recorded value.
+type pendingUpdate struct {
+	items   []*Item     // parked items, in arrival order
+	missing StateVector // clientID -> store clock at park time for that client
 }
 
 func newStructStore() *StructStore {
-	return &StructStore{clients: make(map[ClientID][]*Item)}
+	return &StructStore{
+		clients:   make(map[ClientID][]*Item),
+		pendingDs: newDeleteSet(),
+	}
 }
 
 // Append adds item to the store. Items must be appended in Clock order per client.

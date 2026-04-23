@@ -40,6 +40,13 @@ func newTxn(doc *Doc) *Transaction {
 	}
 }
 
+func TestUnit_StructStore_PendingFieldsExistInitiallyEmpty(t *testing.T) {
+	doc := New()
+	require.NotNil(t, doc.store)
+	assert.Nil(t, doc.store.pending, "pending queue starts nil")
+	assert.Equal(t, 0, len(doc.store.pendingDs.clients), "pendingDs starts empty")
+}
+
 // listContent walks the linked list of a type and returns all non-deleted
 // string content in order — handy for assertion messages.
 func listContent(t *abstractType) []string {
