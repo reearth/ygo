@@ -468,9 +468,16 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 
 			// Skip structs (tag 10) are clock-range placeholders that are
-			// never stored — just advance the clock.
+			// never stored — just advance the clock. Update existingEnd so
+			// that subsequent items in this group are not mistakenly flagged
+			// as having a clock gap (skip structs tell the receiver those
+			// clocks are intentionally absent).
 			if _, isSkip := item.Content.(*contentSkip); isSkip {
-				clock += uint64(item.Content.Len())
+				skipEnd := clock + uint64(item.Content.Len())
+				if skipEnd > existingEnd {
+					existingEnd = skipEnd
+				}
+				clock = skipEnd
 				continue
 			}
 
@@ -489,6 +496,22 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 				offset = int(existingEnd - clock)
 			}
 
+			// Same-client clock gap: this item's clock is past the store's
+			// current clock for this client (we have 0..existingEnd but this
+			// item starts at clock > existingEnd). Silently integrating would
+			// misplace the item at the head of its parent list. Park instead,
+			// with the store's current clock as the watermark — when the store
+			// reaches that clock, the missing predecessor may be available.
+			if clock > existingEnd {
+				if txn.doc.store.pending == nil {
+					txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
+				}
+				txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
+				mergePendingMissing(txn.doc.store.pending.missing, client, existingEnd)
+				clock = itemEnd
+				continue
+			}
+
 			// GC items (tag 0) have no parent — add directly to the store
 			// without linked-list integration.
 			if item.Parent == nil && item.Deleted {
@@ -497,6 +520,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 					item.Content = item.Content.Splice(offset)
 				}
 				txn.doc.store.Append(item)
+				existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
 				clock = itemEnd
 				continue
 			}
@@ -517,6 +541,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 
 			item.integrate(txn, offset)
+			existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
 			clock = itemEnd
 		}
 	}
@@ -554,13 +579,24 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 		}
 		if len(remaining) == len(pending) {
-			// Items whose parents are truly unresolvable (e.g. all
-			// predecessors are GC structs from the Yjs wire format with
-			// no parent info). Store them in the struct store without
-			// integration so they survive re-encoding — the encoder
-			// will write explicit parent info for late-joining clients.
+			// No progress made. Partition `remaining` into two buckets:
+			//   - Future-clock references -> park in store.pending for retry
+			//     when the missing updates arrive (fixes #11).
+			//   - Truly unresolvable (e.g. GC'd parents with lost parent info
+			//     from the Yjs wire format) -> store without integration so
+			//     they survive re-encoding. Matches the pre-#11 fallback.
 			for _, item := range remaining {
-				txn.doc.store.Append(item)
+				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+					if txn.doc.store.pending == nil {
+						txn.doc.store.pending = &pendingUpdate{
+							missing: make(StateVector),
+						}
+					}
+					txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
+					mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
+				} else {
+					txn.doc.store.Append(item)
+				}
 			}
 			break
 		}
@@ -973,4 +1009,25 @@ func fmtValFromJSON(s string) (any, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+// itemFutureDep reports whether item is blocked on a future-clock dependency
+// (one whose referenced clock has not yet been integrated into the store).
+// Returns (missingClient, storeClockAtParkTime, true) if yes; otherwise
+// (0, 0, false) indicating the item's parent is truly unresolvable (e.g.
+// origin references a GC placeholder whose parent info was lost).
+func itemFutureDep(item *Item, store *StructStore) (ClientID, uint64, bool) {
+	if item.Origin != nil {
+		storeClock := store.NextClock(item.Origin.Client)
+		if item.Origin.Clock >= storeClock {
+			return item.Origin.Client, storeClock, true
+		}
+	}
+	if item.OriginRight != nil {
+		storeClock := store.NextClock(item.OriginRight.Client)
+		if item.OriginRight.Clock >= storeClock {
+			return item.OriginRight.Client, storeClock, true
+		}
+	}
+	return 0, 0, false
 }

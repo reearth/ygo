@@ -1144,3 +1144,32 @@ func TestUnit_StructStore_Retryable_WatermarkSemantic(t *testing.T) {
 	store.clients[42] = append(store.clients[42], &Item{ID: ID{Client: 42, Clock: 3}, Content: &ContentAny{Vals: []any{nil, nil, nil}}})
 	assert.True(t, store.retryable(missing), "store.Clock(42) == 6 > 5, retryable")
 }
+
+func TestUnit_ApplyV1_ParksItemsWithFutureOriginClock(t *testing.T) {
+	// Two concurrent producers:
+	//   A (clientID=1) inserts "x" into an array.
+	//   B (clientID=2, sees A's state) inserts "y" after A's item, so B's
+	//   item has Origin pointing to A's item (client=1, clock=0).
+	// Peer receives B's update first, without A's update.
+	// Before this fix: B's items were silently orphaned.
+	// After this fix: they are parked in peer.store.pending with missing[1] set.
+
+	a := newTestDoc(1)
+	arrA := a.GetArray("arr")
+	a.Transact(func(txn *Transaction) { arrA.Insert(txn, 0, []any{"x"}) })
+	updateA := EncodeStateAsUpdateV1(a, nil)
+
+	b := newTestDoc(2)
+	require.NoError(t, ApplyUpdateV1(b, updateA, nil))
+	arrB := b.GetArray("arr")
+	b.Transact(func(txn *Transaction) { arrB.Insert(txn, 1, []any{"y"}) }) // insert after A's item
+	updateBOnly, err := DiffUpdateV1(EncodeStateAsUpdateV1(b, nil), a.store.StateVector())
+	require.NoError(t, err)
+
+	peer := newTestDoc(99)
+	require.NoError(t, ApplyUpdateV1(peer, updateBOnly, nil))
+
+	require.NotNil(t, peer.store.pending, "B's items must be parked, not silently orphaned")
+	assert.NotEmpty(t, peer.store.pending.items)
+	assert.Contains(t, peer.store.pending.missing, ClientID(1))
+}
