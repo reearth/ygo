@@ -608,6 +608,46 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		return wrapUpdateErr(err)
 	}
 	ds.applyTo(txn)
+
+	// Drain pending items whose dependencies have been satisfied by
+	// this update. Inline rather than recursive (Go's sync.Mutex is not
+	// reentrant; ApplyUpdateV1 is already under d.mu via doc.Transact).
+	//
+	// Loop until no progress to handle chained dependencies:
+	//   A arriving satisfies B; B (now integrated) satisfies C; etc.
+	//
+	// Matches yrs' apply_update retry gate and Yjs JS's readUpdateV2
+	// recursion, but executed inline so everything integrated during
+	// this call surfaces in a single OnUpdate notification.
+	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
+		items := txn.doc.store.pending.items
+		txn.doc.store.pending = nil
+
+		var stillPending []*Item
+		stillMissing := make(StateVector)
+		progressed := false
+		for _, item := range items {
+			if tryIntegrate(txn, item) {
+				progressed = true
+			} else {
+				stillPending = append(stillPending, item)
+				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+					mergePendingMissing(stillMissing, client, parkedAt)
+				} else if item.ID.Clock > txn.doc.store.NextClock(item.ID.Client) {
+					// Same-client gap still blocks it.
+					mergePendingMissing(stillMissing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
+				}
+			}
+		}
+		if len(stillPending) > 0 {
+			txn.doc.store.pending = &pendingUpdate{items: stillPending, missing: stillMissing}
+		}
+		if !progressed {
+			// No progress this pass — infinite-loop guard. Items remain parked.
+			break
+		}
+	}
+
 	return nil
 }
 
@@ -1009,6 +1049,76 @@ func fmtValFromJSON(s string) (any, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+// tryIntegrate attempts to integrate item into the doc store. Returns
+// true on success (item is now integrated into the linked list, or
+// stored as an orphan when its parent is truly unresolvable). Returns
+// false if blocked on a future-clock dependency — the caller should
+// leave it in the pending queue.
+//
+// Used by the inline retry loop to drain pending items that may now
+// be integrable. Parallels the normal decode-loop path but with items
+// that have already been decoded.
+func tryIntegrate(txn *Transaction, item *Item) bool {
+	store := txn.doc.store
+
+	existingEnd := store.NextClock(item.ID.Client)
+
+	// Already fully integrated (arrived twice somehow): drop silently.
+	if item.ID.Clock+uint64(item.Content.Len()) <= existingEnd {
+		return true
+	}
+
+	// Same-client clock gap: still blocked.
+	if item.ID.Clock > existingEnd {
+		return false
+	}
+
+	// GC-orphan path (no parent, deleted): store without integration.
+	if item.Parent == nil && item.Deleted {
+		store.Append(item)
+		return true
+	}
+
+	// Try to resolve parent via Origin / OriginRight / ParentSub fallback.
+	if item.Parent == nil {
+		if item.Origin != nil {
+			if oi := store.Find(*item.Origin); oi != nil {
+				item.Parent = oi.Parent
+			} else if item.Origin.Clock >= store.NextClock(item.Origin.Client) {
+				return false // future clock — still blocked
+			}
+		}
+		if item.Parent == nil && item.OriginRight != nil {
+			if ori := store.Find(*item.OriginRight); ori != nil {
+				item.Parent = ori.Parent
+			} else if item.OriginRight.Clock >= store.NextClock(item.OriginRight.Client) {
+				return false
+			}
+		}
+		if item.Parent == nil && item.ParentSub != "" {
+			item.Parent = findParentForMapEntry(store)
+		}
+		if item.Parent == nil {
+			// Truly unresolvable — orphan store (existing behavior).
+			store.Append(item)
+			return true
+		}
+	}
+
+	// Origin present but referring to a future clock -> still blocked.
+	if item.Origin != nil && item.Origin.Clock >= store.NextClock(item.Origin.Client) {
+		return false
+	}
+
+	// Resolve left neighbor for integrate().
+	if item.Origin != nil {
+		item.Left = store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
+	}
+
+	item.integrate(txn, 0)
+	return true
 }
 
 // itemFutureDep reports whether item is blocked on a future-clock dependency

@@ -1173,3 +1173,82 @@ func TestUnit_ApplyV1_ParksItemsWithFutureOriginClock(t *testing.T) {
 	assert.NotEmpty(t, peer.store.pending.items)
 	assert.Contains(t, peer.store.pending.missing, ClientID(1))
 }
+
+func TestInteg_ApplyV1_ConvergesOnReverseOrderDelivery(t *testing.T) {
+	// The #11 acceptance criterion: peer receives B before A, where B's
+	// items reference A's items via Origin. After both arrive, peer must
+	// have all values from both updates.
+	//
+	// Use YArray (not YMap) — YArray inserts create Origin chains;
+	// YMap entries use named-root parents and don't trigger the pending path.
+	a := newTestDoc(1)
+	arrA := a.GetArray("arr")
+	a.Transact(func(txn *Transaction) { arrA.Insert(txn, 0, []any{"a"}) })
+	updateA := EncodeStateAsUpdateV1(a, nil)
+
+	b := newTestDoc(2)
+	require.NoError(t, ApplyUpdateV1(b, updateA, nil))
+	arrB := b.GetArray("arr")
+	b.Transact(func(txn *Transaction) { arrB.Insert(txn, 1, []any{"b"}) })
+	updateBOnly, err := DiffUpdateV1(EncodeStateAsUpdateV1(b, nil), a.store.StateVector())
+	require.NoError(t, err)
+
+	peer := newTestDoc(99)
+	require.NoError(t, ApplyUpdateV1(peer, updateBOnly, nil))
+	require.NotNil(t, peer.store.pending, "B's items are parked pending A")
+
+	// Peer then receives A. This must drain pending and produce final convergent state.
+	require.NoError(t, ApplyUpdateV1(peer, updateA, nil))
+
+	peerArr := peer.GetArray("arr")
+	assert.Equal(t, 2, peerArr.Len(), "peer must have both items after deps arrive")
+	got0 := peerArr.Get(0)
+	assert.Equal(t, "a", got0)
+	got1 := peerArr.Get(1)
+	assert.Equal(t, "b", got1)
+
+	assert.Nil(t, peer.store.pending, "pending queue must be empty after all deps arrive")
+}
+
+func TestInteg_ApplyV1_ConvergesOnChainedReverseOrder(t *testing.T) {
+	// Three producers where each references the previous via Origin:
+	//   A (c=1) inserts at index 0
+	//   B (c=2, sees A) inserts at index 1 (Origin = A's item)
+	//   C (c=3, sees both) inserts at index 2 (Origin = B's item)
+	// Peer receives them in the order C, A, B.
+	a := newTestDoc(1)
+	arrA := a.GetArray("arr")
+	a.Transact(func(txn *Transaction) { arrA.Insert(txn, 0, []any{"a"}) })
+	updateA := EncodeStateAsUpdateV1(a, nil)
+
+	b := newTestDoc(2)
+	require.NoError(t, ApplyUpdateV1(b, updateA, nil))
+	arrB := b.GetArray("arr")
+	b.Transact(func(txn *Transaction) { arrB.Insert(txn, 1, []any{"b"}) })
+	updateB, err := DiffUpdateV1(EncodeStateAsUpdateV1(b, nil), a.store.StateVector())
+	require.NoError(t, err)
+
+	c := newTestDoc(3)
+	require.NoError(t, ApplyUpdateV1(c, updateA, nil))
+	require.NoError(t, ApplyUpdateV1(c, updateB, nil))
+	arrC := c.GetArray("arr")
+	c.Transact(func(txn *Transaction) { arrC.Insert(txn, 2, []any{"c"}) })
+	updateC, err := DiffUpdateV1(EncodeStateAsUpdateV1(c, nil), b.store.StateVector())
+	require.NoError(t, err)
+
+	// Peer receives in order C, A, B.
+	peer := newTestDoc(99)
+	require.NoError(t, ApplyUpdateV1(peer, updateC, nil))
+	require.NotNil(t, peer.store.pending, "C parked pending A and B")
+
+	require.NoError(t, ApplyUpdateV1(peer, updateA, nil))
+	// A arrived; B still not here, so C can't drain yet.
+	require.NotNil(t, peer.store.pending, "C still parked pending B")
+
+	require.NoError(t, ApplyUpdateV1(peer, updateB, nil))
+	// B drains on arrival of A; C drains on inline chained retry.
+	assert.Nil(t, peer.store.pending, "all pending drained after all deps arrive")
+
+	peerArr := peer.GetArray("arr")
+	assert.Equal(t, 3, peerArr.Len())
+}
