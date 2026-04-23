@@ -638,19 +638,39 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		var stillPending []*Item
 		stillMissing := make(StateVector)
 		progressed := false
-		for _, item := range items {
-			if tryIntegrate(txn, item) {
-				progressed = true
-			} else {
-				stillPending = append(stillPending, item)
-				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
-					mergePendingMissing(stillMissing, client, parkedAt)
-				} else if item.ID.Clock > txn.doc.store.NextClock(item.ID.Client) {
-					// Same-client gap still blocks it.
-					mergePendingMissing(stillMissing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
+
+		// Process items with panic-safety: if tryIntegrate panics, re-park
+		// unprocessed items and stillPending back into store.pending so a
+		// subsequent ApplyUpdate can retry them. The outer applyV1Txn recover
+		// (v1.1.1) then converts the panic to an error for the caller.
+		idx := 0
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Restore: anything already re-parked + the unprocessed tail.
+					restore := append(stillPending, items[idx:]...)
+					if len(restore) > 0 {
+						txn.doc.store.pending = &pendingUpdate{items: restore, missing: stillMissing}
+					}
+					panic(r) // re-raise for outer recover
+				}
+			}()
+			for idx = 0; idx < len(items); idx++ {
+				item := items[idx]
+				if tryIntegrate(txn, item) {
+					progressed = true
+				} else {
+					stillPending = append(stillPending, item)
+					if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+						mergePendingMissing(stillMissing, client, parkedAt)
+					} else if item.ID.Clock > txn.doc.store.NextClock(item.ID.Client) {
+						// Same-client gap still blocks it.
+						mergePendingMissing(stillMissing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
+					}
 				}
 			}
-		}
+		}()
+
 		if len(stillPending) > 0 {
 			txn.doc.store.pending = &pendingUpdate{items: stillPending, missing: stillMissing}
 		}
