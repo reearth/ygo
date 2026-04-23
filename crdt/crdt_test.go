@@ -44,7 +44,7 @@ func TestUnit_StructStore_PendingFieldsExistInitiallyEmpty(t *testing.T) {
 	doc := New()
 	require.NotNil(t, doc.store)
 	assert.Nil(t, doc.store.pending, "pending queue starts nil")
-	assert.Equal(t, 0, len(doc.store.pendingDs.clients), "pendingDs starts empty")
+	assert.Empty(t, doc.store.pendingDs.clients, "pendingDs starts empty")
 }
 
 // listContent walks the linked list of a type and returns all non-deleted
@@ -1284,7 +1284,7 @@ func TestInteg_ApplyV1_DeleteSetOnNotYetIntegratedItem(t *testing.T) {
 	assert.Equal(t, 0, peerArr.Len(), "item must be deleted via the pending-ds drain")
 
 	// pendingDs must be empty after the drain.
-	assert.Equal(t, 0, len(peer.store.pendingDs.clients))
+	assert.Empty(t, peer.store.pendingDs.clients)
 }
 
 func TestInteg_ApplyV2_ConvergesOnReverseOrderDelivery(t *testing.T) {

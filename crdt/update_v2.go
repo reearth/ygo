@@ -620,8 +620,8 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 					// we cannot integrate them as live items. Instead we add
 					// their clock range to the delete set: items we already hold
 					// in this range will be tombstoned, and items we've never
-					// seen (GC'd before they reached us) are benignly ignored
-					// because deleteSet.applyTo silently skips missing items.
+					// seen (GC'd before they reached us) are parked in
+					// pendingDs via applyToPartial and retried on later applies.
 					effectiveStart := clock
 					if effectiveStart < existingEnd {
 						effectiveStart = existingEnd
