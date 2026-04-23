@@ -1286,3 +1286,54 @@ func TestInteg_ApplyV1_DeleteSetOnNotYetIntegratedItem(t *testing.T) {
 	// pendingDs must be empty after the drain.
 	assert.Equal(t, 0, len(peer.store.pendingDs.clients))
 }
+
+func TestInteg_ApplyV2_ConvergesOnReverseOrderDelivery(t *testing.T) {
+	// V2 parity for the #11 fix.
+	a := newTestDoc(1)
+	arrA := a.GetArray("arr")
+	a.Transact(func(txn *Transaction) { arrA.Insert(txn, 0, []any{"a"}) })
+	updateA := EncodeStateAsUpdateV2(a, nil)
+
+	b := newTestDoc(2)
+	require.NoError(t, ApplyUpdateV2(b, updateA, nil))
+	arrB := b.GetArray("arr")
+	b.Transact(func(txn *Transaction) { arrB.Insert(txn, 1, []any{"b"}) })
+	// For V2, if there is no DiffUpdateV2 helper, construct the B-only update
+	// via EncodeStateAsUpdateV2 with the pre-B state vector.
+	updateB := EncodeStateAsUpdateV2(b, a.store.StateVector())
+
+	peer := newTestDoc(99)
+	require.NoError(t, ApplyUpdateV2(peer, updateB, nil))
+	require.NotNil(t, peer.store.pending, "V2 path must park identically to V1")
+
+	require.NoError(t, ApplyUpdateV2(peer, updateA, nil))
+	assert.Nil(t, peer.store.pending, "V2 retry must drain pending")
+
+	peerArr := peer.GetArray("arr")
+	assert.Equal(t, 2, peerArr.Len())
+}
+
+func TestInteg_CrossFormat_V1ParksV2Drains(t *testing.T) {
+	// Peer parks V2 update B, then drains it when V1 update A arrives.
+	// This exercises the shared pending queue across formats.
+	a := newTestDoc(1)
+	arrA := a.GetArray("arr")
+	a.Transact(func(txn *Transaction) { arrA.Insert(txn, 0, []any{"a"}) })
+	updateAV1 := EncodeStateAsUpdateV1(a, nil)
+
+	b := newTestDoc(2)
+	require.NoError(t, ApplyUpdateV1(b, updateAV1, nil))
+	arrB := b.GetArray("arr")
+	b.Transact(func(txn *Transaction) { arrB.Insert(txn, 1, []any{"b"}) })
+	updateBV2 := EncodeStateAsUpdateV2(b, a.store.StateVector())
+
+	peer := newTestDoc(99)
+	require.NoError(t, ApplyUpdateV2(peer, updateBV2, nil))
+	require.NotNil(t, peer.store.pending)
+
+	require.NoError(t, ApplyUpdateV1(peer, updateAV1, nil))
+	assert.Nil(t, peer.store.pending)
+
+	peerArr := peer.GetArray("arr")
+	assert.Equal(t, 2, peerArr.Len())
+}

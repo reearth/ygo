@@ -639,7 +639,11 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				if err != nil {
 					return wrapUpdateErr(err)
 				}
-				clock += l
+				skipEnd := clock + l
+				if skipEnd > existingEnd {
+					existingEnd = skipEnd
+				}
+				clock = skipEnd
 				continue
 			}
 
@@ -660,6 +664,22 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				offset = int(existingEnd - clock)
 			}
 
+			// Same-client clock gap: this item's clock is past the store's
+			// current clock for this client (we have 0..existingEnd but this
+			// item starts at clock > existingEnd). Silently integrating would
+			// misplace the item at the head of its parent list. Park instead,
+			// with the store's current clock as the watermark — when the store
+			// reaches that clock, the missing predecessor may be available.
+			if clock > existingEnd {
+				if txn.doc.store.pending == nil {
+					txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
+				}
+				txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
+				mergePendingMissing(txn.doc.store.pending.missing, client, existingEnd)
+				clock = itemEnd
+				continue
+			}
+
 			// Items whose parent can't be resolved yet (cross-client
 			// reference to a group not yet decoded) are deferred.
 			if item.Parent == nil {
@@ -673,6 +693,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 
 			item.integrate(txn, offset)
+			existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
 			clock = itemEnd
 		}
 	}
@@ -705,8 +726,24 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 		}
 		if len(remaining) == len(pending) {
+			// No progress made. Partition `remaining` into two buckets:
+			//   - Future-clock references -> park in store.pending for retry
+			//     when the missing updates arrive (fixes #11).
+			//   - Truly unresolvable (e.g. GC'd parents with lost parent info
+			//     from the Yjs wire format) -> store without integration so
+			//     they survive re-encoding. Matches the pre-#11 fallback.
 			for _, item := range remaining {
-				txn.doc.store.Append(item)
+				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+					if txn.doc.store.pending == nil {
+						txn.doc.store.pending = &pendingUpdate{
+							missing: make(StateVector),
+						}
+					}
+					txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
+					mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
+				} else {
+					txn.doc.store.Append(item)
+				}
 			}
 			break
 		}
@@ -718,7 +755,67 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	ds.applyTo(txn)
+	unresolvableDs := ds.applyToPartial(txn)
+	if len(unresolvableDs.clients) > 0 {
+		txn.doc.store.pendingDs.Merge(unresolvableDs)
+	}
+
+	// pendingDs may be drainable even if pending items aren't — integrated
+	// items from this update might be targets of previously-parked deletes.
+	if len(txn.doc.store.pendingDs.clients) > 0 {
+		pendingDs := txn.doc.store.pendingDs
+		txn.doc.store.pendingDs = newDeleteSet()
+		stillUnresolvable := pendingDs.applyToPartial(txn)
+		txn.doc.store.pendingDs = stillUnresolvable
+	}
+
+	// Drain pending items whose dependencies have been satisfied by
+	// this update. Inline rather than recursive (Go's sync.Mutex is not
+	// reentrant; ApplyUpdateV2 is already under d.mu via doc.Transact).
+	//
+	// Loop until no progress to handle chained dependencies:
+	//   A arriving satisfies B; B (now integrated) satisfies C; etc.
+	//
+	// Matches yrs' apply_update retry gate and Yjs JS's readUpdateV2
+	// recursion, but executed inline so everything integrated during
+	// this call surfaces in a single OnUpdate notification.
+	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
+		items := txn.doc.store.pending.items
+		txn.doc.store.pending = nil
+
+		var stillPending []*Item
+		stillMissing := make(StateVector)
+		progressed := false
+		for _, item := range items {
+			if tryIntegrate(txn, item) {
+				progressed = true
+			} else {
+				stillPending = append(stillPending, item)
+				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+					mergePendingMissing(stillMissing, client, parkedAt)
+				} else if item.ID.Clock > txn.doc.store.NextClock(item.ID.Client) {
+					// Same-client gap still blocks it.
+					mergePendingMissing(stillMissing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
+				}
+			}
+		}
+		if len(stillPending) > 0 {
+			txn.doc.store.pending = &pendingUpdate{items: stillPending, missing: stillMissing}
+		}
+		// Retry pendingDs — freshly-integrated items may now be targets
+		// of previously-parked delete entries.
+		if progressed && len(txn.doc.store.pendingDs.clients) > 0 {
+			pendingDs := txn.doc.store.pendingDs
+			txn.doc.store.pendingDs = newDeleteSet()
+			stillUnresolvable := pendingDs.applyToPartial(txn)
+			txn.doc.store.pendingDs = stillUnresolvable
+		}
+		if !progressed {
+			// No progress this pass — infinite-loop guard. Items remain parked.
+			break
+		}
+	}
+
 	return nil
 }
 
