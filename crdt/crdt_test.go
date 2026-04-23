@@ -1123,3 +1123,24 @@ func TestUnit_TransactContext_CooperativeCancellationViaCtx(t *testing.T) {
 		assert.False(t, ok, "key k%d must NOT be committed (after cancel)", i)
 	}
 }
+
+func TestUnit_StructStore_Retryable_WatermarkSemantic(t *testing.T) {
+	doc := New()
+	store := doc.store
+
+	// Missing empty -> not retryable (nothing to retry).
+	missing := StateVector{}
+	assert.False(t, store.retryable(missing))
+
+	// Missing records client 42 at clock 5; store has no items for 42 yet.
+	missing[42] = 5
+	assert.False(t, store.retryable(missing), "store.Clock(42) == 0 <= 5, not retryable")
+
+	// Simulate integration of client 42 up to clock 3: still not past watermark.
+	store.clients[42] = []*Item{{ID: ID{Client: 42, Clock: 0}, Content: &ContentAny{Vals: []any{nil, nil, nil}}}}
+	assert.False(t, store.retryable(missing), "store.Clock(42) == 3, 3 <= 5, not retryable")
+
+	// Advance past the watermark.
+	store.clients[42] = append(store.clients[42], &Item{ID: ID{Client: 42, Clock: 3}, Content: &ContentAny{Vals: []any{nil, nil, nil}}})
+	assert.True(t, store.retryable(missing), "store.Clock(42) == 6 > 5, retryable")
+}

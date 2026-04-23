@@ -161,3 +161,32 @@ func (s *StructStore) IterateFrom(sv StateVector, fn func(*Item)) {
 		}
 	}
 }
+
+// retryable reports whether the pending queue has any chance of draining
+// given the store's current integrated clocks. It returns true when the
+// store's clock for any client in `missing` has advanced past the
+// watermark recorded at park time. When true, the caller should drain
+// pending items through tryIntegrate.
+//
+// Matches yrs' `for (client, &clock) in pending.missing.iter()
+// { if clock < store.blocks.get_clock(client) { retry = true; break; } }`
+// and Yjs JS's equivalent gate in readUpdateV2.
+func (s *StructStore) retryable(missing StateVector) bool {
+	for client, parkedAt := range missing {
+		if s.NextClock(client) > parkedAt {
+			return true
+		}
+	}
+	return false
+}
+
+// mergePendingMissing sets missing[client] to the minimum of its
+// current value and clk — matching yrs' StateVector::set_min. Used at
+// park time to accumulate the tightest watermark across multiple items
+// referencing the same client.
+func mergePendingMissing(missing StateVector, client ClientID, clk uint64) {
+	if existing, ok := missing[client]; ok && existing <= clk {
+		return
+	}
+	missing[client] = clk
+}
