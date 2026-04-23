@@ -1337,3 +1337,33 @@ func TestInteg_CrossFormat_V1ParksV2Drains(t *testing.T) {
 	peerArr := peer.GetArray("arr")
 	assert.Equal(t, 2, peerArr.Len())
 }
+
+func TestUnit_StateVector_DoesNotLeakPendingClocks(t *testing.T) {
+	// Critical invariant: StateVector must report integrated-only clocks.
+	// If it included pending clocks, remote peers would believe we have
+	// data we don't and stop re-sending, producing permanent gaps.
+
+	// Park an item by applying an update with future-clock Origin.
+	a := newTestDoc(1)
+	arrA := a.GetArray("arr")
+	a.Transact(func(txn *Transaction) { arrA.Insert(txn, 0, []any{"a"}) })
+
+	b := newTestDoc(2)
+	require.NoError(t, ApplyUpdateV1(b, EncodeStateAsUpdateV1(a, nil), nil))
+	arrB := b.GetArray("arr")
+	b.Transact(func(txn *Transaction) { arrB.Insert(txn, 1, []any{"b"}) })
+	updateB, err := DiffUpdateV1(EncodeStateAsUpdateV1(b, nil), a.store.StateVector())
+	require.NoError(t, err)
+
+	peer := newTestDoc(99)
+	require.NoError(t, ApplyUpdateV1(peer, updateB, nil))
+	require.NotNil(t, peer.store.pending, "test precondition: B is parked")
+
+	sv := peer.store.StateVector()
+
+	// Peer has no integrated items for client 1 (A hasn't arrived).
+	assert.Equal(t, uint64(0), sv.Clock(ClientID(1)), "SV must not claim integration of A's client")
+
+	// Peer has no integrated items for client 2 (they're parked, not integrated).
+	assert.Equal(t, uint64(0), sv.Clock(ClientID(2)), "SV must not claim integration of B's parked client")
+}
