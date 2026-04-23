@@ -1,12 +1,12 @@
 ## What's new
 
-- **`Transaction.Ctx()` for cooperative cancellation (#10).** `fn` inside `Transact` or `TransactContext` can now poll `txn.Ctx()` to detect cancellation and return early. Mutations made before the early return commit; those that would follow do not. Closes a long-standing gap where `TransactContext` promised more than it delivered — Go cannot safely interrupt arbitrary `fn` code, so cooperative polling is the mechanism both Yjs JS and the Rust yrs implementation rely on too.
-- **`TransactContext` godoc rewritten** to document the contract explicitly. No behavior change for callers that ignore `txn.Ctx()`.
+- **Cross-update Origin resolution on out-of-order delivery (#11).** Peers that received delta updates out of dependency order used to silently orphan items whose `Origin` references hadn't yet integrated — producing permanent convergence gaps. Updates now park unresolved items in a doc-level pending queue and retry them automatically on each subsequent apply. Same-client clock gaps and delete-set entries targeting not-yet-integrated items follow the same path.
+- **Convergence parity with Yjs JS and yrs.** The pending-structs machinery matches the upstream implementations semantically. State vector still reports integrated-only clocks, so remote peers continue to detect gaps and re-send automatically.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.1.2
+go get github.com/reearth/ygo@v1.2.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.

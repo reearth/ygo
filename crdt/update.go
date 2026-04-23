@@ -468,9 +468,16 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 
 			// Skip structs (tag 10) are clock-range placeholders that are
-			// never stored — just advance the clock.
+			// never stored — just advance the clock. Update existingEnd so
+			// that subsequent items in this group are not mistakenly flagged
+			// as having a clock gap (skip structs tell the receiver those
+			// clocks are intentionally absent).
 			if _, isSkip := item.Content.(*contentSkip); isSkip {
-				clock += uint64(item.Content.Len())
+				skipEnd := clock + uint64(item.Content.Len())
+				if skipEnd > existingEnd {
+					existingEnd = skipEnd
+				}
+				clock = skipEnd
 				continue
 			}
 
@@ -489,6 +496,22 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 				offset = int(existingEnd - clock)
 			}
 
+			// Same-client clock gap: this item's clock is past the store's
+			// current clock for this client (we have 0..existingEnd but this
+			// item starts at clock > existingEnd). Silently integrating would
+			// misplace the item at the head of its parent list. Park instead,
+			// with the store's current clock as the watermark — when the store
+			// reaches that clock, the missing predecessor may be available.
+			if clock > existingEnd {
+				if txn.doc.store.pending == nil {
+					txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
+				}
+				txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
+				mergePendingMissing(txn.doc.store.pending.missing, client, existingEnd)
+				clock = itemEnd
+				continue
+			}
+
 			// GC items (tag 0) have no parent — add directly to the store
 			// without linked-list integration.
 			if item.Parent == nil && item.Deleted {
@@ -497,6 +520,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 					item.Content = item.Content.Splice(offset)
 				}
 				txn.doc.store.Append(item)
+				existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
 				clock = itemEnd
 				continue
 			}
@@ -517,6 +541,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 
 			item.integrate(txn, offset)
+			existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
 			clock = itemEnd
 		}
 	}
@@ -554,13 +579,24 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 		}
 		if len(remaining) == len(pending) {
-			// Items whose parents are truly unresolvable (e.g. all
-			// predecessors are GC structs from the Yjs wire format with
-			// no parent info). Store them in the struct store without
-			// integration so they survive re-encoding — the encoder
-			// will write explicit parent info for late-joining clients.
+			// No progress made. Partition `remaining` into two buckets:
+			//   - Future-clock references -> park in store.pending for retry
+			//     when the missing updates arrive (fixes #11).
+			//   - Truly unresolvable (e.g. GC'd parents with lost parent info
+			//     from the Yjs wire format) -> store without integration so
+			//     they survive re-encoding. Matches the pre-#11 fallback.
 			for _, item := range remaining {
-				txn.doc.store.Append(item)
+				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+					if txn.doc.store.pending == nil {
+						txn.doc.store.pending = &pendingUpdate{
+							missing: make(StateVector),
+						}
+					}
+					txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
+					mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
+				} else {
+					txn.doc.store.Append(item)
+				}
 			}
 			break
 		}
@@ -571,7 +607,87 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	ds.applyTo(txn)
+	unresolvableDs := ds.applyToPartial(txn)
+	if len(unresolvableDs.clients) > 0 {
+		txn.doc.store.pendingDs.Merge(unresolvableDs)
+	}
+
+	// pendingDs may be drainable even if pending items aren't — integrated
+	// items from this update might be targets of previously-parked deletes.
+	if len(txn.doc.store.pendingDs.clients) > 0 {
+		pending := txn.doc.store.pendingDs
+		txn.doc.store.pendingDs = newDeleteSet()
+		stillUnresolvable := pending.applyToPartial(txn)
+		txn.doc.store.pendingDs = stillUnresolvable
+	}
+
+	// Drain pending items whose dependencies have been satisfied by
+	// this update. Inline rather than recursive (Go's sync.Mutex is not
+	// reentrant; ApplyUpdateV1 is already under d.mu via doc.Transact).
+	//
+	// Loop until no progress to handle chained dependencies:
+	//   A arriving satisfies B; B (now integrated) satisfies C; etc.
+	//
+	// Matches yrs' apply_update retry gate and Yjs JS's readUpdateV2
+	// recursion, but executed inline so everything integrated during
+	// this call surfaces in a single OnUpdate notification.
+	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
+		items := txn.doc.store.pending.items
+		txn.doc.store.pending = nil
+
+		var stillPending []*Item
+		stillMissing := make(StateVector)
+		progressed := false
+
+		// Process items with panic-safety: if tryIntegrate panics, re-park
+		// unprocessed items and stillPending back into store.pending so a
+		// subsequent ApplyUpdate can retry them. The outer applyV1Txn recover
+		// (v1.1.1) then converts the panic to an error for the caller.
+		idx := 0
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Restore: anything already re-parked + the unprocessed tail.
+					restore := append(stillPending, items[idx:]...)
+					if len(restore) > 0 {
+						txn.doc.store.pending = &pendingUpdate{items: restore, missing: stillMissing}
+					}
+					panic(r) // re-raise for outer recover
+				}
+			}()
+			for idx = 0; idx < len(items); idx++ {
+				item := items[idx]
+				if tryIntegrate(txn, item) {
+					progressed = true
+				} else {
+					stillPending = append(stillPending, item)
+					if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+						mergePendingMissing(stillMissing, client, parkedAt)
+					} else if item.ID.Clock > txn.doc.store.NextClock(item.ID.Client) {
+						// Same-client gap still blocks it.
+						mergePendingMissing(stillMissing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
+					}
+				}
+			}
+		}()
+
+		if len(stillPending) > 0 {
+			txn.doc.store.pending = &pendingUpdate{items: stillPending, missing: stillMissing}
+		}
+		// Retry pendingDs — freshly-integrated items may now be targets
+		// of previously-parked delete entries.
+		if progressed && len(txn.doc.store.pendingDs.clients) > 0 {
+			pending := txn.doc.store.pendingDs
+			txn.doc.store.pendingDs = newDeleteSet()
+			stillUnresolvable := pending.applyToPartial(txn)
+			txn.doc.store.pendingDs = stillUnresolvable
+		}
+		if !progressed {
+			// No progress this pass — infinite-loop guard. Items remain parked.
+			break
+		}
+	}
+
 	return nil
 }
 
@@ -973,4 +1089,95 @@ func fmtValFromJSON(s string) (any, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+// tryIntegrate attempts to integrate item into the doc store. Returns
+// true on success (item is now integrated into the linked list, or
+// stored as an orphan when its parent is truly unresolvable). Returns
+// false if blocked on a future-clock dependency — the caller should
+// leave it in the pending queue.
+//
+// Used by the inline retry loop to drain pending items that may now
+// be integrable. Parallels the normal decode-loop path but with items
+// that have already been decoded.
+func tryIntegrate(txn *Transaction, item *Item) bool {
+	store := txn.doc.store
+
+	existingEnd := store.NextClock(item.ID.Client)
+
+	// Already fully integrated (arrived twice somehow): drop silently.
+	if item.ID.Clock+uint64(item.Content.Len()) <= existingEnd {
+		return true
+	}
+
+	// Same-client clock gap: still blocked.
+	if item.ID.Clock > existingEnd {
+		return false
+	}
+
+	// GC-orphan path (no parent, deleted): store without integration.
+	if item.Parent == nil && item.Deleted {
+		store.Append(item)
+		return true
+	}
+
+	// Try to resolve parent via Origin / OriginRight / ParentSub fallback.
+	if item.Parent == nil {
+		if item.Origin != nil {
+			if oi := store.Find(*item.Origin); oi != nil {
+				item.Parent = oi.Parent
+			} else if item.Origin.Clock >= store.NextClock(item.Origin.Client) {
+				return false // future clock — still blocked
+			}
+		}
+		if item.Parent == nil && item.OriginRight != nil {
+			if ori := store.Find(*item.OriginRight); ori != nil {
+				item.Parent = ori.Parent
+			} else if item.OriginRight.Clock >= store.NextClock(item.OriginRight.Client) {
+				return false
+			}
+		}
+		if item.Parent == nil && item.ParentSub != "" {
+			item.Parent = findParentForMapEntry(store)
+		}
+		if item.Parent == nil {
+			// Truly unresolvable — orphan store (existing behavior).
+			store.Append(item)
+			return true
+		}
+	}
+
+	// Origin present but referring to a future clock -> still blocked.
+	if item.Origin != nil && item.Origin.Clock >= store.NextClock(item.Origin.Client) {
+		return false
+	}
+
+	// Resolve left neighbor for integrate().
+	if item.Origin != nil {
+		item.Left = store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
+	}
+
+	item.integrate(txn, 0)
+	return true
+}
+
+// itemFutureDep reports whether item is blocked on a future-clock dependency
+// (one whose referenced clock has not yet been integrated into the store).
+// Returns (missingClient, storeClockAtParkTime, true) if yes; otherwise
+// (0, 0, false) indicating the item's parent is truly unresolvable (e.g.
+// origin references a GC placeholder whose parent info was lost).
+func itemFutureDep(item *Item, store *StructStore) (ClientID, uint64, bool) {
+	if item.Origin != nil {
+		storeClock := store.NextClock(item.Origin.Client)
+		if item.Origin.Clock >= storeClock {
+			return item.Origin.Client, storeClock, true
+		}
+	}
+	if item.OriginRight != nil {
+		storeClock := store.NextClock(item.OriginRight.Client)
+		if item.OriginRight.Clock >= storeClock {
+			return item.OriginRight.Client, storeClock, true
+		}
+	}
+	return 0, 0, false
 }

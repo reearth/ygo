@@ -88,31 +88,52 @@ func (ds *DeleteSet) Clients() []ClientID {
 	return out
 }
 
-// applyTo marks items in the document as deleted according to the ranges in ds.
-// Called when applying a remote update that carries a delete set.
+// applyToPartial applies delete-set entries whose target items are
+// integrated, and returns a new DeleteSet containing entries whose
+// target items are absent (or the uncovered suffix of a range whose
+// earlier clocks are integrated but later clocks are not). The caller
+// should merge the returned set into StructStore.pendingDs and retry
+// it on subsequent applies.
 //
-// The naive triple-loop (clients × ranges × items) is O(n²) for large stores.
-// We use binary search to jump directly to the first item in each range and
-// break as soon as we pass the range end, giving O(m log n + k) where m is the
-// number of ranges, n is items per client, and k is items actually deleted (N-H1).
-func (ds *DeleteSet) applyTo(txn *Transaction) {
+// This is the pending-aware variant of applyTo, used by applyV1Txn
+// and applyV2Txn to defer deletes that target not-yet-integrated items.
+func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
+	unresolvable := newDeleteSet()
 	for client, ranges := range ds.clients {
 		items := txn.doc.store.clients[client]
 		if len(items) == 0 {
+			// No items for this client — entire set of ranges is unresolvable.
+			unresolvable.clients[client] = append(unresolvable.clients[client], ranges...)
 			continue
 		}
 		for _, r := range ranges {
-			// Binary search: find the first item with Clock >= r.Clock.
+			// Binary search: first item whose end > r.Clock.
 			lo := sort.Search(len(items), func(i int) bool {
 				return items[i].ID.Clock+uint64(items[i].Content.Len()) > r.Clock
 			})
+			applied := uint64(0)
 			for i := lo; i < len(items); i++ {
 				item := items[i]
 				if item.ID.Clock >= r.Clock+r.Len {
-					break // past the end of this range
+					break
+				}
+				// Compute overlap of [r.Clock, r.Clock+r.Len) with the item's span.
+				end := r.Clock + r.Len
+				itemEnd := item.ID.Clock + uint64(item.Content.Len())
+				if itemEnd < end {
+					end = itemEnd
 				}
 				item.delete(txn)
+				applied = end - r.Clock
+			}
+			// Park the uncovered suffix of the range, if any.
+			if applied < r.Len {
+				unresolvable.clients[client] = append(unresolvable.clients[client], DeleteRange{
+					Clock: r.Clock + applied,
+					Len:   r.Len - applied,
+				})
 			}
 		}
 	}
+	return unresolvable
 }

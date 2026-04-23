@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-04-23
+
+### Fixed
+
+- **Cross-update Origin dependencies on out-of-order delivery (#11)**: when a peer received independent delta updates from concurrent producers out of dependency order (e.g. delta B arrived before delta A, and B's items referenced A's items via `Origin` / `OriginRight`), B's items were silently orphaned in the struct store and never integrated into the linked list, producing permanent convergence gaps that only a fresh sync step 1/2 exchange could repair. Items whose dependencies have not yet been integrated are now parked in a doc-level pending queue and retried automatically on each subsequent `ApplyUpdateV1` / `ApplyUpdateV2`.
+- **Same-client clock gaps silently mis-integrated (#11, adjacent)**: if a peer received clocks 4 and 5 from client X without first receiving clock 3, the items were inserted at the head of the parent list with a `nil` origin lookup. These now park in the same pending queue and drain when the missing predecessor arrives.
+- **Delete-set entries targeting not-yet-integrated items** were silently dropped. Unresolvable entries now accumulate in a `pendingDs` and retry each time pending items make progress, mirroring Yjs JS's `pendingDs` and yrs' `pending_ds`.
+
+### Changed
+
+- **Convergence semantics match Yjs JS and yrs.** The pending-structs machinery is semantically equivalent to the upstream implementations (`StructStore.pendingStructs` in Yjs JS, `Store.pending` in yrs). One mechanical deviation: retry is inline rather than recursive, because Go's `sync.Mutex` is not reentrant.
+
 ## [1.1.2] — 2026-04-22
 
 ### Added
@@ -177,6 +189,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.2.0]: https://github.com/reearth/ygo/releases/tag/v1.2.0
 [1.1.2]: https://github.com/reearth/ygo/releases/tag/v1.1.2
 [1.1.1]: https://github.com/reearth/ygo/releases/tag/v1.1.1
 [1.1.0]: https://github.com/reearth/ygo/releases/tag/v1.1.0
