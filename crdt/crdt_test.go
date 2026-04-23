@@ -1252,3 +1252,37 @@ func TestInteg_ApplyV1_ConvergesOnChainedReverseOrder(t *testing.T) {
 	peerArr := peer.GetArray("arr")
 	assert.Equal(t, 3, peerArr.Len())
 }
+
+func TestInteg_ApplyV1_DeleteSetOnNotYetIntegratedItem(t *testing.T) {
+	// Producer A inserts an item into an array. Producer B (seeing A)
+	// deletes that item. Peer receives B's update (delete-set only)
+	// BEFORE A's update (the create). The delete-set entry targets an
+	// item peer doesn't have yet — must be parked, then applied when
+	// A arrives.
+	a := newTestDoc(1)
+	arrA := a.GetArray("arr")
+	a.Transact(func(txn *Transaction) { arrA.Insert(txn, 0, []any{"x"}) })
+	updateA := EncodeStateAsUpdateV1(a, nil)
+
+	b := newTestDoc(2)
+	require.NoError(t, ApplyUpdateV1(b, updateA, nil))
+	arrB := b.GetArray("arr")
+	b.Transact(func(txn *Transaction) { arrB.Delete(txn, 0, 1) })
+	updateBOnly, err := DiffUpdateV1(EncodeStateAsUpdateV1(b, nil), a.store.StateVector())
+	require.NoError(t, err)
+
+	peer := newTestDoc(99)
+	// B arrives first — delete-set targets an item peer doesn't have.
+	require.NoError(t, ApplyUpdateV1(peer, updateBOnly, nil))
+	require.NotEmpty(t, peer.store.pendingDs.clients, "delete-set entry for absent item must be parked")
+
+	// A arrives — the item integrates; pending delete-set retries; delete applies.
+	require.NoError(t, ApplyUpdateV1(peer, updateA, nil))
+
+	// After both updates, peer's array must be empty (item was inserted and then deleted).
+	peerArr := peer.GetArray("arr")
+	assert.Equal(t, 0, peerArr.Len(), "item must be deleted via the pending-ds drain")
+
+	// pendingDs must be empty after the drain.
+	assert.Equal(t, 0, len(peer.store.pendingDs.clients))
+}

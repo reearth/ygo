@@ -607,7 +607,19 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	ds.applyTo(txn)
+	unresolvableDs := ds.applyToPartial(txn)
+	if len(unresolvableDs.clients) > 0 {
+		txn.doc.store.pendingDs.Merge(unresolvableDs)
+	}
+
+	// pendingDs may be drainable even if pending items aren't — integrated
+	// items from this update might be targets of previously-parked deletes.
+	if len(txn.doc.store.pendingDs.clients) > 0 {
+		pending := txn.doc.store.pendingDs
+		txn.doc.store.pendingDs = newDeleteSet()
+		stillUnresolvable := pending.applyToPartial(txn)
+		txn.doc.store.pendingDs = stillUnresolvable
+	}
 
 	// Drain pending items whose dependencies have been satisfied by
 	// this update. Inline rather than recursive (Go's sync.Mutex is not
@@ -641,6 +653,14 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		}
 		if len(stillPending) > 0 {
 			txn.doc.store.pending = &pendingUpdate{items: stillPending, missing: stillMissing}
+		}
+		// Retry pendingDs — freshly-integrated items may now be targets
+		// of previously-parked delete entries.
+		if progressed && len(txn.doc.store.pendingDs.clients) > 0 {
+			pending := txn.doc.store.pendingDs
+			txn.doc.store.pendingDs = newDeleteSet()
+			stillUnresolvable := pending.applyToPartial(txn)
+			txn.doc.store.pendingDs = stillUnresolvable
 		}
 		if !progressed {
 			// No progress this pass — infinite-loop guard. Items remain parked.
