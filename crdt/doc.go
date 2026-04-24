@@ -308,15 +308,20 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 	}
 }
 
-// transactInternal is the shared transaction entry point that Transact
-// and TransactContext both delegate to. It acquires d.mu, runs fn under
-// the lock with panic-safe cleanup, fires Phase 2 observers outside the
-// lock, and re-raises any panic to the caller. The ctx parameter is
-// stored on the Transaction struct and exposed to fn via Transaction.Ctx().
+// transactInternal is the shared transaction entry point that Transact,
+// TransactContext, TransactE, and TransactContextE all delegate to. It
+// acquires d.mu, runs fn under the lock with panic-safe cleanup, fires
+// Phase 2 observers outside the lock, and re-raises any panic to the
+// caller. The ctx parameter is stored on the Transaction struct and
+// exposed to fn via Transaction.Ctx().
+//
+// fn's returned error is captured as the named return value retErr.
+// Observers fire regardless of whether fn returned an error; the error
+// is propagated to the caller only after the observers have fired.
 //
 // See docs/superpowers/specs/2026-04-21-transact-panic-safety-design.md
 // for the full rationale on the defer/recover structure.
-func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction), origin ...any) {
+func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error, origin ...any) (retErr error) {
 	var orig any
 	if len(origin) > 0 {
 		orig = origin[0]
@@ -367,11 +372,12 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction), origi
 		}
 	}()
 
-	fn(txn)
+	retErr = fn(txn)
 
 	txn.afterState = d.store.StateVector()
 
 	squashRuns(txn)
+	return retErr
 }
 
 // Transact executes fn inside a transaction. All insertions and deletions made
@@ -400,7 +406,27 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction), origi
 //     firing, the observer's panic reaches the caller and the original
 //     fn panic value is lost.
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
-	d.transactInternal(context.Background(), fn, origin...)
+	_ = d.transactInternal(context.Background(), func(t *Transaction) error {
+		fn(t)
+		return nil
+	}, origin...)
+}
+
+// TransactE is like Transact but allows fn to return an error. The error is
+// returned to the caller after all observers have fired. Mutations commit
+// regardless of the error (no rollback — matches Yjs JS doc.transact(f) and
+// the Rust yrs implementation).
+//
+//   - If fn returns nil, TransactE returns nil.
+//   - If fn returns a non-nil error, that error becomes the return value of
+//     TransactE. Mutations that fn completed before returning are committed.
+//   - Observers (OnUpdate, OnAfterTransaction, per-type) fire BEFORE TransactE
+//     returns the error — matching the Yjs JS "finally-block observer" pattern.
+//   - If fn panics, the existing v1.1.1 panic-safety contract applies: partial
+//     state commits, observers fire with partial changes, and the panic is
+//     re-raised to the caller. TransactE does not swallow panics.
+func (d *Doc) TransactE(fn func(*Transaction) error, origin ...any) error {
+	return d.transactInternal(context.Background(), fn, origin...)
 }
 
 // OnUpdate registers a callback that fires after every committed transaction.
@@ -513,8 +539,40 @@ func (d *Doc) TransactContext(ctx context.Context, fn func(*Transaction), origin
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	d.transactInternal(ctx, fn, origin...)
+	_ = d.transactInternal(ctx, func(t *Transaction) error {
+		fn(t)
+		return nil
+	}, origin...)
 	return ctx.Err()
+}
+
+// TransactContextE is like TransactContext but allows fn to return an error.
+// It combines context-cancellation awareness with fn-error propagation.
+//
+//   - If ctx is already cancelled when TransactContextE is called, fn is not
+//     invoked and ctx.Err() is returned immediately.
+//   - If fn returns nil and ctx is not cancelled after the transaction commits,
+//     TransactContextE returns nil.
+//   - If fn returns a non-nil error but ctx is still fine, that error is
+//     returned.
+//   - If ctx cancels during fn (cooperative only — Go cannot safely interrupt
+//     arbitrary fn code), ctx.Err() wins over fn's error. This matches the
+//     precedent set by TransactContext and Yjs JS's ecosystem norm of
+//     cooperative cancellation polling via txn.Ctx().
+//   - Mutations commit regardless of fn's error or ctx cancellation (no
+//     rollback — matches Yjs JS doc.transact(f) and yrs semantics).
+//   - Observers fire BEFORE TransactContextE returns, even when fn errors.
+//   - Panics in fn follow the v1.1.1 panic-safety contract (partial commit,
+//     observer fire, re-raise).
+func (d *Doc) TransactContextE(ctx context.Context, fn func(*Transaction) error, origin ...any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	fnErr := d.transactInternal(ctx, fn, origin...)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return fnErr
 }
 
 // Destroy detaches all observers and clears internal state, releasing

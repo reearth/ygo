@@ -1,12 +1,12 @@
 ## What's new
 
-- **Cross-update Origin resolution on out-of-order delivery (#11).** Peers that received delta updates out of dependency order used to silently orphan items whose `Origin` references hadn't yet integrated — producing permanent convergence gaps. Updates now park unresolved items in a doc-level pending queue and retry them automatically on each subsequent apply. Same-client clock gaps and delete-set entries targeting not-yet-integrated items follow the same path.
-- **Convergence parity with Yjs JS and yrs.** The pending-structs machinery matches the upstream implementations semantically. State vector still reports integrated-only clocks, so remote peers continue to detect gaps and re-send automatically.
+- **`Doc.TransactE` and `Doc.TransactContextE` (#14).** Error-returning variants of the existing transaction methods. Callers who detect a logical error inside `fn` can now return it cleanly instead of panicking or threading an out-of-band channel. `fn`'s returned error becomes the method's return value. Mutations still commit regardless of error (no rollback — matches Yjs JS and yrs); observers fire before the error returns. For `TransactContextE`, ctx cancellation wins over fn error when both fire.
+- **Strictly additive.** Existing `Transact` and `TransactContext` keep their signatures and behavior unchanged.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.2.0
+go get github.com/reearth/ygo@v1.3.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.

@@ -7,6 +7,7 @@ package crdt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -1397,4 +1398,112 @@ func TestUnit_ApplyV1_RetryLoop_PanicRestoresPending(t *testing.T) {
 	// machinery should be no-op on the happy path.
 	require.NoError(t, ApplyUpdateV1(peer, updateA, nil))
 	assert.Nil(t, peer.store.pending, "happy path: retry loop drains without leaving residue")
+}
+
+// ── TransactE / TransactContextE tests ──────────────────────────────────────
+
+func TestInteg_TransactE_ReturnsNilFromFn(t *testing.T) {
+	doc := New()
+	arr := doc.GetArray("a")
+	err := doc.TransactE(func(txn *Transaction) error {
+		arr.Insert(txn, 0, []any{"x"})
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, arr.Len())
+}
+
+func TestInteg_TransactE_PropagatesFnError(t *testing.T) {
+	doc := New()
+	arr := doc.GetArray("a")
+	sentinel := errors.New("validation failed")
+	err := doc.TransactE(func(txn *Transaction) error {
+		arr.Insert(txn, 0, []any{"x"})
+		return sentinel
+	})
+	require.ErrorIs(t, err, sentinel)
+	// No rollback — mutations still commit (matches Yjs JS + yrs).
+	assert.Equal(t, 1, arr.Len(), "mutations commit even when fn returns error")
+}
+
+func TestInteg_TransactE_ObserversFireEvenOnError(t *testing.T) {
+	doc := New()
+	arr := doc.GetArray("a")
+	var observerFired bool
+	unsub := doc.OnUpdate(func(update []byte, origin any) {
+		observerFired = true
+	})
+	defer unsub()
+
+	err := doc.TransactE(func(txn *Transaction) error {
+		arr.Insert(txn, 0, []any{"x"})
+		return errors.New("boom")
+	})
+	require.Error(t, err)
+	assert.True(t, observerFired, "OnUpdate must fire even when fn returns error (matches Yjs JS finally-block observer firing)")
+}
+
+func TestInteg_TransactE_PanicStillRecovered(t *testing.T) {
+	doc := New()
+	arr := doc.GetArray("a")
+
+	assert.Panics(t, func() {
+		_ = doc.TransactE(func(txn *Transaction) error {
+			arr.Insert(txn, 0, []any{"x"})
+			panic("boom")
+		})
+	})
+	// Partial state committed per v1.1.1 contract.
+	assert.Equal(t, 1, arr.Len())
+}
+
+func TestInteg_TransactContextE_PropagatesFnError(t *testing.T) {
+	doc := New()
+	arr := doc.GetArray("a")
+	sentinel := errors.New("validation failed")
+	err := doc.TransactContextE(context.Background(), func(txn *Transaction) error {
+		arr.Insert(txn, 0, []any{"x"})
+		return sentinel
+	})
+	require.ErrorIs(t, err, sentinel)
+	assert.Equal(t, 1, arr.Len())
+}
+
+func TestInteg_TransactContextE_CtxCancelWinsOverFnError(t *testing.T) {
+	doc := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	fnSentinel := errors.New("fn failed")
+
+	err := doc.TransactContextE(ctx, func(txn *Transaction) error {
+		cancel() // cancel ctx inside fn
+		return fnSentinel
+	})
+	// ctx.Err() must win over fn error (matches TransactContext precedent).
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, fnSentinel)
+}
+
+func TestInteg_TransactContextE_PreCancelledCtxReturnsImmediately(t *testing.T) {
+	doc := New()
+	arr := doc.GetArray("a")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	fnRan := false
+	err := doc.TransactContextE(ctx, func(txn *Transaction) error {
+		fnRan = true
+		arr.Insert(txn, 0, []any{"x"})
+		return nil
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, fnRan, "fn must not be invoked when ctx is pre-cancelled")
+	assert.Equal(t, 0, arr.Len())
+}
+
+func TestInteg_TransactContextE_NilFnErrorReturnsNil(t *testing.T) {
+	doc := New()
+	err := doc.TransactContextE(context.Background(), func(txn *Transaction) error {
+		return nil
+	})
+	require.NoError(t, err)
 }
