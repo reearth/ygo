@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -48,11 +49,40 @@ const (
 // preventing OOM from a single crafted large message.
 const maxWSMessageBytes int64 = 64 << 20 // 64 MiB
 
+// maxMessageBytes returns the configured per-message cap or the default.
+func (s *Server) maxMessageBytes() int64 {
+	if s.MaxMessageBytes > 0 {
+		return s.MaxMessageBytes
+	}
+	return maxWSMessageBytes
+}
+
+// log returns the configured logger or slog.Default().
+func (s *Server) log() *slog.Logger {
+	if s.Logger != nil {
+		return s.Logger
+	}
+	return slog.Default()
+}
+
+// peerWriteQueueSize returns the configured per-peer write queue capacity or
+// the default.
+func (s *Server) peerWriteQueueSize() int {
+	if s.PeerWriteQueueSize > 0 {
+		return s.PeerWriteQueueSize
+	}
+	return defaultPeerWriteQueueSize
+}
+
 // maxAwarenessClientsPerPeer caps the number of awareness clientIDs one peer
 // may claim ownership of. Without this cap an attacker can send an awareness
 // update listing 1,000,000 clientIDs and cause an OOM when handleDisconnect
 // builds the removal slice (N-H4).
 const maxAwarenessClientsPerPeer = 10_000
+
+// defaultPeerWriteQueueSize is the default capacity of each peer's broadcast
+// write channel when PeerWriteQueueSize is not set.
+const defaultPeerWriteQueueSize = 256
 
 // PersistenceAdapter is implemented by storage backends that want to persist
 // room state across server restarts. It is called on every committed update so
@@ -122,15 +152,24 @@ type room struct {
 
 // peer is one connected WebSocket client.
 type peer struct {
-	conn      *gws.Conn
-	wmu       sync.Mutex // serialises concurrent writes
-	closed    bool       // H2: true after handleDisconnect; guarded by wmu
-	room      *room
-	roomName  string              // C1: name used to delete room when empty
-	server    *Server             // C1: back-reference for room map cleanup
-	done      chan struct{}       // H1: closed when the read loop exits
-	clientIDs map[uint64]struct{} // awareness clientIDs controlled by this peer
-	cidMu     sync.Mutex
+	conn       *gws.Conn
+	wmu        sync.Mutex // serialises concurrent writes
+	closed     bool       // H2: true after handleDisconnect; guarded by wmu
+	room       *room
+	roomName   string              // C1: name used to delete room when empty
+	server     *Server             // C1: back-reference for room map cleanup
+	done       chan struct{}       // H1: closed when the read loop exits
+	clientIDs  map[uint64]struct{} // awareness clientIDs controlled by this peer
+	cidMu      sync.Mutex
+	writeCh    chan []byte   // buffered queue drained by runWriter goroutine
+	writerDone chan struct{} // closed when runWriter exits
+
+	// disconnectOnce ensures the full teardown sequence in handleDisconnect
+	// runs exactly once, regardless of how many callers race (e.g. broadcast's
+	// conn.Close() triggering the read loop while a ctx-cancel path also calls
+	// handleDisconnect). The closed bool under wmu is still needed for the
+	// per-operation guards in broadcast/write/runWriter.
+	disconnectOnce sync.Once
 }
 
 // Server is a net/http-compatible WebSocket handler.
@@ -188,6 +227,31 @@ type Server struct {
 	// past the cap receive HTTP 503; Apply past the cap returns
 	// ErrTooManyRooms.
 	MaxRooms int
+
+	// MaxMessageBytes is the per-message size cap on the WebSocket read path.
+	// Frames larger than this are rejected by the underlying gorilla/websocket
+	// library (which closes the connection with code 1009). Zero (the default)
+	// uses the package default of 64 MiB, which matches Rust yrs-warp's underlying
+	// warp default. Yjs JS's y-websocket inherits ws library's 100 MiB default.
+	//
+	// Lower this for stricter limits in untrusted multi-tenant deployments;
+	// raise it for unusual bulk-sync workloads.
+	MaxMessageBytes int64
+
+	// Logger receives structured log entries for connection lifecycle, write
+	// failures, slow-peer disconnects, and persistence errors. nil falls back
+	// to slog.Default(). Most operators want to wire this to their app logger
+	// rather than rely on the default.
+	Logger *slog.Logger
+
+	// PeerWriteQueueSize is the buffer capacity of each peer's broadcast
+	// write queue. When the queue fills (slow peer / dead connection), the
+	// peer is disconnected — forcing them to reconnect and re-sync via the
+	// CRDT's pending-structs machinery. Matches yrs-warp's bounded-broadcast
+	// pattern.
+	//
+	// Zero (the default) uses 256, sized for typical sync workloads.
+	PeerWriteQueueSize int
 
 	activeConns atomic.Int64 // atomic; total live WebSocket connections
 }
@@ -273,7 +337,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Close each connection. The peer read loop will exit on the next
 	// ReadMessage call, triggering handleDisconnect cleanup.
 	for _, c := range conns {
-		_ = c.Close()
+		if err := c.Close(); err != nil {
+			s.log().Debug("shutdown close failed", "err", err)
+		}
 	}
 
 	// Wait for all persistence goroutines to drain in-flight writes.
@@ -457,16 +523,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Reject frames larger than maxWSMessageBytes before buffering them.
 	// Without this, a single 4 GB frame would be fully read into memory before
 	// any application-level validation could reject it.
-	ws.SetReadLimit(maxWSMessageBytes)
+	ws.SetReadLimit(s.maxMessageBytes())
 
 	p := &peer{
-		conn:      ws,
-		room:      rm,
-		roomName:  name,
-		server:    s,
-		done:      make(chan struct{}),
-		clientIDs: make(map[uint64]struct{}),
+		conn:       ws,
+		room:       rm,
+		roomName:   name,
+		server:     s,
+		done:       make(chan struct{}),
+		clientIDs:  make(map[uint64]struct{}),
+		writeCh:    make(chan []byte, s.peerWriteQueueSize()),
+		writerDone: make(chan struct{}),
 	}
+	go p.runWriter()
 
 	// Verify the room is still in the server map before adding the peer.
 	// Holding rmu.RLock prevents handleDisconnect from deleting the room
@@ -481,7 +550,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.MaxConnections > 0 {
 			s.activeConns.Add(-1)
 		}
-		_ = ws.Close()
+		_ = ws.Close() // close errors during teardown are expected; not logged
 		return
 	}
 	rm.mu.Lock()
@@ -492,7 +561,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		close(p.done) // H1: unblock the context-watcher goroutine
 		p.handleDisconnect()
-		_ = ws.Close()
+		_ = ws.Close() // close errors during teardown are expected; not logged
 	}()
 
 	// Close the WebSocket when the HTTP request context is cancelled
@@ -502,9 +571,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = ws.Close()
+			_ = ws.Close() // close errors during teardown are expected; not logged
 		case <-s.shutdownCh:
-			_ = ws.Close()
+			_ = ws.Close() // close errors during teardown are expected; not logged
 		case <-p.done: // H1: read loop exited normally; nothing to do
 		}
 	}()
@@ -615,63 +684,80 @@ func (p *peer) trackAwarenessClients(payload []byte) {
 
 // handleDisconnect removes the peer from the room and broadcasts awareness
 // removal for all clientIDs the peer owned.
+//
+// disconnectOnce ensures the full teardown body runs at most once even when
+// multiple callers race — e.g. broadcast()'s conn.Close() waking the read loop
+// while the ctx-cancel goroutine concurrently reaches this point.
 func (p *peer) handleDisconnect() {
-	// H2: mark closed so concurrent broadcast writes skip this peer.
-	p.wmu.Lock()
-	p.closed = true
-	p.wmu.Unlock()
+	p.disconnectOnce.Do(func() {
+		// H2: mark closed so concurrent broadcast writes skip this peer.
+		// Close writeCh after marking closed so runWriter can drain and exit.
+		// Both operations are done under wmu so broadcast() sees a consistent
+		// state (closed=true is visible before writeCh is closed).
+		p.wmu.Lock()
+		p.closed = true
+		close(p.writeCh)
+		p.wmu.Unlock()
 
-	rm := p.room
+		// Wait for the per-peer writer goroutine to fully exit before we touch
+		// the connection in the teardown path. The writer will see the closed
+		// channel and exit cleanly.
+		<-p.writerDone
 
-	// Acquire both locks (server map first, then room) to atomically remove
-	// the peer and, if the room is now empty, delete the room from the server
-	// map and stop the persistence goroutine. This prevents a TOCTOU race
-	// where a new peer joins between the emptiness check and room deletion,
-	// which would fork the logical document into two rooms.
-	p.server.rmu.Lock()
-	rm.mu.Lock()
-	delete(rm.peers, p)
-	empty := len(rm.peers) == 0
-	if empty {
-		delete(p.server.rooms, p.roomName)
-		if rm.persistStop != nil {
-			close(rm.persistStop)
+		rm := p.room
+
+		// Acquire both locks (server map first, then room) to atomically remove
+		// the peer and, if the room is now empty, delete the room from the server
+		// map and stop the persistence goroutine. This prevents a TOCTOU race
+		// where a new peer joins between the emptiness check and room deletion,
+		// which would fork the logical document into two rooms.
+		p.server.rmu.Lock()
+		rm.mu.Lock()
+		delete(rm.peers, p)
+		empty := len(rm.peers) == 0
+		if empty {
+			delete(p.server.rooms, p.roomName)
+			if rm.persistStop != nil {
+				close(rm.persistStop)
+			}
 		}
-	}
-	rm.mu.Unlock()
-	p.server.rmu.Unlock()
+		rm.mu.Unlock()
+		p.server.rmu.Unlock()
 
-	// Decrement atomic connection counters now that the peer has left.
-	if p.server.MaxPeersPerRoom > 0 {
-		rm.activePeers.Add(-1)
-	}
-	if p.server.MaxConnections > 0 {
-		p.server.activeConns.Add(-1)
-	}
+		// Decrement atomic connection counters now that the peer has left.
+		if p.server.MaxPeersPerRoom > 0 {
+			rm.activePeers.Add(-1)
+		}
+		if p.server.MaxConnections > 0 {
+			p.server.activeConns.Add(-1)
+		}
 
-	// Wait for the persistence goroutine to drain buffered writes before the
-	// room reference becomes garbage. This runs outside the locks above.
-	if empty && rm.persistDone != nil {
-		<-rm.persistDone
-	}
+		// Wait for the persistence goroutine to drain buffered writes before the
+		// room reference becomes garbage. This runs outside the locks above.
+		if empty && rm.persistDone != nil {
+			<-rm.persistDone
+		}
 
-	p.cidMu.Lock()
-	clientIDs := make([]uint64, 0, len(p.clientIDs))
-	for id := range p.clientIDs {
-		clientIDs = append(clientIDs, id)
-	}
-	p.cidMu.Unlock()
+		p.cidMu.Lock()
+		clientIDs := make([]uint64, 0, len(p.clientIDs))
+		for id := range p.clientIDs {
+			clientIDs = append(clientIDs, id)
+		}
+		p.cidMu.Unlock()
 
-	if len(clientIDs) == 0 {
-		return
-	}
+		if len(clientIDs) == 0 {
+			return
+		}
 
-	removalBytes := encodeAwarenessRemoval(p.room.awareness, clientIDs)
-	if removalBytes == nil {
-		return
-	}
-	_ = p.room.awareness.ApplyUpdate(removalBytes, nil)
-	p.broadcastAwarenessFromRoom(removalBytes)
+		removalBytes := encodeAwarenessRemoval(p.room.awareness, clientIDs)
+		if removalBytes == nil {
+			return
+		}
+		if err := p.room.awareness.ApplyUpdate(removalBytes, nil); err != nil {
+			p.server.log().Warn("apply removal awareness failed", "room", p.roomName, "err", err)
+		}
+		p.broadcastAwarenessFromRoom(removalBytes)
+	})
 }
 
 // encodeAwarenessRemoval builds a raw awareness update that marks the given
@@ -745,9 +831,16 @@ func (p *peer) broadcastAwarenessFromRoom(awMsg []byte) {
 	p.broadcast(enc.Bytes(), false)
 }
 
-// broadcast sends data to peers in the room. If excludeSelf is true, the
-// calling peer is excluded (used for normal broadcasts). If false, all peers
-// receive it (used for disconnect announcements).
+// broadcast enqueues data for delivery to peers in the room. If excludeSelf
+// is true, the calling peer is excluded.
+//
+// When a target peer's writeCh is full (slow peer, dead connection, or
+// receiver lagging), the peer is disconnected rather than dropping the
+// message. This matches Rust yrs-warp's bounded-broadcast pattern: a
+// dropped message would leave the peer with a silent gap in their sync
+// stream that only resolves on the next exchange. Disconnecting forces
+// a reconnect-and-resync flow which the CRDT's pending-structs
+// machinery handles cleanly.
 func (p *peer) broadcast(data []byte, excludeSelf bool) {
 	p.room.mu.Lock()
 	targets := make([]*peer, 0, len(p.room.peers))
@@ -759,26 +852,84 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 	}
 	p.room.mu.Unlock()
 
-	// Write to each peer concurrently so that a single slow or unresponsive
-	// peer cannot stall the broadcast loop for all others (N-H6).
-	// Each peer.write() holds peer.wmu and sets a per-write deadline, so
-	// concurrent goroutines targeting different peers are safe. The data slice
-	// is read-only after this point, so sharing it across goroutines is safe.
 	for _, other := range targets {
-		go other.write(data)
+		// Guard against sending to a closed channel: check p.closed under
+		// wmu before attempting the channel send. handleDisconnect sets closed
+		// under wmu before closing writeCh, so this is race-free.
+		other.wmu.Lock()
+		if other.closed {
+			other.wmu.Unlock()
+			continue
+		}
+		select {
+		case other.writeCh <- data:
+			// queued
+		default:
+			// Queue full — disconnect the slow peer.
+			p.server.log().Warn("peer write queue full; closing slow peer",
+				"room", other.roomName,
+				"queueSize", cap(other.writeCh))
+			_ = other.conn.Close()
+			// The peer's read loop will detect the close and run
+			// handleDisconnect to clean up room state.
+		}
+		other.wmu.Unlock()
 	}
 }
 
-// write sends a raw binary WebSocket message, serialising concurrent writes.
-// A per-write deadline of writeTimeout is applied so that a slow or unresponsive
-// peer does not block the broadcast loop for all other peers in the room.
-// H2: skips the write if the peer has already been marked closed by handleDisconnect.
+// write enqueues a raw binary message for delivery to this peer via the
+// per-peer writer goroutine. H2: skips the write if the peer has already
+// been marked closed. If the queue is full the peer is disconnected:
+// a dropped handshake reply (sendSync / sendAwareness) leaves the remote
+// peer hung waiting for a response it will never receive. Closing the
+// connection forces a reconnect-and-resync, matching the broadcast contract.
 func (p *peer) write(data []byte) {
 	p.wmu.Lock()
-	defer p.wmu.Unlock()
 	if p.closed {
+		p.wmu.Unlock()
 		return
 	}
-	_ = p.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	_ = p.conn.WriteMessage(gws.BinaryMessage, data)
+	select {
+	case p.writeCh <- data:
+	default:
+		// Queue full during a direct send (e.g. handshake reply) — disconnect.
+		// Unlike a silent drop, closing the connection lets the CRDT
+		// pending-structs machinery recover via reconnect-and-resync.
+		p.server.log().Warn("peer write queue full during direct send; closing peer",
+			"room", p.roomName,
+			"queueSize", cap(p.writeCh))
+		_ = p.conn.Close()
+	}
+	p.wmu.Unlock()
+}
+
+// runWriter is the dedicated per-peer broadcast writer. It drains writeCh
+// and serialises writes to the connection. Exits when writeCh is closed
+// (during teardown) or when a write fails (the connection is then dead;
+// the read loop will tear down the peer).
+//
+// This pattern mirrors Rust yrs-warp's per-peer sink task. It replaces
+// the previous "spawn one goroutine per peer per broadcast" model, which
+// produced unbounded goroutine churn under high broadcast cardinality
+// and had no backpressure mechanism.
+func (p *peer) runWriter() {
+	defer close(p.writerDone)
+	for data := range p.writeCh {
+		p.wmu.Lock()
+		if p.closed {
+			p.wmu.Unlock()
+			return
+		}
+		if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+			p.server.log().Debug("set write deadline failed", "err", err)
+			p.wmu.Unlock()
+			return
+		}
+		if err := p.conn.WriteMessage(gws.BinaryMessage, data); err != nil {
+			p.server.log().Warn("write to peer failed; closing", "room", p.roomName, "err", err)
+			p.wmu.Unlock()
+			return
+		}
+		p.wmu.Unlock()
+	}
 }

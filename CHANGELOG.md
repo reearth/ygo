@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-04-24
+
+### Added
+
+- **`provider/websocket.Server.MaxMessageBytes` (#20)**: per-message size cap on the read path is now configurable. Default is 64 MiB (matching Rust yrs-warp's underlying warp default; conservative relative to Yjs y-websocket's implicit 100 MiB inheritance from `ws`). Lower this for stricter limits in untrusted deployments.
+- **`provider/websocket.Server.Logger` (#18)**: structured logging via `*slog.Logger`. Defaults to `slog.Default()`. Surfaces previously-silent failures (slow-peer write errors, malformed sync messages, awareness update errors) at `Warn` level with `room` and `peer` context.
+- **`provider/websocket.Server.PeerWriteQueueSize` (#19)**: bounded per-peer broadcast queue. Default 256. When a peer's queue fills (slow peer / dead connection / lagged receiver), the peer is disconnected. The CRDT pending-structs machinery (v1.2.0) handles reconnect-and-resync cleanly.
+
+### Changed
+
+- **`provider/websocket` broadcast model (#19)**: replaced "spawn one goroutine per peer per broadcast" with a persistent per-peer writer goroutine draining a buffered channel. Matches `yrs-warp`'s bounded-broadcast pattern. Eliminates unbounded goroutine churn under high broadcast cardinality. Slow peers are disconnected (forcing reconnect-and-resync) rather than silently accumulating un-delivered messages.
+
 ## [1.3.0] — 2026-04-24
 
 ### Added
@@ -199,6 +211,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.4.0]: https://github.com/reearth/ygo/releases/tag/v1.4.0
 [1.3.0]: https://github.com/reearth/ygo/releases/tag/v1.3.0
 [1.2.0]: https://github.com/reearth/ygo/releases/tag/v1.2.0
 [1.1.2]: https://github.com/reearth/ygo/releases/tag/v1.1.2
