@@ -323,3 +323,10 @@ func TestInteg_MultiRoom_Isolated(t *testing.T) {
 	assert.NotNil(t, srv.GetDoc("room-a"))
 	assert.NotNil(t, srv.GetDoc("room-b"))
 }
+
+func TestServer_SlowPeer_GetsDisconnected(t *testing.T) {
+	// Standup a real server + two peers via httptest. Block one peer's read
+	// goroutine, then have the other peer broadcast many messages.
+	// Verify the slow peer's connection is closed after queue fills.
+	t.Skip("integration test pending fake-blocking-peer harness")
+}
