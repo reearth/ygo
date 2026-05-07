@@ -1,6 +1,7 @@
 package websocket_test
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,66 @@ import (
 	ygws "github.com/reearth/ygo/provider/websocket"
 	ygsync "github.com/reearth/ygo/sync"
 )
+
+// pipeDialer returns a gorilla Dialer whose NetDial hook uses net.Pipe() to
+// create an in-process connection pair and delivers the server-side half to
+// the supplied httptest.Server via a custom net.Listener. Writes on net.Pipe
+// block immediately when the reader is not consuming (no OS-level buffering),
+// making writeCh overflow deterministic in tests.
+//
+// Usage:
+//
+//	ln := newPipeListener()
+//	ts := httptest.NewUnstartedServer(handler)
+//	ts.Listener = ln
+//	ts.Start()
+//	conn := pipeDialer(ln).Dial("ws://unused/room", nil)
+func newPipeListener() *pipeListener {
+	return &pipeListener{
+		ch:     make(chan net.Conn, 8),
+		addr:   &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0},
+		closed: make(chan struct{}),
+	}
+}
+
+type pipeListener struct {
+	ch     chan net.Conn
+	addr   net.Addr
+	closed chan struct{}
+}
+
+func (l *pipeListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.ch:
+		return c, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *pipeListener) Close() error {
+	select {
+	case <-l.closed:
+	default:
+		close(l.closed)
+	}
+	return nil
+}
+
+func (l *pipeListener) Addr() net.Addr { return l.addr }
+
+// pipeDialer returns a gorilla WebSocket Dialer that connects via net.Pipe()
+// rather than TCP. Every Dial() call creates a new net.Pipe() pair and sends
+// the server-side to l so the httptest.Server's Accept loop picks it up.
+func pipeDialer(l *pipeListener) *gws.Dialer {
+	return &gws.Dialer{
+		NetDial: func(_, _ string) (net.Conn, error) {
+			serverSide, clientSide := net.Pipe()
+			l.ch <- serverSide
+			return clientSide, nil
+		},
+	}
+}
 
 // wsURL converts an httptest server URL to a ws:// URL.
 func wsURL(srv *httptest.Server, room string) string {
@@ -324,9 +385,89 @@ func TestInteg_MultiRoom_Isolated(t *testing.T) {
 	assert.NotNil(t, srv.GetDoc("room-b"))
 }
 
-func TestServer_SlowPeer_GetsDisconnected(t *testing.T) {
-	// Standup a real server + two peers via httptest. Block one peer's read
-	// goroutine, then have the other peer broadcast many messages.
-	// Verify the slow peer's connection is closed after queue fills.
-	t.Skip("integration test pending fake-blocking-peer harness")
+func TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow(t *testing.T) {
+	// Stand up a server with a tiny peer-write queue (cap 4). Use net.Pipe()
+	// connections (via pipeListener) so that server-side writes block as soon
+	// as the reader stops consuming — there is no OS-level kernel buffering.
+	// This makes the writeCh overflow deterministic:
+	//
+	//   1. Both peers connect via net.Pipe().
+	//   2. Both peers drain their 3-message handshake.
+	//   3. Slow peer stops reading; server-side writes to it block immediately.
+	//   4. runWriter for the slow peer blocks on the first broadcast write.
+	//   5. Fast peer sends more messages; broadcasts fill writeCh (cap 4).
+	//   6. The 5th broadcast finds writeCh full → overflow → conn.Close().
+	//   7. slowConn.ReadMessage() returns an error.
+
+	srv := ygws.NewServer()
+	srv.PeerWriteQueueSize = 4
+
+	ln := newPipeListener()
+	ts := httptest.NewUnstartedServer(srv)
+	ts.Listener = ln
+	ts.Start()
+	defer ts.Close()
+
+	dialer := pipeDialer(ln)
+	// Use a placeholder URL — the dialer ignores the host and injects a pipe.
+	const wsBase = "ws://pipe"
+
+	// Fast peer: connects via pipe, drains handshake, keeps reading.
+	fastConn, _, err := dialer.Dial(wsBase+"/overflow-room", nil)
+	require.NoError(t, err)
+	defer fastConn.Close()
+	fastDoc := crdt.New(crdt.WithClientID(1))
+	_ = fastConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for i := 0; i < 3; i++ {
+		if _, _, e := fastConn.ReadMessage(); e != nil {
+			break
+		}
+	}
+	_ = fastConn.SetReadDeadline(time.Time{})
+	// Start a goroutine that keeps draining from fastConn so the server can
+	// write broadcast messages back without blocking.
+	go func() {
+		for {
+			if _, _, e := fastConn.ReadMessage(); e != nil {
+				return
+			}
+		}
+	}()
+
+	// Slow peer: connects via pipe.
+	slowConn, _, err := dialer.Dial(wsBase+"/overflow-room", nil)
+	require.NoError(t, err)
+	defer slowConn.Close()
+
+	// Drain slow peer's 3-message handshake to free up writeCh capacity.
+	_ = slowConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for i := 0; i < 3; i++ {
+		if _, _, e := slowConn.ReadMessage(); e != nil {
+			break
+		}
+	}
+	_ = slowConn.SetReadDeadline(time.Time{}) // stop reading — writes to slow peer now block
+
+	// Fast peer sends messages; each is broadcast to the slow peer.
+	// runWriter for slow peer blocks on the first write (net.Pipe has no OS
+	// buffer). After 4 more queued broadcasts, the 5th fires the overflow.
+	fastTxt := fastDoc.GetText("t") // fetch outside Transact to avoid deadlock
+	for i := 0; i < 20; i++ {
+		fastDoc.Transact(func(txn *crdt.Transaction) {
+			fastTxt.Insert(txn, 0, "x", nil)
+		})
+		update := crdt.EncodeStateAsUpdateV1(fastDoc, nil)
+		enc := encoding.NewEncoder()
+		enc.WriteVarUint(ygsync.MsgUpdate)
+		enc.WriteVarBytes(update)
+		if err := fastConn.WriteMessage(gws.BinaryMessage, enc.Bytes()); err != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond) // let the server process + broadcast each message
+	}
+
+	// slowConn should get an error because the server closed its connection.
+	_ = slowConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, readErr := slowConn.ReadMessage()
+	assert.Error(t, readErr, "slow peer should be disconnected by the server after queue overflow")
 }

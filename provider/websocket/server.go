@@ -163,6 +163,13 @@ type peer struct {
 	cidMu      sync.Mutex
 	writeCh    chan []byte   // buffered queue drained by runWriter goroutine
 	writerDone chan struct{} // closed when runWriter exits
+
+	// disconnectOnce ensures the full teardown sequence in handleDisconnect
+	// runs exactly once, regardless of how many callers race (e.g. broadcast's
+	// conn.Close() triggering the read loop while a ctx-cancel path also calls
+	// handleDisconnect). The closed bool under wmu is still needed for the
+	// per-operation guards in broadcast/write/runWriter.
+	disconnectOnce sync.Once
 }
 
 // Server is a net/http-compatible WebSocket handler.
@@ -677,74 +684,80 @@ func (p *peer) trackAwarenessClients(payload []byte) {
 
 // handleDisconnect removes the peer from the room and broadcasts awareness
 // removal for all clientIDs the peer owned.
+//
+// disconnectOnce ensures the full teardown body runs at most once even when
+// multiple callers race — e.g. broadcast()'s conn.Close() waking the read loop
+// while the ctx-cancel goroutine concurrently reaches this point.
 func (p *peer) handleDisconnect() {
-	// H2: mark closed so concurrent broadcast writes skip this peer.
-	// Close writeCh after marking closed so runWriter can drain and exit.
-	// Both operations are done under wmu so broadcast() sees a consistent
-	// state (closed=true is visible before writeCh is closed).
-	p.wmu.Lock()
-	p.closed = true
-	close(p.writeCh)
-	p.wmu.Unlock()
+	p.disconnectOnce.Do(func() {
+		// H2: mark closed so concurrent broadcast writes skip this peer.
+		// Close writeCh after marking closed so runWriter can drain and exit.
+		// Both operations are done under wmu so broadcast() sees a consistent
+		// state (closed=true is visible before writeCh is closed).
+		p.wmu.Lock()
+		p.closed = true
+		close(p.writeCh)
+		p.wmu.Unlock()
 
-	// Wait for the per-peer writer goroutine to fully exit before we touch
-	// the connection in the teardown path. The writer will see the closed
-	// channel and exit cleanly.
-	<-p.writerDone
+		// Wait for the per-peer writer goroutine to fully exit before we touch
+		// the connection in the teardown path. The writer will see the closed
+		// channel and exit cleanly.
+		<-p.writerDone
 
-	rm := p.room
+		rm := p.room
 
-	// Acquire both locks (server map first, then room) to atomically remove
-	// the peer and, if the room is now empty, delete the room from the server
-	// map and stop the persistence goroutine. This prevents a TOCTOU race
-	// where a new peer joins between the emptiness check and room deletion,
-	// which would fork the logical document into two rooms.
-	p.server.rmu.Lock()
-	rm.mu.Lock()
-	delete(rm.peers, p)
-	empty := len(rm.peers) == 0
-	if empty {
-		delete(p.server.rooms, p.roomName)
-		if rm.persistStop != nil {
-			close(rm.persistStop)
+		// Acquire both locks (server map first, then room) to atomically remove
+		// the peer and, if the room is now empty, delete the room from the server
+		// map and stop the persistence goroutine. This prevents a TOCTOU race
+		// where a new peer joins between the emptiness check and room deletion,
+		// which would fork the logical document into two rooms.
+		p.server.rmu.Lock()
+		rm.mu.Lock()
+		delete(rm.peers, p)
+		empty := len(rm.peers) == 0
+		if empty {
+			delete(p.server.rooms, p.roomName)
+			if rm.persistStop != nil {
+				close(rm.persistStop)
+			}
 		}
-	}
-	rm.mu.Unlock()
-	p.server.rmu.Unlock()
+		rm.mu.Unlock()
+		p.server.rmu.Unlock()
 
-	// Decrement atomic connection counters now that the peer has left.
-	if p.server.MaxPeersPerRoom > 0 {
-		rm.activePeers.Add(-1)
-	}
-	if p.server.MaxConnections > 0 {
-		p.server.activeConns.Add(-1)
-	}
+		// Decrement atomic connection counters now that the peer has left.
+		if p.server.MaxPeersPerRoom > 0 {
+			rm.activePeers.Add(-1)
+		}
+		if p.server.MaxConnections > 0 {
+			p.server.activeConns.Add(-1)
+		}
 
-	// Wait for the persistence goroutine to drain buffered writes before the
-	// room reference becomes garbage. This runs outside the locks above.
-	if empty && rm.persistDone != nil {
-		<-rm.persistDone
-	}
+		// Wait for the persistence goroutine to drain buffered writes before the
+		// room reference becomes garbage. This runs outside the locks above.
+		if empty && rm.persistDone != nil {
+			<-rm.persistDone
+		}
 
-	p.cidMu.Lock()
-	clientIDs := make([]uint64, 0, len(p.clientIDs))
-	for id := range p.clientIDs {
-		clientIDs = append(clientIDs, id)
-	}
-	p.cidMu.Unlock()
+		p.cidMu.Lock()
+		clientIDs := make([]uint64, 0, len(p.clientIDs))
+		for id := range p.clientIDs {
+			clientIDs = append(clientIDs, id)
+		}
+		p.cidMu.Unlock()
 
-	if len(clientIDs) == 0 {
-		return
-	}
+		if len(clientIDs) == 0 {
+			return
+		}
 
-	removalBytes := encodeAwarenessRemoval(p.room.awareness, clientIDs)
-	if removalBytes == nil {
-		return
-	}
-	if err := p.room.awareness.ApplyUpdate(removalBytes, nil); err != nil {
-		p.server.log().Warn("apply removal awareness failed", "room", p.roomName, "err", err)
-	}
-	p.broadcastAwarenessFromRoom(removalBytes)
+		removalBytes := encodeAwarenessRemoval(p.room.awareness, clientIDs)
+		if removalBytes == nil {
+			return
+		}
+		if err := p.room.awareness.ApplyUpdate(removalBytes, nil); err != nil {
+			p.server.log().Warn("apply removal awareness failed", "room", p.roomName, "err", err)
+		}
+		p.broadcastAwarenessFromRoom(removalBytes)
+	})
 }
 
 // encodeAwarenessRemoval builds a raw awareness update that marks the given
@@ -866,8 +879,10 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 
 // write enqueues a raw binary message for delivery to this peer via the
 // per-peer writer goroutine. H2: skips the write if the peer has already
-// been marked closed. If the queue is full (unlikely for direct sends,
-// since only the local read loop calls this), the message is dropped.
+// been marked closed. If the queue is full the peer is disconnected:
+// a dropped handshake reply (sendSync / sendAwareness) leaves the remote
+// peer hung waiting for a response it will never receive. Closing the
+// connection forces a reconnect-and-resync, matching the broadcast contract.
 func (p *peer) write(data []byte) {
 	p.wmu.Lock()
 	if p.closed {
@@ -877,11 +892,13 @@ func (p *peer) write(data []byte) {
 	select {
 	case p.writeCh <- data:
 	default:
-		// Queue full on direct write (e.g. handshake flood) — log and drop.
-		// This is distinct from broadcast overflow: on the handshake path
-		// the peer is not yet in the room, so disconnecting is not meaningful
-		// here; the read loop will time out naturally.
-		p.server.log().Debug("direct write queue full; dropping message", "room", p.roomName)
+		// Queue full during a direct send (e.g. handshake reply) — disconnect.
+		// Unlike a silent drop, closing the connection lets the CRDT
+		// pending-structs machinery recover via reconnect-and-resync.
+		p.server.log().Warn("peer write queue full during direct send; closing peer",
+			"room", p.roomName,
+			"queueSize", cap(p.writeCh))
+		_ = p.conn.Close()
 	}
 	p.wmu.Unlock()
 }

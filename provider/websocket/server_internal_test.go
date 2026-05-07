@@ -39,11 +39,11 @@ func TestServer_PeerWriteQueueSize_ConfigurableDefault(t *testing.T) {
 }
 
 func TestPeer_Broadcast_DisconnectsSlowPeer(t *testing.T) {
-	// Set up a server with a small queue size to exercise overflow quickly.
-	// This test requires a fakeConn or real httptest server harness.
-	// See TestServer_SlowPeer_GetsDisconnected in server_test.go for the
-	// integration-level version.
-	t.Skip("requires fakeConn or real httptest server harness; see implementation comment")
+	// Integration-level coverage lives in TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow
+	// in server_test.go, which uses net.Pipe() connections to make the overflow deterministic.
+	// A unit-level version here would require a fakeConn that makes WriteMessage block
+	// without depending on OS TCP buffers.
+	t.Skip("TODO: unit version needs a fake conn; integration coverage in TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow")
 }
 
 func TestPeer_RunWriter_ExitsOnChannelClose(t *testing.T) {
