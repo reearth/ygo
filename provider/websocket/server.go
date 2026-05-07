@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -47,6 +48,22 @@ const (
 // by the server. Frames larger than this are rejected before being buffered,
 // preventing OOM from a single crafted large message.
 const maxWSMessageBytes int64 = 64 << 20 // 64 MiB
+
+// maxMessageBytes returns the configured per-message cap or the default.
+func (s *Server) maxMessageBytes() int64 {
+	if s.MaxMessageBytes > 0 {
+		return s.MaxMessageBytes
+	}
+	return maxWSMessageBytes
+}
+
+// log returns the configured logger or slog.Default().
+func (s *Server) log() *slog.Logger {
+	if s.Logger != nil {
+		return s.Logger
+	}
+	return slog.Default()
+}
 
 // maxAwarenessClientsPerPeer caps the number of awareness clientIDs one peer
 // may claim ownership of. Without this cap an attacker can send an awareness
@@ -189,6 +206,22 @@ type Server struct {
 	// ErrTooManyRooms.
 	MaxRooms int
 
+	// MaxMessageBytes is the per-message size cap on the WebSocket read path.
+	// Frames larger than this are rejected by the underlying gorilla/websocket
+	// library (which closes the connection with code 1009). Zero (the default)
+	// uses the package default of 64 MiB, which matches Rust yrs-warp's underlying
+	// warp default. Yjs JS's y-websocket inherits ws library's 100 MiB default.
+	//
+	// Lower this for stricter limits in untrusted multi-tenant deployments;
+	// raise it for unusual bulk-sync workloads.
+	MaxMessageBytes int64
+
+	// Logger receives structured log entries for connection lifecycle, write
+	// failures, slow-peer disconnects, and persistence errors. nil falls back
+	// to slog.Default(). Most operators want to wire this to their app logger
+	// rather than rely on the default.
+	Logger *slog.Logger
+
 	activeConns atomic.Int64 // atomic; total live WebSocket connections
 }
 
@@ -273,7 +306,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Close each connection. The peer read loop will exit on the next
 	// ReadMessage call, triggering handleDisconnect cleanup.
 	for _, c := range conns {
-		_ = c.Close()
+		if err := c.Close(); err != nil {
+			s.log().Debug("shutdown close failed", "err", err)
+		}
 	}
 
 	// Wait for all persistence goroutines to drain in-flight writes.
@@ -457,7 +492,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Reject frames larger than maxWSMessageBytes before buffering them.
 	// Without this, a single 4 GB frame would be fully read into memory before
 	// any application-level validation could reject it.
-	ws.SetReadLimit(maxWSMessageBytes)
+	ws.SetReadLimit(s.maxMessageBytes())
 
 	p := &peer{
 		conn:      ws,
@@ -481,7 +516,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.MaxConnections > 0 {
 			s.activeConns.Add(-1)
 		}
-		_ = ws.Close()
+		_ = ws.Close() // close errors during teardown are expected; not logged
 		return
 	}
 	rm.mu.Lock()
@@ -492,7 +527,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		close(p.done) // H1: unblock the context-watcher goroutine
 		p.handleDisconnect()
-		_ = ws.Close()
+		_ = ws.Close() // close errors during teardown are expected; not logged
 	}()
 
 	// Close the WebSocket when the HTTP request context is cancelled
@@ -502,9 +537,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = ws.Close()
+			_ = ws.Close() // close errors during teardown are expected; not logged
 		case <-s.shutdownCh:
-			_ = ws.Close()
+			_ = ws.Close() // close errors during teardown are expected; not logged
 		case <-p.done: // H1: read loop exited normally; nothing to do
 		}
 	}()
@@ -670,7 +705,9 @@ func (p *peer) handleDisconnect() {
 	if removalBytes == nil {
 		return
 	}
-	_ = p.room.awareness.ApplyUpdate(removalBytes, nil)
+	if err := p.room.awareness.ApplyUpdate(removalBytes, nil); err != nil {
+		p.server.log().Warn("apply removal awareness failed", "room", p.roomName, "err", err)
+	}
 	p.broadcastAwarenessFromRoom(removalBytes)
 }
 
@@ -779,6 +816,11 @@ func (p *peer) write(data []byte) {
 	if p.closed {
 		return
 	}
-	_ = p.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	_ = p.conn.WriteMessage(gws.BinaryMessage, data)
+	if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		p.server.log().Debug("set write deadline failed", "err", err)
+		return
+	}
+	if err := p.conn.WriteMessage(gws.BinaryMessage, data); err != nil {
+		p.server.log().Warn("write to peer failed", "room", p.roomName, "err", err)
+	}
 }
