@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-04-24
+
+### Fixed
+
+- **`provider/websocket`: runWriter goroutine leak on room-membership TOCTOU loss (#33)**: regression introduced in v1.4.0. When the room was deleted between `getOrCreateRoom` and peer registration (rare but reachable during peer churn), the per-peer `runWriter` goroutine was spawned before the TOCTOU check and never cleaned up. Moved the spawn to after the check passes and after the peer is registered with the room.
+- **`awareness`: `StartAutoExpiry` leaked goroutine on double-call (#34)**: calling `StartAutoExpiry` more than once on the same `Awareness` orphaned the first goroutine because `a.stopExpiry` was overwritten without calling the previous stop. Now the previous goroutine is stopped before spawning the new one. Returned `stop` is also `sync.Once`-protected against double-close panics.
+
+### Changed
+
+- **`provider/websocket`: dropped stale per-peer goroutine spawn in inject paths**. Three `go p.write(data)` call sites in `BroadcastUpdate` and `Apply` were leftover from before v1.4.0 when `peer.write()` was synchronous. After v1.4.0, `peer.write()` is non-blocking; the `go` prefix added churn and scrambled write ordering. Now direct calls.
+
 ## [1.4.0] — 2026-04-24
 
 ### Added
@@ -211,6 +222,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.4.1]: https://github.com/reearth/ygo/releases/tag/v1.4.1
 [1.4.0]: https://github.com/reearth/ygo/releases/tag/v1.4.0
 [1.3.0]: https://github.com/reearth/ygo/releases/tag/v1.3.0
 [1.2.0]: https://github.com/reearth/ygo/releases/tag/v1.2.0
