@@ -22,6 +22,8 @@ func (a *YArray) baseType() *abstractType { return &a.abstractType }
 // lock and returns a closure that fires all snapshotted observers. Callers in
 // Transact invoke the returned closure after releasing the lock, so observers
 // may safely call back into any Doc method (N-C1).
+//
+// prepareFire is called by buildPhase2 while the document write lock is held.
 func (a *YArray) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 	if len(a.observers) == 0 {
 		return nil

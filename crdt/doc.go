@@ -12,6 +12,13 @@
 //	update := doc.EncodeStateAsUpdate()
 //
 // Reference algorithm: https://github.com/yjs/yjs/blob/main/INTERNALS.md
+//
+// # Origin Tags
+//
+// The Origin field on Transaction, ChangeEvent (awareness), and
+// UndoManager.trackedOrigins uses type any for user-defined tags.
+// Callers must type-assert on read. Origin is used for filtering
+// in observers and undo-manager scope.
 package crdt
 
 import (

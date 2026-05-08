@@ -97,6 +97,10 @@ func (ds *DeleteSet) Clients() []ClientID {
 //
 // This is the pending-aware variant of applyTo, used by applyV1Txn
 // and applyV2Txn to defer deletes that target not-yet-integrated items.
+//
+// invariant: store.clients[client] is contiguous from clock 0.
+// If a future change relaxes contiguity, the applied-prefix math
+// may under-park ranges spanning a gap.
 func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 	unresolvable := newDeleteSet()
 	for client, ranges := range ds.clients {
