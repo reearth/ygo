@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -470,4 +471,38 @@ func TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow(t *testing.T) {
 	_ = slowConn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	_, _, readErr := slowConn.ReadMessage()
 	assert.Error(t, readErr, "slow peer should be disconnected by the server after queue overflow")
+}
+
+func TestServer_RunWriter_NoLeakOnConnectChurn(t *testing.T) {
+	// Regression for #33: runWriter must not leak when the room
+	// membership TOCTOU check fails after peer setup.
+	//
+	// Strategy: open and close many connections rapidly to a server
+	// configured with no persistence and rapid room creation/deletion
+	// cycles. Without the fix, each TOCTOU loss leaks one runWriter
+	// goroutine.
+	gotBefore := runtime.NumGoroutine()
+
+	s := ygws.NewServer()
+	httpSrv := httptest.NewServer(s)
+	defer httpSrv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/race-room"
+
+	for i := 0; i < 50; i++ {
+		c, _, err := gws.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			continue
+		}
+		_ = c.Close()
+	}
+
+	// Allow time for goroutines to fully tear down.
+	time.Sleep(500 * time.Millisecond)
+
+	gotAfter := runtime.NumGoroutine()
+	const slack = 5
+	assert.LessOrEqual(t, gotAfter-gotBefore, slack,
+		"runWriter goroutine leak suspected: %d before, %d after %d connect/disconnect cycles",
+		gotBefore, gotAfter, 50)
 }

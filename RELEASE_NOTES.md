@@ -1,16 +1,15 @@
 ## What's new
 
-- **WebSocket provider hardening (#18, #19, #20).** Three additions for production WebSocket deployments:
-  - **Configurable per-message size cap** via `Server.MaxMessageBytes`. Default 64 MiB (matching `yrs-warp`); lower for untrusted multi-tenant operators.
-  - **Structured logging** via `Server.Logger *slog.Logger`. Slow-peer write failures, malformed sync messages, and awareness errors that were previously silent now surface at `Warn` level.
-  - **Bounded per-peer broadcast queue** via `Server.PeerWriteQueueSize` (default 256). When a peer can't keep up, it's disconnected (matching `yrs-warp`'s pattern); CRDT pending-structs machinery from v1.2.0 handles reconnect-and-resync cleanly. Replaces the previous unbounded "goroutine per broadcast" fanout.
+Two goroutine leak fixes plus one performance cleanup. Recommended upgrade for any v1.4.0 deployment.
 
-- **All additive.** Existing `Server` config and behavior preserved. Defaults match prior behavior except the broadcast goroutine pattern (now bounded; no user-visible regression for well-behaved peers).
+- **`runWriter` goroutine leak (#33)**: regression from v1.4.0. When a peer connected during a small race window where its target room was being deleted, the per-peer write goroutine could leak. Now correctly paired with cleanup on every code path.
+- **`StartAutoExpiry` double-call leak (#34)**: calling `StartAutoExpiry` twice on the same `Awareness` would orphan the first goroutine. Now the previous one is stopped before the new one starts. Returned `stop` is also safe to call more than once.
+- **Per-peer write goroutine spawn cleanup**: three call sites in the server-side inject paths (`BroadcastUpdate`, `Apply`) spawned a fresh goroutine per peer per write. After v1.4.0 made `peer.write()` non-blocking, these goroutines became wasteful and scrambled ordering. Now direct calls.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.4.0
+go get github.com/reearth/ygo@v1.4.1
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.

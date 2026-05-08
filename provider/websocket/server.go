@@ -535,7 +535,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeCh:    make(chan []byte, s.peerWriteQueueSize()),
 		writerDone: make(chan struct{}),
 	}
-	go p.runWriter()
 
 	// Verify the room is still in the server map before adding the peer.
 	// Holding rmu.RLock prevents handleDisconnect from deleting the room
@@ -557,6 +556,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rm.peers[p] = struct{}{}
 	rm.mu.Unlock()
 	s.rmu.RUnlock()
+
+	// Start the per-peer writer ONLY after the peer is registered with the
+	// room. From this point handleDisconnect (registered next) owns the
+	// runWriter teardown via close(writeCh) + <-writerDone. Before this
+	// point, a TOCTOU loss returned without cleanup, leaking runWriter (#33).
+	go p.runWriter()
 
 	defer func() {
 		close(p.done) // H1: unblock the context-watcher goroutine

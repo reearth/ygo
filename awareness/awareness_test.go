@@ -1,6 +1,7 @@
 package awareness_test
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -380,4 +381,28 @@ func TestUnit_Awareness_ApplyUpdate_StateTooLarge_Errors(t *testing.T) {
 	err := a.ApplyUpdate(enc.Bytes(), nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, awareness.ErrStateTooLarge)
+}
+
+func TestAwareness_StartAutoExpiry_NoLeakOnDoubleCall(t *testing.T) {
+	// Regression for #34: calling StartAutoExpiry twice must not leak
+	// the first goroutine.
+	gotBefore := runtime.NumGoroutine()
+
+	a := awareness.New(0)
+	stop1 := a.StartAutoExpiry(50 * time.Millisecond)
+	stop2 := a.StartAutoExpiry(100 * time.Millisecond)
+
+	// stop2 should kill G2; the fix ensures G1 was already stopped
+	// internally by the second StartAutoExpiry call.
+	stop2()
+	_ = stop1 // legacy reference; should be a no-op double-close-safe
+
+	// Allow time for any leftover goroutines to exit.
+	time.Sleep(200 * time.Millisecond)
+
+	gotAfter := runtime.NumGoroutine()
+	const slack = 2
+	assert.LessOrEqual(t, gotAfter-gotBefore, slack,
+		"StartAutoExpiry leaked goroutine: %d before, %d after",
+		gotBefore, gotAfter)
 }

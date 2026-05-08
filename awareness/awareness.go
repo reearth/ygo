@@ -371,6 +371,15 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 // function stops the goroutine; it must be called to avoid a goroutine leak.
 // The stop function is also stored internally and will be called by Destroy.
 func (a *Awareness) StartAutoExpiry(timeout time.Duration) func() {
+	// Stop any previously-started goroutine to prevent leaking it (#34).
+	a.mu.Lock()
+	prev := a.stopExpiry
+	a.stopExpiry = nil
+	a.mu.Unlock()
+	if prev != nil {
+		prev()
+	}
+
 	ticker := time.NewTicker(timeout / 2)
 	done := make(chan struct{})
 	go func() {
@@ -384,7 +393,10 @@ func (a *Awareness) StartAutoExpiry(timeout time.Duration) func() {
 			}
 		}
 	}()
-	stop := func() { close(done) }
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() { close(done) })
+	}
 	a.mu.Lock()
 	a.stopExpiry = stop
 	a.mu.Unlock()

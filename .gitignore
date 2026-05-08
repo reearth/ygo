@@ -34,3 +34,6 @@ go.work.sum
 benchmarks/*.txt
 testutil/node_modules/
 .claude/
+
+# /code-review skill output — converted to GitHub issues, not tracked
+code-review-report.md
