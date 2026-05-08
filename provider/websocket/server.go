@@ -589,6 +589,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 3. Send the current awareness state of all active peers.
 	p.sendAwareness(rm.awareness.EncodeUpdate(nil))
 
+	// Guard: close p.done on any exit from the read loop, including panic.
+	// Without this, a panic in handleMessage would leak the context-watcher
+	// goroutine launched below.
+	defer close(p.done)
 	// Read loop — exits when the connection is closed (by peer, by context
 	// cancellation, or by Shutdown).
 	for {
