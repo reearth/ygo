@@ -158,7 +158,7 @@ func (s *Server) BroadcastUpdate(ctx context.Context, room string, update []byte
 	}
 	data := encodeBroadcastWire(update)
 	for _, p := range targets {
-		go p.write(data)
+		p.write(data)
 	}
 	return nil
 }
@@ -308,7 +308,7 @@ func (s *Server) Apply(
 		rm.mu.Unlock()
 		data := encodeBroadcastWire(merged)
 		for _, p := range targets {
-			go p.write(data)
+			p.write(data)
 		}
 	}
 
@@ -356,7 +356,7 @@ func (s *Server) Apply(
 
 	data := encodeBroadcastWire(merged)
 	for _, p := range targets {
-		go p.write(data)
+		p.write(data)
 	}
 	return nil
 }
