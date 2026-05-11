@@ -26,6 +26,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -599,6 +600,50 @@ func (d *Doc) TransactContextE(ctx context.Context, fn func(*Transaction) error,
 		return ctxErr
 	}
 	return fnErr
+}
+
+// PendingStats is a snapshot of the doc's pending-queue depth. Returned by
+// Doc.PendingStats. Used for observability — operators can monitor queue
+// growth to detect adversarial peers or persistent convergence gaps. The
+// snapshot is immediately stale; do not use as a synchronization primitive.
+type PendingStats struct {
+	// Items is the number of decoded items parked in the pending queue
+	// (waiting for cross-update Origin/OriginRight dependencies or
+	// same-client clock-gap dependencies to arrive).
+	Items int
+
+	// DeleteRanges is the total number of delete-set ranges in pendingDs
+	// across all clients. Each range is one [clock, clock+len) span.
+	DeleteRanges int
+
+	// MissingFor lists the ClientIDs that pending items reference but
+	// haven't yet received. Sorted ascending. Read-only.
+	MissingFor []ClientID
+}
+
+// PendingStats returns a snapshot of the pending-queue state. Cheap; takes
+// a read lock and copies a few values. Intended for operational monitoring
+// of out-of-order delta convergence; see v1.2.0 release notes for the
+// pending-structs machinery this exposes.
+func (d *Doc) PendingStats() PendingStats {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	stats := PendingStats{}
+	if d.store.pending != nil {
+		stats.Items = len(d.store.pending.items)
+		// missing is a StateVector (map[ClientID]uint64) — extract sorted keys
+		missing := make([]ClientID, 0, len(d.store.pending.missing))
+		for c := range d.store.pending.missing {
+			missing = append(missing, c)
+		}
+		sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
+		stats.MissingFor = missing
+	}
+	for _, ranges := range d.store.pendingDs.clients {
+		stats.DeleteRanges += len(ranges)
+	}
+	return stats
 }
 
 // Destroy detaches all observers and clears internal state, releasing
