@@ -41,6 +41,12 @@ func (o InjectOp) String() string {
 
 // InjectInfo is passed to OnInject. Additional fields may be added in
 // future versions; callers must not rely on the struct being fixed-size.
+//
+// Fields:
+//   - Room: the room name the operation targets.
+//   - Op: identifies the calling method (BroadcastUpdate or Apply).
+//   - UpdateSize: length of the update bytes for BroadcastUpdate,
+//     or 0 for Apply (the delta has not yet been produced).
 type InjectInfo struct {
 	// Room is the room name the operation targets.
 	Room string
