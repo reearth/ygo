@@ -1507,3 +1507,18 @@ func TestInteg_TransactContextE_NilFnErrorReturnsNil(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+func TestUnit_NewClientID_NonZeroAndDistinct(t *testing.T) {
+	// 100 fresh Docs should produce 100 distinct (and non-zero) ClientIDs.
+	// Not a tight statistical test, just a sanity check that the source is
+	// random rather than constant or sequential.
+	seen := make(map[ClientID]struct{}, 100)
+	for i := 0; i < 100; i++ {
+		d := New()
+		id := d.ClientID()
+		assert.NotEqual(t, ClientID(0), id, "ClientID should not be zero (clock 0 is meaningful)")
+		_, dup := seen[id]
+		assert.False(t, dup, "ClientID collision after %d generations: %d", i, id)
+		seen[id] = struct{}{}
+	}
+}

@@ -23,7 +23,9 @@ package crdt
 
 import (
 	"context"
-	"math/rand"
+	"crypto/rand"
+	"encoding/binary"
+	"fmt"
 	"sync"
 )
 
@@ -103,10 +105,27 @@ func (d *Doc) GUID() string {
 	return d.guid
 }
 
+// NewClientID generates a fresh ClientID via crypto/rand.
+//
+// The 32-bit space matches Yjs JS upstream (which uses uint32 to stay within
+// JavaScript's Number.MAX_SAFE_INTEGER). With uniform random distribution, the
+// birthday-bound for collisions is around 65k peers — beyond that, collisions
+// become probable. For multi-tenant deployments, callers may want to coordinate
+// IDs externally; the random generation here is a collision-avoidance
+// heuristic, not an authentication primitive. See SECURITY.md.
+func NewClientID() ClientID {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand.Read returning error is unrecoverable — process is broken.
+		panic(fmt.Errorf("crypto/rand failed: %w", err))
+	}
+	return ClientID(binary.BigEndian.Uint32(b[:]))
+}
+
 // New creates a new Doc with a randomly generated ClientID.
 func New(opts ...DocOption) *Doc {
 	d := &Doc{
-		clientID: ClientID(rand.Uint32()), // uint32 keeps IDs within JS Number.MAX_SAFE_INTEGER
+		clientID: NewClientID(), // uint32 keeps IDs within JS Number.MAX_SAFE_INTEGER
 		gc:       true,
 		store:    newStructStore(),
 		share:    make(map[string]sharedType),

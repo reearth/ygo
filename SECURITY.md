@@ -29,6 +29,14 @@ You can expect an acknowledgement within **48 hours** and a resolution timeline 
   - HTTP POST body and WebSocket frame: max 64 MiB (`maxUpdateBytes` / `maxWSMessageBytes`)
   - Awareness update: max 100 000 client entries (`maxAwarenessClients`); max 1 MiB per client state (`maxAwarenessStateBytes`)
   - `ReadAny` recursion: max 100 levels deep (`maxAnyDepth`)
+### ClientID semantics
+
+`crdt.ClientID` is a 32-bit value generated via `crypto/rand` and used to
+distinguish authoring peers during YATA conflict resolution. It is **not** an
+authentication token — the protocol does not validate that incoming updates
+match a peer's declared ClientID. Authentication and authorization are the
+embedder's responsibility (via `Server.AuthFunc`, request-level checks, etc.).
+
 - **Known limitations**:
   - No built-in cryptographic signatures or MACs on updates — add these at the transport layer if needed.
   - Subdocuments (`ContentDoc`) are structurally present in the wire format but not exposed as a user-facing API in this release.
