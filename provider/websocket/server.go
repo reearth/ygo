@@ -20,10 +20,10 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	gws "github.com/gorilla/websocket"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/crdt"
@@ -138,11 +138,14 @@ func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
 
 // room holds the shared document and awareness state for one named room.
 type room struct {
-	mu          sync.Mutex
-	doc         *crdt.Doc
-	awareness   *awareness.Awareness
-	peers       map[*peer]struct{}
-	activePeers atomic.Int64 // atomic; live peers in this room
+	mu        sync.Mutex
+	doc       *crdt.Doc
+	awareness *awareness.Awareness
+	peers     map[*peer]struct{}
+
+	// peerSem enforces MaxPeersPerRoom as a hard cap. Initialised at room
+	// creation time. nil when MaxPeersPerRoom == 0 (unlimited).
+	peerSem *semaphore.Weighted
 
 	// Persistence write queue. nil when no PersistenceAdapter is configured.
 	persistCh   chan []byte   // buffered channel for serialised writes
@@ -253,7 +256,21 @@ type Server struct {
 	// Zero (the default) uses 256, sized for typical sync workloads.
 	PeerWriteQueueSize int
 
-	activeConns atomic.Int64 // atomic; total live WebSocket connections
+	// connSem enforces MaxConnections as a hard cap. Lazily initialised on
+	// first ServeHTTP. nil when MaxConnections == 0 (unlimited).
+	connSem     *semaphore.Weighted
+	connSemOnce sync.Once
+}
+
+// connSemaphore lazily initialises and returns the server-wide connection
+// semaphore. Returns nil when MaxConnections == 0 (unlimited).
+func (s *Server) connSemaphore() *semaphore.Weighted {
+	s.connSemOnce.Do(func() {
+		if s.MaxConnections > 0 {
+			s.connSem = semaphore.NewWeighted(int64(s.MaxConnections))
+		}
+	})
+	return s.connSem
 }
 
 // checkOrigin validates the WebSocket upgrade request's Origin header.
@@ -393,6 +410,9 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 		awareness: awareness.New(0),
 		peers:     make(map[*peer]struct{}),
 	}
+	if s.MaxPeersPerRoom > 0 {
+		r.peerSem = semaphore.NewWeighted(int64(s.MaxPeersPerRoom))
+	}
 	if s.persistence != nil {
 		data, err := s.persistence.LoadDoc(name)
 		if err != nil {
@@ -490,33 +510,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Enforce per-room and server-wide connection limits before upgrading so
 	// that rejected requests get a clean HTTP 503 rather than an abrupt close
 	// after the WebSocket handshake (N-H5).
-	// Atomics are incremented optimistically before the upgrade; on failure
-	// they are decremented so the counts stay accurate (fixes TOCTOU race).
-	if s.MaxPeersPerRoom > 0 {
-		if rm.activePeers.Add(1) > int64(s.MaxPeersPerRoom) {
-			rm.activePeers.Add(-1)
-			http.Error(w, "room full", http.StatusServiceUnavailable)
-			return
-		}
+	// semaphore.Weighted.TryAcquire provides a hard guarantee: never more than
+	// the configured cap simultaneously, regardless of burst pattern.
+	if rm.peerSem != nil && !rm.peerSem.TryAcquire(1) {
+		s.log().Debug("MaxPeersPerRoom cap reached", "room", name)
+		http.Error(w, "room full", http.StatusServiceUnavailable)
+		return
 	}
-	if s.MaxConnections > 0 {
-		if s.activeConns.Add(1) > int64(s.MaxConnections) {
-			s.activeConns.Add(-1)
-			if s.MaxPeersPerRoom > 0 {
-				rm.activePeers.Add(-1) // undo per-room increment
-			}
-			http.Error(w, "too many connections", http.StatusServiceUnavailable)
-			return
+	if sem := s.connSemaphore(); sem != nil && !sem.TryAcquire(1) {
+		if rm.peerSem != nil {
+			rm.peerSem.Release(1) // release per-room ticket we just acquired
 		}
+		s.log().Debug("MaxConnections cap reached")
+		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		return
 	}
 
 	ws, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		if s.MaxPeersPerRoom > 0 {
-			rm.activePeers.Add(-1)
+		if rm.peerSem != nil {
+			rm.peerSem.Release(1)
 		}
-		if s.MaxConnections > 0 {
-			s.activeConns.Add(-1)
+		if sem := s.connSemaphore(); sem != nil {
+			sem.Release(1)
 		}
 		return
 	}
@@ -543,11 +559,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.rmu.RLock()
 	if current, ok := s.rooms[name]; !ok || current != rm {
 		s.rmu.RUnlock()
-		if s.MaxPeersPerRoom > 0 {
-			rm.activePeers.Add(-1)
+		if rm.peerSem != nil {
+			rm.peerSem.Release(1)
 		}
-		if s.MaxConnections > 0 {
-			s.activeConns.Add(-1)
+		if sem := s.connSemaphore(); sem != nil {
+			sem.Release(1)
 		}
 		_ = ws.Close() // close errors during teardown are expected; not logged
 		return
@@ -729,12 +745,12 @@ func (p *peer) handleDisconnect() {
 		rm.mu.Unlock()
 		p.server.rmu.Unlock()
 
-		// Decrement atomic connection counters now that the peer has left.
-		if p.server.MaxPeersPerRoom > 0 {
-			rm.activePeers.Add(-1)
+		// Release semaphore slots now that the peer has left.
+		if rm.peerSem != nil {
+			rm.peerSem.Release(1)
 		}
-		if p.server.MaxConnections > 0 {
-			p.server.activeConns.Add(-1)
+		if sem := p.server.connSemaphore(); sem != nil {
+			sem.Release(1)
 		}
 
 		// Wait for the persistence goroutine to drain buffered writes before the

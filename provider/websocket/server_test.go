@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -505,4 +507,56 @@ func TestServer_RunWriter_NoLeakOnConnectChurn(t *testing.T) {
 	assert.LessOrEqual(t, gotAfter-gotBefore, slack,
 		"runWriter goroutine leak suspected: %d before, %d after %d connect/disconnect cycles",
 		gotBefore, gotAfter, 50)
+}
+
+func TestServer_MaxConnections_HardCapUnderConcurrentBurst(t *testing.T) {
+	// Open many concurrent connections to a server with MaxConnections=10.
+	// All should either succeed (≤ 10 active at once) or be rejected with
+	// HTTP 503; never more than 10 simultaneously connected.
+
+	const cap = 10
+	const burst = 50
+
+	s := ygws.NewServer()
+	s.MaxConnections = cap
+	httpSrv := httptest.NewServer(s)
+	defer httpSrv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/cap-room"
+
+	var wg sync.WaitGroup
+	var holding atomic.Int32
+	var maxObserved atomic.Int32
+	var rejected atomic.Int32
+
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, _, err := gws.DefaultDialer.Dial(wsURL, nil)
+			if err != nil {
+				rejected.Add(1)
+				return
+			}
+			n := holding.Add(1)
+			for {
+				if m := maxObserved.Load(); n > m {
+					if maxObserved.CompareAndSwap(m, n) {
+						break
+					}
+					continue
+				}
+				break
+			}
+			time.Sleep(100 * time.Millisecond) // hold the conn long enough to observe max
+			holding.Add(-1)
+			_ = c.Close()
+		}()
+	}
+	wg.Wait()
+
+	assert.LessOrEqual(t, int(maxObserved.Load()), cap,
+		"max concurrent connections (%d) exceeded the cap (%d) — atomic-counter race window",
+		maxObserved.Load(), cap)
+	assert.Greater(t, int(rejected.Load()), 0, "some connections should have been rejected")
 }
