@@ -1507,3 +1507,56 @@ func TestInteg_TransactContextE_NilFnErrorReturnsNil(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+func TestUnit_NewClientID_NonZeroAndDistinct(t *testing.T) {
+	// 100 fresh Docs should produce 100 distinct (and non-zero) ClientIDs.
+	// Not a tight statistical test, just a sanity check that the source is
+	// random rather than constant or sequential.
+	seen := make(map[ClientID]struct{}, 100)
+	for i := 0; i < 100; i++ {
+		d := New()
+		id := d.ClientID()
+		assert.NotEqual(t, ClientID(0), id, "ClientID should not be zero (clock 0 is meaningful)")
+		_, dup := seen[id]
+		assert.False(t, dup, "ClientID collision after %d generations: %d", i, id)
+		seen[id] = struct{}{}
+	}
+}
+
+func TestUnit_Doc_PendingStats_EmptyByDefault(t *testing.T) {
+	d := New()
+	stats := d.PendingStats()
+	assert.Equal(t, 0, stats.Items)
+	assert.Equal(t, 0, stats.DeleteRanges)
+	assert.Empty(t, stats.MissingFor)
+}
+
+func TestUnit_Doc_PendingStats_ReflectsParkedItems(t *testing.T) {
+	// Force a parked item via reverse-order delivery (same scenario as
+	// the #11 acceptance test). After parking, PendingStats should report
+	// Items > 0 and MissingFor containing the missing client.
+	a := newTestDoc(1)
+	arrA := a.GetArray("arr")
+	a.Transact(func(txn *Transaction) { arrA.Insert(txn, 0, []any{"a"}) })
+	updateA := EncodeStateAsUpdateV1(a, nil)
+
+	b := newTestDoc(2)
+	require.NoError(t, ApplyUpdateV1(b, updateA, nil))
+	arrB := b.GetArray("arr")
+	b.Transact(func(txn *Transaction) { arrB.Insert(txn, 1, []any{"b"}) })
+	updateBOnly, err := DiffUpdateV1(EncodeStateAsUpdateV1(b, nil), a.store.StateVector())
+	require.NoError(t, err)
+
+	peer := newTestDoc(99)
+	require.NoError(t, ApplyUpdateV1(peer, updateBOnly, nil))
+
+	stats := peer.PendingStats()
+	assert.Positive(t, stats.Items, "parked items must be reflected")
+	assert.Contains(t, stats.MissingFor, ClientID(1), "missing client 1 must be reflected")
+
+	// After A arrives, pending drains, stats reset.
+	require.NoError(t, ApplyUpdateV1(peer, updateA, nil))
+	statsAfter := peer.PendingStats()
+	assert.Equal(t, 0, statsAfter.Items)
+	assert.Empty(t, statsAfter.MissingFor)
+}

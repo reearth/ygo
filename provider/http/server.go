@@ -3,7 +3,6 @@ package http
 import (
 	"encoding/base64"
 	"io"
-	"math/rand"
 	"net/http"
 	"path"
 	"sync"
@@ -47,9 +46,9 @@ func (s *Server) getOrCreateDoc(room string) *crdt.Doc {
 	if doc, ok := s.docs[room]; ok {
 		return doc
 	}
-	// Use Uint32 to stay within Yjs wire protocol's 53-bit VarUint limit and
-	// match crdt/doc.go's default generation (N-M1).
-	doc := crdt.New(crdt.WithClientID(crdt.ClientID(rand.Uint32())))
+	// Use NewClientID (crypto/rand, uint32) to stay within Yjs wire protocol's
+	// 53-bit VarUint limit and avoid predictable IDs in multi-tenant deployments.
+	doc := crdt.New(crdt.WithClientID(crdt.NewClientID()))
 	s.docs[room] = doc
 	return doc
 }
