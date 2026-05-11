@@ -558,5 +558,5 @@ func TestServer_MaxConnections_HardCapUnderConcurrentBurst(t *testing.T) {
 	assert.LessOrEqual(t, int(maxObserved.Load()), cap,
 		"max concurrent connections (%d) exceeded the cap (%d) — atomic-counter race window",
 		maxObserved.Load(), cap)
-	assert.Greater(t, int(rejected.Load()), 0, "some connections should have been rejected")
+	assert.Positive(t, int(rejected.Load()), "some connections should have been rejected")
 }

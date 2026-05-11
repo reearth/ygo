@@ -1551,7 +1551,7 @@ func TestUnit_Doc_PendingStats_ReflectsParkedItems(t *testing.T) {
 	require.NoError(t, ApplyUpdateV1(peer, updateBOnly, nil))
 
 	stats := peer.PendingStats()
-	assert.Greater(t, stats.Items, 0, "parked items must be reflected")
+	assert.Positive(t, stats.Items, "parked items must be reflected")
 	assert.Contains(t, stats.MissingFor, ClientID(1), "missing client 1 must be reflected")
 
 	// After A arrives, pending drains, stats reset.
