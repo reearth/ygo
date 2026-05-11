@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-04-24
+
+### Added
+
+- **`Doc.PendingStats()` for pending-queue observability (#24)**: returns a snapshot of the pending-structs machinery shipped in v1.2.0 — how many items are parked, how many delete-set ranges are queued, which clients we're blocked on. Cheap (one RLock + small copy). Intended for operational monitoring of out-of-order delta convergence: detecting adversarial peers or persistent convergence gaps from misbehaving clients.
+- **`crdt.NewClientID()` public helper**: exposes the same ClientID generator used internally so callers can produce reproducible test setups or coordinate IDs externally.
+
+### Changed
+
+- **`provider/websocket`: hard-cap connections via `semaphore.Weighted` (#23)**: replaces the previous optimistic atomic-counter + rollback for `MaxConnections` and `MaxPeersPerRoom`. The atomic pattern had a race window where N+ε simultaneous connections could briefly exist past the cap before any were rejected. Semaphores provide a hard guarantee under any burst pattern. Adds `golang.org/x/sync` as a direct dependency.
+- **`crdt`, `provider/http`: ClientID generation now uses `crypto/rand` (#28)**: replaces `math/rand` at both sites. ClientIDs aren't authentication tokens, but predictable IDs in multi-tenant deployments are a footgun. `SECURITY.md` updated with explicit ClientID semantics.
+
 ## [1.4.1] — 2026-04-24
 
 ### Fixed
@@ -222,6 +234,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.5.0]: https://github.com/reearth/ygo/releases/tag/v1.5.0
 [1.4.1]: https://github.com/reearth/ygo/releases/tag/v1.4.1
 [1.4.0]: https://github.com/reearth/ygo/releases/tag/v1.4.0
 [1.3.0]: https://github.com/reearth/ygo/releases/tag/v1.3.0
