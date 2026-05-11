@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`provider/websocket`: hard-cap connections via `semaphore.Weighted` (#23)**: replaces the previous optimistic atomic-counter + rollback for `MaxConnections` and `MaxPeersPerRoom`. The atomic pattern had a race window where N+ε simultaneous connections could briefly exist past the cap before any were rejected. Semaphores provide a hard guarantee under any burst pattern. Adds `golang.org/x/sync` as a direct dependency.
 - **`crdt`, `provider/http`: ClientID generation now uses `crypto/rand` (#28)**: replaces `math/rand` at both sites. ClientIDs aren't authentication tokens, but predictable IDs in multi-tenant deployments are a footgun. `SECURITY.md` updated with explicit ClientID semantics.
 
+### Documentation
+
+- **godoc and invariant comment polish (#30)** — contributed by @Jah-yee. Adds an `Origin Tags` section to the `crdt` package doc explaining the `Origin any` convention, struct-level godoc for `provider/websocket.InjectInfo`, godoc for `YArray.prepareFire`, and an invariant comment on `DeleteSet.applyToPartial` documenting the per-client clock-contiguity assumption.
+
 ## [1.4.1] — 2026-04-24
 
 ### Fixed
