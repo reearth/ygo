@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] — 2026-05-12
+
+### Changed
+
+- **`crdt`: `applyV1Txn` refactored into three helpers (#29)**: the V1 update decoder grew to 277 lines across three releases (#11 pending-structs, #10 cooperative cancellation, v1.4.1 panic-safety). Extracted into `decodeAndPark`, `resolveWithinUpdatePending`, and `drainPending`. Pure refactor — zero behavior change, all existing tests pass without modification.
+
 ## [1.6.0] — 2026-05-12
 
 ### Added
@@ -258,6 +264,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.6.1]: https://github.com/reearth/ygo/releases/tag/v1.6.1
 [1.6.0]: https://github.com/reearth/ygo/releases/tag/v1.6.0
 [1.5.0]: https://github.com/reearth/ygo/releases/tag/v1.5.0
 [1.4.1]: https://github.com/reearth/ygo/releases/tag/v1.4.1
