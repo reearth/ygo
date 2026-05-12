@@ -13,6 +13,23 @@
 //
 // Reference algorithm: https://github.com/yjs/yjs/blob/main/INTERNALS.md
 //
+// # Quick start
+//
+//	doc := crdt.New()
+//	text := doc.GetText("body")
+//	doc.Transact(func(txn *crdt.Transaction) {
+//	    text.Insert(txn, 0, "hello", nil)
+//	})
+//	update := crdt.EncodeStateAsUpdateV1(doc, nil)
+//
+// See the Example* functions for canonical usage patterns.
+//
+// # Stability
+//
+// ygo follows semantic versioning. The v1.x public API is considered
+// stable: new functionality lands as minor releases; bug fixes as patch
+// releases; breaking changes are deferred to v2.
+//
 // # Origin Tags
 //
 // The Origin field on Transaction, ChangeEvent (awareness), and
