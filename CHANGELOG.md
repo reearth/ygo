@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Runnable Examples + quick-start snippets + stability statement (#39)**: 8 new `Example*` functions across `crdt`, `awareness`, `provider/websocket`, `provider/http` test files. Each renders as a runnable, copy-pasteable code block on pkg.go.dev. Each public package's `doc.go` now leads with a `Quick start` snippet and includes a `Stability` section documenting the v1.x compatibility promise.
 
+### Changed
+
+- **`provider/websocket`: split `server.go` into focused files (#21)**: the 956-line `server.go` mixed five concerns (HTTP upgrade, peer lifecycle, sync dispatch, awareness broadcast, persistence). Now organized as `server.go` (Server lifecycle), `peer.go` (peer connection lifecycle), and `persistence.go` (persistence worker). Pure refactor — zero behavior change, no API change.
+
 ## [1.5.0] — 2026-04-24
 
 ### Added
