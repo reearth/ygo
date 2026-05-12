@@ -437,26 +437,63 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		return ErrInvalidUpdate
 	}
 
+	// 1. Decode all items, parking any with future-clock deps or same-client gaps.
+	//    Returns the within-update pending list (items whose parent might resolve
+	//    later in this same update).
+	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients)
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+
+	// 2. Within-update retry pass: items whose parents arrived later in this update.
+	resolveWithinUpdatePending(txn, withinUpdatePending)
+
+	ds, err := decodeDeleteSet(dec)
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+	unresolvableDs := ds.applyToPartial(txn)
+	if len(unresolvableDs.clients) > 0 {
+		txn.doc.store.pendingDs.Merge(unresolvableDs)
+	}
+
+	drainPending(txn)
+
+	return nil
+}
+
+// decodeAndPark walks the V1 update's per-client struct groups, decodes each
+// item, and either:
+//
+//	(a) skips fully-integrated items
+//	(b) parks items with same-client clock gaps in store.pending
+//	(c) integrates GC items directly via store.Append
+//	(d) integrates items whose parent is known via item.integrate
+//	(e) collects items whose parent is unresolved-but-might-be-in-this-update
+//	    into the returned slice for the within-update retry pass.
+//
+// numClients is the count parsed from the header.
+func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64) ([]*Item, error) {
 	var pending []*Item
 
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
 		numStructs, err := dec.ReadVarUint()
 		if err != nil {
-			return wrapUpdateErr(err)
+			return nil, err
 		}
 		totalStructs += numStructs
 		if totalStructs > maxV2Items {
-			return ErrInvalidUpdate
+			return nil, ErrInvalidUpdate
 		}
 		clientU, err := dec.ReadVarUint()
 		if err != nil {
-			return wrapUpdateErr(err)
+			return nil, err
 		}
 		client := ClientID(clientU)
 		clock, err := dec.ReadVarUint()
 		if err != nil {
-			return wrapUpdateErr(err)
+			return nil, err
 		}
 
 		existingEnd := sv.Clock(client)
@@ -464,7 +501,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		for j := uint64(0); j < numStructs; j++ {
 			item, err := decodeItem(dec, txn.doc, client, clock)
 			if err != nil {
-				return wrapUpdateErr(err)
+				return nil, err
 			}
 
 			// Skip structs (tag 10) are clock-range placeholders that are
@@ -546,6 +583,16 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		}
 	}
 
+	return pending, nil
+}
+
+// resolveWithinUpdatePending takes the items deferred during decoding
+// (those whose parent might resolve via later items in the same update)
+// and runs a fixed-point loop: try to integrate each item by resolving its
+// parent from the store. If progress was made, try again with the remaining
+// items. When no progress is made, partition survivors into future-clock
+// (park in store.pending) vs truly-unresolvable (orphan-Append).
+func resolveWithinUpdatePending(txn *Transaction, pending []*Item) {
 	// Retry items whose parent couldn't be resolved during the first pass
 	// because their origin items were in a later client group.
 	for len(pending) > 0 {
@@ -602,16 +649,16 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		}
 		pending = remaining
 	}
+}
 
-	ds, err := decodeDeleteSet(dec)
-	if err != nil {
-		return wrapUpdateErr(err)
-	}
-	unresolvableDs := ds.applyToPartial(txn)
-	if len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
-	}
-
+// drainPending runs the doc-level pending drain. It first retries any
+// previously-parked delete-set entries (pendingDs), then loops over
+// store.pending as long as progress is being made, integrating items and
+// re-parking those still blocked. A panic-safety closure re-parks any
+// unprocessed items back into store.pending before re-raising, so the
+// outer applyV1Txn recover (v1.1.1) can convert the panic to an error.
+// Also retries pendingDs after each successful integration pass.
+func drainPending(txn *Transaction) {
 	// pendingDs may be drainable even if pending items aren't — integrated
 	// items from this update might be targets of previously-parked deletes.
 	if len(txn.doc.store.pendingDs.clients) > 0 {
@@ -687,8 +734,6 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			break
 		}
 	}
-
-	return nil
 }
 
 func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) (*Item, error) {
