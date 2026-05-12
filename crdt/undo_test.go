@@ -149,7 +149,7 @@ func TestUndoManager_UndoContext_PreCancelledReturnsCtxErr(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	did, err := mgr.UndoContext(ctx)
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
 	assert.False(t, did, "Undo must not run when ctx pre-cancelled")
 }
 
@@ -175,7 +175,7 @@ func TestUndoManager_RedoContext_PreCancelledReturnsCtxErr(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	did, err := mgr.RedoContext(ctx)
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
 	assert.False(t, did, "Redo must not run when ctx pre-cancelled")
 }
 

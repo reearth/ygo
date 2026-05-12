@@ -417,7 +417,7 @@ func TestAwareness_SetLocalStateContext_PreCancelledReturnsCtxErr(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := a.SetLocalStateContext(ctx, map[string]any{"name": "x"})
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
 	assert.Empty(t, a.GetLocalState(), "state must not be updated when ctx pre-cancelled")
 }
 
@@ -433,5 +433,5 @@ func TestAwareness_ApplyUpdateContext_PreCancelledReturnsCtxErr(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := a.ApplyUpdateContext(ctx, []byte{0, 0}, nil)
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
 }
