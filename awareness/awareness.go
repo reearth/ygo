@@ -1,6 +1,7 @@
 package awareness
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
@@ -159,6 +160,22 @@ func (a *Awareness) SetLocalState(state map[string]any) {
 		evt := ChangeEvent{Added: added, Updated: updated, Removed: removed}
 		fireObservers(obs, evt)
 	}
+}
+
+// SetLocalStateContext is the context-aware variant of SetLocalState.
+// If ctx is already cancelled, the state is NOT updated and ctx.Err()
+// is returned. Otherwise the state is updated and nil is returned.
+//
+// Like TransactContext (see crdt.Doc.TransactContext), mid-call ctx
+// cancellation is not interrupted — the operation itself is short and
+// uninterruptible. This method provides cooperative entry-point
+// cancellation only.
+func (a *Awareness) SetLocalStateContext(ctx context.Context, state map[string]any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.SetLocalState(state)
+	return nil
 }
 
 // GetLocalState returns the local client's current state (nil if not set or removed).
@@ -363,6 +380,17 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 	}
 
 	return nil
+}
+
+// ApplyUpdateContext is the context-aware variant of ApplyUpdate.
+// If ctx is already cancelled, the update is NOT applied and ctx.Err()
+// is returned. Otherwise the update is applied and the underlying
+// ApplyUpdate's error (or nil) is returned.
+func (a *Awareness) ApplyUpdateContext(ctx context.Context, update []byte, origin any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return a.ApplyUpdate(update, origin)
 }
 
 // StartAutoExpiry starts a background goroutine that periodically calls

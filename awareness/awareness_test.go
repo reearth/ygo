@@ -1,6 +1,7 @@
 package awareness_test
 
 import (
+	"context"
 	"runtime"
 	"testing"
 	"time"
@@ -405,4 +406,32 @@ func TestAwareness_StartAutoExpiry_NoLeakOnDoubleCall(t *testing.T) {
 	assert.LessOrEqual(t, gotAfter-gotBefore, slack,
 		"StartAutoExpiry leaked goroutine: %d before, %d after",
 		gotBefore, gotAfter)
+}
+
+// ---------------------------------------------------------------------------
+// Context-aware methods (#27)
+// ---------------------------------------------------------------------------
+
+func TestAwareness_SetLocalStateContext_PreCancelledReturnsCtxErr(t *testing.T) {
+	a := awareness.New(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := a.SetLocalStateContext(ctx, map[string]any{"name": "x"})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, a.GetLocalState(), "state must not be updated when ctx pre-cancelled")
+}
+
+func TestAwareness_SetLocalStateContext_OkReturnsNil(t *testing.T) {
+	a := awareness.New(0)
+	err := a.SetLocalStateContext(context.Background(), map[string]any{"name": "x"})
+	require.NoError(t, err)
+	assert.Equal(t, "x", a.GetLocalState()["name"])
+}
+
+func TestAwareness_ApplyUpdateContext_PreCancelledReturnsCtxErr(t *testing.T) {
+	a := awareness.New(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := a.ApplyUpdateContext(ctx, []byte{0, 0}, nil)
+	assert.ErrorIs(t, err, context.Canceled)
 }
