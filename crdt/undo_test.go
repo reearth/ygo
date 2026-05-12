@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -133,4 +134,61 @@ func TestUnit_UndoManager_WithYMap_UndoRedo(t *testing.T) {
 	v, ok = m.Get("k")
 	assert.True(t, ok)
 	assert.Equal(t, "v", v)
+}
+
+// ---------------------------------------------------------------------------
+// Context-aware methods (#27)
+// ---------------------------------------------------------------------------
+
+func TestUndoManager_UndoContext_PreCancelledReturnsCtxErr(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	mgr := NewUndoManager(doc, []sharedType{arr})
+	defer mgr.Destroy()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	did, err := mgr.UndoContext(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, did, "Undo must not run when ctx pre-cancelled")
+}
+
+func TestUndoManager_UndoContext_OkReturnsResult(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	mgr := NewUndoManager(doc, []sharedType{arr})
+	defer mgr.Destroy()
+
+	doc.Transact(func(txn *Transaction) { arr.Insert(txn, 0, []any{"x"}) })
+
+	did, err := mgr.UndoContext(context.Background())
+	require.NoError(t, err)
+	assert.True(t, did, "Undo should succeed with one item on the stack")
+}
+
+func TestUndoManager_RedoContext_PreCancelledReturnsCtxErr(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	mgr := NewUndoManager(doc, []sharedType{arr})
+	defer mgr.Destroy()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	did, err := mgr.RedoContext(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, did, "Redo must not run when ctx pre-cancelled")
+}
+
+func TestUndoManager_RedoContext_OkReturnsResult(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	mgr := NewUndoManager(doc, []sharedType{arr})
+	defer mgr.Destroy()
+
+	doc.Transact(func(txn *Transaction) { arr.Insert(txn, 0, []any{"x"}) })
+	mgr.Undo() // put something on the redo stack
+
+	did, err := mgr.RedoContext(context.Background())
+	require.NoError(t, err)
+	assert.True(t, did, "Redo should succeed with one item on the redo stack")
 }

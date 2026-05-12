@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -185,6 +186,29 @@ func (u *UndoManager) Redo() bool {
 	u.mu.Unlock()
 
 	return true
+}
+
+// UndoContext is the context-aware variant of Undo. If ctx is already
+// cancelled, the undo is NOT attempted, false is returned, and ctx.Err()
+// is the second return value. Otherwise the undo proceeds and the result
+// (whether anything was undone) is returned with nil error.
+//
+// Like TransactContext, mid-call ctx cancellation is cooperative; this
+// only guards the entry point.
+func (u *UndoManager) UndoContext(ctx context.Context) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return u.Undo(), nil
+}
+
+// RedoContext is the context-aware variant of Redo. See UndoContext for
+// the ctx semantics.
+func (u *UndoManager) RedoContext(ctx context.Context) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return u.Redo(), nil
 }
 
 // Clear discards all items from both stacks without applying them.
