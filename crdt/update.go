@@ -612,6 +612,19 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		txn.doc.store.pendingDs.Merge(unresolvableDs)
 	}
 
+	drainPending(txn)
+
+	return nil
+}
+
+// drainPending runs the doc-level pending drain. It first retries any
+// previously-parked delete-set entries (pendingDs), then loops over
+// store.pending as long as progress is being made, integrating items and
+// re-parking those still blocked. A panic-safety closure re-parks any
+// unprocessed items back into store.pending before re-raising, so the
+// outer applyV1Txn recover (v1.1.1) can convert the panic to an error.
+// Also retries pendingDs after each successful integration pass.
+func drainPending(txn *Transaction) {
 	// pendingDs may be drainable even if pending items aren't — integrated
 	// items from this update might be targets of previously-parked deletes.
 	if len(txn.doc.store.pendingDs.clients) > 0 {
@@ -687,8 +700,6 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 			break
 		}
 	}
-
-	return nil
 }
 
 func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) (*Item, error) {
