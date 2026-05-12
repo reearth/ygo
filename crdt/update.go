@@ -546,6 +546,29 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		}
 	}
 
+	resolveWithinUpdatePending(txn, pending)
+
+	ds, err := decodeDeleteSet(dec)
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+	unresolvableDs := ds.applyToPartial(txn)
+	if len(unresolvableDs.clients) > 0 {
+		txn.doc.store.pendingDs.Merge(unresolvableDs)
+	}
+
+	drainPending(txn)
+
+	return nil
+}
+
+// resolveWithinUpdatePending takes the items deferred during decoding
+// (those whose parent might resolve via later items in the same update)
+// and runs a fixed-point loop: try to integrate each item by resolving its
+// parent from the store. If progress was made, try again with the remaining
+// items. When no progress is made, partition survivors into future-clock
+// (park in store.pending) vs truly-unresolvable (orphan-Append).
+func resolveWithinUpdatePending(txn *Transaction, pending []*Item) {
 	// Retry items whose parent couldn't be resolved during the first pass
 	// because their origin items were in a later client group.
 	for len(pending) > 0 {
@@ -602,19 +625,6 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		}
 		pending = remaining
 	}
-
-	ds, err := decodeDeleteSet(dec)
-	if err != nil {
-		return wrapUpdateErr(err)
-	}
-	unresolvableDs := ds.applyToPartial(txn)
-	if len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
-	}
-
-	drainPending(txn)
-
-	return nil
 }
 
 // drainPending runs the doc-level pending drain. It first retries any
