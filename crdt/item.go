@@ -28,6 +28,18 @@ type Item struct {
 // offset > 0 is only needed when the item partially overlaps an existing item
 // in the store (a split scenario during update decoding). For Phase 2 all
 // items arrive cleanly (offset = 0).
+//
+// Architecture note: this function is intentionally kept as a single monolith
+// rather than split into helpers (e.g., scanConcurrentInserts, linkInto). Yjs
+// JS and yrs (Rust) keep their equivalents inline for the same reason — the
+// algorithm's live state (left, conflicting, beforeOrigin) spans both the
+// conflict scan and the link phase, making a clean split awkward in any
+// language. V8 and LLVM can transparently absorb helper-function calls; Go's
+// heuristic inliner has a hard ~80-node budget and cannot. A measured
+// extraction attempt regressed BenchmarkApplyUpdateV1/V2 and YText_Insert by
+// 3-10% (see investigation in closed issue #22). Keep monolithic until either
+// the Go compiler's inlining heuristics improve, or a benchmarked split that
+// stays inside the inliner budget is found.
 func (item *Item) integrate(txn *Transaction, offset int) {
 	if offset > 0 {
 		item.ID.Clock += uint64(offset)
