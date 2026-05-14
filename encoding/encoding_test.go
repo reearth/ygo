@@ -437,7 +437,7 @@ func TestEncoder_WriteVarIntE_ValidInputProducesSameBytesAsWriteVarInt(t *testin
 func TestEncoder_WriteVarIntE_OutOfRangeReturnsError(t *testing.T) {
 	e := encoding.NewEncoder()
 	err := e.WriteVarIntE(1 << 56)
-	assert.ErrorIs(t, err, encoding.ErrVarIntOutOfRange)
+	require.ErrorIs(t, err, encoding.ErrVarIntOutOfRange)
 	assert.Empty(t, e.Bytes(), "no bytes should be written on error")
 }
 

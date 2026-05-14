@@ -567,9 +567,9 @@ func TestServer_MaxConnections_HardCapUnderConcurrentBurst(t *testing.T) {
 // captureCtxAdapter implements both PersistenceAdapter and
 // PersistenceAdapterContext. Records whether the ctx-aware path was used.
 type captureCtxAdapter struct {
-	mu            sync.Mutex
-	contextUsed   bool
-	legacyUsed    bool
+	mu             sync.Mutex
+	contextUsed    bool
+	legacyUsed     bool
 	receivedCtxErr func() error // closure to read ctx.Err() at call time
 }
 
