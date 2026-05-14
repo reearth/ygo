@@ -1,6 +1,7 @@
 package websocket_test
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -559,4 +560,93 @@ func TestServer_MaxConnections_HardCapUnderConcurrentBurst(t *testing.T) {
 		"max concurrent connections (%d) exceeded the cap (%d) — atomic-counter race window",
 		maxObserved.Load(), cap)
 	assert.Positive(t, int(rejected.Load()), "some connections should have been rejected")
+}
+
+// --- PersistenceAdapterContext (#35) ---
+
+// captureCtxAdapter implements both PersistenceAdapter and
+// PersistenceAdapterContext. Records whether the ctx-aware path was used.
+type captureCtxAdapter struct {
+	mu            sync.Mutex
+	contextUsed   bool
+	legacyUsed    bool
+	receivedCtxErr func() error // closure to read ctx.Err() at call time
+}
+
+func (a *captureCtxAdapter) LoadDoc(string) ([]byte, error) { return nil, nil }
+
+func (a *captureCtxAdapter) StoreUpdate(room string, update []byte) error {
+	a.mu.Lock()
+	a.legacyUsed = true
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *captureCtxAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
+	a.mu.Lock()
+	a.contextUsed = true
+	a.receivedCtxErr = ctx.Err
+	a.mu.Unlock()
+	return nil
+}
+
+func TestServer_PersistenceAdapterContext_PreferredOverLegacy(t *testing.T) {
+	a := &captureCtxAdapter{}
+	s := ygws.NewServerWithPersistence(a)
+	defer s.Shutdown(context.Background())
+
+	// Trigger a persistence write by calling Apply.
+	err := s.Apply(context.Background(), "room1", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		text := doc.GetText("body")
+		transact(func(txn *crdt.Transaction) {
+			text.Insert(txn, 0, "hello", nil)
+		})
+	})
+	require.NoError(t, err)
+
+	// Allow the persistence goroutine to run.
+	time.Sleep(100 * time.Millisecond)
+
+	a.mu.Lock()
+	contextUsed := a.contextUsed
+	legacyUsed := a.legacyUsed
+	a.mu.Unlock()
+
+	assert.True(t, contextUsed, "ctx-aware StoreUpdateContext should be called when adapter implements it")
+	assert.False(t, legacyUsed, "legacy StoreUpdate should be skipped when ctx variant is available")
+}
+
+// legacyAdapter implements only PersistenceAdapter (no ctx variant).
+type legacyAdapter struct {
+	mu     sync.Mutex
+	called bool
+}
+
+func (a *legacyAdapter) LoadDoc(string) ([]byte, error) { return nil, nil }
+func (a *legacyAdapter) StoreUpdate(room string, update []byte) error {
+	a.mu.Lock()
+	a.called = true
+	a.mu.Unlock()
+	return nil
+}
+
+func TestServer_LegacyPersistenceAdapter_StillWorks(t *testing.T) {
+	a := &legacyAdapter{}
+	s := ygws.NewServerWithPersistence(a)
+	defer s.Shutdown(context.Background())
+
+	err := s.Apply(context.Background(), "room2", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		arr := doc.GetArray("items")
+		transact(func(txn *crdt.Transaction) {
+			arr.Insert(txn, 0, []any{"x"})
+		})
+	})
+	require.NoError(t, err)
+
+	time.Sleep(100 * time.Millisecond)
+
+	a.mu.Lock()
+	called := a.called
+	a.mu.Unlock()
+	assert.True(t, called, "legacy StoreUpdate must still be called for adapters without ctx variant")
 }
