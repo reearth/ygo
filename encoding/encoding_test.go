@@ -420,3 +420,30 @@ func FuzzDecodeAny(f *testing.F) {
 		_, _ = d.ReadAny()
 	})
 }
+
+// --- WriteVarIntE (#26) ---
+
+func TestEncoder_WriteVarIntE_ValidInputProducesSameBytesAsWriteVarInt(t *testing.T) {
+	cases := []int64{0, 1, -1, 63, -63, 64, -64, 1 << 54, -(1 << 54)}
+	for _, v := range cases {
+		a := encoding.NewEncoder()
+		a.WriteVarInt(v)
+		b := encoding.NewEncoder()
+		require.NoError(t, b.WriteVarIntE(v))
+		assert.Equal(t, a.Bytes(), b.Bytes(), "WriteVarInt and WriteVarIntE must produce identical bytes for v=%d", v)
+	}
+}
+
+func TestEncoder_WriteVarIntE_OutOfRangeReturnsError(t *testing.T) {
+	e := encoding.NewEncoder()
+	err := e.WriteVarIntE(1 << 56)
+	require.ErrorIs(t, err, encoding.ErrVarIntOutOfRange)
+	assert.Empty(t, e.Bytes(), "no bytes should be written on error")
+}
+
+func TestEncoder_WriteVarInt_StillPanicsOnOutOfRange(t *testing.T) {
+	assert.Panics(t, func() {
+		e := encoding.NewEncoder()
+		e.WriteVarInt(1 << 56)
+	})
+}

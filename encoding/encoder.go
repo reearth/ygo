@@ -2,10 +2,16 @@ package encoding
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
 )
+
+// ErrVarIntOutOfRange is returned by WriteVarIntE when the magnitude of v
+// exceeds the lib0 VarInt encoding range ((1<<55)-1). The JS Yjs decoder
+// rejects values outside this range, so producing one would be unwire-able.
+var ErrVarIntOutOfRange = errors.New("encoding: VarInt magnitude exceeds lib0 55-bit range")
 
 // Encoder writes values into a growing byte buffer using the lib0 encoding format.
 // Encoder is not safe for concurrent use; each goroutine should use its own instance.
@@ -43,13 +49,14 @@ func (e *Encoder) WriteVarUint(v uint64) {
 	e.buf = append(e.buf, byte(v))
 }
 
-// WriteVarInt encodes a signed integer using the lib0 sign-magnitude format,
-// matching the JavaScript lib0 library's writeVarInt.
-// The sign occupies bit 6 of the first byte; bits 0-5 hold the low 6 bits of
-// the magnitude. Continuation bytes carry 7 data bits each (bit 7 = more).
-// Panics if the magnitude of v exceeds (1<<55)-1, which is the maximum
-// encodable by the lib0 protocol (the decoder rejects anything larger).
-func (e *Encoder) WriteVarInt(v int64) {
+// WriteVarIntE is the error-returning variant of WriteVarInt. Returns
+// ErrVarIntOutOfRange if the magnitude of v exceeds the lib0 55-bit range.
+// Preferred over WriteVarInt for callers who need to surface out-of-range
+// inputs without a panic — for example, encoding pipelines that wrap user
+// input or untrusted data.
+//
+// Successful encoding is byte-identical to WriteVarInt(v) for the same v.
+func (e *Encoder) WriteVarIntE(v int64) error {
 	sign := byte(0)
 	var mag uint64
 	if v < 0 {
@@ -59,11 +66,11 @@ func (e *Encoder) WriteVarInt(v int64) {
 		mag = uint64(v)
 	}
 	if mag > (1<<55)-1 {
-		panic(fmt.Sprintf("encoding: WriteVarInt value %d exceeds 55-bit lib0 VarInt range", v))
+		return ErrVarIntOutOfRange
 	}
 	if mag < 64 {
 		e.buf = append(e.buf, sign|byte(mag))
-		return
+		return nil
 	}
 	e.buf = append(e.buf, 0x80|sign|byte(mag&0x3F))
 	mag >>= 6
@@ -72,6 +79,20 @@ func (e *Encoder) WriteVarInt(v int64) {
 		mag >>= 7
 	}
 	e.buf = append(e.buf, byte(mag))
+	return nil
+}
+
+// WriteVarInt encodes a signed integer using the lib0 sign-magnitude format,
+// matching the JavaScript lib0 library's writeVarInt.
+//
+// Panics if the magnitude of v exceeds (1<<55)-1, which is the maximum
+// encodable by the lib0 protocol (the decoder rejects anything larger).
+// Most callers should prefer WriteVarIntE which returns this case as
+// ErrVarIntOutOfRange instead of panicking.
+func (e *Encoder) WriteVarInt(v int64) {
+	if err := e.WriteVarIntE(v); err != nil {
+		panic(fmt.Sprintf("encoding: WriteVarInt value %d exceeds 55-bit lib0 VarInt range", v))
+	}
 }
 
 // WriteVarString encodes s as VarUint(byteLength) followed by raw UTF-8 bytes.

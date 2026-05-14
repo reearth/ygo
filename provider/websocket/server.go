@@ -88,6 +88,26 @@ type PersistenceAdapter interface {
 	StoreUpdate(room string, update []byte) error
 }
 
+// PersistenceAdapterContext is an optional extension to PersistenceAdapter.
+// Adapters that implement this interface receive a context that is cancelled
+// when the server begins shutdown, letting the adapter abort in-flight writes
+// (network calls, DB queries, etc.) rather than blocking Shutdown indefinitely.
+//
+// The persistence worker checks for this interface at runtime via a type
+// assertion. Adapters that implement only PersistenceAdapter remain fully
+// supported — the worker falls back to StoreUpdate when StoreUpdateContext
+// is unavailable.
+//
+// Pattern mirrors io.WriterTo / http.CloseNotifier and the database/sql/driver
+// Queryer / QueryerContext family in the standard library.
+type PersistenceAdapterContext interface {
+	// StoreUpdateContext is the context-aware variant of StoreUpdate. It is
+	// called with a ctx that is cancelled when Server.Shutdown begins. The
+	// adapter should respect cancellation (e.g., abort the network call or
+	// DB transaction) and return ctx.Err() when ctx is done.
+	StoreUpdateContext(ctx context.Context, room string, update []byte) error
+}
+
 // MemoryPersistence is a thread-safe in-memory PersistenceAdapter that merges
 // all updates into a single V1 snapshot per room. It is the default adapter
 // used when no external persistence is configured and is primarily useful in
