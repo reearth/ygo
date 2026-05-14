@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-05-14
+
+### Added
+
+- **`encoding.Encoder.WriteVarIntE(v int64) error` (#26)**: error-returning sibling for `WriteVarInt`. Returns `ErrVarIntOutOfRange` when v's magnitude exceeds the lib0 55-bit limit instead of panicking. Preferred over `WriteVarInt` for callers that wrap user input or untrusted data. Successful output is byte-identical to `WriteVarInt`. Pattern matches v1.3.0's `TransactE`. Existing `WriteVarInt` unchanged (now a thin wrapper).
+- **`provider/websocket.PersistenceAdapterContext` (#35)**: optional extension interface that lets persistence adapters receive a context cancelled when `Server.Shutdown` begins. The persistence worker type-asserts at runtime and prefers `StoreUpdateContext` when available, falling back to `StoreUpdate` for existing adapters. Pattern matches `io.WriterTo` / `database/sql/driver.QueryerContext`. Existing adapters work unchanged.
+
 ## [1.6.1] — 2026-05-12
 
 ### Changed
@@ -264,6 +271,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.7.0]: https://github.com/reearth/ygo/releases/tag/v1.7.0
 [1.6.1]: https://github.com/reearth/ygo/releases/tag/v1.6.1
 [1.6.0]: https://github.com/reearth/ygo/releases/tag/v1.6.0
 [1.5.0]: https://github.com/reearth/ygo/releases/tag/v1.5.0
