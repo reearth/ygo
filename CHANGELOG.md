@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] — 2026-05-14
+
+### Changed
+
+- **`crdt`: small `Item.integrate` refactor + architecture note (#22)**: extracted the post-insertion housekeeping (ContentMove arbitration, ContentString tracking, ContentType back-pointer, map-key LWW, `addChanged`) into `postIntegrateHousekeeping`. This was the only split that worked under Go's heuristic inliner — `scanConcurrentInserts` and `linkInto` extractions both regressed the hot path by 3-10% because their locals are shared with the conflict-scan loop. Yjs JS and yrs (Rust) keep their equivalents monolithic for the same reason; V8 and LLVM can absorb helper calls transparently, Go cannot. The `Item.integrate` godoc now documents this constraint to spare future maintainers the investigation. Pure refactor — zero behavior change, `benchstat` over n=10 confirms no perf regression on any hot-path benchmark.
+
 ## [1.6.1] — 2026-05-12
 
 ### Changed
@@ -264,6 +270,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.6.2]: https://github.com/reearth/ygo/releases/tag/v1.6.2
 [1.6.1]: https://github.com/reearth/ygo/releases/tag/v1.6.1
 [1.6.0]: https://github.com/reearth/ygo/releases/tag/v1.6.0
 [1.5.0]: https://github.com/reearth/ygo/releases/tag/v1.5.0

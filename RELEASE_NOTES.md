@@ -1,11 +1,11 @@
 ## What's new
 
-- **`crdt` internal refactor (#29)** — `applyV1Txn` (the V1 update decoder) refactored from a 277-line function into a thin orchestrator + three focused helpers (`decodeAndPark`, `resolveWithinUpdatePending`, `drainPending`). Pure refactor: zero behavior change, all existing tests pass without modification.
+- **`crdt` internal refactor + architecture note (#22)** — extracted the post-insertion housekeeping in `Item.integrate` into `postIntegrateHousekeeping`. The hot conflict-scan and link phases stay inline because their live state spans both — Yjs JS and yrs (Rust) keep their equivalents monolithic for the same reason. The `Item.integrate` godoc now documents why, so future maintainers don't re-discover this constraint independently. Pure refactor — zero behavior change, `benchstat` over n=10 confirms no perf regression.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.6.1
+go get github.com/reearth/ygo@v1.6.2
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
