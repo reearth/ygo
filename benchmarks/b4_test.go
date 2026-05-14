@@ -15,7 +15,7 @@
 //  2. Place it at benchmarks/testdata/editing-trace.json
 //  3. Re-run: go test -bench=BenchmarkB4 -benchmem ./benchmarks/
 //
-// # Targets (see ROADMAP.md Phase 8)
+// # Targets
 //
 //	B4 Apply    < 2 s
 //	B4 Encode V1 < 200 ms
