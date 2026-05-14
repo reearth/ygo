@@ -157,6 +157,15 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// Register in the document store.
 	txn.doc.store.Append(item)
 
+	item.postIntegrateHousekeeping(txn)
+}
+
+// postIntegrateHousekeeping runs the per-content-type bookkeeping that happens
+// after an item is linked into the parent's list and registered in the store.
+// Extracted from integrate's post-insertion section because none of its work
+// shares live locals with the conflict scan — register-pressure isolation
+// should keep the inliner's choices for integrate unchanged.
+func (item *Item) postIntegrateHousekeeping(txn *Transaction) {
 	// ContentMove priority arbitration: resolve the target item (splitting if
 	// needed so it covers exactly TargetLen elements) and claim it if we are the
 	// winning move. Lower ClientID wins for concurrent moves from different peers;
