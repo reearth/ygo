@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] — 2026-05-15
+
+### Added
+
+- **`encoding.BigInt` type + `Any` tag 122 support.** lib0's BigInt tag (used by Yjs JS to encode int64 values that don't fit in JS `Number.MAX_SAFE_INTEGER`) is now decoded into a new `encoding.BigInt` named type, and `WriteAny` can encode that type with tag 122. Previously, ygo failed to decode updates containing JS BigInt values. Adds `Encoder.WriteBigInt64` and `Decoder.ReadBigInt64` helpers.
+
+### Fixed
+
+- **Float byte order now matches lib0 and yrs (big-endian).** ygo previously encoded float32 and float64 in little-endian, which silently broke binary compatibility with Yjs JS and yrs for any document containing float values. The README has always claimed binary compatibility; this fixes the gap. The wire format for float `Any` values (tags 123 and 124) is now big-endian, matching [lib0's `writeFloat32`/`writeFloat64`](https://github.com/dmonad/lib0/blob/main/src/encoding.js).
+
+  **Compatibility note**: previously persisted ygo updates containing float values will read different float values after upgrading. Cross-implementation use was already broken before this fix; the breakage was in the previous behavior, not this one. If your deployment stores ygo update bytes long-term and uses raw float values (rather than integers encoded via VarInt), plan for a re-encode pass.
+
 ## [1.7.1] — 2026-05-14
 
 ### Documentation
@@ -282,6 +294,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.8.0]: https://github.com/reearth/ygo/releases/tag/v1.8.0
 [1.7.1]: https://github.com/reearth/ygo/releases/tag/v1.7.1
 [1.7.0]: https://github.com/reearth/ygo/releases/tag/v1.7.0
 [1.6.1]: https://github.com/reearth/ygo/releases/tag/v1.6.1
