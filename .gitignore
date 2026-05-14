@@ -37,3 +37,7 @@ testutil/node_modules/
 
 # /code-review skill output — converted to GitHub issues, not tracked
 code-review-report.md
+
+# Brainstorming specs and plans — planning artifacts stay local; the durable
+# record lives in CHANGELOG, PR descriptions, and issue threads.
+docs/superpowers/
