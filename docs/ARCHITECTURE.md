@@ -16,6 +16,8 @@ provider/{websocket,http}
 
 **Rule:** no upward imports. `encoding/` has zero runtime dependencies. `crdt/` depends only on `encoding/`. `sync/` and `awareness/` depend on `crdt/` and `encoding/`. Providers depend on `sync/` and `awareness/`.
 
+> **Note**: Since v1.0, the library has added several mechanisms not detailed here — the pending-structs queue for out-of-order delivery, structured logging via `slog`, per-peer broadcast queues, and context-aware methods. See [CHANGELOG.md](../CHANGELOG.md) for the per-release picture.
+
 ---
 
 ## `encoding/` — lib0 binary codec
@@ -85,6 +87,12 @@ This guarantees identical final state on all replicas regardless of message arri
 ### StructStore
 
 `map[ClientID][]*Item` — items are appended in clock order per client (append-only). Lookups by ID use binary search.
+
+### Pending-structs queue
+
+When an update references an item whose dependency hasn't arrived yet — a same-client clock gap or a cross-update Origin reference — the item is parked in a per-doc pending queue rather than silently orphaned. The queue drains automatically on each subsequent `ApplyUpdate` when the missing predecessors arrive. This mirrors Yjs JS's `pendingStructs` and yrs's `Store.pending`. See the v1.2.0 CHANGELOG entry for the design.
+
+The same machinery handles delete-set entries that target not-yet-integrated items (`pendingDs`). State-vector computation is unaffected — pending items don't appear in `StateVector()` until they're integrated, so peers correctly retry the missing dependencies.
 
 ### DeleteSet
 
