@@ -9,34 +9,46 @@
 
 It is **binary-compatible** with the JavaScript Yjs reference implementation — updates produced by ygo can be applied by Yjs clients, and vice versa.
 
-## Status
+## API stability
 
-> **This library is production-ready.** All planned phases are complete, the test suite passes, and the B4 benchmark targets are met. See the [CHANGELOG](CHANGELOG.md) for recent security hardening.
+ygo follows [semantic versioning](https://semver.org/). The v1.x public API is stable: new functionality lands as minor releases; bug fixes as patch releases; breaking changes are deferred to v2.
 
-| Component              | Status          |
-|------------------------|-----------------|
-| `encoding/`            | ✅ Complete     |
-| `crdt/` core           | ✅ Complete     |
-| `crdt/types/`          | ✅ Complete     |
-| Update encoding V1     | ✅ Complete     |
-| Update encoding V2     | ✅ Complete     |
-| Sync protocol          | ✅ Complete     |
-| Awareness              | ✅ Complete     |
-| WebSocket handler      | ✅ Complete     |
-| HTTP handler           | ✅ Complete     |
-| Snapshots / GC         | ✅ Complete     |
+## Capabilities
+
+ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (Rust):
+
+- All Y-types: `YText`, `YArray`, `YMap`, `YXmlFragment`, `YXmlElement`, `YXmlText`
+- Both update wire formats (V1 and V2, with V1↔V2 conversion)
+- The y-protocols sync handshake and awareness layer
+- WebSocket and HTTP transport bindings (the core is transport-agnostic)
+- Snapshots, garbage collection, undo manager, persistence adapters
+
+The current release is **v1.7.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
 
 ## Features
 
-- **Pure Go** — no CGO, no V8, no embedded JavaScript engine
-- **Binary-compatible** — interoperates with JS Yjs, Yrs (Rust), and any compliant Yjs client
-- **Full type support** — YText, YArray, YMap, YXmlFragment, YXmlElement, YXmlText
-- **Both update formats** — UpdateV1 and UpdateV2 (with V1↔V2 conversion)
-- **Sync protocol** — implements [y-protocols](https://github.com/yjs/y-protocols) SyncStep1/2 and incremental updates
-- **Awareness** — presence, cursor sharing, and ephemeral state
-- **Snapshots** — point-in-time document history and restore
-- **Transport-agnostic** — core logic has no transport dependency; WebSocket and HTTP handlers are addons
-- **Idiomatic API** — designed for Go developers, not a transliteration of the JS API
+- **Pure Go** — no CGO, no V8, no embedded JavaScript engine.
+- **Binary-compatible** with Yjs JS and yrs. Updates round-trip across all three implementations.
+- **Full Y-type coverage** — `YText`, `YArray`, `YMap`, `YXmlFragment`, `YXmlElement`, `YXmlText`.
+- **Both update formats** — V1 and V2, with V1↔V2 conversion.
+- **Sync protocol** — implements [y-protocols](https://github.com/yjs/y-protocols) `SyncStep1`, `SyncStep2`, and incremental updates.
+- **Awareness** — presence, cursor sharing, ephemeral state.
+- **Snapshots** — point-in-time document history and restore.
+- **Transport-agnostic** — core logic has no transport dependency; WebSocket and HTTP handlers are addons.
+
+Post-v1.0 hardening:
+
+- **Panic-safe transactions** (v1.1.1). If `fn` inside `Transact` panics, the document lock is still released, observers fire with the partial state that was committed before the panic, and the original panic propagates to the caller. No rollback — that's by design, matching Yjs JS and yrs. For atomic batching, recover above `Transact` and reconcile via sync.
+- **Cooperative cancellation** (v1.1.2). `Doc.TransactContext` accepts a `context.Context` and exposes it inside `fn` via `txn.Ctx()`. `fn` can poll `txn.Ctx().Err()` to bail out early when the request context is cancelled.
+- **Error-returning variants** (v1.3.0, v1.6.0, v1.7.0). Sibling methods that surface errors instead of panicking or silently succeeding: `TransactE`, `TransactContextE`, `Awareness.SetLocalStateContext`, `Awareness.ApplyUpdateContext`, `UndoManager.UndoContext`, `UndoManager.RedoContext`, `Encoder.WriteVarIntE`. All additive; original methods unchanged.
+- **Out-of-order delta convergence** (v1.2.0). When an update references an item whose dependency hasn't arrived yet, the item is parked in a per-doc pending queue and integrated automatically when the missing predecessor arrives. Mirrors `pendingStructs` in Yjs JS and `Store.pending` in yrs.
+- **WebSocket hardening** (v1.4.0). Structured logging via `*slog.Logger`, per-message size cap (`MaxMessageBytes`), bounded per-peer broadcast queue with disconnect-on-overflow (`PeerWriteQueueSize`), and the bounded broadcast pattern itself — replacing the previous goroutine-per-broadcast fan-out.
+- **Operational observability** (v1.5.0). `Doc.PendingStats()` returns counts of items parked waiting for dependencies — useful when monitoring convergence in production.
+- **Semaphore-backed hard caps** (v1.5.0). `MaxConnections` and `MaxPeersPerRoom` are now hard guarantees, not optimistic atomic counters with race windows.
+- **`crypto/rand` ClientID** (v1.5.0). Predictable IDs in multi-tenant deployments are a footgun; the default `ClientID` is now cryptographically random. `crdt.NewClientID()` is exposed for callers who want to generate IDs externally.
+- **Context-aware persistence** (v1.7.0). Adapters can opt into `PersistenceAdapterContext` to receive a context cancelled when `Server.Shutdown` begins, letting them abort in-flight DB calls instead of blocking shutdown.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full per-release picture.
 
 ## Requirements
 
@@ -103,6 +115,8 @@ go run ./examples/http-sync
 go run ./examples/snapshot-history
 go run ./examples/collab-editor/server   # then open http://localhost:8080
 ```
+
+**New users**: start with `peer-sync` for the smallest end-to-end demonstration of two docs converging in-process. Jump to `collab-editor` when you want to wire the WebSocket server to a real browser client.
 
 ## WebSocket Server
 
@@ -233,6 +247,71 @@ authorization. A caller who can reach either API can craft updates that
 spoof any client ID, which is equivalent to the authority already
 granted by `GetDoc` + `ApplyUpdateV1`.
 
+## Persistence
+
+The WebSocket server takes an optional `PersistenceAdapter` so room state survives restarts:
+
+```go
+type PersistenceAdapter interface {
+    LoadDoc(room string) ([]byte, error)
+    StoreUpdate(room string, update []byte) error
+}
+```
+
+`LoadDoc` is called once when the first peer connects to a room; the result seeds the in-memory doc. `StoreUpdate` is called on every committed transaction. Writes run on a per-room worker goroutine — slow storage doesn't block peers. Wire an adapter in via `NewServerWithPersistence(adapter)`.
+
+For backend examples (Postgres, Redis, file-system) and the v1.7.0 context-aware extension that lets adapters abort in-flight writes during `Server.Shutdown`, see [docs/PERSISTENCE.md](docs/PERSISTENCE.md).
+
+## Running in production
+
+The library ships several operational hooks. See package godoc for the full reference; here's the short version of what to wire up.
+
+### Logging
+
+`Server.Logger *slog.Logger` defaults to `slog.Default()`. Surfaces slow-peer write failures, sync-dispatch errors, and awareness apply errors at `Warn` level with `room` and `peer` context.
+
+```go
+server := websocket.NewServer()
+server.Logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+```
+
+### Observability
+
+`Doc.PendingStats()` returns a snapshot of the per-doc pending queue: how many items are parked, how many delete-set ranges are queued, which clients we're blocked on. Cheap (one read-lock). Useful when monitoring out-of-order delivery in production.
+
+```go
+stats := doc.PendingStats()
+metrics.PendingItems.Set(float64(stats.Items))
+metrics.PendingDeleteRanges.Set(float64(stats.DeleteRanges))
+```
+
+### Resource limits
+
+All hard-capped (semaphore-backed for connection counts):
+
+- `Server.MaxConnections` — server-wide cap on simultaneous WebSocket peers.
+- `Server.MaxPeersPerRoom` — per-room cap.
+- `Server.MaxRooms` — total-room cap (applies to peer upgrades and `Server.Apply`).
+- `Server.MaxUpdateBytes` — per-update size cap (default 64 MiB).
+- `Server.MaxMessageBytes` — per-message size on the WebSocket read path (default 64 MiB).
+- `Server.PeerWriteQueueSize` — per-peer broadcast queue depth (default 256). When the queue fills, the peer is disconnected.
+
+Each defaults to a sensible value or unlimited where noted.
+
+### Auth
+
+`Server.AuthFunc func(*http.Request) bool` runs before the WebSocket upgrade. Return false to reject:
+
+```go
+server.AuthFunc = func(r *http.Request) bool {
+    return validateBearer(r.Header.Get("Authorization"))
+}
+```
+
+### Graceful shutdown
+
+`Server.Shutdown(ctx)` drains pending writes and closes peers. Adapters that implement `PersistenceAdapterContext` (v1.7.0) receive a context derived from the shutdown signal so they can abort in-flight DB calls instead of waiting for the driver's timeout.
+
 ## Performance
 
 ### Running the benchmarks
@@ -328,6 +407,8 @@ ygo targets compatibility with:
 
 Compatibility is verified by golden-file tests that compare binary output byte-for-byte with Yjs-generated fixtures.
 
+For a Go-vs-Rust port comparison, see [docs/comparison/ygo-vs-yrs.md](docs/comparison/ygo-vs-yrs.md).
+
 ## Gotchas
 
 ### No read methods or observer registration inside `Transact`
@@ -362,6 +443,10 @@ the lock and are safe to use normally.
 Use `crdt.WithClientID(id)` at construction time. Changing the ID after the
 document has started accepting operations will corrupt the item store.
 
+## What's changed since v1.0
+
+Eleven minor and patch releases between v1.1.0 and v1.7.0, focused on hardening: panic safety, out-of-order convergence, WebSocket production hooks, observability, error-returning variants, and an optional context-aware persistence extension. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the design narrative.
+
 ## Contributing
 
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
@@ -370,7 +455,14 @@ For significant changes, open an issue first to discuss what you'd like to chang
 
 ## Security
 
-Please report security vulnerabilities by following the process in [SECURITY.md](SECURITY.md). Do not open public issues for security problems.
+ygo's security model is **defense-in-depth**, not authentication:
+
+- **`ClientID` is collision-avoidance, not authentication.** The protocol does not validate that incoming updates match a peer's declared `ClientID`. Use `Server.AuthFunc` and/or transport-level auth.
+- **Transport security is the embedder's responsibility.** ygo does not enforce TLS, signed updates, or peer authentication. Wrap the WebSocket server behind your usual reverse proxy.
+- **`Server.Apply` and `Server.BroadcastUpdate` grant total write authority.** Treat the `*Server` handle like a database connection. `OnInject` is defense-in-depth, not a substitute for caller-side authorization.
+- **`ClientID` generation uses `crypto/rand`** (v1.5.0). 32-bit space matches Yjs JS for wire compatibility; collision probability at multi-tenant scale is documented in [SECURITY.md](SECURITY.md).
+
+Please report vulnerabilities by following the process in [SECURITY.md](SECURITY.md). Do not open public issues for security problems.
 
 ## License
 

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] — 2026-05-14
+
+### Documentation
+
+- **Documentation refresh.** README updated to reflect the v1.7.0 reality: extended Features list covering panic safety, cooperative cancellation, error-returning variants, out-of-order delta convergence, WebSocket hardening, observability, semaphore-backed resource limits, `crypto/rand` ClientID, and context-aware persistence. New top-level sections: Persistence, Running in production. Security section rewritten to cover the threat model alongside vulnerability-reporting.
+- **`docs/ROADMAP.md` retired.** Replaced with `docs/HISTORY.md`, which covers what was built, the post-1.0 arc, and the upstream-alignment design value. The pre-1.0 phased plan no longer applied.
+- **`docs/PERSISTENCE.md` documents `PersistenceAdapterContext`** (added in v1.7.0) with a Postgres-style example using `db.ExecContext`.
+- **`docs/ARCHITECTURE.md` and `docs/INTERNALS.md`** signpost v1.x additions and link to CHANGELOG. ARCHITECTURE adds a paragraph on the pending-structs queue.
+- **`CONTRIBUTING.md` documents PR conventions** that we settled in practice: Conventional Commits prefixes, the auto-close keyword convention (one `Closes #N` per issue), branch naming, and benchstat discipline for hot-path changes.
+- **`.github/PULL_REQUEST_TEMPLATE.md` aligned** with actual practice — CHANGELOG entries go into the next version's heading (no `[Unreleased]` section).
+
 ## [1.7.0] — 2026-05-14
 
 ### Added
@@ -271,6 +282,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Doc.TransactContext` added for context-aware transaction entry.
 - WebSocket `Server.Shutdown(ctx)` closes all peer connections and waits for goroutines to exit.
 
+[1.7.1]: https://github.com/reearth/ygo/releases/tag/v1.7.1
 [1.7.0]: https://github.com/reearth/ygo/releases/tag/v1.7.0
 [1.6.1]: https://github.com/reearth/ygo/releases/tag/v1.6.1
 [1.6.0]: https://github.com/reearth/ygo/releases/tag/v1.6.0

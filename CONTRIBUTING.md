@@ -107,6 +107,56 @@ Breaking changes must include `BREAKING CHANGE:` in the footer or `!` after the 
 feat(sync)!: change SyncStep2 message layout for V2 updates
 ```
 
+## PR conventions
+
+We follow a few conventions that aren't enforced by tooling but help keep the project tidy. Reviewers may push back if these aren't met.
+
+### Commit messages
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) prefixes: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `test:`, `perf:`. Add a scope when it adds information:
+
+```
+feat(crdt): add TransactE error variant (#14)
+fix(provider/websocket): plug runWriter goroutine leak (#33)
+docs(persistence): document PersistenceAdapterContext extension
+```
+
+### Closing issues
+
+Use a separate `Closes #N` keyword for each issue your PR resolves. Comma-separated lists like `Closes #A, #B, #C` only close the first issue — GitHub's auto-close parser ignores the rest. The right form:
+
+```
+Closes #14, closes #15, closes #16
+```
+
+See [GitHub's docs on closing keywords](https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue#linking-a-pull-request-to-an-issue-using-a-keyword) for the full list of recognised verbs.
+
+### Branch naming
+
+- `chore/v<version>-<topic>` for release-targeted work (e.g., `chore/v1.7.0-additive-context-and-errors`)
+- `chore/<topic>` otherwise
+- `fix/<topic>` for isolated bug fixes
+
+### Hot-path changes need benchstat
+
+Changes inside `Item.integrate`, `applyV1Txn`, or other functions called once per item per update must include a `benchstat` comparison over at least n=10 samples:
+
+```bash
+git checkout main
+go test -bench=ApplyUpdateV1 -benchmem -count=10 -run=^$ ./crdt/ > before.txt
+
+git checkout your-branch
+go test -bench=ApplyUpdateV1 -benchmem -count=10 -run=^$ ./crdt/ > after.txt
+
+benchstat before.txt after.txt
+```
+
+Three samples are not enough to distinguish real change from noise — we found this out the hard way (see closed issue #22). The PR description should include the `benchstat` output for any row that changed.
+
+### CHANGELOG entry
+
+Add your change under the next version's heading in `CHANGELOG.md`. We don't use an `[Unreleased]` section — entries go directly into the version they ship in.
+
 ## Pull Request Checklist
 
 Before opening a PR ensure:

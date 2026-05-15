@@ -2,6 +2,8 @@
 
 Deep-dive reference for contributors working on the CRDT core, encoding layer, or wire protocol.
 
+> **Note**: Since v1.0, several mechanisms shipped that aren't covered here — pending-structs for out-of-order delivery, structured logging, per-peer broadcast queues, context-aware sibling methods, the panic-safe transaction contract. See [CHANGELOG.md](../CHANGELOG.md) for the per-release picture.
+
 ## VarUint encoding
 
 Each byte contributes 7 bits of data. The MSB is a continuation flag: `1` means another byte follows, `0` means this is the last byte. Bits are packed least-significant-first.

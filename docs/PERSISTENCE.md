@@ -350,3 +350,61 @@ func TestAdapter(t *testing.T, adapter PersistenceAdapter) {
     }
 }
 ```
+
+---
+
+## Context-aware adapters (v1.7.0+)
+
+The `PersistenceAdapter` interface is unchanged. v1.7.0 added an optional extension that adapters can implement to receive a `context.Context` cancelled when `Server.Shutdown` begins:
+
+```go
+type PersistenceAdapterContext interface {
+    StoreUpdateContext(ctx context.Context, room string, update []byte) error
+}
+```
+
+The persistence worker checks for this interface at runtime via a type assertion. Adapters that implement both `PersistenceAdapter` and `PersistenceAdapterContext` get the context-aware path; others fall back to `StoreUpdate` with no behavior change.
+
+### When to implement it
+
+Implement `PersistenceAdapterContext` when your `StoreUpdate` body can take longer than a few hundred milliseconds — typical for adapters that hit a network or slow disk. Otherwise the legacy interface is fine.
+
+### Example: Postgres adapter that respects ctx
+
+```go
+type PostgresAdapter struct {
+    db *sql.DB
+}
+
+func (p *PostgresAdapter) LoadDoc(room string) ([]byte, error) {
+    var data []byte
+    err := p.db.QueryRow(
+        "SELECT state FROM rooms WHERE name = $1", room,
+    ).Scan(&data)
+    if errors.Is(err, sql.ErrNoRows) {
+        return nil, nil
+    }
+    return data, err
+}
+
+func (p *PostgresAdapter) StoreUpdate(room string, update []byte) error {
+    return p.storeUpdate(context.Background(), room, update)
+}
+
+func (p *PostgresAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
+    return p.storeUpdate(ctx, room, update)
+}
+
+func (p *PostgresAdapter) storeUpdate(ctx context.Context, room string, update []byte) error {
+    _, err := p.db.ExecContext(ctx,
+        "INSERT INTO updates(room, payload) VALUES ($1, $2)",
+        room, update,
+    )
+    return err
+}
+```
+
+During `Server.Shutdown`, the in-flight `ExecContext` call sees the context cancellation and returns early instead of waiting for the database driver's default timeout.
+
+This pattern mirrors `io.WriterTo`, `http.CloseNotifier`, and `database/sql/driver.QueryerContext` in the standard library — extension interfaces that callers can opt into without breaking older implementations.
+```
