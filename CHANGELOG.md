@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] — 2026-05-18
+
+### Added
+
+- **`awareness.Awareness.SetMaxBytes(n int64)`** (#48): caps the cumulative byte size of awareness state held in one Awareness instance across all remote clients merged via `ApplyUpdate`. A value of 0 (the default) is unlimited. Incoming entries that would push the total past the cap are silently dropped (treated as null), matching the existing pattern for oversized-state handling.
+- **`provider/websocket.Server.MaxAwarenessBytesPerRoom int64`** (#48): server-level config that forwards `SetMaxBytes` to each room's `Awareness` at room creation. Caps total awareness state per room.
+
+### Fixed
+
+- **`crdt`: `Item.integrate` now resolves `Right` from `OriginRight` (#65, #68)**: the YATA conflict-scan loop in `Item.integrate` terminates on `o != item.Right`, but `item.Right` was never populated from `item.OriginRight` before the loop ran. When an incoming item declared a right boundary via `OriginRight`, the scan had no upper bound and placed the item past concurrent items that share the same `Origin`. This caused divergence with Yjs JS and yrs on any update whose items used `OriginRight` — including local inserts in the middle of same-client runs and remote inserts that should respect a known right neighbour. Mirrors Yjs JS's `getItemCleanStart(this.rightOrigin)` call at the top of `Item.integrate`.
+  - Adds a new `StructStore.getItemCleanStart(txn, id)` helper that mirrors the existing `getItemCleanEnd`, splitting an existing item so the returned item starts exactly at the given clock.
+  - Regression coverage: 5 new tests in `crdt/yata_origin_right_test.go` covering basic right-boundary placement, conflicting right-origins, split-boundary right-origins, three-replica convergence, and the deleted-right-neighbour case. No measurable perf regression on `BenchmarkApplyUpdateV1`, `BenchmarkYText_Insert`, or `BenchmarkTwoPeerConvergence` (benchstat over n=5; differences within noise).
+- **`awareness`: cap on per-state key count (#48 vector A)**: a state JSON object with thousands of small keys (e.g. `{"k1":1,...,"k65535":1}`) passed the existing 1 MiB byte cap (~10 bytes per entry × 65k entries ≈ 650 KiB) but materialised into a multi-MB `map[string]any`. After `json.Unmarshal`, states with more than 1,000 top-level keys are now dropped silently (treated as null).
+
 ## [1.8.0] — 2026-05-15
 
 ### Added
