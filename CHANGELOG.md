@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`crdt`: cap on pending-items queue depth (#46)**: items whose dependencies have not yet arrived are parked in `StructStore.pending.items`. Previously this queue was unbounded — a malicious peer could craft a single max-size update full of items referencing far-future clocks and park multi-GB of items, OOM'ing the server. Now capped at 100,000 by default (configurable via the new `crdt.WithMaxPendingItems` option or `provider/websocket.Server.MaxPendingItems` / `provider/http.Server.MaxPendingItems`). Updates that would exceed the cap return `ErrInvalidUpdate`.
 - **`provider/websocket`: initial read deadline on connections (#47)**: the WebSocket read loop had no read deadline before the first message. With `MaxConnections == 0` (the default), an attacker could complete handshakes on many connections and then send nothing, holding goroutines + buffers indefinitely (slow-loris). Now an initial `HandshakeTimeout` (default 30s, configurable via `Server.HandshakeTimeout`) closes any connection that doesn't send a first message in time. The deadline is cleared after the first successful read.
 
+### Documentation
+
+- **CSWSH warning on `Server.AllowedOrigins` (#49)**: godoc on the `AllowedOrigins` field now explicitly warns about Cross-Site WebSocket Hijacking when set to `"*"`. `SECURITY.md` adds a CSWSH entry to the threat model with mitigation guidance.
+
 ## [1.7.1] — 2026-05-14
 
 ### Documentation

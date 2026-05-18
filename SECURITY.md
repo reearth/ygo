@@ -24,6 +24,7 @@ You can expect an acknowledgement within **48 hours** and a resolution timeline 
 ## Threat Model
 
 - **Wire format**: ygo validates all incoming binary updates (V1 and V2) but does **not** authenticate them. Applying an update from an untrusted peer is safe in the sense that it cannot crash the process or exhaust unbounded memory, but it can modify the document. Authentication and authorisation are the responsibility of the transport layer (e.g. the WebSocket `AuthFunc` hook).
+- **Cross-Site WebSocket Hijacking (CSWSH)**: setting `Server.AllowedOrigins` to `"*"` disables same-origin protection. A malicious page visited by the user can then open a WebSocket to this server and exercise the user's session if authentication is carried by a cookie. Mitigations: (a) use a specific allow-list of origins rather than `"*"`; (b) use `AuthFunc` with tokens carried explicitly (subprotocol or query parameter), not cookies; (c) deploy behind a reverse proxy that enforces origin checks at the edge. See #49.
 - **Denial of service**: the following resource limits are enforced on untrusted input:
   - Binary update: max 1 048 576 items per update (`maxV2Items`); max `math.MaxInt32` length per field
   - HTTP POST body and WebSocket frame: max 64 MiB (`maxUpdateBytes` / `maxWSMessageBytes`)

@@ -197,6 +197,14 @@ type Server struct {
 	// If the slice is empty the server falls back to a same-origin check:
 	// the request Origin header must match the HTTP Host header. Non-browser
 	// clients that omit the Origin header are always permitted.
+	//
+	// Security warning: setting AllowedOrigins to "*" disables same-origin
+	// protection and enables Cross-Site WebSocket Hijacking (CSWSH) — a
+	// malicious page that the user visits can open a WebSocket to this
+	// server and act as that user if authentication is carried by a session
+	// cookie. Use "*" only when AuthFunc validates tokens carried explicitly
+	// (bearer tokens in the WebSocket subprotocol or a query parameter), not
+	// when relying on cookie-based auth. See SECURITY.md.
 	AllowedOrigins []string
 
 	// MaxConnections is the server-wide cap on simultaneous WebSocket peers.
