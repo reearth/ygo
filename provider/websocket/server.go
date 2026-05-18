@@ -244,6 +244,12 @@ type Server struct {
 	// Zero (the default) uses 256, sized for typical sync workloads.
 	PeerWriteQueueSize int
 
+	// MaxPendingItems caps the per-document pending-items queue depth. The
+	// queue holds items whose dependencies have not yet arrived, waiting for
+	// out-of-order delivery to resolve. Zero or negative uses the crdt default
+	// (100,000). See crdt.WithMaxPendingItems and issue #46.
+	MaxPendingItems int
+
 	// connSem enforces MaxConnections as a hard cap. Lazily initialised on
 	// first ServeHTTP. nil when MaxConnections == 0 (unlimited).
 	connSem     *semaphore.Weighted
@@ -393,8 +399,12 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 	if s.MaxRooms > 0 && len(s.rooms) >= s.MaxRooms {
 		return nil, ErrTooManyRooms
 	}
+	docOpts := []crdt.DocOption{}
+	if s.MaxPendingItems > 0 {
+		docOpts = append(docOpts, crdt.WithMaxPendingItems(s.MaxPendingItems))
+	}
 	r := &room{
-		doc:       crdt.New(),
+		doc:       crdt.New(docOpts...),
 		awareness: awareness.New(0),
 		peers:     make(map[*peer]struct{}),
 	}

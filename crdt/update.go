@@ -446,7 +446,9 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 
 	// 2. Within-update retry pass: items whose parents arrived later in this update.
-	resolveWithinUpdatePending(txn, withinUpdatePending)
+	if err := resolveWithinUpdatePending(txn, withinUpdatePending); err != nil {
+		return err
+	}
 
 	ds, err := decodeDeleteSet(dec)
 	if err != nil {
@@ -540,6 +542,9 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			// with the store's current clock as the watermark — when the store
 			// reaches that clock, the missing predecessor may be available.
 			if clock > existingEnd {
+				if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
+					return nil, wrapUpdateErr(ErrInvalidUpdate)
+				}
 				if txn.doc.store.pending == nil {
 					txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
 				}
@@ -592,7 +597,8 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 // parent from the store. If progress was made, try again with the remaining
 // items. When no progress is made, partition survivors into future-clock
 // (park in store.pending) vs truly-unresolvable (orphan-Append).
-func resolveWithinUpdatePending(txn *Transaction, pending []*Item) {
+// Returns ErrInvalidUpdate (wrapped) if the pending queue cap is exceeded.
+func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 	// Retry items whose parent couldn't be resolved during the first pass
 	// because their origin items were in a later client group.
 	for len(pending) > 0 {
@@ -634,6 +640,9 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) {
 			//     they survive re-encoding. Matches the pre-#11 fallback.
 			for _, item := range remaining {
 				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+					if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
+						return wrapUpdateErr(ErrInvalidUpdate)
+					}
 					if txn.doc.store.pending == nil {
 						txn.doc.store.pending = &pendingUpdate{
 							missing: make(StateVector),
@@ -649,6 +658,7 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) {
 		}
 		pending = remaining
 	}
+	return nil
 }
 
 // drainPending runs the doc-level pending drain. It first retries any

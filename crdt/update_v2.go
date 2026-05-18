@@ -671,6 +671,9 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			// with the store's current clock as the watermark — when the store
 			// reaches that clock, the missing predecessor may be available.
 			if clock > existingEnd {
+				if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
+					return wrapUpdateErr(ErrInvalidUpdate)
+				}
 				if txn.doc.store.pending == nil {
 					txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
 				}
@@ -734,6 +737,9 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			//     they survive re-encoding. Matches the pre-#11 fallback.
 			for _, item := range remaining {
 				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+					if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
+						return wrapUpdateErr(ErrInvalidUpdate)
+					}
 					if txn.doc.store.pending == nil {
 						txn.doc.store.pending = &pendingUpdate{
 							missing: make(StateVector),

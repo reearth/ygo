@@ -1560,3 +1560,52 @@ func TestUnit_Doc_PendingStats_ReflectsParkedItems(t *testing.T) {
 	assert.Equal(t, 0, statsAfter.Items)
 	assert.Empty(t, statsAfter.MissingFor)
 }
+
+func TestUnit_Doc_MaxPendingItems_CapsParkedItems(t *testing.T) {
+	// Build a doc with a tiny cap and craft an update that would
+	// otherwise park many items in the pending queue. Cap should
+	// fire before the queue grows unbounded.
+	//
+	// Producer A inserts a "seed" item (clock 0). Producer B sees A's
+	// state and inserts 10 further items (each referencing A's item via
+	// Origin). We give the consumer B's update without the seed, so all
+	// 10 items reference a clock the consumer doesn't have and get parked.
+	// With a cap of 5 the apply should fail.
+	a := newTestDoc(1)
+	arrA := a.GetArray("arr")
+	a.Transact(func(txn *Transaction) { arrA.Insert(txn, 0, []any{"seed"}) })
+	seedSV := a.store.StateVector() // state vector after seed: {1: 1}
+
+	b := newTestDoc(2)
+	require.NoError(t, ApplyUpdateV1(b, EncodeStateAsUpdateV1(a, nil), nil))
+	arrB := b.GetArray("arr")
+	for i := 0; i < 10; i++ {
+		idx := i + 1
+		b.Transact(func(txn *Transaction) { arrB.Insert(txn, idx, []any{"item"}) })
+	}
+	// Build an update that omits the seed item: B's new items reference A's
+	// clock but the consumer only gets B's additions.
+	updateBOnly, err := DiffUpdateV1(EncodeStateAsUpdateV1(b, nil), seedSV)
+	require.NoError(t, err)
+
+	doc := New(WithMaxPendingItems(5), WithClientID(99))
+	err = ApplyUpdateV1(doc, updateBOnly, nil)
+	require.ErrorIs(t, err, ErrInvalidUpdate, "applying update that parks > cap items should fail")
+
+	stats := doc.PendingStats()
+	assert.LessOrEqual(t, stats.Items, 5, "pending queue must not exceed the configured cap")
+}
+
+func TestUnit_Doc_MaxPendingItems_DefaultIsHigh(t *testing.T) {
+	doc := New()
+	assert.Equal(t, defaultMaxPendingItems, doc.maxPendingItemsLimit())
+
+	doc2 := New(WithMaxPendingItems(0))
+	assert.Equal(t, defaultMaxPendingItems, doc2.maxPendingItemsLimit(), "zero == default")
+
+	doc3 := New(WithMaxPendingItems(-1))
+	assert.Equal(t, defaultMaxPendingItems, doc3.maxPendingItemsLimit(), "negative == default")
+
+	doc4 := New(WithMaxPendingItems(42))
+	assert.Equal(t, 42, doc4.maxPendingItemsLimit())
+}
