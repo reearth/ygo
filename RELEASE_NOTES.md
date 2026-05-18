@@ -1,16 +1,15 @@
 ## What's new
 
-Four items bundled — two from an external contributor's lib0 wire-compat fix, two from a security audit, plus a documentation hardening.
+A YATA correctness fix and two awareness DoS hardenings, surfaced by an external bug report (#65) and a follow-up architectural audit.
 
-- **Lib0 `Any` `BigInt` tag support + float byte-order fix** (#45, contributed by @zombiek731). Adds `encoding.BigInt` and `WriteAny`/`ReadAny` support for lib0's `Any` tag 122. Fixes a long-standing wire-compat bug: ygo encoded `float32`/`float64` `Any` values in little-endian, but lib0 and yrs use big-endian. The README has always claimed Yjs binary compatibility; this finally honors it for documents containing float or BigInt values. See the compatibility note in CHANGELOG for the persisted-update implication.
-- **Cap on the pending-items queue** (#46). `StructStore.pending.items` was previously unbounded. A malicious peer could craft a single max-size update full of items referencing far-future clocks and OOM the server. Now capped at 100,000 by default. Configurable via `crdt.WithMaxPendingItems` and `Server.MaxPendingItems` on both providers.
-- **WebSocket initial read deadline** (#47). The read loop had no deadline before the first message; with `MaxConnections == 0` (default), an attacker could complete handshakes and sit idle, exhausting goroutines. New `Server.HandshakeTimeout` (default 30s) closes idle connections; deadline is cleared after the first successful read.
-- **CSWSH warning on `AllowedOrigins`** (#49). Documentation update: setting `AllowedOrigins` to `"*"` disables same-origin protection and enables Cross-Site WebSocket Hijacking. The godoc and `SECURITY.md` now make this explicit with mitigation guidance.
+- **YATA `OriginRight` boundary fix** (#65, #68). `Item.integrate`'s conflict-scan loop terminated on `o != item.Right`, but `item.Right` was never resolved from `item.OriginRight` before the loop ran. When an incoming item declared a right boundary via `OriginRight`, the scan had no upper bound and placed the item past concurrent items that share the same `Origin` — causing divergence with Yjs JS and yrs on a class of updates that turned out to include local inserts in the middle of same-client runs as well as remote integration. Now resolves via a new `StructStore.getItemCleanStart` helper at the top of `integrate`, mirroring Yjs JS. 5 new regression tests in `crdt/yata_origin_right_test.go`; no perf regression on the integrate hot path (benchstat n=5).
+- **Awareness per-state key cap** (#48, vector A). A small JSON state object with thousands of keys (e.g. `{"k1":1,...,"k65535":1}`) passed the existing 1 MiB byte cap but materialised into a multi-MB `map[string]any`. States with more than 1,000 top-level keys are now dropped silently (treated as null), matching the existing pattern for oversized-state handling.
+- **Awareness per-room byte cap** (#48, vector B). Total wire-applied awareness state per `Awareness` instance was unbounded — a single peer could claim up to ~10 GiB by spreading large states across 10,000 clientIDs. New `Awareness.SetMaxBytes(n int64)` API; `provider/websocket.Server.MaxAwarenessBytesPerRoom` plumbs the cap to each room at creation. Default is unlimited (backward compatible); suggested production value is 100 MiB.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.8.0
+go get github.com/reearth/ygo@v1.8.1
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
