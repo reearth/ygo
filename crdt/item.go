@@ -43,6 +43,17 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		return
 	}
 
+	// Resolve the right boundary from OriginRight (Yjs/yrs parity). The
+	// conflict-scan loop below terminates on `o != item.Right`, so without
+	// this resolution the loop has no upper bound and can place the item
+	// past concurrent items that share the same Origin — see issue #65 and
+	// the broader OriginRight gaps in #68. Mirrors Yjs JS's
+	// `if (this.rightOrigin !== null) this.right = getItemCleanStart(...)`
+	// at the top of Item.integrate.
+	if item.Right == nil && item.OriginRight != nil {
+		item.Right = txn.doc.store.getItemCleanStart(txn, *item.OriginRight)
+	}
+
 	// Determine the starting scan position: immediately right of the left origin.
 	left := item.Left
 	var o *Item
