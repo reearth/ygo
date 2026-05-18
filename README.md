@@ -295,6 +295,7 @@ All hard-capped (semaphore-backed for connection counts):
 - `Server.MaxUpdateBytes` — per-update size cap (default 64 MiB).
 - `Server.MaxMessageBytes` — per-message size on the WebSocket read path (default 64 MiB).
 - `Server.PeerWriteQueueSize` — per-peer broadcast queue depth (default 256). When the queue fills, the peer is disconnected.
+- `Server.MaxPendingItems` — per-document cap on items parked in the out-of-order pending queue (default 100,000). When the cap is reached, updates that would park additional items return `ErrInvalidUpdate`. Defends against a crafted update full of far-future-clock items that would otherwise grow the queue unboundedly. Same cap is available at the doc level via `crdt.WithMaxPendingItems(n)`.
 
 Each defaults to a sensible value or unlimited where noted.
 

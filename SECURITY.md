@@ -29,6 +29,7 @@ You can expect an acknowledgement within **48 hours** and a resolution timeline 
   - HTTP POST body and WebSocket frame: max 64 MiB (`maxUpdateBytes` / `maxWSMessageBytes`)
   - Awareness update: max 100 000 client entries (`maxAwarenessClients`); max 1 MiB per client state (`maxAwarenessStateBytes`)
   - `ReadAny` recursion: max 100 levels deep (`maxAnyDepth`)
+  - Per-document pending-items queue: max 100 000 parked items by default (`defaultMaxPendingItems`; configurable via `crdt.WithMaxPendingItems` or `Server.MaxPendingItems`). Items whose `Origin`/`OriginRight` references a clock not yet integrated are parked in this queue and retried when the dependency arrives — the cap prevents a crafted update full of far-future-clock items from growing the queue without bound. Updates that would exceed the cap return `ErrInvalidUpdate`. (Added in v1.8.0; see #46.)
 ### ClientID semantics
 
 `crdt.ClientID` is a 32-bit value generated via `crypto/rand` and used to
