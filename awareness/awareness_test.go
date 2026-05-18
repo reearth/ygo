@@ -461,10 +461,10 @@ func TestUnit_Awareness_ApplyUpdate_StateKeyCountExceeded_DropsState(t *testing.
 	b = append(b, '}')
 
 	enc := encoding.NewEncoder()
-	enc.WriteVarUint(1)            // numClients
-	enc.WriteVarUint(999)          // clientID
-	enc.WriteVarUint(1)            // clock
-	enc.WriteVarString(string(b))  // state with too many keys
+	enc.WriteVarUint(1)           // numClients
+	enc.WriteVarUint(999)         // clientID
+	enc.WriteVarUint(1)           // clock
+	enc.WriteVarString(string(b)) // state with too many keys
 
 	a := awareness.New(1)
 	require.NoError(t, a.ApplyUpdate(enc.Bytes(), nil),
@@ -586,7 +586,7 @@ func itoa(n int) string {
 func buildAwarenessPayload(t *testing.T, clientID uint64, clock uint64, jsonState string) []byte {
 	t.Helper()
 	enc := encoding.NewEncoder()
-	enc.WriteVarUint(1)            // numClients
+	enc.WriteVarUint(1) // numClients
 	enc.WriteVarUint(clientID)
 	enc.WriteVarUint(clock)
 	enc.WriteVarString(jsonState)

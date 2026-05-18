@@ -117,9 +117,9 @@ type Awareness struct {
 	// entries that arrived via ApplyUpdate are counted; SetLocalState is
 	// excluded because the local client's state is set by trusted embedder
 	// code, not adversarial wire input.
-	wireBytes  map[uint64]int
+	wireBytes   map[uint64]int
 	activeBytes int64 // sum of wireBytes values
-	maxBytes   int64 // 0 = unlimited (default; backward compatible)
+	maxBytes    int64 // 0 = unlimited (default; backward compatible)
 }
 
 // New creates an Awareness instance for the given client.
