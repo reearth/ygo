@@ -95,6 +95,36 @@ func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock u
 	return item // item is now the left half, ending at clock
 }
 
+// getItemCleanStart returns the item starting at exactly (client, clock).
+// If the item containing that position starts before clock it is split so the
+// returned item starts exactly at clock. Used when a new item's right-origin
+// falls inside an existing multi-character item — the conflict-scan loop in
+// Item.integrate needs the right boundary to be a clean item start so the
+// loop terminates at the correct position.
+//
+// Mirrors Yjs JS's `getItemCleanStart` and yrs's `get_item_clean_start`.
+// Returns nil if no item contains the given clock (e.g. the target hasn't
+// been integrated yet — the caller is responsible for parking via the
+// pending queue in that case).
+func (s *StructStore) getItemCleanStart(txn *Transaction, id ID) *Item {
+	item := s.Find(id)
+	if item == nil {
+		return nil
+	}
+	if item.ID.Clock == id.Clock {
+		return item
+	}
+	// Guard against malformed updates where id.Clock < item.ID.Clock: Find
+	// shouldn't return such an item, but bail defensively to avoid producing
+	// an invalid splitAt that would panic in Splice.
+	if id.Clock < item.ID.Clock {
+		return item
+	}
+	// Split so the right half starts exactly at id.Clock.
+	splitAt := int(id.Clock - item.ID.Clock)
+	return splitItem(txn, item, splitAt)
+}
+
 // StateVector computes the current state vector: for each client, the clock of
 // the last item + its length (i.e. the next expected clock from that client).
 func (s *StructStore) StateVector() StateVector {

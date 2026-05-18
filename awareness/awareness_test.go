@@ -435,3 +435,176 @@ func TestAwareness_ApplyUpdateContext_PreCancelledReturnsCtxErr(t *testing.T) {
 	err := a.ApplyUpdateContext(ctx, []byte{0, 0}, nil)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+// ---------------------------------------------------------------------------
+// DoS caps for issue #48
+// ---------------------------------------------------------------------------
+
+// Vector A: a single state JSON object with thousands of keys passes the
+// existing 1 MiB byte cap (a small int value per key fits comfortably in
+// 1 MiB at ~10 bytes/key) but materialises into a huge map[string]any.
+// The cap on key count must drop such states.
+func TestUnit_Awareness_ApplyUpdate_StateKeyCountExceeded_DropsState(t *testing.T) {
+	// Build a JSON object with maxStateKeys + 100 keys. Total byte size will
+	// be well under the 1 MiB ErrStateTooLarge threshold for trivial values.
+	var b []byte
+	b = append(b, '{')
+	const numKeys = 1100 // > maxStateKeys (1000)
+	for i := 0; i < numKeys; i++ {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = append(b, []byte(`"k`)...)
+		b = append(b, []byte(itoa(i))...)
+		b = append(b, []byte(`":1`)...)
+	}
+	b = append(b, '}')
+
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(1)           // numClients
+	enc.WriteVarUint(999)         // clientID
+	enc.WriteVarUint(1)           // clock
+	enc.WriteVarString(string(b)) // state with too many keys
+
+	a := awareness.New(1)
+	require.NoError(t, a.ApplyUpdate(enc.Bytes(), nil),
+		"oversized-key-count states are dropped silently, not errored")
+	assert.NotContains(t, a.GetStates(), uint64(999),
+		"client with > maxStateKeys keys must be dropped (treated as null)")
+}
+
+func TestUnit_Awareness_ApplyUpdate_StateAtKeyLimit_Accepted(t *testing.T) {
+	// Sanity: a state at exactly the limit (1000 keys) is accepted.
+	var b []byte
+	b = append(b, '{')
+	const numKeys = 1000 // == maxStateKeys
+	for i := 0; i < numKeys; i++ {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = append(b, []byte(`"k`)...)
+		b = append(b, []byte(itoa(i))...)
+		b = append(b, []byte(`":1`)...)
+	}
+	b = append(b, '}')
+
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(1)
+	enc.WriteVarUint(7)
+	enc.WriteVarUint(1)
+	enc.WriteVarString(string(b))
+
+	a := awareness.New(1)
+	require.NoError(t, a.ApplyUpdate(enc.Bytes(), nil))
+	assert.Contains(t, a.GetStates(), uint64(7),
+		"state with exactly maxStateKeys keys must be accepted")
+}
+
+// Vector B: cumulative awareness state across all clients in one room must be
+// capped. Configured via SetMaxBytes; entries that would push total past the
+// cap are dropped.
+func TestUnit_Awareness_ApplyUpdate_PerRoomByteCap_DropsExcess(t *testing.T) {
+	a := awareness.New(1)
+	const cap = 4 * 1024 // 4 KiB cap for this test
+	a.SetMaxBytes(cap)
+
+	// First client: ~2 KiB of legitimate state. Fits.
+	payload1 := buildAwarenessPayload(t, 100, 1, makeRoughlySized("x", 2*1024))
+	require.NoError(t, a.ApplyUpdate(payload1, nil))
+	require.Contains(t, a.GetStates(), uint64(100), "first client must fit")
+
+	// Second client: ~2 KiB more. Total ~4 KiB — still fits.
+	payload2 := buildAwarenessPayload(t, 200, 1, makeRoughlySized("y", 2*1024))
+	require.NoError(t, a.ApplyUpdate(payload2, nil))
+	require.Contains(t, a.GetStates(), uint64(200), "second client must fit at cap boundary")
+
+	// Third client: ~2 KiB more. Total would be ~6 KiB, exceeding 4 KiB cap.
+	// Must be dropped.
+	payload3 := buildAwarenessPayload(t, 300, 1, makeRoughlySized("z", 2*1024))
+	require.NoError(t, a.ApplyUpdate(payload3, nil),
+		"per-room byte cap should drop the entry silently, not error")
+	assert.NotContains(t, a.GetStates(), uint64(300),
+		"client that would exceed per-room byte cap must be dropped")
+}
+
+func TestUnit_Awareness_ApplyUpdate_PerRoomByteCap_RemovedClientFreesBytes(t *testing.T) {
+	// When a client is removed (null state), its bytes must be released from
+	// the room total so subsequent clients can fit.
+	a := awareness.New(1)
+	const cap = 4 * 1024
+	a.SetMaxBytes(cap)
+
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 100, 1, makeRoughlySized("x", 3*1024)), nil))
+	require.Contains(t, a.GetStates(), uint64(100))
+
+	// Remove client 100 (null state with higher clock).
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 100, 2, "null"), nil))
+	require.NotContains(t, a.GetStates(), uint64(100), "client 100 should be removed")
+
+	// Now a fresh 3 KiB client should fit (the slot was reclaimed).
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 200, 1, makeRoughlySized("y", 3*1024)), nil))
+	assert.Contains(t, a.GetStates(), uint64(200),
+		"after removing 100, room has free bytes for 200")
+}
+
+func TestUnit_Awareness_ApplyUpdate_PerRoomByteCap_Unlimited_WhenZero(t *testing.T) {
+	// SetMaxBytes(0) means unlimited — backward compatible default.
+	a := awareness.New(1)
+	a.SetMaxBytes(0)
+	payload := buildAwarenessPayload(t, 100, 1, makeRoughlySized("x", 100*1024)) // 100 KiB
+	require.NoError(t, a.ApplyUpdate(payload, nil))
+	assert.Contains(t, a.GetStates(), uint64(100),
+		"with cap=0 (unlimited), even large states must be accepted")
+}
+
+// itoa is a tiny base-10 integer-to-string helper to keep the test self-
+// contained without pulling in strconv (which would balloon imports for one use).
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+// buildAwarenessPayload encodes a single-client awareness update.
+func buildAwarenessPayload(t *testing.T, clientID uint64, clock uint64, jsonState string) []byte {
+	t.Helper()
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(1) // numClients
+	enc.WriteVarUint(clientID)
+	enc.WriteVarUint(clock)
+	enc.WriteVarString(jsonState)
+	return enc.Bytes()
+}
+
+// makeRoughlySized returns a JSON object with one key and a string value
+// sized so the total JSON length is approximately targetBytes.
+func makeRoughlySized(key string, targetBytes int) string {
+	// JSON overhead: {"key":"…"} = 8 + len(key) bytes (assumes no escaping in value).
+	overhead := 8 + len(key)
+	valLen := targetBytes - overhead
+	if valLen < 0 {
+		valLen = 0
+	}
+	val := make([]byte, valLen)
+	for i := range val {
+		val[i] = 'a'
+	}
+	return `{"` + key + `":"` + string(val) + `"}`
+}

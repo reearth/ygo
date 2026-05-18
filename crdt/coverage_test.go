@@ -1005,12 +1005,11 @@ func TestUnit_GetItemCleanEnd_MidItemSplit(t *testing.T) {
 	doc2.Transact(func(txn *Transaction) { txt2.Insert(txn, 2, "X", nil) })
 	u2 := EncodeStateAsUpdateV1(doc2, nil)
 
-	// Applying doc2's update to doc1 triggers getItemCleanEnd for the origin clock.
+	// Applying doc2's update to doc1 triggers getItemCleanEnd for the origin clock
+	// and (after #65) getItemCleanStart for the right-origin clock. doc2 inserted
+	// "X" between 'e' and 'l', so the converged state on doc1 must also be "heXllo".
 	require.NoError(t, ApplyUpdateV1(doc1, u2, nil))
-	// Both "hello" and "X" are present; exact position depends on YATA resolution.
-	assert.Equal(t, 6, txt1.Len())
-	assert.Contains(t, txt1.ToString(), "hello")
-	assert.Contains(t, txt1.ToString(), "X")
+	assert.Equal(t, "heXllo", txt1.ToString())
 }
 
 // ── deleteChildRange: delete from exact start with large range ────────────────

@@ -66,6 +66,13 @@ const maxAwarenessClients = 100_000
 // JSON state string. Prevents OOM from a peer broadcasting a multi-GB state.
 const maxAwarenessStateBytes = 1 << 20 // 1 MiB
 
+// maxStateKeys is the maximum number of top-level keys accepted in a client's
+// decoded state object. The existing 1 MiB byte cap allows a single payload
+// like {"k1":1,"k2":1,...,"k65535":1} (~10 bytes per key * 65k keys = ~650 KiB)
+// that would materialise into a multi-MB map. States exceeding this key count
+// are dropped (treated as null). See issue #48 vector A.
+const maxStateKeys = 1000
+
 // ErrTooManyClients is returned when an update claims more clients than maxAwarenessClients.
 var ErrTooManyClients = errors.New("awareness: update exceeds maximum client count")
 
@@ -105,15 +112,43 @@ type Awareness struct {
 	clock      uint64               // local client's clock
 	observers  []*observer
 	stopExpiry func() // set by StartAutoExpiry; stopped by Destroy
+	// wireBytes tracks the JSON byte length of the last ApplyUpdate-accepted
+	// state per client. Used to enforce maxBytes (issue #48 vector B). Only
+	// entries that arrived via ApplyUpdate are counted; SetLocalState is
+	// excluded because the local client's state is set by trusted embedder
+	// code, not adversarial wire input.
+	wireBytes   map[uint64]int
+	activeBytes int64 // sum of wireBytes values
+	maxBytes    int64 // 0 = unlimited (default; backward compatible)
 }
 
 // New creates an Awareness instance for the given client.
 func New(clientID uint64) *Awareness {
 	return &Awareness{
-		clientID: clientID,
-		states:   make(map[uint64]ClientState),
-		meta:     make(map[uint64]time.Time),
+		clientID:  clientID,
+		states:    make(map[uint64]ClientState),
+		meta:      make(map[uint64]time.Time),
+		wireBytes: make(map[uint64]int),
 	}
+}
+
+// SetMaxBytes caps the cumulative byte size of awareness state across all
+// remote clients merged via ApplyUpdate. Incoming entries that would push the
+// total past the cap are silently dropped (treated as null) rather than
+// rejected with an error — matches the existing pattern for oversized-state
+// handling so a single misbehaving peer cannot cause an entire room's
+// awareness merge to fail.
+//
+// A value of 0 (the default) disables the cap. Local state set via
+// SetLocalState is not counted; the cap is intended to constrain untrusted
+// wire input only. See issue #48 vector B.
+//
+// Set this once at construction time; changes while concurrent updates are
+// being processed are safe (the field is read under a.mu).
+func (a *Awareness) SetMaxBytes(n int64) {
+	a.mu.Lock()
+	a.maxBytes = n
+	a.mu.Unlock()
 }
 
 // ClientID returns the local client ID.
@@ -350,10 +385,37 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 			}
 		}
 
+		// Issue #48 vector A: cap the number of keys in a decoded state to
+		// prevent a small (under 1 MiB) JSON payload from materialising into
+		// a huge map.
+		if !isNull && len(state) > maxStateKeys {
+			isNull = true
+			state = nil
+		}
+
+		// Issue #48 vector B: enforce per-room cumulative byte cap. Compute
+		// the byte delta this entry would introduce (new size minus the
+		// previously-tracked size for this client) and drop the entry if
+		// applying it would exceed maxBytes.
+		newSize := len(e.jsonStr)
+		oldSize := a.wireBytes[e.clientID]
+		if !isNull && a.maxBytes > 0 {
+			delta := int64(newSize - oldSize)
+			if a.activeBytes+delta > a.maxBytes {
+				isNull = true
+				state = nil
+			}
+		}
+
 		if isNull {
 			// Store nil state with incoming clock to prevent stale re-application.
 			a.states[e.clientID] = ClientState{Clock: e.clock, State: nil}
 			delete(a.meta, e.clientID)
+			// Release any wire-bytes the previous active state held for this client.
+			if oldSize > 0 {
+				a.activeBytes -= int64(oldSize)
+				delete(a.wireBytes, e.clientID)
+			}
 			if wasActive {
 				removed = append(removed, e.clientID)
 			}
@@ -363,6 +425,9 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 				State: state,
 			}
 			a.meta[e.clientID] = time.Now()
+			// Update byte accounting: replace the old size with the new size.
+			a.activeBytes += int64(newSize - oldSize)
+			a.wireBytes[e.clientID] = newSize
 			if wasActive {
 				updated = append(updated, e.clientID)
 			} else {
@@ -456,6 +521,11 @@ func (a *Awareness) RemoveExpired(timeout time.Duration) {
 				a.states[id] = ClientState{Clock: cs.Clock, State: nil}
 			}
 			delete(a.meta, id)
+			// Release any wire-bytes the expired client held (#48 vector B).
+			if size, ok := a.wireBytes[id]; ok {
+				a.activeBytes -= int64(size)
+				delete(a.wireBytes, id)
+			}
 			removed = append(removed, id)
 		}
 	}
