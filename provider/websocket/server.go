@@ -277,6 +277,16 @@ type Server struct {
 	// See #47.
 	HandshakeTimeout time.Duration
 
+	// MaxAwarenessBytesPerRoom caps the cumulative byte size of awareness
+	// state held in one room across all remote clients. Without this cap a
+	// single peer can claim up to maxAwarenessClientsPerPeer (10,000)
+	// clientIDs each holding the maximum per-state size (1 MiB) — up to
+	// ~10 GiB of awareness state in one room. Incoming entries that would
+	// push the total past this cap are silently dropped (matching the
+	// existing oversized-state handling). Zero (the default) disables the
+	// cap. Suggested production value: 100 MiB. See issue #48 vector B.
+	MaxAwarenessBytesPerRoom int64
+
 	// connSem enforces MaxConnections as a hard cap. Lazily initialised on
 	// first ServeHTTP. nil when MaxConnections == 0 (unlimited).
 	connSem     *semaphore.Weighted
@@ -430,9 +440,13 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 	if s.MaxPendingItems > 0 {
 		docOpts = append(docOpts, crdt.WithMaxPendingItems(s.MaxPendingItems))
 	}
+	aw := awareness.New(0)
+	if s.MaxAwarenessBytesPerRoom > 0 {
+		aw.SetMaxBytes(s.MaxAwarenessBytesPerRoom)
+	}
 	r := &room{
 		doc:       crdt.New(docOpts...),
-		awareness: awareness.New(0),
+		awareness: aw,
 		peers:     make(map[*peer]struct{}),
 	}
 	if s.MaxPeersPerRoom > 0 {
