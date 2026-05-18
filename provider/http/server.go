@@ -29,6 +29,12 @@ const maxSVParamBytes = 1 << 16 // 64 KiB
 type Server struct {
 	mu   sync.RWMutex
 	docs map[string]*crdt.Doc
+
+	// MaxPendingItems caps the per-document pending-items queue depth. The
+	// queue holds items whose dependencies have not yet arrived, waiting for
+	// out-of-order delivery to resolve. Zero or negative uses the crdt default
+	// (100,000). See crdt.WithMaxPendingItems and issue #46.
+	MaxPendingItems int
 }
 
 // NewServer returns a new Server with an empty document store.
@@ -48,7 +54,11 @@ func (s *Server) getOrCreateDoc(room string) *crdt.Doc {
 	}
 	// Use NewClientID (crypto/rand, uint32) to stay within Yjs wire protocol's
 	// 53-bit VarUint limit and avoid predictable IDs in multi-tenant deployments.
-	doc := crdt.New(crdt.WithClientID(crdt.NewClientID()))
+	docOpts := []crdt.DocOption{crdt.WithClientID(crdt.NewClientID())}
+	if s.MaxPendingItems > 0 {
+		docOpts = append(docOpts, crdt.WithMaxPendingItems(s.MaxPendingItems))
+	}
+	doc := crdt.New(docOpts...)
 	s.docs[room] = doc
 	return doc
 }

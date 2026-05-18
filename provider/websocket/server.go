@@ -47,6 +47,16 @@ func (s *Server) maxMessageBytes() int64 {
 	return maxWSMessageBytes
 }
 
+const defaultHandshakeTimeout = 30 * time.Second
+
+// handshakeTimeout returns the configured first-read deadline or the default.
+func (s *Server) handshakeTimeout() time.Duration {
+	if s.HandshakeTimeout > 0 {
+		return s.HandshakeTimeout
+	}
+	return defaultHandshakeTimeout
+}
+
 // log returns the configured logger or slog.Default().
 func (s *Server) log() *slog.Logger {
 	if s.Logger != nil {
@@ -187,6 +197,14 @@ type Server struct {
 	// If the slice is empty the server falls back to a same-origin check:
 	// the request Origin header must match the HTTP Host header. Non-browser
 	// clients that omit the Origin header are always permitted.
+	//
+	// Security warning: setting AllowedOrigins to "*" disables same-origin
+	// protection and enables Cross-Site WebSocket Hijacking (CSWSH) — a
+	// malicious page that the user visits can open a WebSocket to this
+	// server and act as that user if authentication is carried by a session
+	// cookie. Use "*" only when AuthFunc validates tokens carried explicitly
+	// (bearer tokens in the WebSocket subprotocol or a query parameter), not
+	// when relying on cookie-based auth. See SECURITY.md.
 	AllowedOrigins []string
 
 	// MaxConnections is the server-wide cap on simultaneous WebSocket peers.
@@ -243,6 +261,21 @@ type Server struct {
 	//
 	// Zero (the default) uses 256, sized for typical sync workloads.
 	PeerWriteQueueSize int
+
+	// MaxPendingItems caps the per-document pending-items queue depth. The
+	// queue holds items whose dependencies have not yet arrived, waiting for
+	// out-of-order delivery to resolve. Zero or negative uses the crdt default
+	// (100,000). See crdt.WithMaxPendingItems and issue #46.
+	MaxPendingItems int
+
+	// HandshakeTimeout caps how long a peer may stay connected without sending
+	// any message after the WebSocket upgrade completes. This is the first-line
+	// defense against slow-loris-style attacks where an attacker completes the
+	// handshake on many connections and then sends nothing, holding goroutines
+	// and buffers indefinitely. After the first successful ReadMessage the
+	// deadline is cleared. Zero or negative uses the default (30 seconds).
+	// See #47.
+	HandshakeTimeout time.Duration
 
 	// connSem enforces MaxConnections as a hard cap. Lazily initialised on
 	// first ServeHTTP. nil when MaxConnections == 0 (unlimited).
@@ -393,8 +426,12 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 	if s.MaxRooms > 0 && len(s.rooms) >= s.MaxRooms {
 		return nil, ErrTooManyRooms
 	}
+	docOpts := []crdt.DocOption{}
+	if s.MaxPendingItems > 0 {
+		docOpts = append(docOpts, crdt.WithMaxPendingItems(s.MaxPendingItems))
+	}
 	r := &room{
-		doc:       crdt.New(),
+		doc:       crdt.New(docOpts...),
 		awareness: awareness.New(0),
 		peers:     make(map[*peer]struct{}),
 	}
@@ -562,10 +599,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Read loop — exits when the connection is closed (by peer, by context
 	// cancellation, or by Shutdown).
+	//
+	// An initial read deadline guards against slow-loris: a peer that completes
+	// the WebSocket handshake but never sends a message would otherwise hold
+	// the read goroutine, writeCh buffer, and any connection-tracking memory
+	// indefinitely. After the first successful ReadMessage we clear the
+	// deadline; downstream slow-peer protection is handled by the writeCh
+	// disconnect-on-overflow path (see #19) and gorilla/websocket's pong
+	// handling. See #47.
+	if err := ws.SetReadDeadline(time.Now().Add(s.handshakeTimeout())); err != nil {
+		return
+	}
+	firstMessage := true
 	for {
 		_, data, err := ws.ReadMessage()
 		if err != nil {
 			break
+		}
+		if firstMessage {
+			// Clear the handshake deadline; subsequent reads can take as long
+			// as the WebSocket protocol's own pong-timeout machinery allows.
+			if err := ws.SetReadDeadline(time.Time{}); err != nil {
+				return
+			}
+			firstMessage = false
 		}
 		p.handleMessage(data)
 	}

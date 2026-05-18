@@ -10,12 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`encoding.BigInt` type + `Any` tag 122 support.** lib0's BigInt tag (used by Yjs JS to encode int64 values that don't fit in JS `Number.MAX_SAFE_INTEGER`) is now decoded into a new `encoding.BigInt` named type, and `WriteAny` can encode that type with tag 122. Previously, ygo failed to decode updates containing JS BigInt values. Adds `Encoder.WriteBigInt64` and `Decoder.ReadBigInt64` helpers.
+- **`crdt.WithMaxPendingItems(n int)`** (#46): doc option to configure the pending-items cap.
+- **`provider/websocket.Server.MaxPendingItems`** and **`provider/http.Server.MaxPendingItems`** (#46): server-level config that forwards the cap to `crdt.New(...)` for all rooms.
+- **`provider/websocket.Server.HandshakeTimeout`** (#47, default 30s): caps how long a peer may stay connected without sending any message after handshake.
 
 ### Fixed
 
 - **Float byte order now matches lib0 and yrs (big-endian).** ygo previously encoded float32 and float64 in little-endian, which silently broke binary compatibility with Yjs JS and yrs for any document containing float values. The README has always claimed binary compatibility; this fixes the gap. The wire format for float `Any` values (tags 123 and 124) is now big-endian, matching [lib0's `writeFloat32`/`writeFloat64`](https://github.com/dmonad/lib0/blob/main/src/encoding.js).
 
   **Compatibility note**: previously persisted ygo updates containing float values will read different float values after upgrading. Cross-implementation use was already broken before this fix; the breakage was in the previous behavior, not this one. If your deployment stores ygo update bytes long-term and uses raw float values (rather than integers encoded via VarInt), plan for a re-encode pass.
+- **`crdt`: cap on pending-items queue depth (#46)**: items whose dependencies have not yet arrived are parked in `StructStore.pending.items`. Previously this queue was unbounded — a malicious peer could craft a single max-size update full of items referencing far-future clocks and park multi-GB of items, OOM'ing the server. Now capped at 100,000 by default (configurable via the new `crdt.WithMaxPendingItems` option or `provider/websocket.Server.MaxPendingItems` / `provider/http.Server.MaxPendingItems`). Updates that would exceed the cap return `ErrInvalidUpdate`.
+- **`provider/websocket`: initial read deadline on connections (#47)**: the WebSocket read loop had no read deadline before the first message. With `MaxConnections == 0` (the default), an attacker could complete handshakes on many connections and then send nothing, holding goroutines + buffers indefinitely (slow-loris). Now an initial `HandshakeTimeout` (default 30s, configurable via `Server.HandshakeTimeout`) closes any connection that doesn't send a first message in time. The deadline is cleared after the first successful read.
+
+### Documentation
+
+- **CSWSH warning on `Server.AllowedOrigins` (#49)**: godoc on the `AllowedOrigins` field now explicitly warns about Cross-Site WebSocket Hijacking when set to `"*"`. `SECURITY.md` adds a CSWSH entry to the threat model with mitigation guidance.
 
 ## [1.7.1] — 2026-05-14
 

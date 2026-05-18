@@ -650,3 +650,33 @@ func TestServer_LegacyPersistenceAdapter_StillWorks(t *testing.T) {
 	a.mu.Unlock()
 	assert.True(t, called, "legacy StoreUpdate must still be called for adapters without ctx variant")
 }
+
+func TestServer_HandshakeTimeout_ClosesIdleConnection(t *testing.T) {
+	// Regression for #47: a peer that completes the WebSocket handshake but
+	// never sends a message must be disconnected within HandshakeTimeout.
+	s := ygws.NewServer()
+	s.HandshakeTimeout = 300 * time.Millisecond
+	httpSrv := httptest.NewServer(s)
+	defer httpSrv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/idle-room"
+
+	c, _, err := gws.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err)
+	defer c.Close()
+
+	// Drain the three server-initiated handshake messages (step1, step2, awareness)
+	// so they don't interfere with the idle-connection detection.
+	for i := 0; i < 3; i++ {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _, err := c.ReadMessage()
+		require.NoError(t, err, "handshake message %d should arrive cleanly", i+1)
+	}
+	_ = c.SetReadDeadline(time.Time{})
+
+	// Do not send any message. The server's HandshakeTimeout (300ms) fires and
+	// closes the connection. Our read should error within ~HandshakeTimeout.
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, readErr := c.ReadMessage()
+	assert.Error(t, readErr, "idle peer should be disconnected by the server within HandshakeTimeout")
+}

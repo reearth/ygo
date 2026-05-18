@@ -68,6 +68,23 @@ func WithGUID(guid string) DocOption {
 	return func(d *Doc) { d.guid = guid }
 }
 
+// defaultMaxPendingItems is the default cap on items parked in the per-doc
+// pending queue waiting for out-of-order dependencies. Matches the per-update
+// limit (maxV2Items) used by the decoder. See WithMaxPendingItems and #46.
+const defaultMaxPendingItems = 100_000
+
+// WithMaxPendingItems caps the per-doc pending queue depth — items parked
+// waiting for out-of-order dependencies. Once the cap is reached, further
+// items that would be parked cause ApplyUpdate to return ErrInvalidUpdate.
+// Zero or negative uses the default (100,000).
+//
+// This is a defence against a malicious peer crafting an update full of
+// far-future-clock items, which would otherwise grow the pending queue
+// without bound. See issue #46.
+func WithMaxPendingItems(n int) DocOption {
+	return func(d *Doc) { d.maxPendingItems = n }
+}
+
 // updateSub pairs a unique subscription ID with its callback so that
 // unsubscribe closures can find and remove the right entry even when
 // callbacks are removed out-of-order.
@@ -85,9 +102,10 @@ type transactionSub struct {
 // Doc is the root of a Yjs collaborative document.
 // All shared types (YArray, YMap, YText, …) live inside a Doc.
 type Doc struct {
-	clientID ClientID
-	gc       bool
-	guid     string // subdocument identifier; empty for root docs
+	clientID        ClientID
+	gc              bool
+	guid            string // subdocument identifier; empty for root docs
+	maxPendingItems int    // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -121,6 +139,14 @@ func (d *Doc) ClientID() ClientID {
 // GUID returns the document's subdocument identifier (empty for root docs).
 func (d *Doc) GUID() string {
 	return d.guid
+}
+
+// maxPendingItemsLimit returns the effective cap on the pending queue depth.
+func (d *Doc) maxPendingItemsLimit() int {
+	if d.maxPendingItems <= 0 {
+		return defaultMaxPendingItems
+	}
+	return d.maxPendingItems
 }
 
 // NewClientID generates a fresh ClientID via crypto/rand.
