@@ -1,6 +1,7 @@
 package crdt_test
 
 import (
+	"encoding/hex"
 	"os"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/crdt"
+	yencoding "github.com/reearth/ygo/encoding"
 )
 
 // loadFixture reads a binary fixture file from testutil/fixtures/.
@@ -15,6 +17,13 @@ func loadFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile("../testutil/fixtures/" + name + ".bin")
 	require.NoError(t, err, "fixture %s.bin not found — run testutil/gen_fixtures.js", name)
+	return data
+}
+
+func mustDecodeHex(t *testing.T, s string) []byte {
+	t.Helper()
+	data, err := hex.DecodeString(s)
+	require.NoError(t, err)
 	return data
 }
 
@@ -67,6 +76,21 @@ func TestCompat_ApplyJSUpdate_YArray(t *testing.T) {
 	assert.Equal(t, map[string]any{"key": "val"}, got[4])
 }
 
+func TestCompat_ApplyJSUpdate_YArrayFloatAny(t *testing.T) {
+	update := mustDecodeHex(t, "0101b7a6ad960b000801046c697374027c3fc000007602066e65737465647c40100000056c6162656c77026f6b00")
+	doc := crdt.New(crdt.WithClientID(99))
+	require.NoError(t, crdt.ApplyUpdateV1(doc, update, nil))
+
+	arr := doc.GetArray("list")
+	got := arr.ToSlice()
+	require.Len(t, got, 2)
+	assert.InDelta(t, float32(1.5), got[0], 0)
+	assert.Equal(t, map[string]any{
+		"nested": float32(2.25),
+		"label":  "ok",
+	}, got[1])
+}
+
 func TestCompat_ApplyJSUpdate_YMap(t *testing.T) {
 	doc := crdt.New(crdt.WithClientID(99))
 	require.NoError(t, crdt.ApplyUpdateV1(doc, loadFixture(t, "ymap_basic"), nil))
@@ -83,6 +107,27 @@ func TestCompat_ApplyJSUpdate_YMap(t *testing.T) {
 	active, ok := m.Get("active")
 	require.True(t, ok)
 	assert.Equal(t, true, active)
+}
+
+func TestCompat_ApplyJSUpdate_YXmlFragmentBigIntAttribute(t *testing.T) {
+	update := mustDecodeHex(t, "0102f08bfe120007010b70726f73656d6972726f720301702800f08bfe120007646174612d6964017a000000000000002a00")
+	doc := crdt.New(crdt.WithClientID(99))
+	require.NoError(t, crdt.ApplyUpdateV1(doc, update, nil))
+
+	frag := doc.GetXmlFragment("prosemirror")
+	assert.Equal(t, 1, frag.Len())
+}
+
+func TestCompat_ApplyJSUpdateV2_YTextFormatBigIntAny(t *testing.T) {
+	update := mustDecodeHex(t, "0002000206cef7d3a41301010001000504004600860b0674786964696441004200010100000103007a000000000000002a7e00")
+	doc := crdt.New(crdt.WithClientID(99))
+	require.NoError(t, crdt.ApplyUpdateV2(doc, update, nil))
+
+	txt := doc.GetText("t")
+	delta := txt.ToDelta()
+	require.Len(t, delta, 1)
+	assert.Equal(t, "x", delta[0].Insert)
+	assert.Equal(t, crdt.Attributes{"id": yencoding.BigInt(42)}, delta[0].Attributes)
 }
 
 func TestCompat_ApplyJSUpdate_ConcurrentMerge(t *testing.T) {

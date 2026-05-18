@@ -143,24 +143,34 @@ func (d *Decoder) ReadVarBytes() ([]byte, error) {
 	return out, nil
 }
 
-// ReadFloat32 reads a 32-bit little-endian IEEE 754 float.
+// ReadFloat32 reads a 32-bit big-endian IEEE 754 float.
 func (d *Decoder) ReadFloat32() (float32, error) {
 	if d.pos+4 > len(d.buf) {
 		return 0, ErrUnexpectedEOF
 	}
-	bits := binary.LittleEndian.Uint32(d.buf[d.pos:])
+	bits := binary.BigEndian.Uint32(d.buf[d.pos:])
 	d.pos += 4
 	return math.Float32frombits(bits), nil
 }
 
-// ReadFloat64 reads a 64-bit little-endian IEEE 754 float.
+// ReadFloat64 reads a 64-bit big-endian IEEE 754 float.
 func (d *Decoder) ReadFloat64() (float64, error) {
 	if d.pos+8 > len(d.buf) {
 		return 0, ErrUnexpectedEOF
 	}
-	bits := binary.LittleEndian.Uint64(d.buf[d.pos:])
+	bits := binary.BigEndian.Uint64(d.buf[d.pos:])
 	d.pos += 8
 	return math.Float64frombits(bits), nil
+}
+
+// ReadBigInt64 reads a signed 64-bit big-endian integer.
+func (d *Decoder) ReadBigInt64() (int64, error) {
+	if d.pos+8 > len(d.buf) {
+		return 0, ErrUnexpectedEOF
+	}
+	bits := binary.BigEndian.Uint64(d.buf[d.pos:])
+	d.pos += 8
+	return int64(bits), nil
 }
 
 // readVarIntWithSign reads a sign-magnitude VarInt and returns the magnitude
@@ -233,6 +243,12 @@ func (d *Decoder) readAny(depth int) (any, error) {
 		return d.ReadFloat32()
 	case 123:
 		return d.ReadFloat64()
+	case 122:
+		v, err := d.ReadBigInt64()
+		if err != nil {
+			return nil, err
+		}
+		return BigInt(v), nil
 	case 119:
 		return d.ReadVarString()
 	case 116:

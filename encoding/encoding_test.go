@@ -212,6 +212,60 @@ func TestUnit_Any_IntAlias(t *testing.T) {
 	assert.Equal(t, int64(42), got)
 }
 
+func TestGolden_Any_Lib0BigInt_KnownBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		val  encoding.BigInt
+		wire []byte
+	}{
+		{
+			name: "positive",
+			val:  encoding.BigInt(42),
+			wire: []byte{122, 0, 0, 0, 0, 0, 0, 0, 42},
+		},
+		{
+			name: "negative",
+			val:  encoding.BigInt(-42),
+			wire: []byte{122, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xd6},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := encoding.NewDecoder(tc.wire).ReadAny()
+			require.NoError(t, err)
+			assert.Equal(t, tc.val, got)
+
+			e := encoding.NewEncoder()
+			e.WriteAny(tc.val)
+			assert.Equal(t, tc.wire, e.Bytes())
+		})
+	}
+}
+
+func TestGolden_Any_Lib0FloatBytes(t *testing.T) {
+	t.Run("float32", func(t *testing.T) {
+		wire := []byte{124, 0x3f, 0xc0, 0x00, 0x00}
+		got, err := encoding.NewDecoder(wire).ReadAny()
+		require.NoError(t, err)
+		assert.InDelta(t, float32(1.5), got, 0)
+
+		e := encoding.NewEncoder()
+		e.WriteAny(float32(1.5))
+		assert.Equal(t, wire, e.Bytes())
+	})
+
+	t.Run("float64", func(t *testing.T) {
+		wire := []byte{123, 0x40, 0x09, 0x21, 0xfb, 0x54, 0x44, 0x2d, 0x18}
+		got, err := encoding.NewDecoder(wire).ReadAny()
+		require.NoError(t, err)
+		assert.InDelta(t, math.Pi, got, 0)
+
+		e := encoding.NewEncoder()
+		e.WriteAny(math.Pi)
+		assert.Equal(t, wire, e.Bytes())
+	})
+}
+
 // --- Encoder reset ---
 
 func TestUnit_Encoder_Reset(t *testing.T) {

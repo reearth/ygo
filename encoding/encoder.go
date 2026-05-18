@@ -107,17 +107,27 @@ func (e *Encoder) WriteVarBytes(b []byte) {
 	e.buf = append(e.buf, b...)
 }
 
-// WriteFloat32 writes a 32-bit IEEE 754 float in little-endian byte order.
+// BigInt represents lib0 writeAny tag 122, encoded as a signed 64-bit integer.
+type BigInt int64
+
+// WriteFloat32 writes a 32-bit IEEE 754 float in big-endian byte order.
 func (e *Encoder) WriteFloat32(v float32) {
 	var b [4]byte
-	binary.LittleEndian.PutUint32(b[:], math.Float32bits(v))
+	binary.BigEndian.PutUint32(b[:], math.Float32bits(v))
 	e.buf = append(e.buf, b[:]...)
 }
 
-// WriteFloat64 writes a 64-bit IEEE 754 float in little-endian byte order.
+// WriteFloat64 writes a 64-bit IEEE 754 float in big-endian byte order.
 func (e *Encoder) WriteFloat64(v float64) {
 	var b [8]byte
-	binary.LittleEndian.PutUint64(b[:], math.Float64bits(v))
+	binary.BigEndian.PutUint64(b[:], math.Float64bits(v))
+	e.buf = append(e.buf, b[:]...)
+}
+
+// WriteBigInt64 writes a signed 64-bit integer in big-endian byte order.
+func (e *Encoder) WriteBigInt64(v int64) {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], uint64(v))
 	e.buf = append(e.buf, b[:]...)
 }
 
@@ -141,15 +151,16 @@ func (e *Encoder) writeNegVarUint(v uint64) {
 // WriteAny encodes an arbitrary value using lib0's tagged-union format.
 // Supported Go types and their wire tags:
 //
-//	nil           → 126 (null)
-//	bool          → 120 (true) / 121 (false)
-//	int / int64   → 125 + VarInt
-//	float32       → 124 + 4 bytes LE
-//	float64       → 123 + 8 bytes LE
-//	string        → 119 + VarString
-//	[]byte        → 116 + VarBytes
-//	[]any         → 117 + VarUint(len) + elements
-//	map[string]any→ 118 + VarUint(len) + key-value pairs
+//	nil            -> 126 (null)
+//	bool           -> 120 (true) / 121 (false)
+//	int / int64    -> 125 + VarInt
+//	float32        -> 124 + 4 bytes BE
+//	float64        -> 123 + 8 bytes BE
+//	BigInt         -> 122 + 8 bytes BE
+//	string         -> 119 + VarString
+//	[]byte         -> 116 + VarBytes
+//	[]any          -> 117 + VarUint(len) + elements
+//	map[string]any -> 118 + VarUint(len) + key-value pairs
 func (e *Encoder) WriteAny(v any) {
 	switch val := v.(type) {
 	case nil:
@@ -172,6 +183,9 @@ func (e *Encoder) WriteAny(v any) {
 	case float64:
 		e.WriteUint8(123)
 		e.WriteFloat64(val)
+	case BigInt:
+		e.WriteUint8(122)
+		e.WriteBigInt64(int64(val))
 	case string:
 		e.WriteUint8(119)
 		e.WriteVarString(val)
