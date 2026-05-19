@@ -1,15 +1,26 @@
 ## What's new
 
-A YATA correctness fix and two awareness DoS hardenings, surfaced by an external bug report (#65) and a follow-up architectural audit.
+First in a series of fixes from the cross-reference audit against Yjs JS and yrs (see the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps)).
 
-- **YATA `OriginRight` boundary fix** (#65, #68). `Item.integrate`'s conflict-scan loop terminated on `o != item.Right`, but `item.Right` was never resolved from `item.OriginRight` before the loop ran. When an incoming item declared a right boundary via `OriginRight`, the scan had no upper bound and placed the item past concurrent items that share the same `Origin` — causing divergence with Yjs JS and yrs on a class of updates that turned out to include local inserts in the middle of same-client runs as well as remote integration. Now resolves via a new `StructStore.getItemCleanStart` helper at the top of `integrate`, mirroring Yjs JS. 5 new regression tests in `crdt/yata_origin_right_test.go`; no perf regression on the integrate hot path (benchstat n=5).
-- **Awareness per-state key cap** (#48, vector A). A small JSON state object with thousands of keys (e.g. `{"k1":1,...,"k65535":1}`) passed the existing 1 MiB byte cap but materialised into a multi-MB `map[string]any`. States with more than 1,000 top-level keys are now dropped silently (treated as null), matching the existing pattern for oversized-state handling.
-- **Awareness per-room byte cap** (#48, vector B). Total wire-applied awareness state per `Awareness` instance was unbounded — a single peer could claim up to ~10 GiB by spreading large states across 10,000 clientIDs. New `Awareness.SetMaxBytes(n int64)` API; `provider/websocket.Server.MaxAwarenessBytesPerRoom` plumbs the cap to each room at creation. Default is unlimited (backward compatible); suggested production value is 100 MiB.
+- **`sync.WithErrorHandler` option for `ApplySyncMessage`** (#79). Previously, a single malformed update inside a sync message would propagate the error out of `ApplySyncMessage` and force any caller using it as the dispatcher in a transport read loop to tear down the connection. y-protocols' `readSyncMessage` wraps `applyUpdate` in try/catch and routes failures to an optional `errorHandler` callback while keeping the loop alive. ygo now matches:
+
+  ```go
+  sync.ApplySyncMessage(doc, msg, origin,
+      sync.WithErrorHandler(func(err error) { log.Warn(err) }))
+  ```
+
+  When set, the dispatcher routes `ApplyUpdateV1` errors to the handler and returns `(nil, nil)` — the read loop continues processing subsequent messages. Without the option, the existing return-the-error behavior is preserved (back-compat for every existing caller). Header-level decode errors (truncated frames, unknown message types, malformed state vectors in Step1) are still returned regardless — those signal transport-level corruption and should disconnect.
+
+  9 tests cover the contract: single-call semantics, read-loop continuation across good→bad→good sequences, multi-error reporting, header/Step1 error routing, panic propagation, and nil-handler defensive case.
+
+- **Benchmark CI scoped to hot-path PRs**. The benchmark job no longer runs on every PR — only when the diff touches `crdt/**`, `encoding/**`, `benchmarks/**`, or the workflow file. Adds a nightly cron schedule (`06:00 UTC`) that records absolute numbers on `main` as a 30-day artifact for trend tracking, plus a `workflow_dispatch` trigger for on-demand runs. Reduces typical PR CI time by ~20 minutes.
+
+- **`CONTRIBUTING.md`** documents the GetText-inside-Transact deadlock pitfall for contributors writing tests — the most common cause of hanging test runs.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.8.1
+go get github.com/reearth/ygo@v1.9.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
