@@ -172,17 +172,38 @@ func (e *Encoder) WriteAny(v any) {
 			e.WriteUint8(121)
 		}
 	case int:
-		e.WriteUint8(125)
-		e.WriteVarInt(int64(val))
+		e.writeAnyInt(int64(val))
+	case int8:
+		e.writeAnyInt(int64(val))
+	case int16:
+		e.writeAnyInt(int64(val))
+	case int32:
+		e.writeAnyInt(int64(val))
 	case int64:
-		e.WriteUint8(125)
-		e.WriteVarInt(val)
+		e.writeAnyInt(val)
+	case uint:
+		e.writeAnyUint(uint64(val))
+	case uint8:
+		e.writeAnyInt(int64(val))
+	case uint16:
+		e.writeAnyInt(int64(val))
+	case uint32:
+		e.writeAnyInt(int64(val))
+	case uint64:
+		e.writeAnyUint(val)
 	case float32:
 		e.WriteUint8(124)
 		e.WriteFloat32(val)
 	case float64:
-		e.WriteUint8(123)
-		e.WriteFloat64(val)
+		// lib0 narrows float64 to float32 (tag 124) when the value round-trips
+		// losslessly, matching lib0's isFloat32 dispatch.
+		if isFloat32Lossless(val) {
+			e.WriteUint8(124)
+			e.WriteFloat32(float32(val))
+		} else {
+			e.WriteUint8(123)
+			e.WriteFloat64(val)
+		}
 	case BigInt:
 		e.WriteUint8(122)
 		e.WriteBigInt64(int64(val))
@@ -217,4 +238,60 @@ func (e *Encoder) WriteAny(v any) {
 		// immediately rather than silently corrupting documents (N-M2).
 		panic(fmt.Sprintf("encoding: unsupported type %T passed to WriteAny", v))
 	}
+}
+
+// writeAnyInt dispatches an int64 to the correct lib0 Any tag based on
+// magnitude, matching lib0's writeAny number dispatch (encoding.js):
+//
+//   - int32 range  → tag 125 (int) + VarInt: byte-identical to lib0 for
+//     values JavaScript Number would treat as a small integer.
+//   - float64 safe-int range → tag 123 (float64): values that exceed int32
+//     but round-trip losslessly through float64's 52-bit mantissa. lib0
+//     emits the same here because JS Number is float64.
+//   - outside float64 safe-int → tag 122 (BigInt): Go's int64 can hold these
+//     exactly; lib0 JS cannot (Number would lose precision), so the BigInt
+//     tag is the correct cross-impl representation for full-precision int64.
+//     Decodes as `bigint` on the JS side via lib0's BigInt path.
+func (e *Encoder) writeAnyInt(v int64) {
+	const (
+		int32Min = -1 << 31
+		int32Max = 1<<31 - 1
+		safeMin  = -1 << 53 // -2^53; float64's lossless integer floor
+		safeMax  = 1 << 53  // 2^53;  float64's lossless integer ceiling
+	)
+	switch {
+	case v >= int32Min && v <= int32Max:
+		e.WriteUint8(125)
+		e.WriteVarInt(v)
+	case v >= safeMin && v <= safeMax:
+		e.WriteUint8(123)
+		e.WriteFloat64(float64(v))
+	default:
+		e.WriteUint8(122)
+		e.WriteBigInt64(v)
+	}
+}
+
+// writeAnyUint dispatches a uint64. Values within int64 range route through
+// writeAnyInt for the normal magnitude-based tag choice. Values exceeding
+// int64 (> 2^63 - 1) can't be represented in BigInt's signed int64 wire
+// format; they fall back to tag 123 (float64) with documented precision loss,
+// matching lib0 JS's behavior for Numbers in that range.
+func (e *Encoder) writeAnyUint(v uint64) {
+	if v <= math.MaxInt64 {
+		e.writeAnyInt(int64(v))
+		return
+	}
+	e.WriteUint8(123)
+	e.WriteFloat64(float64(v))
+}
+
+// isFloat32Lossless reports whether the float64 value round-trips through
+// float32 exactly — i.e. lib0's isFloat32 check. Used by WriteAny to choose
+// between tag 124 (float32, 4 bytes) and tag 123 (float64, 8 bytes).
+//
+// NaN deliberately returns false: `float64(float32(NaN)) != NaN` because
+// NaN != NaN, so NaN routes to tag 123. lib0 has the same behavior.
+func isFloat32Lossless(v float64) bool {
+	return float64(float32(v)) == v
 }

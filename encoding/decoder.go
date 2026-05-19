@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"unicode/utf8"
 )
 
 // maxStringBytes is the maximum number of bytes accepted for a single
@@ -23,6 +24,11 @@ var (
 	// to a known Any variant. Returning an error (rather than nil, nil) prevents
 	// crafted payloads from silently injecting nil values into the document.
 	ErrUnknownTag = errors.New("encoding: unknown Any tag")
+
+	// ErrInvalidUTF8 is returned by ReadVarString when the byte sequence is not
+	// valid UTF-8. Matches lib0's TextDecoder('utf-8', { fatal: true }) which
+	// throws on malformed input rather than producing a corrupt string.
+	ErrInvalidUTF8 = errors.New("encoding: invalid UTF-8 in varstring")
 )
 
 // Decoder reads values from a byte slice using the lib0 encoding format.
@@ -113,11 +119,17 @@ func (d *Decoder) ReadVarInt() (int64, error) {
 	return int64(result), nil
 }
 
-// ReadVarString decodes a length-prefixed UTF-8 string.
+// ReadVarString decodes a length-prefixed UTF-8 string. Invalid UTF-8 byte
+// sequences return ErrInvalidUTF8, matching lib0's TextDecoder fatal:true
+// mode. Without this, malformed input would silently produce a corrupt Go
+// string carrying non-UTF-8 bytes that downstream code may misinterpret.
 func (d *Decoder) ReadVarString() (string, error) {
 	b, err := d.ReadVarBytes()
 	if err != nil {
 		return "", err
+	}
+	if !utf8.Valid(b) {
+		return "", ErrInvalidUTF8
 	}
 	return string(b), nil
 }

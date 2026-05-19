@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] — 2026-05-19
+
+### Added
+
+- **`WriteAny` now accepts Go unsigned integer types and the narrower signed types** (#77): `uint`, `uint8`, `uint16`, `uint32`, `uint64`, `int8`, `int16`, `int32` previously panicked. They are now promoted to `int64` and dispatched through the same magnitude-based tag logic as `int` / `int64`. `uint64` values exceeding `math.MaxInt64` fall back to tag 123 (float64) with documented precision loss, matching lib0 JS's behavior for very-large `Number`s.
+- **`encoding.ErrInvalidUTF8`** (#77): returned by `ReadVarString` when the byte payload is not valid UTF-8.
+
+### Fixed
+
+- **`WriteAny` integer dispatch now matches lib0 byte-for-byte** (#77): ygo previously emitted tag 125 (int + VarInt) for any `int`/`int64` up to 2^55-1, regardless of magnitude. lib0 only uses tag 125 for int32-range values; larger integers go to tag 123 (float64) or tag 122 (BigInt). ygo now uses the same dispatch:
+
+  | Range | Tag | Wire format |
+  |-------|-----|-------------|
+  | `[-2^31, 2^31)` | 125 | VarInt |
+  | `[-2^53, 2^53)` (outside int32) | 123 | float64 |
+  | beyond float64 safe-int | 122 | BigInt |
+
+  **Compatibility note:** ygo-encoded updates produced before this fix used tag 125 for ints in the 2^31..2^54 range; Yjs JS still decodes those correctly (tag 125 → VarInt → JS Number). After the fix, ygo's emitted bytes for these values match Yjs JS byte-for-byte. **Round-trip type change for Go callers:** a Go `int64(2^35)` previously round-tripped as `int64`; it now round-trips as `float64` (tag 123). A Go `int64(2^55)` previously panicked in `WriteVarInt`; it now round-trips as `encoding.BigInt`. Callers who depend on int64 type fidelity for values outside int32 range should use `encoding.BigInt` explicitly.
+
+- **`WriteAny(float64)` narrows to float32 when lossless** (#77): lib0 emits tag 124 (4 bytes) when `float32(v) == v`; ygo previously always emitted tag 123 (8 bytes). Now matches lib0. Halves the wire size for values like `1.5`, `-0`, and small integer-valued floats.
+
+- **`ReadVarString` rejects invalid UTF-8** (#77): previously `string(b)` silently accepted any byte sequence, producing strings that downstream consumers (JSON serializers, JS clients, persistence) couldn't handle correctly. Now returns `ErrInvalidUTF8`, matching lib0's `TextDecoder('utf-8', { fatal: true })`. **Perf note:** `ReadAny` of a string is ~4ns slower per call (utf8.Valid scan). Negligible at typical workloads; correctness is the priority.
+
 ## [1.9.0] — 2026-05-19
 
 ### Added

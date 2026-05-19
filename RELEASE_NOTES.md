@@ -1,26 +1,29 @@
 ## What's new
 
-First in a series of fixes from the cross-reference audit against Yjs JS and yrs (see the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps)).
+Second in the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps) series from the cross-reference audit against Yjs JS and yrs. Closes the lib0 `Any` tagged-union parity gaps in `encoding/`.
 
-- **`sync.WithErrorHandler` option for `ApplySyncMessage`** (#79). Previously, a single malformed update inside a sync message would propagate the error out of `ApplySyncMessage` and force any caller using it as the dispatcher in a transport read loop to tear down the connection. y-protocols' `readSyncMessage` wraps `applyUpdate` in try/catch and routes failures to an optional `errorHandler` callback while keeping the loop alive. ygo now matches:
+- **Integer dispatch now matches lib0 by magnitude** (#77). ygo previously emitted tag 125 (int + VarInt) for any `int`/`int64` up to 2^55-1. lib0 only uses tag 125 for int32-range values; larger integers go to tag 123 (float64) or — in ygo's case, where Go's int64 has more range than JS Number — tag 122 (BigInt) to preserve precision. ygo now matches:
 
-  ```go
-  sync.ApplySyncMessage(doc, msg, origin,
-      sync.WithErrorHandler(func(err error) { log.Warn(err) }))
-  ```
+  | Range | Tag |
+  |-------|-----|
+  | `[-2^31, 2^31)` | 125 (VarInt) |
+  | safe-int range (outside int32) | 123 (float64) |
+  | beyond float64 safe-int | 122 (BigInt) |
 
-  When set, the dispatcher routes `ApplyUpdateV1` errors to the handler and returns `(nil, nil)` — the read loop continues processing subsequent messages. Without the option, the existing return-the-error behavior is preserved (back-compat for every existing caller). Header-level decode errors (truncated frames, unknown message types, malformed state vectors in Step1) are still returned regardless — those signal transport-level corruption and should disconnect.
+  Yjs JS readers see byte-for-byte parity with their own writer for the first two ranges and receive `bigint` for the third (which is the natural cross-impl representation when an integer is too large for `Number`).
 
-  9 tests cover the contract: single-call semantics, read-loop continuation across good→bad→good sequences, multi-error reporting, header/Step1 error routing, panic propagation, and nil-handler defensive case.
+  Compatibility implication for Go callers: an `int64(2^35)` now round-trips as `float64`, and `int64(2^55)` (which previously panicked in `WriteVarInt`) now round-trips as `encoding.BigInt`. See CHANGELOG for the full table.
 
-- **Benchmark CI scoped to hot-path PRs**. The benchmark job no longer runs on every PR — only when the diff touches `crdt/**`, `encoding/**`, `benchmarks/**`, or the workflow file. Adds a nightly cron schedule (`06:00 UTC`) that records absolute numbers on `main` as a 30-day artifact for trend tracking, plus a `workflow_dispatch` trigger for on-demand runs. Reduces typical PR CI time by ~20 minutes.
+- **`WriteAny(float64)` narrows to float32 when lossless** (#77). Values like `1.5`, `-0`, and small integer-valued floats now emit tag 124 (4 bytes on the wire) instead of always tag 123 (8 bytes). Matches lib0's `isFloat32` dispatch — halves the wire size for these values.
 
-- **`CONTRIBUTING.md`** documents the GetText-inside-Transact deadlock pitfall for contributors writing tests — the most common cause of hanging test runs.
+- **`ReadVarString` rejects invalid UTF-8** (#77). Returns the new `encoding.ErrInvalidUTF8` rather than silently producing a corrupt Go string. Matches lib0's `TextDecoder('utf-8', { fatal: true })`. There's a ~4ns per-call cost from the UTF-8 scan; correctness takes priority — silent corruption surfaces as untraceable bugs downstream.
+
+- **`WriteAny` accepts the rest of Go's numeric tower** (#77). `uint`, `uint8`, `uint16`, `uint32`, `uint64`, `int8`, `int16`, `int32` previously panicked; they're now promoted to `int64` and dispatched normally. `uint64` values exceeding `math.MaxInt64` fall back to tag 123 (float64) with documented precision loss, matching lib0's behavior for very-large `Number`s.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.9.0
+go get github.com/reearth/ygo@v1.10.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
