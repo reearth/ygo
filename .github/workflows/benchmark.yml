@@ -1,8 +1,33 @@
 name: Benchmark
 
+# Benchmark CI runs in three scenarios:
+#
+#   1. On PRs that touch hot-path source (crdt/, encoding/, benchmarks/, or this
+#      workflow itself). Compares PR branch vs base via benchstat. Skipped for
+#      docs, provider, sync, awareness, and CI-meta changes — none of which
+#      affect the integrate/encode inner loops.
+#
+#   2. Nightly on a cron schedule. Runs the suite on whatever main currently is
+#      and uploads the raw output as a 30-day artifact. Lets us spot slow drift
+#      that no single PR introduces.
+#
+#   3. Manually via workflow_dispatch. Use this when a non-hot-path PR genuinely
+#      needs measurement, or to spot-check main on demand.
+#
+# Rationale: previously this ran on every PR (~20 min per run). Most PRs don't
+# touch the hot paths, so the comparison was noise. See PR #80.
+
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'crdt/**'
+      - 'encoding/**'
+      - 'benchmarks/**'
+      - '.github/workflows/benchmark.yml'
+  schedule:
+    - cron: '0 6 * * *'  # 06:00 UTC daily
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,11 +44,22 @@ jobs:
         with:
           go-version: "1.23"
           cache: true
-      - name: Bench PR branch
+      - name: Bench current ref
         run: go test -bench=. -benchmem -count=5 ./... | tee /tmp/new.txt
-      - name: Bench base branch
+      - name: Bench base branch (PR only)
+        if: github.event_name == 'pull_request'
         run: |
           git checkout ${{ github.base_ref }}
           go test -bench=. -benchmem -count=5 ./... | tee /tmp/old.txt
-      - run: go install golang.org/x/perf/cmd/benchstat@latest
-      - run: benchstat /tmp/old.txt /tmp/new.txt
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+      - name: Compare PR vs base
+        if: github.event_name == 'pull_request'
+        run: benchstat /tmp/old.txt /tmp/new.txt
+      - name: Upload nightly/dispatch output
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.run_id }}
+          path: /tmp/new.txt
+          retention-days: 30
