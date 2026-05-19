@@ -290,3 +290,79 @@ func TestUnit_ApplySyncMessage_WithErrorHandler_SuccessUnaffected(t *testing.T) 
 	require.NoError(t, caught, "handler must not fire on a successful apply")
 	assert.Equal(t, "hello", docB.GetText("t").ToString())
 }
+
+func TestUnit_ApplySyncMessage_WithErrorHandler_LoopContinuesAfterFailure(t *testing.T) {
+	// Simulate a transport read loop: good message → bad message → good message.
+	// Without WithErrorHandler the bad message would terminate the loop and
+	// the final message would never apply. With it, we expect:
+	//   - handler fires exactly once (for the bad message)
+	//   - both good messages apply
+	//   - docB's final state reflects both good updates
+	docA := newDoc(1, "hello")
+	txtA := docA.GetText("t") // capture outside Transact to avoid the well-known
+	// GetText-inside-Transact deadlock (see CONTRIBUTING.md / memory file).
+	msg1 := sync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(docA, nil))
+
+	// Mutate docA, then encode the incremental diff for msg3.
+	docA.Transact(func(txn *crdt.Transaction) {
+		txtA.Insert(txn, 5, " world", nil)
+	})
+	// docB hasn't seen anything yet; encode against an empty state vector so
+	// msg3 carries the full doc. Idempotent re-apply on docB is fine after msg1.
+	msg3 := sync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(docA, nil))
+
+	docB := newDoc(2, "")
+	var errs []error
+	handler := func(e error) { errs = append(errs, e) }
+
+	for i, msg := range [][]byte{msg1, malformedStep2(), msg3} {
+		_, err := sync.ApplySyncMessage(docB, msg, nil, sync.WithErrorHandler(handler))
+		require.NoError(t, err, "message %d: dispatch must not return an error when handler is set", i)
+	}
+
+	require.Len(t, errs, 1, "handler must fire exactly once (only the bad message)")
+	require.ErrorIs(t, errs[0], crdt.ErrInvalidUpdate)
+	assert.Equal(t, "hello world", docB.GetText("t").ToString(),
+		"both good messages must apply despite the bad one in the middle")
+}
+
+func TestUnit_ApplySyncMessage_WithErrorHandler_MultipleErrorsAllReported(t *testing.T) {
+	// Each bad message should fire the handler — not just the first one.
+	docB := newDoc(2, "")
+	var errs []error
+	handler := func(e error) { errs = append(errs, e) }
+
+	for i := 0; i < 3; i++ {
+		_, err := sync.ApplySyncMessage(docB, malformedStep2(), nil, sync.WithErrorHandler(handler))
+		require.NoError(t, err, "iteration %d: dispatch must not return error with handler set", i)
+	}
+
+	assert.Len(t, errs, 3, "handler must fire once per bad message")
+	for _, e := range errs {
+		assert.ErrorIs(t, e, crdt.ErrInvalidUpdate)
+	}
+}
+
+func TestUnit_ApplySyncMessage_WithErrorHandler_HeaderErrorsStillReturned(t *testing.T) {
+	// Header-level decode errors (truncated frame, unknown type) must be
+	// returned to the caller regardless of WithErrorHandler. The handler is
+	// only for ApplyUpdateV1 errors on a well-framed payload. These are
+	// signals that the transport itself is broken — the caller should
+	// disconnect, not log-and-continue.
+	docB := newDoc(2, "")
+	var caught error
+	handler := func(e error) { caught = e }
+
+	// Unknown message type.
+	_, err := sync.ApplySyncMessage(docB, []byte{99}, nil, sync.WithErrorHandler(handler))
+	require.ErrorIs(t, err, sync.ErrUnknownMessage,
+		"header-level errors must still be returned with handler set")
+	require.NoError(t, caught, "handler must NOT fire on header-level decode errors")
+
+	// Truncated frame: type byte only, no varBytes wrapper.
+	caught = nil
+	_, err = sync.ApplySyncMessage(docB, []byte{byte(sync.MsgSyncStep2)}, nil,
+		sync.WithErrorHandler(handler))
+	require.ErrorIs(t, err, sync.ErrUnexpectedEOF)
+	require.NoError(t, caught, "handler must NOT fire on truncated frames")
+}
