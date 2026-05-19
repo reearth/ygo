@@ -78,6 +78,25 @@ ygo uses four test layers:
 - New fuzz targets must be registered in the `fuzz` Makefile target and the `fuzz.yml` workflow.
 - Benchmarks should cover hot paths in `encoding/` and `crdt/`.
 
+### Common pitfalls
+
+- **Always obtain shared-type handles outside `Transact` callbacks.** `doc.GetText`, `doc.GetArray`, `doc.GetMap`, `doc.GetXmlFragment` and the other root accessors acquire the doc's write lock — which `Transact` already holds. Calling them inside the callback deadlocks. The same applies to reads like `text.ToString()` and `arr.ToSlice()`. Pattern:
+
+  ```go
+  // CORRECT — capture the handle before Transact.
+  txt := doc.GetText("content")
+  doc.Transact(func(txn *crdt.Transaction) {
+      txt.Insert(txn, 0, "hello", nil)
+  })
+
+  // DEADLOCK — GetText inside Transact tries to re-acquire the write lock.
+  doc.Transact(func(txn *crdt.Transaction) {
+      doc.GetText("content").Insert(txn, 0, "hello", nil) // hangs forever
+  })
+  ```
+
+  README has the user-facing version of this warning; it's repeated here because tests are the most common place to hit it. If a new test hangs indefinitely, this is almost always the cause.
+
 ## Conventional Commits
 
 Commit messages must follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):

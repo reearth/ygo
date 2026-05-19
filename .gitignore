@@ -41,3 +41,7 @@ code-review-report.md
 # Brainstorming specs and plans — planning artifacts stay local; the durable
 # record lives in CHANGELOG, PR descriptions, and issue threads.
 docs/superpowers/
+
+# Local working notes (per-issue progress trackers, debug logs, scratch repros).
+# Same rationale: planning stays local, durable record lives in PRs and issues.
+.notes/

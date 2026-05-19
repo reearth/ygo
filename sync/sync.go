@@ -108,6 +108,31 @@ func EncodeUpdate(update []byte) []byte {
 	return enc.Bytes()
 }
 
+// ApplySyncMessageOption configures ApplySyncMessage. Use WithErrorHandler to
+// keep the sync loop alive across a single malformed message.
+type ApplySyncMessageOption func(*applySyncOpts)
+
+// applySyncOpts is the internal options struct for ApplySyncMessage.
+type applySyncOpts struct {
+	errorHandler func(error)
+}
+
+// WithErrorHandler routes ApplyUpdateV1 errors encountered during sync-step-2
+// or update dispatch to a caller-supplied handler instead of returning them.
+// When set, ApplySyncMessage swallows the apply error after invoking the
+// handler and returns (nil, nil), letting a transport read loop continue
+// processing subsequent messages from the same peer.
+//
+// Without this option, ApplySyncMessage preserves the pre-v1.8.2 behavior of
+// returning the error to the caller. Decoding errors (truncated headers,
+// unknown message types) are always returned regardless of this option —
+// only ApplyUpdateV1 errors on a well-framed payload are routed to the handler.
+//
+// Matches y-protocols `readSyncMessage(..., errorHandler)` (sync.js).
+func WithErrorHandler(fn func(error)) ApplySyncMessageOption {
+	return func(o *applySyncOpts) { o.errorHandler = fn }
+}
+
 // ApplySyncMessage decodes a sync message and applies it to doc.
 // It handles all three message types:
 //   - step-1: returns a step-2 reply that should be sent back to the sender
@@ -116,7 +141,14 @@ func EncodeUpdate(update []byte) []byte {
 //
 // The origin value is passed through to doc.ApplyUpdate and can be used
 // by observers to identify the source of an update (e.g. a connection ID).
-func ApplySyncMessage(doc *crdt.Doc, msg []byte, origin any) (reply []byte, err error) {
+//
+// Pass WithErrorHandler to keep a sync loop alive across malformed updates.
+func ApplySyncMessage(doc *crdt.Doc, msg []byte, origin any, opts ...ApplySyncMessageOption) (reply []byte, err error) {
+	var so applySyncOpts
+	for _, opt := range opts {
+		opt(&so)
+	}
+
 	dec := encoding.NewDecoder(msg)
 
 	msgType, err := dec.ReadVarUint()
@@ -135,6 +167,10 @@ func ApplySyncMessage(doc *crdt.Doc, msg []byte, origin any) (reply []byte, err 
 			return nil, ErrUnexpectedEOF
 		}
 		if err := crdt.ApplyUpdateV1(doc, updateBytes, origin); err != nil {
+			if so.errorHandler != nil {
+				so.errorHandler(err)
+				return nil, nil
+			}
 			return nil, err
 		}
 		return nil, nil
