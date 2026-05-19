@@ -238,3 +238,55 @@ func FuzzApplySyncMessage(f *testing.F) {
 		_, _ = sync.ApplySyncMessage(target, data, nil)
 	})
 }
+
+// ── #79: ApplySyncMessage error-handler option ────────────────────────────────
+
+// malformedStep2 builds a syntactically valid sync-step-2 wrapper around an
+// intentionally corrupt update payload. ReadVarUint parses the type byte and
+// ReadVarBytes pulls out the payload — but ApplyUpdateV1 on the payload
+// returns ErrInvalidUpdate because the embedded varuint is truncated.
+func malformedStep2() []byte {
+	return []byte{
+		byte(sync.MsgSyncStep2), // 0x01 — message type
+		0x01,                    // varuint(1) — payload length
+		0xff,                    // payload byte: lone continuation, no follower → truncated VarUint
+	}
+}
+
+func TestUnit_ApplySyncMessage_NoHandler_ReturnsError(t *testing.T) {
+	// Without an error handler the call still returns the underlying error,
+	// preserving existing behavior (back-compat).
+	doc := crdt.New()
+	_, err := sync.ApplySyncMessage(doc, malformedStep2(), nil)
+	require.Error(t, err, "without handler, malformed update must surface as a returned error")
+}
+
+func TestUnit_ApplySyncMessage_WithErrorHandler_KeepsLoopAlive(t *testing.T) {
+	// With WithErrorHandler the call swallows the apply error, invokes the
+	// handler, and returns (nil, nil) so a sync read loop can continue.
+	doc := crdt.New()
+	var caught error
+	reply, err := sync.ApplySyncMessage(doc, malformedStep2(), nil,
+		sync.WithErrorHandler(func(e error) { caught = e }))
+	require.NoError(t, err, "with handler, apply error is reported via handler not returned")
+	assert.Nil(t, reply, "no reply for an error path")
+	require.Error(t, caught, "handler must be invoked with the underlying error")
+	assert.ErrorIs(t, caught, crdt.ErrInvalidUpdate)
+}
+
+func TestUnit_ApplySyncMessage_WithErrorHandler_SuccessUnaffected(t *testing.T) {
+	// The handler is only invoked on apply errors. A well-formed update
+	// applies normally and the handler stays untouched.
+	docA := newDoc(1, "hello")
+	raw := crdt.EncodeStateAsUpdateV1(docA, nil)
+	msg := sync.EncodeUpdate(raw)
+
+	docB := newDoc(2, "")
+	var caught error
+	reply, err := sync.ApplySyncMessage(docB, msg, nil,
+		sync.WithErrorHandler(func(e error) { caught = e }))
+	require.NoError(t, err)
+	assert.Nil(t, reply, "MsgUpdate produces no reply")
+	assert.NoError(t, caught, "handler must not fire on a successful apply")
+	assert.Equal(t, "hello", docB.GetText("t").ToString())
+}

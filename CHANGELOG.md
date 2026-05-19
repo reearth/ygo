@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.2] — Unreleased
+
+### Added
+
+- **`sync.WithErrorHandler(fn func(error))` option for `ApplySyncMessage` (#79)**: when set, the dispatcher routes `ApplyUpdateV1` errors to the caller-supplied handler and returns `(nil, nil)` instead of propagating the error out. Lets a transport read loop continue across a single malformed update from a peer rather than tearing down the connection. Without the option, the existing return-the-error behavior is preserved (back-compat). Decoding errors on the message header itself (truncated frames, unknown message types) are still returned regardless. Matches y-protocols `readSyncMessage(..., errorHandler)`.
+
 ## [1.8.1] — 2026-05-18
 
 ### Added
