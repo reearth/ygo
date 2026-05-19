@@ -287,6 +287,6 @@ func TestUnit_ApplySyncMessage_WithErrorHandler_SuccessUnaffected(t *testing.T) 
 		sync.WithErrorHandler(func(e error) { caught = e }))
 	require.NoError(t, err)
 	assert.Nil(t, reply, "MsgUpdate produces no reply")
-	assert.NoError(t, caught, "handler must not fire on a successful apply")
+	require.NoError(t, caught, "handler must not fire on a successful apply")
 	assert.Equal(t, "hello", docB.GetText("t").ToString())
 }
