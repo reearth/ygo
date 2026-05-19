@@ -620,6 +620,133 @@ func TestUnit_ReadVarString_AcceptsValidUTF8(t *testing.T) {
 	assert.Equal(t, "héllo 日本語 🦄", got)
 }
 
+// --- #77 boundary cases ---
+
+// Int32 boundary: -2^31 and 2^31-1 are still tag 125 (inside int32 range);
+// 2^31 and -2^31-1 are just outside and must use tag 123 (float64).
+func TestUnit_Any_IntDispatch_Int32Boundary(t *testing.T) {
+	cases := []struct {
+		v       int64
+		wantTag byte
+		desc    string
+	}{
+		{v: 0x7FFFFFFF, wantTag: 125, desc: "max int32 (2^31-1): tag 125"},
+		{v: -0x80000000, wantTag: 125, desc: "min int32 (-2^31): tag 125"},
+		{v: 0x80000000, wantTag: 123, desc: "max int32 + 1 (2^31): tag 123"},
+		{v: -0x80000001, wantTag: 123, desc: "min int32 - 1 (-2^31 - 1): tag 123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			e := encoding.NewEncoder()
+			e.WriteAny(tc.v)
+			require.NotEmpty(t, e.Bytes())
+			assert.Equal(t, tc.wantTag, e.Bytes()[0])
+		})
+	}
+}
+
+// Safe-int boundary: 2^53 and -2^53 are exactly representable in float64
+// and use tag 123. Values just outside (2^53+1, -2^53-1) lose precision in
+// float64 and must use tag 122 (BigInt) for lossless round-trip.
+func TestUnit_Any_IntDispatch_SafeIntBoundary(t *testing.T) {
+	cases := []struct {
+		v       int64
+		wantTag byte
+		desc    string
+	}{
+		{v: 1 << 53, wantTag: 123, desc: "2^53 (max safe-int): tag 123"},
+		{v: -(1 << 53), wantTag: 123, desc: "-2^53 (min safe-int): tag 123"},
+		{v: (1 << 53) + 1, wantTag: 122, desc: "2^53 + 1 (precision-lossy): tag 122 BigInt"},
+		{v: -(1 << 53) - 1, wantTag: 122, desc: "-2^53 - 1: tag 122 BigInt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			e := encoding.NewEncoder()
+			e.WriteAny(tc.v)
+			require.NotEmpty(t, e.Bytes())
+			assert.Equal(t, tc.wantTag, e.Bytes()[0])
+		})
+	}
+}
+
+// uint64 values above math.MaxInt64 can't be expressed as int64 (which BigInt
+// wraps) and fall back to tag 123 (float64) with documented precision loss.
+// Test pins that it doesn't panic and produces the expected wire shape.
+func TestUnit_Any_VeryLargeUint64_FallsBackToFloat64(t *testing.T) {
+	v := uint64(math.MaxUint64)
+	e := encoding.NewEncoder()
+	assert.NotPanics(t, func() { e.WriteAny(v) })
+	got := e.Bytes()
+	require.Len(t, got, 9, "tag(1) + float64(8) = 9 bytes")
+	assert.Equal(t, byte(123), got[0], "uint64 > MaxInt64 must use tag 123 (float64)")
+	// Round-trip returns float64 with precision loss (expected — same as JS).
+	dec := encoding.NewDecoder(got)
+	decoded, err := dec.ReadAny()
+	require.NoError(t, err)
+	assert.IsType(t, float64(0), decoded)
+}
+
+// IEEE-754 specials: NaN can't equal itself so isFloat32Lossless returns false
+// → tag 123. +Inf and -Inf round-trip through float32 exactly (Inf == Inf
+// holds) → tag 124 narrowing.
+func TestUnit_Any_FloatSpecials(t *testing.T) {
+	t.Run("NaN_stays_float64", func(t *testing.T) {
+		e := encoding.NewEncoder()
+		e.WriteAny(math.NaN())
+		got := e.Bytes()
+		require.Len(t, got, 9)
+		assert.Equal(t, byte(123), got[0],
+			"NaN must use tag 123 (float64) — NaN != NaN breaks the lossless check")
+		// Verify decode returns NaN (can't use Equal because NaN != NaN).
+		dec := encoding.NewDecoder(got)
+		decoded, err := dec.ReadAny()
+		require.NoError(t, err)
+		f, ok := decoded.(float64)
+		require.True(t, ok)
+		assert.True(t, math.IsNaN(f), "round-trip preserves NaN-ness")
+	})
+	t.Run("PosInf_narrows_to_float32", func(t *testing.T) {
+		e := encoding.NewEncoder()
+		e.WriteAny(math.Inf(1))
+		got := e.Bytes()
+		require.Len(t, got, 5)
+		assert.Equal(t, byte(124), got[0],
+			"+Inf is exactly representable in float32 — must narrow to tag 124")
+		dec := encoding.NewDecoder(got)
+		decoded, err := dec.ReadAny()
+		require.NoError(t, err)
+		f, ok := decoded.(float32)
+		require.True(t, ok)
+		assert.True(t, math.IsInf(float64(f), 1))
+	})
+	t.Run("NegInf_narrows_to_float32", func(t *testing.T) {
+		e := encoding.NewEncoder()
+		e.WriteAny(math.Inf(-1))
+		got := e.Bytes()
+		require.Len(t, got, 5)
+		assert.Equal(t, byte(124), got[0])
+	})
+}
+
+// Asymmetric UTF-8 contract: WriteVarString trusts the caller (Go strings
+// can legally contain invalid UTF-8 byte sequences). ReadVarString is the
+// validation gate. Document this so future contributors don't add
+// validation to WriteVarString and break callers passing pre-encoded data.
+func TestUnit_VarString_AsymmetricUTF8Contract(t *testing.T) {
+	invalid := string([]byte{0xff, 0xfe, 0xfd}) // not valid UTF-8
+
+	// Write trusts the caller — no validation, no panic.
+	enc := encoding.NewEncoder()
+	assert.NotPanics(t, func() { enc.WriteVarString(invalid) })
+
+	// Read validates and rejects.
+	dec := encoding.NewDecoder(enc.Bytes())
+	_, err := dec.ReadVarString()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, encoding.ErrInvalidUTF8,
+		"asymmetric contract: write trusts, read validates")
+}
+
 // G4: WriteAny must accept Go unsigned integer types (uint, uint8-32, uint64
 // within int64 range) by promoting to int64. lib0 has no native unsigned
 // type; the goal is API ergonomic parity with Go's numeric tower.
