@@ -459,7 +459,12 @@ func TestUnit_Any_Int64Precision_WithinFloat64SafeRange_RoundTripsAsFloat64(t *t
 	e.WriteAny(v)
 	got, err := encoding.NewDecoder(e.Bytes()).ReadAny()
 	require.NoError(t, err)
-	assert.Equal(t, float64(v), got,
+	// Delta 0 means exact equality — 2^40 is exactly representable in float64,
+	// so this is a precise check, not a fuzzy one. assert.InDelta over
+	// assert.Equal here is a testifylint requirement (float-compare rule).
+	gotFloat, ok := got.(float64)
+	require.True(t, ok, "safe-int-range int must decode as float64")
+	assert.InDelta(t, float64(v), gotFloat, 0,
 		"safe-int-range int round-trips as float64 via tag 123 (matches lib0)")
 }
 
