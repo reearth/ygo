@@ -343,6 +343,54 @@ func TestUnit_ApplySyncMessage_WithErrorHandler_MultipleErrorsAllReported(t *tes
 	}
 }
 
+func TestUnit_ApplySyncMessage_WithErrorHandler_PanicPropagates(t *testing.T) {
+	// Contract: a panic in the user-supplied handler propagates up through
+	// ApplySyncMessage rather than being silently swallowed. The handler is
+	// caller code — we don't recover and hide their bugs. If the loop wants
+	// resilience against handler panics, the *caller* should defer/recover
+	// around the dispatcher.
+	docB := newDoc(2, "")
+	handler := func(e error) { panic("boom") }
+
+	assert.Panics(t, func() {
+		_, _ = sync.ApplySyncMessage(docB, malformedStep2(), nil, sync.WithErrorHandler(handler))
+	}, "handler panic must propagate, not be silently swallowed")
+}
+
+func TestUnit_ApplySyncMessage_WithErrorHandler_NilHandler_BehavesLikeNoOption(t *testing.T) {
+	// Defensive: WithErrorHandler(nil) should be equivalent to not passing
+	// the option at all — error returned to caller, no panic from a nil
+	// function call. Guards against future regressions where someone
+	// forgets the nil check.
+	docB := newDoc(2, "")
+	_, err := sync.ApplySyncMessage(docB, malformedStep2(), nil, sync.WithErrorHandler(nil))
+	require.Error(t, err, "nil handler should fall through to default error-return behavior")
+}
+
+func TestUnit_ApplySyncMessage_WithErrorHandler_Step1ErrorBypassesHandler(t *testing.T) {
+	// Step1 dispatch (case MsgSyncStep1 → EncodeSyncStep2) can fail when
+	// the state-vector payload is corrupt. Like header-level errors, those
+	// failures are returned to the caller regardless of the handler — they
+	// represent transport-level corruption, not an apply failure on
+	// otherwise-valid update bytes. The handler must NOT fire.
+	docB := newDoc(2, "")
+	var caught error
+	handler := func(e error) { caught = e }
+
+	// Malformed Step1: type=0, varBytes length=2, payload's leading VarUint
+	// claims 255 clients in just 2 bytes — DecodeStateVectorV1 rejects with
+	// ErrInvalidUpdate.
+	malformedStep1 := []byte{
+		byte(sync.MsgSyncStep1), // 0x00
+		0x02,                    // varBytes length = 2
+		0xff, 0x01,              // VarUint = 255; no client/clock pairs follow
+	}
+
+	_, err := sync.ApplySyncMessage(docB, malformedStep1, nil, sync.WithErrorHandler(handler))
+	require.Error(t, err, "Step1 dispatch errors must be returned even with handler set")
+	require.NoError(t, caught, "handler must NOT fire on Step1 dispatch errors")
+}
+
 func TestUnit_ApplySyncMessage_WithErrorHandler_HeaderErrorsStillReturned(t *testing.T) {
 	// Header-level decode errors (truncated frame, unknown type) must be
 	// returned to the caller regardless of WithErrorHandler. The handler is
