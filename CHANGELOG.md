@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] — 2026-05-20
+
+### Fixed
+
+- **`crdt`: `Item.delete` now cascades into `ContentType` children (#72 vector B1, HIGH)**. Deleting a container item (e.g. a `YArray` entry holding a nested `YMap`) previously tombstoned only the outer item; the nested children stayed live in the store and the delete-set on the wire omitted their clocks. Peers that held the same nested type saw inconsistent state — inner items appeared live after the outer container was deleted. `Item.delete` now walks `ContentType.Type` head-to-tail and recursively tombstones each child, matching Yjs JS `Item.delete` and yrs `Block::delete`. Cascade depth is unbounded (arbitrarily-nested structures fully clean up).
+
+- **`crdt`: `DeleteSet.applyToPartial` splits items at range boundaries before tombstoning (#72 vector B2, HIGH)**. A delete-set entry that only partially overlapped a locally-squashed run previously tombstoned the entire item, wiping content outside the declared range. Cross-peer trigger: one side squashes runs of text the sender saw as multiple items, then receives a partial-range delete-set entry from the sender. `applyToPartial` now calls `getItemCleanStart` at both range boundaries so each affected item lies entirely inside `[r.Clock, r.Clock+r.Len)` before being deleted, matching Yjs JS `iterateDeletedStructs` and yrs `Update::integrate`.
+
 ## [1.11.0] — 2026-05-20
 
 ### Added
