@@ -209,6 +209,13 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 // logical position. For local transactions the caller (e.g., deleteRange)
 // is responsible for calling invalidatePosCacheFrom before scanning, so we
 // skip the redundant full clear to avoid O(n²) behaviour.
+//
+// Cascade: when this item wraps a ContentType (nested YMap/YArray/YText/…),
+// every child item is recursively deleted so the delete-set encoded on the
+// wire includes the children's clocks. Without this, peers that held the
+// same nested type would see inner items as live after the outer container
+// was deleted (Yjs JS Item.delete walks content.getContent() identically;
+// yrs Block::delete does the same). See #72 vector B1.
 func (item *Item) delete(txn *Transaction) {
 	if item.Deleted {
 		return
@@ -223,6 +230,16 @@ func (item *Item) delete(txn *Transaction) {
 	txn.deleteSet.add(item.ID, item.Content.Len())
 	if item.Parent != nil {
 		txn.addChanged(item.Parent, item.ParentSub)
+	}
+
+	// Recurse into nested-type children so their clocks land in the
+	// delete-set too. Recursive call handles arbitrarily-deep nesting.
+	if ct, ok := item.Content.(*ContentType); ok && ct.Type != nil {
+		for child := ct.Type.start; child != nil; child = child.Right {
+			if !child.Deleted {
+				child.delete(txn)
+			}
+		}
 	}
 }
 
