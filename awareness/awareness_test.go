@@ -127,8 +127,11 @@ func TestInteg_TwoPeer_StateExchange(t *testing.T) {
 }
 
 func TestInteg_RemoveExpired_FiresObserver(t *testing.T) {
+	// Local client (5) is never expired by RemoveExpired per #73 vector C4;
+	// to exercise the observer, seed a remote client (99) and let it expire.
 	a := awareness.New(5)
 	a.SetLocalState(map[string]any{"x": 1})
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 99, 1, `{"y":2}`), nil))
 
 	var fired bool
 	var removedIDs []uint64
@@ -139,12 +142,14 @@ func TestInteg_RemoveExpired_FiresObserver(t *testing.T) {
 		}
 	})
 
-	// timeout=0 means everything is expired immediately.
+	// timeout=0: remote 99 expires; local 5 is exempt (C4).
 	a.RemoveExpired(0)
 
-	assert.True(t, fired, "observer should have been called")
-	assert.Contains(t, removedIDs, uint64(5))
-	assert.NotContains(t, a.GetStates(), uint64(5))
+	assert.True(t, fired, "observer should have been called for remote eviction")
+	assert.Contains(t, removedIDs, uint64(99), "remote client must be expired")
+	assert.NotContains(t, removedIDs, uint64(5), "local client must NOT be expired")
+	assert.NotContains(t, a.GetStates(), uint64(99), "remote gone")
+	assert.Contains(t, a.GetStates(), uint64(5), "local stays")
 }
 
 func TestInteg_OnChange_CalledOnApply(t *testing.T) {
@@ -607,4 +612,132 @@ func makeRoughlySized(key string, targetBytes int) string {
 		val[i] = 'a'
 	}
 	return `{"` + key + `":"` + string(val) + `"}`
+}
+
+// ---------------------------------------------------------------------------
+// #73: awareness protocol correctness (y-protocols parity)
+// ---------------------------------------------------------------------------
+
+// C1 (HIGH) — a remote null update targeting our own clientID must NOT wipe
+// our local state. Yjs JS and yrs both detect this and bump the local clock
+// so a re-emit will overrule the remote. ygo previously accepted the wipe.
+func TestUnit_Awareness_C1_RemoteCannotWipeLocalState(t *testing.T) {
+	a := awareness.New(1)
+	a.SetLocalState(map[string]any{"name": "alice"})
+	initialClock := a.GetStates()[1].Clock
+
+	// Malicious / buggy update: clientID=1 (us), state=null, clock far ahead.
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 1, 999, "null"), nil))
+
+	// Local state must remain; local clock must be > 999 so the re-emit wins.
+	require.Contains(t, a.GetStates(), uint64(1), "local state must survive the remote wipe attempt")
+	assert.Equal(t, "alice", a.GetStates()[1].State["name"])
+	assert.Greater(t, a.GetStates()[1].Clock, uint64(999),
+		"local clock must be bumped past the remote attempt so peers learn the new value")
+	assert.Greater(t, a.GetStates()[1].Clock, initialClock,
+		"local clock must monotonically advance")
+}
+
+// C2 (HIGH) — an equal-clock null entry for a currently-active client must
+// be accepted as the canonical "client X went offline at the clock you
+// already know" message. ygo previously dropped it because of the strict
+// `<= current.Clock` check.
+func TestUnit_Awareness_C2_EqualClockNullRemovesActiveClient(t *testing.T) {
+	a := awareness.New(1)
+	// Seed client 99 with an active state at clock 5.
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 99, 5, `{"x":1}`), nil))
+	require.Contains(t, a.GetStates(), uint64(99))
+
+	// Same clock 5, but now null — the offline signal.
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 99, 5, "null"), nil))
+	assert.NotContains(t, a.GetStates(), uint64(99),
+		"equal-clock null must remove an active client (offline signal)")
+}
+
+// C2 cont. — a strictly-less-than-current clock must still be dropped. The
+// fix to accept equal-clock null mustn't accidentally also accept stale ones.
+func TestUnit_Awareness_C2_OlderClockStillRejected(t *testing.T) {
+	a := awareness.New(1)
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 99, 5, `{"x":1}`), nil))
+	// Older null — must NOT remove.
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 99, 3, "null"), nil))
+	assert.Contains(t, a.GetStates(), uint64(99),
+		"strictly-older null must be dropped, not honored")
+}
+
+// C2 cont. — equal-clock non-null is still a no-op (no new information).
+func TestUnit_Awareness_C2_EqualClockSameStateNoOp(t *testing.T) {
+	a := awareness.New(1)
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 99, 5, `{"x":1}`), nil))
+	// Same clock 5, non-null — no new info, must not double-fire observer.
+	var fireCount int
+	a.OnChange(func(awareness.ChangeEvent) { fireCount++ })
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 99, 5, `{"x":2}`), nil))
+	assert.Equal(t, 0, fireCount,
+		"equal-clock non-null update must be dropped (no observer fire)")
+}
+
+// C3 (MEDIUM) — local clock must follow any remote echo of our own
+// clientID. If a peer reports our clientID at a higher clock (e.g. another
+// browser tab is also us), SetLocalState must produce a clock above that,
+// not a stale a.clock++.
+func TestUnit_Awareness_C3_LocalClockFollowsRemoteEcho(t *testing.T) {
+	a := awareness.New(1)
+	// Remote echoes clientID=1 at clock 100 (e.g. another tab).
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 1, 100, `{"name":"alice"}`), nil))
+	require.Equal(t, uint64(100), a.GetStates()[1].Clock)
+
+	// Now SetLocalState — its clock must be > 100, not 1.
+	a.SetLocalState(map[string]any{"name": "alice-v2"})
+	assert.Greater(t, a.GetStates()[1].Clock, uint64(100),
+		"SetLocalState after remote echo must produce a clock above the echo")
+}
+
+// C4 (MEDIUM) — RemoveExpired must skip the local client. Yjs JS and yrs
+// both explicitly exclude self from the expiry sweep so the local peer
+// can't self-remove in a quiet room.
+func TestUnit_Awareness_C4_RemoveExpiredSkipsLocal(t *testing.T) {
+	a := awareness.New(1)
+	a.SetLocalState(map[string]any{"x": 1})
+
+	// Aggressive expiry: 0 timeout = everything expires immediately.
+	a.RemoveExpired(0)
+
+	assert.Contains(t, a.GetStates(), uint64(1),
+		"local client must never be expired by RemoveExpired")
+}
+
+// C4 cont. — remote clients must STILL be evicted normally.
+func TestUnit_Awareness_C4_RemoveExpiredStillEvictsRemote(t *testing.T) {
+	a := awareness.New(1)
+	a.SetLocalState(map[string]any{"x": 1})
+	require.NoError(t, a.ApplyUpdate(buildAwarenessPayload(t, 99, 5, `{"y":2}`), nil))
+
+	a.RemoveExpired(0)
+
+	assert.Contains(t, a.GetStates(), uint64(1), "local stays")
+	assert.NotContains(t, a.GetStates(), uint64(99), "remote evicted")
+}
+
+// C5 (new API) — Heartbeat re-emits the local state with an incremented
+// clock so peers learn that we're still alive even when our state hasn't
+// changed. No-op when no local state is set.
+func TestUnit_Awareness_C5_Heartbeat_BumpsClock(t *testing.T) {
+	a := awareness.New(1)
+	a.SetLocalState(map[string]any{"x": 1})
+	before := a.GetStates()[1].Clock
+
+	a.Heartbeat()
+	after := a.GetStates()[1].Clock
+	assert.Greater(t, after, before, "Heartbeat must bump the local clock")
+	assert.Equal(t, map[string]any{"x": 1}, a.GetStates()[1].State,
+		"Heartbeat must preserve local state")
+}
+
+func TestUnit_Awareness_C5_Heartbeat_NoOpWhenNoLocalState(t *testing.T) {
+	a := awareness.New(1)
+	// No SetLocalState before Heartbeat.
+	assert.NotPanics(t, func() { a.Heartbeat() })
+	assert.NotContains(t, a.GetStates(), uint64(1),
+		"Heartbeat without local state must not create one")
 }

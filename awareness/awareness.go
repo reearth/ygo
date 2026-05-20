@@ -160,6 +160,15 @@ func (a *Awareness) ClientID() uint64 {
 // Passing nil removes the local client from the awareness set.
 func (a *Awareness) SetLocalState(state map[string]any) {
 	a.mu.Lock()
+	// Reconcile a.clock with any remote echo of our clientID that bumped
+	// states[a.clientID].Clock past a.clock — e.g. another tab also acting
+	// as this clientID. Without this, a.clock++ could produce a value lower
+	// than what peers have already seen, and the update would be ignored
+	// downstream (#73 vector C3). yrs derives the local clock directly from
+	// meta.get(clientID).clock + 1; we do the equivalent via a max() step.
+	if cs, ok := a.states[a.clientID]; ok && cs.Clock > a.clock {
+		a.clock = cs.Clock
+	}
 	// Saturate at MaxUint64 rather than wrapping: a wrap-around would make new
 	// states appear older than existing ones, breaking monotonicity.
 	if a.clock < math.MaxUint64 {
@@ -195,6 +204,38 @@ func (a *Awareness) SetLocalState(state map[string]any) {
 		evt := ChangeEvent{Added: added, Updated: updated, Removed: removed}
 		fireObservers(obs, evt)
 	}
+}
+
+// Heartbeat re-emits the local client's current state at an incremented
+// clock so peers learn that we're still alive even when the state hasn't
+// changed. No-op when no local state is set or when the local client has
+// been removed (state == nil).
+//
+// Typical use is to schedule periodic calls alongside StartAutoExpiry on
+// peers — they expire clients that go quiet, this advertises that we
+// haven't. Matches Yjs JS's constructor interval which re-emits local
+// state every outdatedTimeout/2.
+//
+// Observers are NOT fired — the state itself didn't change, only the
+// clock advanced. Peers will pick up the new clock via EncodeUpdate.
+//
+// Added in v1.11.0 (#73 vector C5).
+func (a *Awareness) Heartbeat() {
+	a.mu.Lock()
+	cs, ok := a.states[a.clientID]
+	if !ok || cs.State == nil {
+		a.mu.Unlock()
+		return
+	}
+	if a.clock < cs.Clock {
+		a.clock = cs.Clock
+	}
+	if a.clock < math.MaxUint64 {
+		a.clock++
+	}
+	a.states[a.clientID] = ClientState{Clock: a.clock, State: cs.State}
+	a.meta[a.clientID] = time.Now()
+	a.mu.Unlock()
 }
 
 // SetLocalStateContext is the context-aware variant of SetLocalState.
@@ -363,8 +404,40 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 
 	for _, e := range entries {
 		current, exists := a.states[e.clientID]
-		// Only apply if incoming clock is strictly greater.
-		if exists && e.clock <= current.Clock {
+		isNullEntry := e.jsonStr == "null" || e.jsonStr == ""
+
+		// y-protocols clock gate (#73 vector C2):
+		//   - strictly-older clock → drop
+		//   - equal clock + null + currently-active → accept (offline signal)
+		//   - equal clock + non-null OR equal clock + already-removed → drop (no new info)
+		//   - strictly-newer clock → accept
+		if exists {
+			if e.clock < current.Clock {
+				continue
+			}
+			if e.clock == current.Clock {
+				validRemoval := isNullEntry && current.State != nil
+				if !validRemoval {
+					continue
+				}
+			}
+		}
+
+		// Self-state protection (#73 vector C1): if a remote sends a null
+		// update for OUR clientID, don't honor it — bump our local clock past
+		// the incoming and re-emit local state so peers learn the new value.
+		// Matches Yjs JS / yrs which both detect this and override the remote.
+		if e.clientID == a.clientID && isNullEntry {
+			if e.clock >= a.clock {
+				a.clock = e.clock + 1
+			}
+			// If we currently have an active local state, re-emit it at the
+			// bumped clock. Wire-bytes accounting is left alone — local state
+			// is excluded from the wireBytes cap (see SetMaxBytes godoc).
+			if exists && current.State != nil {
+				a.states[a.clientID] = ClientState{Clock: a.clock, State: current.State}
+				updated = append(updated, a.clientID)
+			}
 			continue
 		}
 
@@ -372,7 +445,10 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 
 		// Decode JSON state. Reject deeply nested payloads before unmarshalling
 		// to prevent quadratic parse cost from crafted inputs like [[[[...]]]].
-		isNull := e.jsonStr == "null" || e.jsonStr == ""
+		// isNull starts from isNullEntry (computed at the gate above) and can
+		// be further set true by the depth check, unmarshal failure, or one
+		// of the resource caps below.
+		isNull := isNullEntry
 		var state map[string]any
 		if !isNull {
 			if !checkJSONDepth(e.jsonStr) {
@@ -510,11 +586,19 @@ func (a *Awareness) Destroy() {
 
 // RemoveExpired removes clients whose last update is older than timeout.
 // Only active clients (with non-nil State) are tracked in meta and can expire.
+//
+// The local client is exempt: peers can't reliably tell whether we've gone
+// silent, so it's our job to broadcast presence via SetLocalState or
+// Heartbeat. Self-expiry would create false offline signals on quiet rooms.
+// Matches y-protocols / yrs behavior (#73 vector C4).
 func (a *Awareness) RemoveExpired(timeout time.Duration) {
 	now := time.Now()
 	a.mu.Lock()
 	var removed []uint64
 	for id, t := range a.meta {
+		if id == a.clientID {
+			continue // never self-expire
+		}
 		if now.Sub(t) >= timeout {
 			// Mark as removed (keep clock for future clock comparisons).
 			if cs, ok := a.states[id]; ok {
