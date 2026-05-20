@@ -1,29 +1,21 @@
 ## What's new
 
-Second in the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps) series from the cross-reference audit against Yjs JS and yrs. Closes the lib0 `Any` tagged-union parity gaps in `encoding/`.
+Third in the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps) series from the cross-reference audit against Yjs JS and yrs. Closes the awareness self-state protection and clock-semantics gaps in the `awareness/` package.
 
-- **Integer dispatch now matches lib0 by magnitude** (#77). ygo previously emitted tag 125 (int + VarInt) for any `int`/`int64` up to 2^55-1. lib0 only uses tag 125 for int32-range values; larger integers go to tag 123 (float64) or — in ygo's case, where Go's int64 has more range than JS Number — tag 122 (BigInt) to preserve precision. ygo now matches:
+- **Remote peers can no longer wipe local state** (#73 vector C1, HIGH). A `(self.clientID, ?, "null")` entry from a remote peer previously cleared the local awareness state — any peer could effectively deauthenticate any other by broadcasting a null for their clientID. `ApplyUpdate` now detects this case, bumps the local clock past the incoming value, and re-emits the current local state so peers learn the new clock.
 
-  | Range | Tag |
-  |-------|-----|
-  | `[-2^31, 2^31)` | 125 (VarInt) |
-  | safe-int range (outside int32) | 123 (float64) |
-  | beyond float64 safe-int | 122 (BigInt) |
+- **Equal-clock null removals are honored for active clients** (#73 vector C2, HIGH). The strict `<= current.Clock` gate dropped the canonical "I'm going offline at the clock you already know" disconnect message, leaving phantom presence indicators. The gate now uses `<` for stale-drop and additionally accepts equal-clock null when the client is active. Stale and equal-clock-non-null entries are still dropped (no new info).
 
-  Yjs JS readers see byte-for-byte parity with their own writer for the first two ranges and receive `bigint` for the third (which is the natural cross-impl representation when an integer is too large for `Number`).
+- **Local clock follows remote echoes** (#73 vector C3, MEDIUM). `SetLocalState` now reconciles `a.clock` against `states[a.clientID].Clock` before incrementing, so a remote echo of our clientID (e.g. another tab) doesn't cause subsequent updates to emit a clock peers have already seen.
 
-  Compatibility implication for Go callers: an `int64(2^35)` now round-trips as `float64`, and `int64(2^55)` (which previously panicked in `WriteVarInt`) now round-trips as `encoding.BigInt`. See CHANGELOG for the full table.
+- **`RemoveExpired` no longer evicts the local client** (#73 vector C4, MEDIUM). The expiry sweep now skips our own clientID — peers can't reliably tell whether we've gone silent, so it's our job to refresh presence via `SetLocalState` or the new `Heartbeat`.
 
-- **`WriteAny(float64)` narrows to float32 when lossless** (#77). Values like `1.5`, `-0`, and small integer-valued floats now emit tag 124 (4 bytes on the wire) instead of always tag 123 (8 bytes). Matches lib0's `isFloat32` dispatch — halves the wire size for these values.
-
-- **`ReadVarString` rejects invalid UTF-8** (#77). Returns the new `encoding.ErrInvalidUTF8` rather than silently producing a corrupt Go string. Matches lib0's `TextDecoder('utf-8', { fatal: true })`. There's a ~4ns per-call cost from the UTF-8 scan; correctness takes priority — silent corruption surfaces as untraceable bugs downstream.
-
-- **`WriteAny` accepts the rest of Go's numeric tower** (#77). `uint`, `uint8`, `uint16`, `uint32`, `uint64`, `int8`, `int16`, `int32` previously panicked; they're now promoted to `int64` and dispatched normally. `uint64` values exceeding `math.MaxInt64` fall back to tag 123 (float64) with documented precision loss, matching lib0's behavior for very-large `Number`s.
+- **New `Awareness.Heartbeat()` method** (#73 vector C5). Re-emits the local state with an incremented clock so peers see us as still alive even when state hasn't changed. Pairs with their `StartAutoExpiry` to keep us visible in a quiet room. No observers fired (state didn't change, only the clock).
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.10.0
+go get github.com/reearth/ygo@v1.11.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
