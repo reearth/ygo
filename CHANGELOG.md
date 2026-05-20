@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] — 2026-05-20
+
+### Added
+
+- **`Awareness.Heartbeat()`** (#73 vector C5): re-emits the local client's current state with an incremented clock so peers learn we're still alive even when the state hasn't changed. Designed to pair with `StartAutoExpiry` on the peer side — they expire clients that go quiet; we keep ourselves visible by heartbeating periodically. Observers are not fired (state itself didn't change, only the clock advanced). Matches Yjs JS's constructor interval which re-emits local state every `outdatedTimeout/2`.
+
+### Fixed
+
+- **Awareness: remote peers can no longer wipe local state (#73 vector C1, HIGH)**. A remote `(self.clientID, ?, "null")` entry previously cleared the local awareness state — meaning any peer could deauthenticate any other peer by broadcasting a null for their clientID. `ApplyUpdate` now detects this case, bumps the local clock past the incoming, and re-emits the current local state so peers learn the new clock. Matches yrs `apply_update_internal` (`awareness.rs:414-419`) and Yjs JS `applyAwarenessUpdate`.
+
+- **Awareness: equal-clock null removals are honored for active clients (#73 vector C2, HIGH)**. The strict `e.clock <= current.Clock` gate dropped legitimate "client X has gone offline at the clock you already know" messages, leaving phantom presence indicators. The gate now uses `e.clock < current.Clock` for the stale-drop path, and additionally accepts `e.clock == current.Clock` when the entry is null AND the client is currently active. Strictly-older clocks and equal-clock non-null updates are still dropped (no new information).
+
+- **Awareness: local clock now reconciles with remote echoes (#73 vector C3, MEDIUM)**. `SetLocalState` previously did a plain `a.clock++`, which could regress if a remote peer had echoed our clientID at a higher clock (e.g. another browser tab also acting as this clientID). It now does `a.clock = max(a.clock, states[a.clientID].Clock) + 1` so the emitted clock is always greater than anything peers have already observed for us.
+
+- **Awareness: `RemoveExpired` exempts the local client (#73 vector C4, MEDIUM)**. Previously the sweep walked every entry in `meta`, including our own — meaning the local client could self-expire in a quiet room. Now skipped. Matches y-protocols / yrs: the local peer can't tell whether *it* has gone silent, so it's responsible for refreshing presence via `SetLocalState` or `Heartbeat`.
+
 ## [1.10.0] — 2026-05-19
 
 ### Added
