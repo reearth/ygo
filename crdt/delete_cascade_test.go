@@ -178,7 +178,7 @@ func TestUnit_DeleteSet_ExactMatch_NoSpuriousSplit(t *testing.T) {
 	docB.Transact(func(txn *Transaction) { txtB.Delete(txn, 0, 2) })
 	require.NoError(t, ApplyUpdateV1(docA, EncodeStateAsUpdateV1(docB, docA.StateVector()), nil))
 
-	assert.Equal(t, "", txtA.ToString(), "exact-match delete tombstones the whole item")
+	assert.Empty(t, txtA.ToString(), "exact-match delete tombstones the whole item")
 	itemsAfter := len(docA.store.clients[1])
 	assert.Equal(t, itemsBefore, itemsAfter,
 		"no spurious splits when the range exactly matches an item")
