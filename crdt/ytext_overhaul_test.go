@@ -93,7 +93,7 @@ func TestUnit_YText_Delete_CleansUpDanglingFormatMarkers(t *testing.T) {
 		txt.Format(txn, 0, 5, Attributes{"bold": true})
 	})
 
-	require.Greater(t, countLiveContentFormat(doc), 0,
+	require.Positive(t, countLiveContentFormat(doc),
 		"format markers exist after Format()")
 
 	doc.Transact(func(txn *Transaction) {
@@ -115,7 +115,7 @@ func TestUnit_YText_Delete_WrappedSpan_TombstonesBothMarkers(t *testing.T) {
 		txt.Insert(txn, 0, "abc DEF ghi", nil)
 		txt.Format(txn, 4, 3, Attributes{"bold": true}) // bold "DEF"
 	})
-	require.Greater(t, countLiveContentFormat(doc), 0,
+	require.Positive(t, countLiveContentFormat(doc),
 		"setup: bold markers must exist around DEF")
 
 	doc.Transact(func(txn *Transaction) {

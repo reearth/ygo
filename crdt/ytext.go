@@ -371,7 +371,7 @@ func (txt *YText) Delete(txn *Transaction, index, length int) {
 	// walk forward from there post-deletion. nil means "start of document."
 	var startAnchor *Item
 	if index > 0 {
-		startAnchor, _ = txt.abstractType.leftNeighbourAt(index)
+		startAnchor, _ = txt.leftNeighbourAt(index)
 	}
 
 	deleteRange(&txt.abstractType, txn, index, length)
