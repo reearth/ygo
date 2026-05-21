@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] — 2026-05-20
+
+### Added
+
+- **`YText.InsertEmbed(txn, index, embed, attrs)`** (#76, HIGH): public API for inserting embedded objects (images, formulas, videos, any inline non-text payload) into the rich-text stream. Each embed counts as one UTF-16 code unit in document length, matching Yjs JS. Optional `attrs` argument wraps the embed in opening + closing ContentFormat markers so attributes apply only to the embed itself, not to subsequent content. The wire format (`ContentEmbed`, tag 5) already supported embeds — this closes the missing public-API gap.
+- **`ToDelta` now emits embeds** as their own Delta entries with the embed value carried in `Insert` (rather than a string). Pre-fix, `ContentEmbed` items in the linked list were silently dropped from `ToDelta` output.
+
+### Fixed
+
+- **`YText.Format` cleans up overlapping same-key markers in the target range** (#71 vector A1, HIGH): pre-fix, every call to `Format` inserted opening + closing markers without checking for existing markers in the range. Repeated formatting toggles (bold on/off, applied multiple times to the same range) left dead pairs in the linked list that accumulated without bound. `Format` now walks the range and tombstones any pre-existing `ContentFormat` items whose key is being set or cleared before inserting the new markers. Matches Yjs JS `YText.formatText`.
+
+- **`YText.Delete` cleans up dangling format markers** (#71 vector A4, MEDIUM): after deleting a range, `ContentFormat` markers whose effect zone now contains no live countable content are tombstoned. Two redundancy categories handled: openers with no live content in scope (until the next same-key marker), and closers with no live opener for the same key preceding them. Matches Yjs JS `cleanupFormattingGap`. **Perf note:** the cleanup adds a bounded local walk after each `Delete` call — `BenchmarkYText_Delete` (1000 single-char deletes from position 0) shows a ~53% increase from 1.55µs to 2.39µs per delete, all within sub-µs absolute latency. Tracked for future optimisation; correctness takes priority.
+
+- **`computeDelta` correctly handles markers deleted in the current transaction** (incidental fix surfaced by #71/A1): a pre-existing format marker tombstoned during the transaction updated `oldAttrs` mid-walk, producing a phantom attribute diff on the preceding retain. `flushRetain` is now called before the `oldAttrs` update so the diff is computed against the correct pre-transaction state.
+
+### Deferred to follow-up
+
+- **YText.Insert with attribute inheritance / negation** (#71 vectors A2 + A3): the structural rewrite of `Insert` to compute `currentAttributes` at the cursor and diff against caller-supplied attrs is scoped to a separate PR (#71 stays open with a follow-up note).
+
 ## [1.11.1] — 2026-05-20
 
 ### Fixed
