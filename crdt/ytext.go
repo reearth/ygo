@@ -124,6 +124,12 @@ func (txt *YText) computeDelta(txn *Transaction) []Delta {
 			} else if txn.deleteSet.IsDeleted(item.ID) {
 				// Pre-existing marker deleted in this txn: it was active before
 				// (update oldAttrs) but is gone now (leave currentAttrs alone).
+				// Flush any pending retain FIRST so the diff is computed against
+				// the state BEFORE this marker took effect — without the flush
+				// a retain that lives before this position gets a phantom attr
+				// diff (surfaced by #71/A1 where Format now deletes overlapping
+				// markers in its target range).
+				flushRetain()
 				if c.Val == nil {
 					delete(oldAttrs, c.Key)
 				} else {
@@ -248,9 +254,220 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 	item.integrate(txn, 0)
 }
 
+// InsertEmbed inserts an embedded object (image, formula, video metadata, or
+// any other inline non-text payload) at logical UTF-16 position index. Each
+// embed counts as one UTF-16 code unit in the document's length, matching
+// Yjs JS's `YText.insertEmbed` semantics.
+//
+// attrs may carry inline attributes that apply ONLY to this embed item.
+// They are emitted as opening + closing ContentFormat markers around the
+// embed so subsequent inserts are unaffected. Pass nil for an unstyled embed.
+//
+// Must be called from inside a Transact callback.
+//
+// Added in v1.12.0 (#76).
+func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attributes) {
+	t := &txt.abstractType
+	left, offset := t.leftNeighbourAt(index)
+	if offset > 0 {
+		splitItem(txn, left, offset)
+	}
+
+	var origin *ID
+	var originRight *ID
+	if left != nil {
+		end := left.ID.Clock + uint64(left.Content.Len()) - 1
+		origin = &ID{Client: left.ID.Client, Clock: end}
+		if left.Right != nil {
+			id := left.Right.ID
+			originRight = &id
+		}
+	} else if t.start != nil {
+		id := t.start.ID
+		originRight = &id
+	}
+
+	clock := txn.doc.store.NextClock(txn.doc.clientID)
+
+	// Opening attr markers — same pattern as Insert with attrs.
+	if len(attrs) > 0 {
+		for k, v := range attrs {
+			fmtItem := &Item{
+				ID:          ID{Client: txn.doc.clientID, Clock: clock},
+				Origin:      origin,
+				OriginRight: originRight,
+				Left:        left,
+				Parent:      t,
+				Content:     NewContentFormat(k, v),
+			}
+			fmtItem.integrate(txn, 0)
+			left = fmtItem
+			origin = &ID{Client: fmtItem.ID.Client, Clock: fmtItem.ID.Clock}
+			originRight = nil
+			clock = txn.doc.store.NextClock(txn.doc.clientID)
+		}
+	}
+
+	// The embed item itself.
+	item := &Item{
+		ID:          ID{Client: txn.doc.clientID, Clock: clock},
+		Origin:      origin,
+		OriginRight: originRight,
+		Left:        left,
+		Parent:      t,
+		Content:     NewContentEmbed(embed),
+	}
+	if index > 0 {
+		t.insertHint = index
+	}
+	item.integrate(txn, 0)
+
+	// Closing (negating) attr markers — without these the attrs would bleed
+	// into subsequent content. Unlike Insert (which currently doesn't emit
+	// negated attrs — that's the deferred A3 work), InsertEmbed scopes attrs
+	// to the embed exactly, so we always close here.
+	if len(attrs) > 0 {
+		left = item
+		origin = &ID{Client: item.ID.Client, Clock: item.ID.Clock}
+		if left.Right != nil {
+			rid := left.Right.ID
+			originRight = &rid
+		} else {
+			originRight = nil
+		}
+		clock = txn.doc.store.NextClock(txn.doc.clientID)
+
+		for k := range attrs {
+			closeItem := &Item{
+				ID:          ID{Client: txn.doc.clientID, Clock: clock},
+				Origin:      origin,
+				OriginRight: originRight,
+				Left:        left,
+				Parent:      t,
+				Content:     NewContentFormat(k, nil),
+			}
+			closeItem.integrate(txn, 0)
+			left = closeItem
+			origin = &ID{Client: closeItem.ID.Client, Clock: closeItem.ID.Clock}
+			originRight = nil
+			clock = txn.doc.store.NextClock(txn.doc.clientID)
+		}
+	}
+}
+
 // Delete removes length characters starting at logical position index.
+//
+// After the range is tombstoned, Delete examines ContentFormat markers in
+// the local deletion region and tombstones any that no longer wrap live
+// content — matching Yjs JS's cleanupFormattingGap. Without this, repeated
+// edits leave orphan markers that bloat the store and inflate the encoded
+// delete-set. See #71 vector A4.
+//
+// The scan is scoped to the region between the item just before the deletion
+// and the first live countable item after it, so the per-Delete cost is
+// O(region size + scope size of any markers found) rather than O(document).
 func (txt *YText) Delete(txn *Transaction, index, length int) {
+	// Capture the anchor immediately before the deletion start so we can
+	// walk forward from there post-deletion. nil means "start of document."
+	var startAnchor *Item
+	if index > 0 {
+		startAnchor, _ = txt.leftNeighbourAt(index)
+	}
+
 	deleteRange(&txt.abstractType, txn, index, length)
+
+	txt.cleanupDanglingFormatsInRegion(txn, startAnchor)
+}
+
+// cleanupDanglingFormatsInRegion tombstones ContentFormat items in the local
+// region of a recent deletion whose effect zone now contains no live
+// countable content. Called from Delete with the item immediately before
+// the deletion (#71 vector A4).
+//
+// Two categories of redundancy:
+//   - An opener `{key: val}` is redundant when no live countable item lies
+//     between it and the next same-key marker (the scope boundary).
+//   - A closer `{key: nil}` is redundant when no live opener for the same
+//     key precedes it within scope.
+//
+// The outer walk is bounded: we stop after seeing one live countable item
+// past the deletion, which is enough to cover markers whose scope was
+// changed by this delete. Markers further away are unaffected by this
+// specific deletion.
+func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *Item) {
+	var node *Item
+	if startAnchor == nil {
+		node = txt.start
+	} else {
+		node = startAnchor.Right
+	}
+	seenLivePast := false
+	for node != nil {
+		next := node.Right
+		if node.Deleted {
+			node = next
+			continue
+		}
+		if cf, ok := node.Content.(*ContentFormat); ok {
+			if cf.Val == nil {
+				// Closer: walk Left until a same-key marker. A tombstoned
+				// marker doesn't count as a live opener.
+				hasLiveOpener := false
+				for p := node.Left; p != nil; p = p.Left {
+					if p.Deleted {
+						continue
+					}
+					pcf, isFmt := p.Content.(*ContentFormat)
+					if !isFmt {
+						continue
+					}
+					if pcf.Key != cf.Key {
+						continue
+					}
+					if pcf.Val != nil {
+						hasLiveOpener = true
+					}
+					break
+				}
+				if !hasLiveOpener {
+					node.delete(txn)
+				}
+			} else {
+				// Opener: walk Right looking for live countable content in
+				// scope (until the next same-key marker).
+				hasLiveInScope := false
+				for n := node.Right; n != nil; n = n.Right {
+					if n.Deleted {
+						continue
+					}
+					if ncf, isFmt := n.Content.(*ContentFormat); isFmt {
+						if ncf.Key == cf.Key {
+							break
+						}
+						continue
+					}
+					if n.Content.IsCountable() {
+						hasLiveInScope = true
+						break
+					}
+				}
+				if !hasLiveInScope {
+					node.delete(txn)
+				}
+			}
+			node = next
+			continue
+		}
+		if node.Content.IsCountable() {
+			if seenLivePast {
+				// We've seen one live countable past the deletion; markers
+				// further on couldn't have been affected by this delete.
+				break
+			}
+			seenLivePast = true
+		}
+		node = next
+	}
 }
 
 // Format applies attrs to the character range [index, index+length).
@@ -278,6 +495,48 @@ func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) 
 	left, offset := t.leftNeighbourAt(index)
 	if offset > 0 {
 		splitItem(txn, left, offset)
+	}
+
+	// #71/A1: Delete pre-existing same-key ContentFormat markers within the
+	// target range BEFORE we insert new ones. Without this, repeated Format
+	// toggles (e.g. bold-on then bold-off, applied multiple times) leave
+	// stranded markers in the linked list that accumulate without bound.
+	// Mirrors Yjs JS YText.formatText which walks the range and clears
+	// overlapping markers as a preliminary step.
+	//
+	// Walk strategy: format items are zero-width and sit BETWEEN text items,
+	// including at the boundary position index+length where the closing
+	// marker from a prior Format would live. Only stop when the next
+	// text/embed item would push past the range end — that way we capture
+	// markers in the trailing gap too.
+	{
+		var node *Item
+		if left == nil {
+			node = t.start
+		} else {
+			node = left.Right
+		}
+		consumed := 0
+		for node != nil {
+			next := node.Right
+			if node.Deleted {
+				node = next
+				continue
+			}
+			if cf, ok := node.Content.(*ContentFormat); ok {
+				if _, touched := attrs[cf.Key]; touched {
+					node.delete(txn)
+				}
+				node = next
+				continue
+			}
+			// Text/embed item — check whether we've already covered the range.
+			if consumed >= length {
+				break
+			}
+			consumed += node.Content.Len()
+			node = next
+		}
 	}
 
 	// Skip past any ContentFormat items already sitting at this boundary.
@@ -440,6 +699,19 @@ func (txt *YText) ToDelta() []Delta {
 		switch c := item.Content.(type) {
 		case *ContentString:
 			d := Delta{Op: DeltaOpInsert, Insert: c.Str}
+			if len(currentAttrs) > 0 {
+				attrs := make(Attributes, len(currentAttrs))
+				for k, v := range currentAttrs {
+					attrs[k] = v
+				}
+				d.Attributes = attrs
+			}
+			deltas = append(deltas, d)
+		case *ContentEmbed:
+			// #76: embeds are emitted as their own Delta entries with Insert
+			// carrying the embed value (not a string). Attributes attached
+			// inline via opening + closing markers around the embed apply.
+			d := Delta{Op: DeltaOpInsert, Insert: c.Val}
 			if len(currentAttrs) > 0 {
 				attrs := make(Attributes, len(currentAttrs))
 				for k, v := range currentAttrs {
