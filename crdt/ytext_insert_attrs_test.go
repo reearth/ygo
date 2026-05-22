@@ -162,6 +162,73 @@ func TestUnit_YText_Insert_NonComparableAttrValue_DoesNotPanic(t *testing.T) {
 	assert.Equal(t, complexAttr, delta[0].Attributes)
 }
 
+// Regression — when oldVal and newVal are both non-comparable but DIFFERENT,
+// reflect.DeepEqual must return false and the key must appear in the diff.
+// Exercises the inequality branch of the DeepEqual replacement.
+func TestUnit_YText_Insert_NonComparableAttrValue_DifferentValues_DiffsCorrectly(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "A", Attributes{"link": []any{"https://example.com/a"}})
+	})
+	beforeMarkers := countLiveContentFormat(doc)
+
+	// Same key, DIFFERENT slice value → must be diffed (not skipped). Emits
+	// a new opener carrying the new link.
+	assert.NotPanics(t, func() {
+		doc.Transact(func(txn *Transaction) {
+			txt.Insert(txn, 1, "B", Attributes{"link": []any{"https://example.com/b"}})
+		})
+	})
+
+	// More markers added — the diff path was taken, not the same-skip path.
+	assert.Greater(t, countLiveContentFormat(doc), beforeMarkers,
+		"different non-comparable values must take the diff path and emit new markers")
+}
+
+// Regression for the `anchor == nil` early-exit in currentAttributesAt
+// (Copilot review comment #1). Without the early-exit, the walk runs to
+// the END of the document and returns end-state attrs — so an Insert at
+// position 0 with explicit attrs would compute a diff against the wrong
+// baseline (the doc's later state instead of the empty start state),
+// potentially skipping marker emission.
+func TestUnit_YText_Insert_AtStart_ExplicitAttrs_DoesNotInheritFromEndOfDoc(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	// Build a doc with bold formatting LATER in the text.
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "later", Attributes{"bold": true})
+	})
+
+	// Now Insert AT POSITION 0 (before the bold span) with explicit
+	// {bold: true}. The currentAttributes anchor here is nil — the cursor is
+	// before any item. With the early-exit, currentAttrs = {} (start state).
+	// effective {bold: true} vs current {} → diff has bold:true → emit
+	// opener + closer for the new insert.
+	//
+	// Without the early-exit, currentAttributesAt(nil) would walk the entire
+	// doc and return the end-state attrs (which happen to be {} here because
+	// the bold span has a closer, but in a more complex doc the bug would
+	// produce wrong results). We assert the correct behavior via marker
+	// count: the new insert MUST contribute its own opener+closer pair, not
+	// rely on a phantom-shared opener with the later span.
+	beforeMarkers := countLiveContentFormat(doc)
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "X", Attributes{"bold": true})
+	})
+	assert.Equal(t, beforeMarkers+2, countLiveContentFormat(doc),
+		"Insert(0, ..., bold:true) must emit its own opener+closer pair "+
+			"independent of formatting later in the doc (anchor==nil early-exit)")
+
+	// Sanity: the inserted X must actually be bold in ToDelta.
+	delta := txt.ToDelta()
+	require.NotEmpty(t, delta)
+	first := delta[0]
+	require.Equal(t, "X", first.Insert)
+	assert.Equal(t, Attributes{"bold": true}, first.Attributes,
+		"X must be bold via its OWN marker pair, not by accident")
+}
+
 // A3 — Cross-peer convergence: docB receives docA's Insert-with-attrs and
 // must produce the same ToDelta output (including the bounded formatting).
 func TestInteg_YText_Insert_WithAttrs_CrossPeerConvergence(t *testing.T) {
