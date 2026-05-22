@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] — 2026-05-21
+
+### Fixed
+
+- **`YText.Insert` with `currentAttributes` diff** (#71 vectors A2 + A3, HIGH). Closes #71 entirely. Companion to v1.12.0's A1 + A4 fixes.
+  - **A2 — inheritance**: when caller passes `nil`/empty attrs, the new text inherits whatever `ContentFormat` markers are in effect at the cursor. `Insert` now computes `currentAttributes` by walking from `txt.start` to the insertion anchor, then uses it to decide whether any new markers are needed (none, in the inheritance case).
+  - **A3 — no rightward bleed**: when caller passes explicit attrs, a diff against `currentAttributes` drives marker emission: opening markers for keys that need to change, and negating closing markers after the text to revert to the pre-insert state. Pre-fix, only openers were emitted, so formatting bled rightward through subsequent retained text. Matches Yjs JS `insertText` byte-for-byte.
+  - **Incidental fix**: the closer's `Origin` was being set to the first clock of the wrapped text item, not the last. On a fresh peer applying the update via `ApplyUpdateV1`, YATA integration placed the closer mid-text instead of after the full text. Now uses `item.ID.Clock + item.Content.Len() - 1`.
+
 ## [1.12.0] — 2026-05-20
 
 ### Added
