@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"encoding/json"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -220,18 +221,13 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 		// left is now the left half; left.Right is the right half.
 	}
 
-	// Compute the format state in effect AT the cursor (immediately after
-	// `left`). This drives both the inheritance (A2) and diff/negation (A3)
-	// behavior described in the doc-comment above.
-	currentAttrs := txt.currentAttributesAt(left)
-
-	// Determine which attribute keys actually need an open/close pair around
-	// the insert. For each key in the caller-supplied attrs, compare against
-	// currentAttrs; if the requested value differs, that key needs a marker
-	// pair. Keys whose value already matches the current state are skipped.
-	//
-	// diffKeys preserves a deterministic order via the keys slice so emitted
-	// marker order is stable across runs (helpful for goldens and debugging).
+	// Fast path: when caller passed nil/empty attrs, there's nothing to diff,
+	// no markers to emit, and the new text inherits surrounding formatting
+	// via the existing markers in the linked list — ToDelta walks them as it
+	// emits the new text. Skipping currentAttributesAt here is what keeps
+	// sequential typing in a long doc at near-O(1) per Insert instead of
+	// degrading to O(n²) — currentAttributesAt itself is O(n) (walks from
+	// txt.start to the anchor).
 	type diffEntry struct {
 		key    string
 		newVal any
@@ -240,8 +236,12 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 	}
 	var diff []diffEntry
 	if len(attrs) > 0 {
-		// Deterministic order — Go map iteration is randomized, but the order
-		// of opener emission is observable through the linked list. Sort keys.
+		// Caller passed explicit attrs — we need currentAttributes to compute
+		// which keys actually need an open/close pair around the insert.
+		currentAttrs := txt.currentAttributesAt(left)
+
+		// Deterministic emission order — Go map iteration is randomized, but
+		// linked-list order is observable, so sort keys.
 		keys := make([]string, 0, len(attrs))
 		for k := range attrs {
 			keys = append(keys, k)
@@ -250,12 +250,14 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 		for _, k := range keys {
 			newVal := attrs[k]
 			oldVal, hadKey := currentAttrs[k]
-			same := hadKey && oldVal == newVal
 			// Treat (absent in current) and (newVal == nil) as the same state
 			// — both mean "no formatting for this key." No marker needed.
 			if !hadKey && newVal == nil {
 				continue
 			}
+			// reflect.DeepEqual safely compares any JSON-decoded value
+			// (including []any / map[string]any), where `==` would panic.
+			same := hadKey && reflect.DeepEqual(oldVal, newVal)
 			if same {
 				continue
 			}
@@ -359,19 +361,24 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 }
 
 // currentAttributesAt computes the format state in effect at the cursor
-// position immediately AFTER `anchor`. Walks from txt.start (or t.start
-// equivalently) to anchor, applying each live ContentFormat marker in
-// linked-list order. Tombstoned markers are skipped — they no longer
-// contribute to the formatting state.
+// position immediately AFTER `anchor`. Walks from txt.start to anchor,
+// applying each live ContentFormat marker in linked-list order. Tombstoned
+// markers are skipped — they no longer contribute to the formatting state.
 //
-// Returns nil-equivalent (empty map) when anchor is nil or no markers
-// precede it.
+// When anchor is nil, the cursor is BEFORE any item (insertion at the
+// document start), so no markers can be in effect — returns an empty map
+// without walking the list. Without this early exit, the loop would walk
+// the whole document and return the end-state attrs instead of the
+// start-state attrs.
 //
 // Added in v1.13.0 (#71 vectors A2 + A3). The caller is responsible for
 // not invoking this with stale anchor pointers; YText.Insert calls it
 // immediately after leftNeighbourAt.
 func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 	attrs := make(Attributes)
+	if anchor == nil {
+		return attrs
+	}
 	for item := txt.start; item != nil; item = item.Right {
 		if !item.Deleted {
 			if cf, ok := item.Content.(*ContentFormat); ok {

@@ -135,6 +135,33 @@ func TestUnit_YText_Insert_ExplicitAttrsMatchingContext_NoExtraMarkers(t *testin
 		"explicit attrs that match currentAttributes must not produce new markers")
 }
 
+// Regression — non-comparable attribute values (slices, maps) from
+// JSON-decoded ContentFormat must not panic during the diff calculation.
+// Pre-fix, `oldVal == newVal` would panic at runtime when comparing
+// `[]any` / `map[string]any` values. Now uses reflect.DeepEqual.
+func TestUnit_YText_Insert_NonComparableAttrValue_DoesNotPanic(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	complexAttr := Attributes{
+		"link":   []any{"https://example.com", "title"},
+		"meta":   map[string]any{"weight": float64(700)},
+		"simple": "value",
+	}
+	assert.NotPanics(t, func() {
+		doc.Transact(func(txn *Transaction) {
+			txt.Insert(txn, 0, "hello", complexAttr)
+			// Second insert with identical complex attrs — exercises the
+			// reflect.DeepEqual path (same value, no markers needed).
+			txt.Insert(txn, 5, "world", complexAttr)
+		})
+	}, "Insert must handle non-comparable attr values via reflect.DeepEqual")
+
+	// Sanity check that all three attrs round-trip.
+	delta := txt.ToDelta()
+	require.NotEmpty(t, delta)
+	assert.Equal(t, complexAttr, delta[0].Attributes)
+}
+
 // A3 — Cross-peer convergence: docB receives docA's Insert-with-attrs and
 // must produce the same ToDelta output (including the bounded formatting).
 func TestInteg_YText_Insert_WithAttrs_CrossPeerConvergence(t *testing.T) {
