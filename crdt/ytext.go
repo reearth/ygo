@@ -233,10 +233,10 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 	// diffKeys preserves a deterministic order via the keys slice so emitted
 	// marker order is stable across runs (helpful for goldens and debugging).
 	type diffEntry struct {
-		key      string
-		newVal   any
-		oldVal   any // currentAttrs[key], or nil if absent
-		hadKey   bool
+		key    string
+		newVal any
+		oldVal any // currentAttrs[key], or nil if absent
+		hadKey bool
 	}
 	var diff []diffEntry
 	if len(attrs) > 0 {
