@@ -393,7 +393,7 @@ func (t *YXmlText) ToXML() string {
 // this, calling YXmlText.ToXML from computeDelta (under write lock) would
 // deadlock on the RLock inside YText.ToString.
 func (t *YXmlText) toXMLLocked() string {
-	return xmlEscapeText(t.YText.toStringLocked())
+	return xmlEscapeText(t.toStringLocked())
 }
 
 // ── Constructors ──────────────────────────────────────────────────────────────
