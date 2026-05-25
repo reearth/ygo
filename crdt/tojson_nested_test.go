@@ -119,6 +119,110 @@ func TestUnit_YMap_ToJSON_RecursesIntoNestedYArray(t *testing.T) {
 	require.Contains(t, roundTrip, "list")
 }
 
+// Regression — ContentJSON values (legacy wire variant, tag wireJSON=2)
+// must appear in YArray.ToSlice output, not be silently dropped. Mirrors
+// the ContentAny handling. Without this case in the type switch, any
+// items received from JS peers via V1 wire as ContentJSON would vanish
+// from ToJSON output.
+func TestUnit_YArray_ToSlice_HandlesContentJSON(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	doc.Transact(func(txn *Transaction) {
+		// First a normal item via ContentAny.
+		arr.Push(txn, []any{"first"})
+		// Then a manually-integrated ContentJSON item (simulating an item
+		// decoded from a JS-peer V1 update with wireJSON tag).
+		at := arr.baseType()
+		item := &Item{
+			ID:      ID{Client: doc.clientID, Clock: doc.store.NextClock(doc.clientID)},
+			Parent:  at,
+			Content: NewContentJSON("legacy-string", int64(42), true),
+		}
+		item.integrate(txn, 0)
+	})
+
+	got := arr.ToSlice()
+	require.Len(t, got, 4,
+		"ContentAny 'first' + 3 ContentJSON values = 4 total")
+	// The manually-integrated ContentJSON has no Origin set, so YATA places
+	// it at the start of the array (before "first"). The order is therefore:
+	// ContentJSON values first, then the ContentAny value. The actual
+	// assertion is just that ContentJSON values appear at all — order is
+	// implementation detail of where Origin was set.
+	assert.Equal(t, "legacy-string", got[0])
+	assert.Equal(t, int64(42), got[1])
+	assert.Equal(t, true, got[2])
+	assert.Equal(t, "first", got[3])
+}
+
+// Regression — ContentJSON values must appear in YMap.Entries output too.
+// Same gap mirrored to the map type.
+func TestUnit_YMap_Entries_HandlesContentJSON(t *testing.T) {
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	doc.Transact(func(txn *Transaction) {
+		m.Set(txn, "fresh", "via-ContentAny")
+		// Manually integrate a ContentJSON-backed entry under key 'legacy'.
+		at := m.baseType()
+		item := &Item{
+			ID:        ID{Client: doc.clientID, Clock: doc.store.NextClock(doc.clientID)},
+			Parent:    at,
+			ParentSub: "legacy",
+			Content:   NewContentJSON("legacy-value"),
+		}
+		item.integrate(txn, 0)
+	})
+
+	entries := m.Entries()
+	assert.Equal(t, "via-ContentAny", entries["fresh"])
+	assert.Equal(t, "legacy-value", entries["legacy"],
+		"keys backed by ContentJSON must appear in Entries output (was silently dropped pre-fix)")
+}
+
+// Regression — nested YXml types in YArray.ToSlice must serialise via the
+// lock-free toXMLLocked path. The contract is: nested XML appears as an
+// XML string in the array's JSON representation. Incidentally exercises
+// the locked-variant code path that prevents the deadlock fixed alongside
+// the ContentJSON gap.
+func TestUnit_YArray_ToSlice_NestedYXml_SerializesAsString(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	elem := NewYXmlElement("p")
+	elem.doc = doc
+	xmlText := NewYXmlText()
+	xmlText.doc = doc
+
+	doc.Transact(func(txn *Transaction) {
+		// Place the XML element into the array.
+		at := arr.baseType()
+		item := &Item{
+			ID:      ID{Client: doc.clientID, Clock: doc.store.NextClock(doc.clientID)},
+			Parent:  at,
+			Content: NewContentType(&elem.abstractType),
+		}
+		item.integrate(txn, 0)
+
+		// Add a YXmlText child to the element with some content.
+		atElem := elem.baseType()
+		textItem := &Item{
+			ID:      ID{Client: doc.clientID, Clock: doc.store.NextClock(doc.clientID)},
+			Parent:  atElem,
+			Content: NewContentType(&xmlText.abstractType),
+		}
+		textItem.integrate(txn, 0)
+		xmlText.Insert(txn, 0, "hello", nil)
+	})
+
+	got := arr.ToSlice()
+	require.Len(t, got, 1)
+	xmlStr, ok := got[0].(string)
+	require.True(t, ok,
+		"nested YXmlElement must serialise as a string via XML escaping")
+	assert.Contains(t, xmlStr, "<p>")
+	assert.Contains(t, xmlStr, "hello")
+	assert.Contains(t, xmlStr, "</p>")
+}
+
 // #75 cont. — Two-level nesting (array → map → array) recurses correctly
 // all the way down. Pin the depth contract.
 func TestUnit_YArray_ToJSON_DeepNesting(t *testing.T) {
