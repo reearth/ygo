@@ -14,10 +14,11 @@ import (
 // causing silent data loss for editors, persistence layers, and snapshot
 // dumps that round-trip through JSON.
 
-// insertNestedYMap is a tiny helper that builds a nested YMap parented to
-// the given YArray at the specified index, populating it inside the same
+// insertNestedYMap is a tiny helper that appends a nested YMap to the given
+// YArray (always at the end — tests requiring specific placement should
+// construct the items directly). Populates the nested map in the same
 // transaction. Returns the nested map for further assertions.
-func insertNestedYMap(t *testing.T, doc *Doc, arr *YArray, index int, kv map[string]any) *YMap {
+func insertNestedYMap(t *testing.T, doc *Doc, arr *YArray, kv map[string]any) *YMap {
 	t.Helper()
 	nested := &YMap{}
 	nested.doc = doc
@@ -30,9 +31,6 @@ func insertNestedYMap(t *testing.T, doc *Doc, arr *YArray, index int, kv map[str
 			Parent:  at,
 			Content: NewContentType(&nested.abstractType),
 		}
-		// Position at the end for simplicity — tests can shuffle if they need
-		// a specific layout.
-		_ = index
 		item.integrate(txn, 0)
 		for k, v := range kv {
 			nested.Set(txn, k, v)
@@ -47,7 +45,7 @@ func insertNestedYMap(t *testing.T, doc *Doc, arr *YArray, index int, kv map[str
 func TestUnit_YArray_ToJSON_RecursesIntoNestedYMap(t *testing.T) {
 	doc := newTestDoc(1)
 	arr := doc.GetArray("a")
-	insertNestedYMap(t, doc, arr, 0, map[string]any{"k1": "v1", "k2": int64(42)})
+	insertNestedYMap(t, doc, arr, map[string]any{"k1": "v1", "k2": int64(42)})
 
 	// Add some plain values alongside.
 	doc.Transact(func(txn *Transaction) {

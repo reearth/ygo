@@ -147,6 +147,13 @@ func (m *YMap) entriesLocked() map[string]any {
 			if len(c.Vals) > 0 {
 				out[k] = c.Vals[0]
 			}
+		case *ContentJSON:
+			// ContentJSON is the legacy JSON wire variant (tag wireJSON=2);
+			// functionally equivalent to ContentAny. Without this case,
+			// keys received via JS-peer updates would be silently dropped.
+			if len(c.Vals) > 0 {
+				out[k] = c.Vals[0]
+			}
 		case *ContentEmbed:
 			out[k] = c.Val
 		case *ContentType:

@@ -184,6 +184,12 @@ func (a *YArray) toSliceLocked() []any {
 		switch c := item.Content.(type) {
 		case *ContentAny:
 			result = append(result, c.Vals...)
+		case *ContentJSON:
+			// ContentJSON is the legacy JSON wire variant (tag wireJSON=2),
+			// functionally equivalent to ContentAny. Updates received from
+			// JS peers can land as ContentJSON items; without this case they
+			// would be silently dropped from ToSlice/ToJSON output.
+			result = append(result, c.Vals...)
 		case *ContentEmbed:
 			result = append(result, c.Val)
 		case *ContentType:
@@ -209,11 +215,11 @@ func toJSONValue(ct *ContentType) any {
 	case *YText:
 		return owner.toStringLocked()
 	case *YXmlElement:
-		return owner.ToXML()
+		return owner.toXMLLocked()
 	case *YXmlFragment:
-		return owner.ToXML()
+		return owner.toXMLLocked()
 	case *YXmlText:
-		return owner.ToXML()
+		return owner.toXMLLocked()
 	default:
 		return nil
 	}

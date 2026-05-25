@@ -7,8 +7,15 @@ import (
 
 // xmlNode is implemented by all XML node types (*YXmlFragment, *YXmlElement,
 // *YXmlText). It is used internally to walk and serialise XML trees.
+//
+// toXMLLocked is the lock-free counterpart to ToXML, used by toJSONValue
+// (#75) when serialisation is happening from a context that already holds
+// the doc lock — most notably computeDelta running under the doc write
+// lock via prepareFire. Calling ToXML there would re-enter the lock and
+// deadlock on the YXmlText path (which delegates to YText.ToString).
 type xmlNode interface {
 	ToXML() string
+	toXMLLocked() string
 	baseXMLType() *abstractType
 }
 
@@ -150,6 +157,16 @@ func (f *YXmlFragment) ToXML() string {
 	var sb strings.Builder
 	for _, child := range f.Children() {
 		sb.WriteString(child.ToXML())
+	}
+	return sb.String()
+}
+
+// toXMLLocked is the lock-free body of ToXML; safe to call from a context
+// holding the doc lock. See the xmlNode interface comment.
+func (f *YXmlFragment) toXMLLocked() string {
+	var sb strings.Builder
+	for _, child := range f.Children() {
+		sb.WriteString(child.toXMLLocked())
 	}
 	return sb.String()
 }
@@ -307,6 +324,25 @@ func (e *YXmlElement) ToXML() string {
 	return sb.String()
 }
 
+// toXMLLocked is the lock-free body of ToXML; calls the locked variant of
+// YXmlFragment so the recursion into YXmlText descendants doesn't re-enter
+// the doc lock. See the xmlNode interface comment.
+func (e *YXmlElement) toXMLLocked() string {
+	attrs := e.GetAttributes()
+	var sb strings.Builder
+	sb.WriteByte('<')
+	sb.WriteString(e.NodeName)
+	for _, k := range xmlSortedKeys(attrs) {
+		fmt.Fprintf(&sb, ` %s="%s"`, k, xmlEscapeAttr(attrs[k]))
+	}
+	sb.WriteByte('>')
+	sb.WriteString(e.YXmlFragment.toXMLLocked())
+	sb.WriteString("</")
+	sb.WriteString(e.NodeName)
+	sb.WriteByte('>')
+	return sb.String()
+}
+
 // Observe registers fn to be called after every transaction that modifies this
 // element (children added/removed or attributes changed). Returns an
 // unsubscribe function. Uses ID-based lookup so out-of-order unsubscription
@@ -350,6 +386,14 @@ func (t *YXmlText) baseXMLType() *abstractType { return &t.abstractType }
 // ToXML returns the text content with XML-special characters escaped.
 func (t *YXmlText) ToXML() string {
 	return xmlEscapeText(t.YText.ToString()) //nolint:staticcheck // intentional: avoids recursion with YXmlText.ToXML
+}
+
+// toXMLLocked is the lock-free body of ToXML; uses YText.toStringLocked so
+// it's safe to call from a context already holding the doc lock. Without
+// this, calling YXmlText.ToXML from computeDelta (under write lock) would
+// deadlock on the RLock inside YText.ToString.
+func (t *YXmlText) toXMLLocked() string {
+	return xmlEscapeText(t.YText.toStringLocked())
 }
 
 // ── Constructors ──────────────────────────────────────────────────────────────
