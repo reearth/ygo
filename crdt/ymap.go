@@ -118,21 +118,46 @@ func (m *YMap) Keys() []string {
 	return keys
 }
 
-// Entries returns a snapshot of all live key-value pairs.
+// Entries returns a snapshot of all live key-value pairs. Nested shared
+// types are recursively unwrapped (#75): nested YArray → []any, nested
+// YMap → map[string]any, nested YText → string. Pre-fix these were
+// silently dropped from the output.
+//
 // Must not be called from inside a Transact callback.
 func (m *YMap) Entries() map[string]any {
 	if doc := m.doc; doc != nil {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
 	}
+	return m.entriesLocked()
+}
+
+// entriesLocked is the lock-free body of Entries; callers must already
+// hold the doc lock. Used by Entries (top-level) and toJSONValue (during
+// recursive unwrap of nested types).
+func (m *YMap) entriesLocked() map[string]any {
 	t := &m.abstractType
 	out := make(map[string]any, len(t.itemMap))
 	for k, item := range t.itemMap {
 		if item.Deleted {
 			continue
 		}
-		if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-			out[k] = ca.Vals[0]
+		switch c := item.Content.(type) {
+		case *ContentAny:
+			if len(c.Vals) > 0 {
+				out[k] = c.Vals[0]
+			}
+		case *ContentJSON:
+			// ContentJSON is the legacy JSON wire variant (tag wireJSON=2);
+			// functionally equivalent to ContentAny. Without this case,
+			// keys received via JS-peer updates would be silently dropped.
+			if len(c.Vals) > 0 {
+				out[k] = c.Vals[0]
+			}
+		case *ContentEmbed:
+			out[k] = c.Val
+		case *ContentType:
+			out[k] = toJSONValue(c)
 		}
 	}
 	return out

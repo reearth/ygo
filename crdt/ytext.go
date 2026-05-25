@@ -109,6 +109,54 @@ func (txt *YText) computeDelta(txn *Transaction) []Delta {
 				retain += c.Len()
 			}
 
+		case *ContentEmbed:
+			// #74 D3: observers must see embed inserts/deletes/retains
+			// alongside text. Each embed counts as one UTF-16 unit
+			// (matches Yjs convention; see YText.InsertEmbed in v1.12.0).
+			if isNew {
+				if !item.Deleted {
+					flushRetain()
+					d := Delta{Op: DeltaOpInsert, Insert: c.Val}
+					if len(currentAttrs) > 0 {
+						attrs := make(Attributes, len(currentAttrs))
+						for k, v := range currentAttrs {
+							attrs[k] = v
+						}
+						d.Attributes = attrs
+					}
+					ops = append(ops, d)
+				}
+			} else if txn.deleteSet.IsDeleted(item.ID) {
+				flushRetain()
+				ops = append(ops, Delta{Op: DeltaOpDelete, Delete: 1})
+			} else if !item.Deleted {
+				retain += 1
+			}
+
+		case *ContentType:
+			// #74 D3: rare in YText (used by some editors to embed YArray/
+			// YMap as inline objects). Treat like an embed for delta
+			// purposes — length 1, value is the unwrapped nested type.
+			if isNew {
+				if !item.Deleted {
+					flushRetain()
+					d := Delta{Op: DeltaOpInsert, Insert: toJSONValue(c)}
+					if len(currentAttrs) > 0 {
+						attrs := make(Attributes, len(currentAttrs))
+						for k, v := range currentAttrs {
+							attrs[k] = v
+						}
+						d.Attributes = attrs
+					}
+					ops = append(ops, d)
+				}
+			} else if txn.deleteSet.IsDeleted(item.ID) {
+				flushRetain()
+				ops = append(ops, Delta{Op: DeltaOpDelete, Delete: 1})
+			} else if !item.Deleted {
+				retain += 1
+			}
+
 		case *ContentFormat:
 			if isNew {
 				if !item.Deleted {
@@ -800,6 +848,13 @@ func (txt *YText) ToString() string {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
 	}
+	return txt.toStringLocked()
+}
+
+// toStringLocked is the lock-free body of ToString; callers must already
+// hold the doc lock. Used by ToString (top-level) and toJSONValue (#75)
+// when a YText appears as a value inside a YArray or YMap.
+func (txt *YText) toStringLocked() string {
 	t := &txt.abstractType
 	var sb strings.Builder
 	for item := t.start; item != nil; item = item.Right {

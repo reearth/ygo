@@ -140,13 +140,24 @@ func (a *YArray) Delete(txn *Transaction, index, length int) {
 	deleteRange(&a.abstractType, txn, index, length)
 }
 
-// ToSlice returns all non-deleted elements as a new slice.
+// ToSlice returns all non-deleted elements as a new slice. Nested shared
+// types are recursively unwrapped via toJSONValue (#75): a nested YArray
+// appears as []any, a nested YMap as map[string]any, a nested YText as
+// string. Pre-fix these were silently dropped from the output.
+//
 // Must not be called from inside a Transact callback.
 func (a *YArray) ToSlice() []any {
 	if doc := a.doc; doc != nil {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
 	}
+	return a.toSliceLocked()
+}
+
+// toSliceLocked is the lock-free body of ToSlice; callers must already
+// hold the doc lock. Used by ToSlice (top-level) and toJSONValue (during
+// recursive unwrap of nested types under #75).
+func (a *YArray) toSliceLocked() []any {
 	t := &a.abstractType
 	result := make([]any, 0, t.length)
 	for item := t.start; item != nil; item = item.Right {
@@ -154,7 +165,6 @@ func (a *YArray) ToSlice() []any {
 			continue
 		}
 		if cm, ok := item.Content.(*ContentMove); ok {
-			// Render the moved item at this position if this move won.
 			if a.doc != nil {
 				target := a.doc.store.Find(*cm.Target)
 				if target != nil && target.MovedBy == item && !target.Deleted {
@@ -169,14 +179,50 @@ func (a *YArray) ToSlice() []any {
 			continue
 		}
 		if item.MovedBy != nil {
-			// Rendered at the ContentMove's position; skip here.
 			continue
 		}
-		if ca, ok := item.Content.(*ContentAny); ok {
-			result = append(result, ca.Vals...)
+		switch c := item.Content.(type) {
+		case *ContentAny:
+			result = append(result, c.Vals...)
+		case *ContentJSON:
+			// ContentJSON is the legacy JSON wire variant (tag wireJSON=2),
+			// functionally equivalent to ContentAny. Updates received from
+			// JS peers can land as ContentJSON items; without this case they
+			// would be silently dropped from ToSlice/ToJSON output.
+			result = append(result, c.Vals...)
+		case *ContentEmbed:
+			result = append(result, c.Val)
+		case *ContentType:
+			result = append(result, toJSONValue(c))
 		}
 	}
 	return result
+}
+
+// toJSONValue recursively unwraps a ContentType into its JSON-shaped value.
+// YArray → []any, YMap → map[string]any, YText → string, YXmlElement /
+// YXmlFragment / YXmlText → string (XML serialisation). Unknown nested
+// types fall back to nil. Caller must hold the doc lock. See #75.
+func toJSONValue(ct *ContentType) any {
+	if ct == nil || ct.Type == nil || ct.Type.owner == nil {
+		return nil
+	}
+	switch owner := ct.Type.owner.(type) {
+	case *YArray:
+		return owner.toSliceLocked()
+	case *YMap:
+		return owner.entriesLocked()
+	case *YText:
+		return owner.toStringLocked()
+	case *YXmlElement:
+		return owner.toXMLLocked()
+	case *YXmlFragment:
+		return owner.toXMLLocked()
+	case *YXmlText:
+		return owner.toXMLLocked()
+	default:
+		return nil
+	}
 }
 
 // ToJSON returns the array serialised as a JSON array.

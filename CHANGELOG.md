@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] — 2026-05-25
+
+### Fixed
+
+- **`YArray.ToSlice` / `YArray.ToJSON` / `YMap.Entries` / `YMap.ToJSON` recursively unwrap nested shared types** (#75, HIGH). Pre-fix, items wrapping a nested `*YArray`, `*YMap`, `*YText`, or `*YXml*` via `ContentType` were silently dropped from the output — `json.Marshal` of a YArray containing a nested YMap produced an array with the nested map missing entirely. Now: nested YArray → `[]any`, nested YMap → `map[string]any`, nested YText → `string`, nested YXml* → XML string serialisation. Arbitrarily-deep nesting (array → map → array → …) recurses cleanly. Matches Yjs JS's `toJSON` convention.
+
+- **`YTextEvent.Delta` emits insert/delete/retain ops for `ContentEmbed` and `ContentType` items** (#74 vector D3, MEDIUM). Pre-fix, `computeDelta` only handled `ContentString` and `ContentFormat`, so observers received delta events that silently omitted embeds (images, formulas, custom inline objects). Now: embed inserts surface as `Delta{Op: Insert, Insert: embedValue}`, embed deletes as `Delta{Op: Delete, Delete: 1}`, and retains across embeds advance by 1 (matching Yjs's UTF-16 length convention).
+
+### Internal refactor
+
+- Factored `toSliceLocked` / `entriesLocked` / `toStringLocked` helpers in YArray / YMap / YText so the recursive `toJSONValue` (used by #75) can traverse nested types from within a held doc lock without re-entering. No public API change.
+
+### Documentation
+
+- **README refresh.** Bumped the version reference from v1.7.0 to v1.14.0 (five months stale). Extended the post-v1.0 hardening section through v1.14.0: security hardening (v1.8.x), lib0 wire-format parity (v1.8.0/v1.10.0), cross-reference audit (v1.9.0–v1.14.0), sync read-loop resilience (v1.9.0), awareness heartbeat (v1.11.0). Added a callout for the `gaps` label tracking the audit work.
+
 ## [1.13.0] — 2026-05-21
 
 ### Fixed
