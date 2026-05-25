@@ -1,21 +1,17 @@
 ## What's new
 
-Closes #71 entirely. This is the deferred companion to v1.12.0's partial YText overhaul: `YText.Insert` now computes `currentAttributes` at the cursor and uses a diff-based approach to emit opening and negating markers, matching Yjs JS's `insertText` exactly.
+Two correctness fixes from the cross-reference audit, plus a long-overdue README refresh. After this lands the audit will have one remaining PR (#74 D1+D2 and #78) targeted for v1.15.0.
 
-**Two behavior changes** vs v1.12.0:
+- **`ToJSON` / `ToSlice` / `Entries` now recursively unwrap nested shared types** (#75). Pre-fix, a YArray containing a nested YMap silently dropped the nested map from `ToSlice` output, and `ToJSON` round-trips lost data. Now nested types serialize as their JSON-equivalent values (YArray → `[]any`, YMap → `map[string]any`, YText → `string`, YXml* → XML string). Arbitrarily-deep nesting recurses cleanly. Matches Yjs JS's `toJSON` convention.
 
-- **Inheritance (A2)**: typing with `nil`/empty attrs at the end of a formatted span now properly tracks `currentAttributes` from the linked-list state. Functionally users see the same continuation-of-bold behavior as before, but the underlying mechanism is now correct (and `currentAttributes` is available for future features like relative cursors).
+- **`YTextEvent.Delta` now reports embed inserts/deletes/retains** (#74 D3). Observers were missing embed events entirely because `computeDelta` only switched on `ContentString` and `ContentFormat`. Now also handles `ContentEmbed` (and `ContentType` for rare YText-inside-YText cases), emitting `Insert{embedValue}`, `Delete{1}`, and contributing 1 to retains — matching Yjs's UTF-16 length convention for embeds.
 
-- **No more right-bleed (A3)**: `Insert` with explicit attrs now emits negating closing markers after the text. Without them, formatting bled rightward through subsequent retained text — visible to a peer doing `ToDelta` after sync as runs of incorrectly-formatted plain text.
-
-The wire format now matches Yjs JS byte-for-byte for `Insert`-with-attrs scenarios. Cross-peer convergence tests confirm a fresh peer applying these updates produces the same `ToDelta` as the originating peer.
-
-Plus an incidental bug fix in the closer's `Origin` reference (was being set to the first clock of the wrapped text item instead of the last, which placed closers mid-text after YATA integration on a fresh peer).
+- **README refresh** — the version reference was five months stale (v1.7.0 → v1.14.0). Extended the post-v1.0 hardening section to cover the v1.8.x security work, the v1.10.0 lib0 wire-format parity, the v1.9.0–v1.14.0 cross-reference audit, and the smaller features in between (`sync.WithErrorHandler`, `Awareness.Heartbeat`, `YText.InsertEmbed`). Added a callout for the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps) tracking the audit.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.13.0
+go get github.com/reearth/ygo@v1.14.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.

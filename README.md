@@ -23,7 +23,7 @@ ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (
 - WebSocket and HTTP transport bindings (the core is transport-agnostic)
 - Snapshots, garbage collection, undo manager, persistence adapters
 
-The current release is **v1.7.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
+The current release is **v1.14.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
 
 ## Features
 
@@ -47,6 +47,11 @@ Post-v1.0 hardening:
 - **Semaphore-backed hard caps** (v1.5.0). `MaxConnections` and `MaxPeersPerRoom` are now hard guarantees, not optimistic atomic counters with race windows.
 - **`crypto/rand` ClientID** (v1.5.0). Predictable IDs in multi-tenant deployments are a footgun; the default `ClientID` is now cryptographically random. `crdt.NewClientID()` is exposed for callers who want to generate IDs externally.
 - **Context-aware persistence** (v1.7.0). Adapters can opt into `PersistenceAdapterContext` to receive a context cancelled when `Server.Shutdown` begins, letting them abort in-flight DB calls instead of blocking shutdown.
+- **Security hardening** (v1.8.0–v1.8.1). Pending-items queue cap (`Server.MaxPendingItems`), WebSocket handshake read deadline (`Server.HandshakeTimeout`), CSWSH documentation for `AllowedOrigins`, and a per-room awareness state cap (`Server.MaxAwarenessBytesPerRoom` plus `Awareness.SetMaxBytes`).
+- **lib0 wire-format parity** (v1.8.0, v1.10.0). Float byte-order fixed to big-endian (contributed by @zombiek731), lib0 `Any` tag 122 (BigInt) support, integer dispatch by magnitude matching lib0, lossless float64→float32 narrowing, strict UTF-8 in `ReadVarString` (`ErrInvalidUTF8`), and acceptance of Go's full numeric tower in `WriteAny`.
+- **Cross-reference audit** (v1.9.0–v1.14.0). A systematic comparison of ygo against Yjs JS and yrs reference implementations surfaced ten correctness gaps, tracked under the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps). Notable fixes: YATA `OriginRight` boundary (#65, #68), awareness self-state protection (#73), `Item.delete` cascade into nested types + `DeleteSet` partial-overlap split (#72), YText format-marker correctness (#71: bleed, accumulation, gap cleanup, current-attribute inheritance), `YText.InsertEmbed` (#76), and `YArray/YMap.ToJSON` recursive unwrap of nested types (#75). See [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps) for the full list.
+- **Sync read-loop resilience** (v1.9.0). `sync.WithErrorHandler` option lets `ApplySyncMessage` route a single malformed update to a caller-supplied handler rather than tearing down the connection.
+- **Awareness heartbeat** (v1.11.0). `Awareness.Heartbeat()` re-emits local state at an incremented clock so peers learn we're still alive without the local state needing to change. Pairs with `StartAutoExpiry` on the peer side.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release picture.
 
@@ -448,7 +453,7 @@ document has started accepting operations will corrupt the item store.
 
 ## What's changed since v1.0
 
-Eleven minor and patch releases between v1.1.0 and v1.7.0, focused on hardening: panic safety, out-of-order convergence, WebSocket production hooks, observability, error-returning variants, and an optional context-aware persistence extension. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the design narrative.
+Eighteen minor and patch releases between v1.1.0 and v1.14.0. The early arc (v1.1.x–v1.7.x) focused on production hardening: panic safety, out-of-order convergence, WebSocket hooks, observability, error-returning variants, context-aware persistence. The recent arc (v1.8.x–v1.14.x) delivered a systematic cross-reference audit against Yjs JS and yrs, closing correctness gaps in YATA boundary handling, awareness protocol, delete-path cascade, lib0 wire-format parity, YText format markers, and JSON serialisation of nested shared types — tracked under the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps). See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the design narrative.
 
 ## Contributing
 
