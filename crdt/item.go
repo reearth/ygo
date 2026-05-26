@@ -270,6 +270,10 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 	if item.Parent != nil {
 		item.Parent.invalidatePosCache()
 	}
+	// #78 H2 — track the right half so tryMergeWithLefts can reverse the split
+	// at transaction commit if no item ends up inserted between the two halves.
+	// txn is guaranteed non-nil here (insertItem above would have panicked).
+	txn.mergeStructs = append(txn.mergeStructs, right)
 	return right
 }
 

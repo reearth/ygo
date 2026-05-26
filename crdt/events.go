@@ -24,17 +24,51 @@ type Delta struct {
 }
 
 // YArrayEvent is emitted after a transaction that modifies a YArray.
+//
+// Delta is a Quill-compatible changeset describing the array modifications:
+// a sequence of Insert(values), Retain(n), and Delete(n) ops. Inserts carry
+// Insert as a []any of newly-added values. Added in v1.15.0 (#74 vector D1)
+// to match Yjs JS's `ArrayEvent.delta` and yrs's `ArrayEvent::delta`.
 type YArrayEvent struct {
 	Target *YArray
 	Txn    *Transaction
+	Delta  []Delta
+}
+
+// KeyChangeAction describes how a single key was affected by a transaction.
+type KeyChangeAction string
+
+const (
+	// KeyAdded means the key did not exist before the transaction and now does.
+	KeyAdded KeyChangeAction = "add"
+	// KeyUpdated means the key existed before and now holds a different value.
+	KeyUpdated KeyChangeAction = "update"
+	// KeyDeleted means the key existed before and no longer does.
+	KeyDeleted KeyChangeAction = "delete"
+)
+
+// KeyChange describes the per-key delta for a YMapEvent: what happened to
+// the key and, when applicable, what its previous value was. Mirrors Yjs JS's
+// `event.keys` Map<key, {action, oldValue}> and yrs's `MapEvent::keys()`.
+type KeyChange struct {
+	Action   KeyChangeAction
+	OldValue any // nil when Action == KeyAdded
 }
 
 // YMapEvent is emitted after a transaction that modifies a YMap.
-// KeysChanged contains every map key touched during the transaction.
+//
+// KeysChanged is the legacy field — a set of every map key touched during
+// the transaction. Kept for backward compatibility.
+//
+// Keys is the structured replacement (added in v1.15.0, #74 vector D2):
+// per-key Action + OldValue, enabling undo/redo, replication consumers, and
+// audit-log integrations to reconstruct the pre-transaction state from the
+// event alone.
 type YMapEvent struct {
 	Target      *YMap
 	Txn         *Transaction
 	KeysChanged map[string]struct{}
+	Keys        map[string]KeyChange
 }
 
 // YTextEvent is emitted after a transaction that modifies a YText.

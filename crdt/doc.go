@@ -129,6 +129,13 @@ type Doc struct {
 	// Used by UndoManager; also available to application code that needs
 	// richer change metadata than the binary update alone provides.
 	onAfterTxn []transactionSub
+
+	// undoManagerCount tracks how many UndoManagers are currently attached to
+	// this doc. While count > 0, transaction-commit auto-GC (#78 H1) is
+	// suppressed because UndoManager.applyStackItem must be able to flip
+	// Deleted=false on items it captured — which requires their original
+	// Content to still be present. Mutated under d.mu.
+	undoManagerCount int
 }
 
 // ClientID returns the document's client identifier (read-only after creation).
@@ -431,6 +438,21 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			phase2 = buildPhase2(d, txn)
 		}
 
+		// #78 H1 — Auto-GC at transaction commit. Runs AFTER buildPhase2 so
+		// the observer Deltas have already been computed against the original
+		// content; runs BEFORE Unlock so other goroutines never see partially-
+		// GC'd state. No-op when doc.gc is false.
+		//
+		// When an UndoManager is attached we skip auto-GC: applyStackItem
+		// reconstructs deleted items by flipping the Deleted flag, which only
+		// works if their original Content is still present. Yjs handles this
+		// with a per-item keep flag; for v1.15.0 we take the conservative
+		// position of disabling auto-GC entirely while any UndoManager is
+		// registered. RunGC remains available as the explicit manual entry point.
+		if d.gc && d.undoManagerCount == 0 {
+			gcTxnDeleteSet(d, txn)
+		}
+
 		d.mu.Unlock()
 
 		if phase2 != nil {
@@ -447,6 +469,10 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 	txn.afterState = d.store.StateVector()
 
 	squashRuns(txn)
+	// #78 H2 — Re-merge transient splits. Must run after squashRuns so any
+	// new-item run that squash-collapsed disappears from tryMergeWithLefts's
+	// view (its left.Right == item check filters out absorbed items).
+	tryMergeWithLefts(txn)
 	return retErr
 }
 

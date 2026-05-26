@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] — 2026-05-26
+
+Closes the cross-reference audit (issues #71-#79). Final correctness-focused minor release of the audit cycle.
+
+### Added
+
+- **`YMapEvent.Keys`** (#74 vector D2, MEDIUM). New `map[string]KeyChange` field on `YMapEvent` surfaces per-key change actions (`KeyAdded` / `KeyUpdated` / `KeyDeleted`) plus `OldValue` for updates and deletes. The legacy `KeysChanged` set is still populated for backwards compatibility, but new code should prefer `Keys` for richer event metadata. Mirrors Yjs JS's `YMapEvent.keys`.
+
+- **`YArrayEvent.Delta`** (#74 vector D1, MEDIUM). New `[]Delta` field on `YArrayEvent` carries Quill-style insert / retain / delete operations with values, matching the existing `YTextEvent.Delta` shape. Trailing retains are elided per Quill convention. Pre-fix, array observers received only the `Target` and `Txn` and had to recompute the diff themselves.
+
+### Fixed
+
+- **Auto-GC at transaction commit** (#78 vector H1, MEDIUM). When `WithGC(true)` (the default), the content of items tombstoned during a transaction is now replaced with a length-only `ContentDeleted` placeholder at commit time, rather than waiting for a manual `RunGC` call. Long-running collaborative sessions no longer retain full content for items that have been deleted and will never be observable again. The replacement happens *after* the observer-delta computation, so subscribers still see the original content in the Delete delta. Auto-GC is suppressed while an `UndoManager` is attached so undo / redo can still restore deleted items by flipping the `Deleted` flag.
+
+- **Transient-split re-merge at transaction commit** (#78 vector H2, MEDIUM). When `splitItem` produces a right half and no item is integrated between the two halves before the transaction commits, the halves are reunited. This prevents linked-list fragmentation in long edit sessions where item boundaries get split (e.g. during partial deletions or `ContentMove` resolution) but no foreign insertion ever needed the boundary. Mirrors Yjs JS's `_mergeStructs` / `tryToMergeWithLeft`.
+
+### Internal refactor
+
+- `Transaction` gains a `mergeStructs []*Item` field (private) that `splitItem` appends to and `tryMergeWithLefts` walks at commit. Adds one slice header per transaction; allocation is amortised across splits.
+- `Doc` gains a private `undoManagerCount` field, incremented by `NewUndoManager` and decremented by `UndoManager.Destroy`. Used to gate transaction-commit auto-GC.
+
 ## [1.14.0] — 2026-05-25
 
 ### Fixed

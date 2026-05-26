@@ -21,6 +21,12 @@ type Transaction struct {
 	// newItems collects ContentString items integrated during this transaction.
 	// Used by squashRuns to merge adjacent same-client runs after observers fire.
 	newItems []*Item
+	// mergeStructs collects right-halves produced by splitItem during this
+	// transaction. tryMergeWithLefts walks the slice at commit and re-merges
+	// each entry with its left neighbour when the split turned out to be
+	// transient (no item was inserted between them). Mirrors Yjs JS's
+	// `_mergeStructs` and powers gap #78 H2.
+	mergeStructs []*Item
 	// ctx is the context associated with this transaction. Set to
 	// context.Background() by Transact and to the caller's ctx by
 	// TransactContext. Exposed via the Ctx() method so fn can poll for
@@ -185,4 +191,128 @@ func (txn *Transaction) addChanged(t *abstractType, key string) {
 		txn.changed[t] = keys
 	}
 	keys[key] = struct{}{}
+}
+
+// tryMergeWithLefts walks every right-half produced by splitItem during this
+// transaction and re-merges it with its left neighbour when the split turned
+// out to be unnecessary (#78 H2). A split is unnecessary when, by the time the
+// transaction commits, no item has been inserted between the two halves and
+// no other invariant (move arbitration, parent, ParentSub, deleted state,
+// origin pointers) blocks reunification.
+//
+// Re-merging shortens the linked list, which compounds with squashRuns (new
+// runs) and gcTxnDeleteSet (deleted runs after auto-GC) to keep documents from
+// fragmenting over long edit sessions. Mirrors Yjs JS's `tryToMergeWithLeft`.
+//
+// Caller must hold doc.mu.
+func tryMergeWithLefts(txn *Transaction) {
+	if len(txn.mergeStructs) == 0 {
+		return
+	}
+	store := txn.doc.store
+	for _, item := range txn.mergeStructs {
+		tryMergeWithLeft(item, store)
+	}
+}
+
+// tryMergeWithLeft attempts to absorb item into item.Left. Returns true when
+// the merge succeeded. Conditions, all required:
+//   - both items share the same client, parent, ParentSub, MovedBy, and Deleted state
+//   - left.Right == item (still directly adjacent in the linked list)
+//   - clocks are contiguous: left.ID.Clock + left.Content.Len() == item.ID.Clock
+//   - item.Origin points to the last clock of left (Yjs origin invariant)
+//   - content types match and support merging (ContentString, ContentAny,
+//     ContentJSON, ContentDeleted)
+//
+// On success: left's content is extended in place, the linked list is spliced
+// past item, and item is removed from the store.
+func tryMergeWithLeft(item *Item, store *StructStore) bool {
+	left := item.Left
+	if left == nil {
+		return false
+	}
+	if left.ID.Client != item.ID.Client {
+		return false
+	}
+	if left.Right != item {
+		return false
+	}
+	if left.ID.Clock+uint64(left.Content.Len()) != item.ID.Clock {
+		return false
+	}
+	if left.Deleted != item.Deleted {
+		return false
+	}
+	if left.ParentSub != item.ParentSub {
+		return false
+	}
+	if left.Parent != item.Parent {
+		return false
+	}
+	if left.MovedBy != item.MovedBy {
+		return false
+	}
+	// item.Origin must reference the last clock of left for the split to be
+	// reversible. (splitItem always sets Origin this way; foreign updates may
+	// set Origin differently, in which case we leave the items split.)
+	if item.Origin == nil {
+		return false
+	}
+	expectedLast := left.ID.Clock + uint64(left.Content.Len()) - 1
+	if item.Origin.Client != left.ID.Client || item.Origin.Clock != expectedLast {
+		return false
+	}
+
+	// Content-type match + in-place extension.
+	switch lc := left.Content.(type) {
+	case *ContentString:
+		rc, ok := item.Content.(*ContentString)
+		if !ok {
+			return false
+		}
+		lc.Str += rc.Str
+		lc.utf16Len += rc.utf16Len
+	case *ContentAny:
+		rc, ok := item.Content.(*ContentAny)
+		if !ok {
+			return false
+		}
+		lc.Vals = append(lc.Vals, rc.Vals...)
+	case *ContentJSON:
+		rc, ok := item.Content.(*ContentJSON)
+		if !ok {
+			return false
+		}
+		lc.Vals = append(lc.Vals, rc.Vals...)
+	case *ContentDeleted:
+		rc, ok := item.Content.(*ContentDeleted)
+		if !ok {
+			return false
+		}
+		lc.length += rc.length
+	default:
+		// ContentEmbed, ContentType, ContentFormat, ContentBinary, ContentDoc,
+		// and ContentMove are single-value or not splittable — never appear
+		// in mergeStructs in mergeable form.
+		return false
+	}
+
+	// Splice item out of the linked list.
+	left.Right = item.Right
+	if item.Right != nil {
+		item.Right.Left = left
+	}
+	if left.Parent != nil {
+		left.Parent.invalidatePosCache()
+	}
+
+	// Remove item from the store's per-client slice.
+	storeItems := store.clients[item.ID.Client]
+	for i, it := range storeItems {
+		if it == item {
+			store.clients[item.ID.Client] = append(storeItems[:i], storeItems[i+1:]...)
+			break
+		}
+	}
+	return true
 }

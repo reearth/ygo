@@ -24,18 +24,99 @@ func (a *YArray) baseType() *abstractType { return &a.abstractType }
 // may safely call back into any Doc method (N-C1).
 //
 // prepareFire is called by buildPhase2 while the document write lock is held.
+//
+// The Delta is computed under the lock so it sees a consistent view of the
+// linked list before the lock is released. Added in v1.15.0 (#74 D1).
 func (a *YArray) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 	if len(a.observers) == 0 {
 		return nil
 	}
+	delta := a.computeDelta(txn)
 	snap := make([]arraySub, len(a.observers))
 	copy(snap, a.observers)
-	e := YArrayEvent{Target: a, Txn: txn}
+	e := YArrayEvent{Target: a, Txn: txn, Delta: delta}
 	return func() {
 		for _, s := range snap {
 			s.fn(e)
 		}
 	}
+}
+
+// computeDelta builds a Quill-compatible delta for the array changes in
+// txn — mirrors YText.computeDelta but for array semantics. Walks items in
+// linked-list order; for each item, classifies as:
+//   - new + not deleted   → Insert with the values
+//   - new + deleted       → no-op (transient)
+//   - pre-existing, now-deleted → Delete N
+//   - pre-existing, still-live  → Retain N
+//
+// Adjacent same-op runs are not merged here — the Delta type carries one
+// op per item, matching YText.computeDelta. Consumers that care about
+// compact deltas can post-process.
+//
+// Trailing Retain is elided per Quill convention.
+func (a *YArray) computeDelta(txn *Transaction) []Delta {
+	var ops []Delta
+	retain := 0
+	flushRetain := func() {
+		if retain > 0 {
+			ops = append(ops, Delta{Op: DeltaOpRetain, Retain: retain})
+			retain = 0
+		}
+	}
+
+	t := &a.abstractType
+	for item := t.start; item != nil; item = item.Right {
+		if item.ParentSub != "" {
+			// Map-keyed entries don't belong to the array's sequence; skip.
+			continue
+		}
+		if !item.Content.IsCountable() {
+			continue
+		}
+		beforeClock := txn.beforeState.Clock(item.ID.Client)
+		isNew := item.ID.Clock >= beforeClock
+		n := item.Content.Len()
+
+		if isNew {
+			if !item.Deleted {
+				flushRetain()
+				ops = append(ops, Delta{
+					Op:     DeltaOpInsert,
+					Insert: arrayValuesFromItem(item),
+				})
+			}
+			// new + deleted → transient; skip
+		} else if txn.deleteSet.IsDeleted(item.ID) {
+			flushRetain()
+			ops = append(ops, Delta{Op: DeltaOpDelete, Delete: n})
+		} else if !item.Deleted {
+			retain += n
+		}
+	}
+	// Trailing retain is elided.
+	return ops
+}
+
+// arrayValuesFromItem extracts the slice of values an array item contributes
+// to a Delta's Insert. Returns []any in all cases, mirroring Yjs JS where
+// `event.delta` entries always carry an array of values.
+func arrayValuesFromItem(item *Item) []any {
+	switch c := item.Content.(type) {
+	case *ContentAny:
+		out := make([]any, len(c.Vals))
+		copy(out, c.Vals)
+		return out
+	case *ContentJSON:
+		out := make([]any, len(c.Vals))
+		copy(out, c.Vals)
+		return out
+	case *ContentEmbed:
+		return []any{c.Val}
+	case *ContentType:
+		return []any{toJSONValue(c)}
+	}
+	return nil
 }
 
 // Len returns the number of non-deleted elements.

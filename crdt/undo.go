@@ -104,6 +104,13 @@ func NewUndoManager(doc *Doc, scope []sharedType, opts ...UndoManagerOption) *Un
 		u.captureTransaction(txn)
 	})
 
+	// Suppress transaction-commit auto-GC (#78 H1) while this UndoManager is
+	// attached. Otherwise applyStackItem can't restore items the user deletes
+	// — their Content would have been replaced with a length-only tombstone.
+	doc.mu.Lock()
+	doc.undoManagerCount++
+	doc.mu.Unlock()
+
 	return u
 }
 
@@ -119,10 +126,18 @@ func (u *UndoManager) OnStackItemAdded(fn func(*StackItem, bool)) {
 
 // Destroy stops tracking transactions and releases the document subscription.
 // After Destroy, Undo and Redo are no-ops.
+//
+// Destroy also re-enables transaction-commit auto-GC (#78 H1) when no other
+// UndoManager remains attached to the doc.
 func (u *UndoManager) Destroy() {
 	if u.unsubscribe != nil {
 		u.unsubscribe()
 		u.unsubscribe = nil
+		u.doc.mu.Lock()
+		if u.doc.undoManagerCount > 0 {
+			u.doc.undoManagerCount--
+		}
+		u.doc.mu.Unlock()
 	}
 }
 

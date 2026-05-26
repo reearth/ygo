@@ -173,6 +173,44 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 	return enc.Bytes()
 }
 
+// gcTxnDeleteSet is the per-transaction counterpart to RunGC (#78 H1, v1.15.0).
+// Called from transactInternal under the doc lock, after buildPhase2 has
+// captured observer deltas. For every item tombstoned in this transaction,
+// replaces its Content with a length-only ContentDeleted placeholder so
+// long-running documents don't retain full content for items that will
+// never be observable again.
+//
+// Caller must hold d.mu. Unlike RunGC this does NOT acquire the lock or
+// run the adjacent-tombstone merge pass — those are for the manual
+// whole-document RunGC entry point.
+func gcTxnDeleteSet(doc *Doc, txn *Transaction) {
+	for client, ranges := range txn.deleteSet.clients {
+		items := doc.store.clients[client]
+		if len(items) == 0 {
+			continue
+		}
+		for _, r := range ranges {
+			rangeEnd := r.Clock + r.Len
+			// Skip past items whose end is before the range start.
+			for _, item := range items {
+				if item.ID.Clock >= rangeEnd {
+					break
+				}
+				if item.ID.Clock+uint64(item.Content.Len()) <= r.Clock {
+					continue
+				}
+				if !item.Deleted {
+					continue // shouldn't happen for items in deleteSet, but defensive
+				}
+				if _, alreadyGC := item.Content.(*ContentDeleted); alreadyGC {
+					continue
+				}
+				item.Content = NewContentDeleted(item.Content.Len())
+			}
+		}
+	}
+}
+
 // RunGC replaces the content of deleted items with lightweight ContentDeleted
 // tombstones, freeing memory while preserving the structural position information
 // required for CRDT correctness. It then merges adjacent ContentDeleted items

@@ -22,18 +22,105 @@ func (m *YMap) baseType() *abstractType { return &m.abstractType }
 
 // prepareFire snapshots the current observer slice inside the document write
 // lock and returns a closure that fires all snapshotted observers (N-C1).
+//
+// The Keys map (#74 D2, v1.15.0) is computed under the lock so it sees a
+// consistent view of the linked list before the lock is released.
 func (m *YMap) prepareFire(txn *Transaction, keysChanged map[string]struct{}) func() {
 	if len(m.observers) == 0 {
 		return nil
 	}
+	keys := m.computeKeys(txn, keysChanged)
 	snap := make([]mapSub, len(m.observers))
 	copy(snap, m.observers)
-	e := YMapEvent{Target: m, Txn: txn, KeysChanged: keysChanged}
+	e := YMapEvent{Target: m, Txn: txn, KeysChanged: keysChanged, Keys: keys}
 	return func() {
 		for _, s := range snap {
 			s.fn(e)
 		}
 	}
+}
+
+// computeKeys derives the per-key KeyChange map (#74 D2) for every key in
+// keysChanged. For each key it walks the items with that ParentSub to
+// determine:
+//   - the pre-transaction winner (most-recent live item before the txn)
+//   - the post-transaction winner (currently live item, or nil)
+//
+// and from the two derives an Action (add / update / delete) plus the
+// pre-transaction value.
+//
+// "Live before the txn" = !isNew && (!Deleted || txn.deleteSet.IsDeleted(item)).
+// That is: existed before this txn AND was not already-tombstoned at the
+// start. Pre-existing items that were already deleted before this txn are
+// ignored.
+func (m *YMap) computeKeys(txn *Transaction, keysChanged map[string]struct{}) map[string]KeyChange {
+	if len(keysChanged) == 0 {
+		return nil
+	}
+	t := &m.abstractType
+	out := make(map[string]KeyChange, len(keysChanged))
+	for key := range keysChanged {
+		var preWinner *Item // most recent item live before the txn
+		var postWinner *Item
+		// Walk all items in clock order across all clients with this ParentSub.
+		// Items are reachable via the linked list since the map's items also
+		// chain through start/Right (ContentAny+ParentSub items).
+		for item := t.start; item != nil; item = item.Right {
+			if item.ParentSub != key {
+				continue
+			}
+			beforeClock := txn.beforeState.Clock(item.ID.Client)
+			isNew := item.ID.Clock >= beforeClock
+			// Was live before this txn?
+			deletedInTxn := txn.deleteSet.IsDeleted(item.ID)
+			preLive := !isNew && (!item.Deleted || deletedInTxn)
+			if preLive {
+				preWinner = item
+			}
+			if !item.Deleted {
+				postWinner = item
+			}
+		}
+
+		var change KeyChange
+		switch {
+		case preWinner == nil && postWinner != nil:
+			change.Action = KeyAdded
+		case preWinner != nil && postWinner != nil && preWinner != postWinner:
+			change.Action = KeyUpdated
+			change.OldValue = extractMapValue(preWinner)
+		case preWinner != nil && postWinner == nil:
+			change.Action = KeyDeleted
+			change.OldValue = extractMapValue(preWinner)
+		default:
+			// Either both nil (transient: created+deleted in same txn) or
+			// same item (no real change). Skip — don't emit a Keys entry.
+			continue
+		}
+		out[key] = change
+	}
+	return out
+}
+
+// extractMapValue pulls a single map value out of an item's Content, used
+// when computing KeyChange.OldValue. Matches the unwrap rules in
+// entriesLocked so consumers see consistent shapes.
+func extractMapValue(item *Item) any {
+	switch c := item.Content.(type) {
+	case *ContentAny:
+		if len(c.Vals) > 0 {
+			return c.Vals[0]
+		}
+	case *ContentJSON:
+		if len(c.Vals) > 0 {
+			return c.Vals[0]
+		}
+	case *ContentEmbed:
+		return c.Val
+	case *ContentType:
+		return toJSONValue(c)
+	}
+	return nil
 }
 
 // Set writes value under key. If a live entry already exists for key, it is
