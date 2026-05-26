@@ -62,9 +62,11 @@ func (m *YMap) computeKeys(txn *Transaction, keysChanged map[string]struct{}) ma
 	for key := range keysChanged {
 		var preWinner *Item // most recent item live before the txn
 		var postWinner *Item
-		// Walk all items in clock order across all clients with this ParentSub.
-		// Items are reachable via the linked list since the map's items also
-		// chain through start/Right (ContentAny+ParentSub items).
+		// Walk items in linked-list (YATA) order, not clock order. For
+		// map-keyed entries the rightmost item with a given ParentSub is the
+		// last-write-wins winner regardless of client, so the LAST matching
+		// item we encounter is the winning candidate — exactly what the
+		// `if preLive` / `if !item.Deleted` reassignments below rely on.
 		for item := t.start; item != nil; item = item.Right {
 			if item.ParentSub != key {
 				continue

@@ -183,3 +183,42 @@ func TestUnit_YArrayEvent_Delta_InsertAndDelete(t *testing.T) {
 	// totalRetain depends on exact computation; assert it's non-negative and not zero.
 	assert.GreaterOrEqual(t, totalRetain, 1)
 }
+
+// Regression for Copilot review: pre-fix, a Move() transaction produced a
+// Delta that only reported Retain on the original position (because
+// ContentMove is non-countable and silently skipped) and emitted nothing at
+// the destination — leaving observers blind to the move.
+//
+// Post-fix the Delta mirrors the render walk: the move-away position emits
+// Delete N, and the destination (winning ContentMove) emits Insert with the
+// target's values.
+func TestUnit_YArrayEvent_Delta_Move(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	// Seed with four elements as a single transaction so they pre-exist.
+	doc.Transact(func(txn *Transaction) {
+		arr.Insert(txn, 0, []any{int64(0), int64(1), int64(2), int64(3)})
+	})
+
+	var observed YArrayEvent
+	arr.Observe(func(e YArrayEvent) { observed = e })
+
+	// Move element at index 2 to index 0 — render should change [0,1,2,3] → [2,0,1,3].
+	doc.Transact(func(txn *Transaction) { arr.Move(txn, 2, 0) })
+
+	var totalInsert, totalDelete int
+	for _, d := range observed.Delta {
+		switch d.Op {
+		case DeltaOpInsert:
+			if vs, ok := d.Insert.([]any); ok {
+				totalInsert += len(vs)
+			}
+		case DeltaOpDelete:
+			totalDelete += d.Delete
+		}
+	}
+	assert.Equal(t, 1, totalInsert,
+		"Move must surface a single Insert at the destination carrying the moved value")
+	assert.Equal(t, 1, totalDelete,
+		"Move must surface a single Delete at the moved-away position")
+}

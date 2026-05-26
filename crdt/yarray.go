@@ -48,11 +48,18 @@ func (a *YArray) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 //   - new + not deleted   → Insert with the values
 //   - new + deleted       → no-op (transient)
 //   - pre-existing, now-deleted → Delete N
-//   - pre-existing, still-live  → Retain N
+//   - pre-existing, still-live  → Retain N (consecutive retains coalesce
+//     into a single op so the emitted delta is compact)
 //
-// Adjacent same-op runs are not merged here — the Delta type carries one
-// op per item, matching YText.computeDelta. Consumers that care about
-// compact deltas can post-process.
+// Move semantics mirror the render walk used by Get / ToSlice:
+//   - a winning ContentMove (MovedBy of the target points back at this item)
+//     renders as the target's values at this position; for a new winning
+//     move that means an Insert; for a pre-existing winning move the
+//     destination has not changed, so Retain N.
+//   - items with MovedBy != nil are rendered elsewhere and therefore must
+//     not appear at their original position; when the move-away happened
+//     this transaction the original position emits a Delete, otherwise the
+//     item is silently skipped (already invisible before the txn).
 //
 // Trailing Retain is elided per Quill convention.
 func (a *YArray) computeDelta(txn *Transaction) []Delta {
@@ -71,6 +78,48 @@ func (a *YArray) computeDelta(txn *Transaction) []Delta {
 			// Map-keyed entries don't belong to the array's sequence; skip.
 			continue
 		}
+
+		// Move-aware classification — see contract above.
+		if cm, ok := item.Content.(*ContentMove); ok {
+			// Resolve the target this ContentMove claims. Render only if
+			// this move is the current winner for the target.
+			if a.doc == nil || cm.Target == nil {
+				continue
+			}
+			target := a.doc.store.Find(*cm.Target)
+			if target == nil || target.MovedBy != item || target.Deleted || item.Deleted {
+				continue
+			}
+			n := target.Content.Len()
+			beforeClock := txn.beforeState.Clock(item.ID.Client)
+			isNew := item.ID.Clock >= beforeClock
+			if isNew {
+				flushRetain()
+				ops = append(ops, Delta{
+					Op:     DeltaOpInsert,
+					Insert: arrayValuesFromItem(target),
+				})
+			} else {
+				retain += n
+			}
+			continue
+		}
+		if item.MovedBy != nil {
+			// Item is rendered at the ContentMove's position, not here. If
+			// the move-away happened this transaction the original position
+			// emits a Delete; otherwise the item was already invisible.
+			if !item.Content.IsCountable() {
+				continue
+			}
+			beforeClock := txn.beforeState.Clock(item.MovedBy.ID.Client)
+			moveIsNew := item.MovedBy.ID.Clock >= beforeClock
+			if moveIsNew && !item.Deleted {
+				flushRetain()
+				ops = append(ops, Delta{Op: DeltaOpDelete, Delete: item.Content.Len()})
+			}
+			continue
+		}
+
 		if !item.Content.IsCountable() {
 			continue
 		}
