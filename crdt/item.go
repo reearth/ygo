@@ -121,6 +121,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	if left == nil {
 		item.Right = item.Parent.start
 		item.Parent.start = item
+		// New head — the firstLive memoisation may point past us; reset it
+		// so the next cleanup walk picks up the new live item (#86).
+		item.Parent.invalidateFirstLiveCache()
 	} else {
 		item.Right = left.Right
 		left.Right = item
@@ -174,6 +177,14 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// Track ContentString items for end-of-transaction run squashing.
 	if _, ok := item.Content.(*ContentString); ok {
 		txn.newItems = append(txn.newItems, item)
+	}
+
+	// Yjs parity: once any ContentFormat is integrated into this type, mark
+	// hasFormatting so subsequent YText.Delete calls know they need to run
+	// the contextless cleanup walk. Plain-text types never set this flag,
+	// so their deletes skip the walk entirely (#86 final fix).
+	if _, ok := item.Content.(*ContentFormat); ok && item.Parent != nil {
+		item.Parent.hasFormatting = true
 	}
 
 	// If this item wraps a nested type, set the back-pointer so the type

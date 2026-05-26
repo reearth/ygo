@@ -1,25 +1,30 @@
 ## What's new
 
-The final correctness PR closing the cross-reference audit. v1.15.0 fully resolves [#74](https://github.com/reearth/ygo/issues/74) and [#78](https://github.com/reearth/ygo/issues/78), wrapping up the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps) work tracked across v1.9.0–v1.15.0.
+First post-audit release. Focused exclusively on `crdt/` internal performance — no public API changes.
 
-### Observer event shape parity with Yjs (#74)
+### `YText.Delete` -47% on head-delete workloads (#86)
 
-- **`YMapEvent.Keys`** — new `map[string]KeyChange` field carries the per-key change action (`KeyAdded` / `KeyUpdated` / `KeyDeleted`) plus the `OldValue` for updates and deletes. The legacy `KeysChanged` set stays populated for backwards compatibility; new code should prefer `Keys`. Mirrors Yjs JS's `YMapEvent.keys`.
-- **`YArrayEvent.Delta`** — new `[]Delta` field carries Quill-style insert / retain / delete ops with their values, matching the existing `YTextEvent.Delta` shape. Trailing retains are elided per Quill convention. Pre-fix, array observers received only `Target` and `Txn` and had to recompute the diff themselves.
+The `cleanupDanglingFormatsInRegion` walk introduced in v1.12.0 became O(N²) for sequential head-deletes: it started from `txt.start` on every call, re-skipping every accumulated tombstone before reaching live content. The fix combines two complementary optimisations, both inspired by a cross-reference comparison against Yjs JS and yrs:
 
-### Transaction-end housekeeping (#78)
+1. **`hasFormatting` gating** (mirrors Yjs's `_hasFormatting` flag). `abstractType` now flips a `hasFormatting` bit the first time a `ContentFormat` item is integrated. `YText.Delete` skips the cleanup walk entirely on YText types that have never had `Format()` called — the dominant cost on plain-text head-delete workloads.
+2. **`firstLiveCache` extended to `deleteRange`**. `abstractType` memoises the first live item from `t.start`; both `deleteRange` and the cleanup walk now resume from that cached pointer instead of re-walking leading tombstones on every call.
 
-- **Auto-GC at transaction commit (H1)** — with `WithGC(true)` (the default), items tombstoned during a transaction have their content replaced with a length-only `ContentDeleted` placeholder at commit time. Long collaborative sessions no longer accumulate full content for items that have been deleted and will never be observable again. Auto-GC runs *after* the observer-delta computation, so subscribers still see the original content. It is suppressed while an `UndoManager` is attached so undo / redo can still restore deleted items.
-- **Transient-split re-merge (H2)** — when `splitItem` produces a right half and no item ends up integrated between the two halves before commit, the halves are reunited. Prevents linked-list fragmentation in long edit sessions. Mirrors Yjs's `_mergeStructs` / `tryToMergeWithLeft`.
+**Benchstat n=5 on `BenchmarkYText_Delete`: -46.77% (2.87ms → 1.53ms)** per 1000-char delete loop. Geomean across the hot-path suite: **-8.09% sec/op**, **0.00% B/op**, **0.00% allocs/op**.
 
-## Audit complete
+### Transaction allocation hygiene (#54 A)
 
-This release ships the last of the gaps surfaced by the cross-reference audit against Yjs JS and yrs. The full list (#71 through #79) is now closed. See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for the per-release breakdown.
+`Transaction.changed` is now pre-sized to capacity 4 — most transactions touch 1-3 types and the prior zero-hint allocation forced immediate rehashing on the first append.
+
+Two related candidates from #54 (`newItems` pre-sizing and YATA conflict-scan map reuse via `clear()`) were measured and reverted because they net-regressed other benchmarks. They remain candidates for a future PR once the cost model is right.
+
+### Why not a full Yjs structural port
+
+A cross-reference comparison against Yjs JS showed that Yjs's `cleanupContextlessFormattingGap` model has different cleanup semantics — it only removes duplicate-key markers in a contiguous gap, not orphan opener/closer pairs whose effect zone has no live content. ygo's existing `cleanupDanglingFormatsInRegion` is intentionally more aggressive and is what closes #71 vector A4. We kept ygo's richer cleanup and adopted only Yjs's `_hasFormatting` gating + the `firstLiveCache` optimisation, which together give the YText_Delete win without weakening cleanup semantics.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.15.0
+go get github.com/reearth/ygo@v1.16.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.

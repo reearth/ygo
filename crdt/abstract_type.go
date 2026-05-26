@@ -67,6 +67,57 @@ type abstractType struct {
 	// the entire cache, so that entries before the insertion point survive for
 	// subsequent nearby lookups. Zero means "no hint; do a full clear".
 	insertHint int
+
+	// firstLiveCache memoises the first live (non-deleted) item from t.start.
+	// Used by linked-list walks that would otherwise re-skip the same leading
+	// tombstones on every call (deleteRange when many head-deletes accumulate,
+	// per issue #86). Updated lazily by firstLiveFromStart; invalidated on
+	// item.integrate when a new head replaces t.start. Because tombstoning
+	// is monotonic, advancing the cache forward from its current value is
+	// always safe — once we walk past a deleted item we never need to revisit.
+	firstLiveCache *Item
+
+	// hasFormatting becomes true the first time a ContentFormat item is
+	// integrated into this type (locally via YText.Format or remotely via
+	// an update). Mirrors Yjs's _hasFormatting flag. YText.Delete uses this
+	// to skip the (expensive) per-deleted-item cleanup walk on types that
+	// have never had formatting applied — the dominant cost on head-delete
+	// workloads in plain-text documents. Once true, stays true.
+	hasFormatting bool
+}
+
+// firstLiveFromStart returns the first non-deleted item reachable from t.start
+// by walking Right, or nil if every item is tombstoned. The result is memoised
+// in t.firstLiveCache: subsequent calls advance the cache past any tombstones
+// that accumulated since the last call rather than restarting from t.start.
+//
+// Cache invariant: t.firstLiveCache is either nil, the true first-live item,
+// or an earlier item that may or may not still be live. The forward walk from
+// the cache is always correct because tombstoning is monotonic — an item that
+// is currently deleted stays deleted, so once we walk past it we never have
+// to revisit it. The cache MUST be reset (to nil) only when a new item is
+// inserted strictly before the cached pointer, which currently only happens
+// when item.integrate replaces t.start (see item.go).
+//
+// Closes the O(N²) sequential-head-delete behaviour described in issue #86.
+func (t *abstractType) firstLiveFromStart() *Item {
+	node := t.firstLiveCache
+	if node == nil {
+		node = t.start
+	}
+	for node != nil && node.Deleted {
+		node = node.Right
+	}
+	t.firstLiveCache = node
+	return node
+}
+
+// invalidateFirstLiveCache clears the first-live memoisation. Callers must
+// invoke this whenever a new item is inserted at the head of the linked list
+// (i.e. as the new t.start) so the next firstLiveFromStart call resumes its
+// walk from the new head rather than skipping past it.
+func (t *abstractType) invalidateFirstLiveCache() {
+	t.firstLiveCache = nil
 }
 
 // invalidatePosCache clears all cached position entries. Must be called

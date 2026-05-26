@@ -412,8 +412,14 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		Local:       true,
 		deleteSet:   newDeleteSet(),
 		beforeState: d.store.StateVector(),
-		changed:     make(map[*abstractType]map[string]struct{}),
-		ctx:         ctx,
+		// Pre-size changed to common-case capacity (#54 A): most transactions
+		// touch 1-3 types, and the zero-hint alloc forces immediate rehashing
+		// on the very first append. newItems is left nil — pre-sizing it here
+		// added 1 alloc per txn even when no ContentString was inserted, which
+		// hurt array/map-only workloads more than it helped text workloads
+		// (the squashRuns target).
+		changed: make(map[*abstractType]map[string]struct{}, 4),
+		ctx:     ctx,
 	}
 
 	defer func() {

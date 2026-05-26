@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] — 2026-05-26
+
+First post-audit release. Focused exclusively on `crdt/` internal performance — no public API changes.
+
+### Performance
+
+- **`YText.Delete` O(N²) → O(N) for sequential head-deletes** (#86). Two complementary fixes drive the win, both inspired by a cross-reference comparison against Yjs JS and yrs:
+  1. **`hasFormatting` gating** (mirrors Yjs's `_hasFormatting` flag). `abstractType` now flips a `hasFormatting` bit the first time a `ContentFormat` item is integrated. `YText.Delete` skips the `cleanupDanglingFormatsInRegion` walk entirely on YText types that have never had `Format()` called — the dominant cost on plain-text head-delete workloads.
+  2. **`firstLiveCache` extended to `deleteRange`**. `abstractType` memoises the first live (non-deleted) item from `t.start`; both `deleteRange` and `cleanupDanglingFormatsInRegion` now resume from that pointer instead of re-walking accumulated leading tombstones on every call. The cache advances lazily (tombstoning is monotonic) and is invalidated only when a new item is integrated as the new `t.start`.
+
+  Benchstat n=5 on `BenchmarkYText_Delete`: **-46.77% (2.87ms → 1.53ms per 1000-char delete loop)**. Geomean across the hot-path suite: **-8.09% sec/op**, **0.00% B/op**, **0.00% allocs/op**.
+
+- **`Transaction.changed` pre-sized to 4** (#54 A). Most transactions touch 1-3 types; the zero-hint allocation forced immediate rehashing on the first append.
+
+Two follow-ups from #54 were measured and reverted because they net-regressed other benchmarks:
+- Pre-sizing `Transaction.newItems` added one allocation per transaction even when no `ContentString` was inserted, hurting array/map-only workloads more than it helped text.
+- Reusing the YATA conflict-scan maps via `clear()` slowed `TwoPeerConvergence` (small maps make `clear()` walk slower than a fresh allocation). Conflict-scan map pooling remains a candidate for a future PR once the cost model justifies it.
+
+### Internal refactor
+
+- `abstractType` gains `firstLiveCache *Item` and `hasFormatting bool`, plus helpers `firstLiveFromStart` and `invalidateFirstLiveCache`. All private — no public API surface change.
+- `item.integrate` flips `Parent.hasFormatting = true` whenever the integrated item carries a `ContentFormat`, matching Yjs's `_hasFormatting` once-true-always-true semantics.
+
+### Why not a full Yjs structural port
+
+A cross-reference comparison against Yjs JS revealed that the Yjs `cleanupContextlessFormattingGap` model has different cleanup semantics — it only removes duplicate-key markers in a contiguous gap, not orphan opener/closer pairs whose effect zone has no live content. ygo's existing `cleanupDanglingFormatsInRegion` is intentionally more aggressive and is what closes #71 vector A4. We kept ygo's richer cleanup logic and adopted only Yjs's `_hasFormatting` gating + the `firstLiveCache` optimisation, which together give the YText_Delete win without weakening cleanup semantics.
+
 ## [1.15.0] — 2026-05-26
 
 Closes the cross-reference audit (issues #71-#79). Final correctness-focused minor release of the audit cycle.
