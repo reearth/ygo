@@ -553,9 +553,15 @@ func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attr
 // edits leave orphan markers that bloat the store and inflate the encoded
 // delete-set. See #71 vector A4.
 //
-// The scan is scoped to the region between the item just before the deletion
-// and the first live countable item after it, so the per-Delete cost is
-// O(region size + scope size of any markers found) rather than O(document).
+// The scan is gated on txt.hasFormatting: YText that has never had a
+// ContentFormat integrated (the common plain-text case) skips the walk
+// entirely. This mirrors Yjs's `_hasFormatting` flag gating and is the
+// dominant perf win on head-delete workloads in plain-text documents (#86).
+//
+// When the scan does run it is scoped to the region between the item just
+// before the deletion and the first live countable item after it, so the
+// per-Delete cost is O(region size + scope size of any markers found)
+// rather than O(document).
 func (txt *YText) Delete(txn *Transaction, index, length int) {
 	// Capture the anchor immediately before the deletion start so we can
 	// walk forward from there post-deletion. nil means "start of document."
@@ -566,6 +572,12 @@ func (txt *YText) Delete(txn *Transaction, index, length int) {
 
 	deleteRange(&txt.abstractType, txn, index, length)
 
+	if !txt.hasFormatting {
+		// No ContentFormat has ever been integrated into this type — nothing
+		// to clean up. Skip the walk: this is the head-delete benchmark's
+		// dominant saving (#86).
+		return
+	}
 	txt.cleanupDanglingFormatsInRegion(txn, startAnchor)
 }
 
@@ -587,7 +599,11 @@ func (txt *YText) Delete(txn *Transaction, index, length int) {
 func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *Item) {
 	var node *Item
 	if startAnchor == nil {
-		node = txt.start
+		// Sequential head-deletes (the BenchmarkYText_Delete worst case)
+		// accumulate tombstones at txt.start; without the memoised pointer
+		// every cleanup re-walks all of them and the per-delete cost is
+		// O(deletes-so-far). Use the cache instead — issue #86.
+		node = txt.firstLiveFromStart()
 	} else {
 		node = startAnchor.Right
 	}

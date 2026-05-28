@@ -647,7 +647,13 @@ func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 		t.invalidatePosCacheFrom(index)
 	}
 	counted := 0
-	item := t.start
+	// Start the walk at firstLiveFromStart, not t.start: leading tombstones
+	// accumulated by earlier head-deletes are skipped in O(1) via the cache,
+	// turning the previous O(N) per-call leading-skip into O(1) amortized.
+	// firstLiveFromStart returns the first non-deleted item; subsequent
+	// non-countable items (e.g. ContentFormat) are still handled by the
+	// existing skip branch below. Closes the deleteRange half of #86.
+	item := t.firstLiveFromStart()
 	for item != nil && length > 0 {
 		if item.Deleted || !item.Content.IsCountable() {
 			item = item.Right
