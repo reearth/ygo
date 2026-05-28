@@ -1,30 +1,40 @@
 ## What's new
 
-First post-audit release. Focused exclusively on `crdt/` internal performance — no public API changes.
+Wire-framing performance pass. Focused on the two largest sources of allocation churn on the WebSocket send / receive paths.
 
-### `YText.Delete` -47% on head-delete workloads (#86)
+### sync.Pool for Encoder across all send paths (#52)
 
-The `cleanupDanglingFormatsInRegion` walk introduced in v1.12.0 became O(N²) for sequential head-deletes: it started from `txt.start` on every call, re-skipping every accumulated tombstone before reaching live content. The fix combines two complementary optimisations, both inspired by a cross-reference comparison against Yjs JS and yrs:
+Every `sendSync`, `broadcastSync`, `sendAwareness`, `broadcastAwareness`, and update-encoder call site previously allocated a fresh `*Encoder` plus its 64-byte initial buffer. With six call sites in `provider/websocket/peer.go` and the doc-update encoder in `crdt/update.go`, a 100-peer room doing 10 updates/sec/peer paid ~7000 small allocations/sec purely on wire-framing overhead.
 
-1. **`hasFormatting` gating** (mirrors Yjs's `_hasFormatting` flag). `abstractType` now flips a `hasFormatting` bit the first time a `ContentFormat` item is integrated. `YText.Delete` skips the cleanup walk entirely on YText types that have never had `Format()` called — the dominant cost on plain-text head-delete workloads.
-2. **`firstLiveCache` extended to `deleteRange`**. `abstractType` memoises the first live item from `t.start`; both `deleteRange` and the cleanup walk now resume from that cached pointer instead of re-walking leading tombstones on every call.
+New helpers in `encoding/`:
 
-**Benchstat n=5 on `BenchmarkYText_Delete`: -46.77% (2.87ms → 1.53ms)** per 1000-char delete loop. Geomean across the hot-path suite: **-8.09% sec/op**, **0.00% B/op**, **0.00% allocs/op**.
+- **`encoding.GetEncoder` / `encoding.PutEncoder`** — pool primitives.
+- **`encoding.EncodeBytes(fn)`** — the recommended wrapper. Gets an encoder from the pool, runs `fn`, copies the result into an independent allocation, and returns the encoder to the pool. Safe to hand the returned bytes to write channels.
 
-### Transaction allocation hygiene (#54 A)
+### Zero-copy decoder paths (#53)
 
-`Transaction.changed` is now pre-sized to capacity 4 — most transactions touch 1-3 types and the prior zero-hint allocation forced immediate rehashing on the first append.
+- **`Decoder.RemainingBytes`** now returns a sub-slice instead of a copy. The previous behaviour is preserved under the new name `RemainingBytesCopy` for callers that need an independent allocation. Documented contract: treat the result as read-only.
+- **`Awareness.ApplyUpdate`** decodes JSON payloads as `[]byte` end-to-end (via `ReadVarBytes`, which already returned a sub-slice) and passes them directly to `json.Unmarshal`. Pre-fix, every entry incurred two copies: one via `ReadVarString`'s `[]byte→string` conversion, and one via `json.Unmarshal([]byte(s), ...)`. On `BenchmarkApplyUpdate_Many` (100 entries): **-15.97% allocs/op** (626 → 526), **-9.93% sec/op** on the single-entry variant.
 
-Two related candidates from #54 (`newItems` pre-sizing and YATA conflict-scan map reuse via `clear()`) were measured and reverted because they net-regressed other benchmarks. They remain candidates for a future PR once the cost model is right.
+## Benchstat n=5 vs main
 
-### Why not a full Yjs structural port
-
-A cross-reference comparison against Yjs JS showed that Yjs's `cleanupContextlessFormattingGap` model has different cleanup semantics — it only removes duplicate-key markers in a contiguous gap, not orphan opener/closer pairs whose effect zone has no live content. ygo's existing `cleanupDanglingFormatsInRegion` is intentionally more aggressive and is what closes #71 vector A4. We kept ygo's richer cleanup and adopted only Yjs's `_hasFormatting` gating + the `firstLiveCache` optimisation, which together give the YText_Delete win without weakening cleanup semantics.
+```
+                   sec/op       vs base
+awareness:
+  SetLocalState        64.90n   -5.34%
+  EncodeUpdate_Single  224.5n   -10.52%
+  EncodeUpdate_Many    13.00µ   -7.85%
+  ApplyUpdate_Single   686.0n   -9.93%   (also -4.35% allocs/op)
+  ApplyUpdate_Many     21.41µ   ~        (-15.97% allocs/op, 100 fewer allocs)
+  geomean                       -7.97% sec/op, -3.58% allocs/op
+encoding:
+  geomean                       -1.81% sec/op, neutral allocs
+```
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.16.0
+go get github.com/reearth/ygo@v1.17.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.

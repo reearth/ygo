@@ -49,8 +49,24 @@ func (d *Decoder) Remaining() int { return len(d.buf) - d.pos }
 // HasContent reports whether there are unread bytes remaining.
 func (d *Decoder) HasContent() bool { return d.pos < len(d.buf) }
 
-// RemainingBytes returns a copy of the unread portion of the buffer.
+// RemainingBytes returns the unread portion of the buffer as a sub-slice.
+//
+// The returned slice ALIASES the decoder's underlying buffer; mutating it
+// (or extending its length via append beyond cap) corrupts the decoder.
+// Callers must treat it as read-only and copy if they need a slice with
+// an independent lifetime. Most callers in this codebase hand the bytes
+// straight to ApplySyncMessage or json.Unmarshal, both of which read-only,
+// so the zero-copy path is safe.
+//
+// Use RemainingBytesCopy if you need an independent allocation.
 func (d *Decoder) RemainingBytes() []byte {
+	return d.buf[d.pos:]
+}
+
+// RemainingBytesCopy returns an independently-allocated copy of the unread
+// portion of the buffer. Use when the caller needs to retain the bytes
+// across mutations of the decoder's underlying buffer.
+func (d *Decoder) RemainingBytesCopy() []byte {
 	rem := d.buf[d.pos:]
 	cp := make([]byte, len(rem))
 	copy(cp, rem)

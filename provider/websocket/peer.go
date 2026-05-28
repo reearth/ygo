@@ -204,56 +204,56 @@ func encodeAwarenessRemoval(aw *awareness.Awareness, clientIDs []uint64) []byte 
 	if len(toRemove) == 0 {
 		return nil
 	}
-	enc := encoding.NewEncoder()
-	enc.WriteVarUint(uint64(len(toRemove)))
-	for _, item := range toRemove {
-		enc.WriteVarUint(item.id)
-		enc.WriteVarUint(item.clock + 1)
-		enc.WriteVarString("null")
-	}
-	return enc.Bytes()
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(uint64(len(toRemove)))
+		for _, item := range toRemove {
+			enc.WriteVarUint(item.id)
+			enc.WriteVarUint(item.clock + 1)
+			enc.WriteVarString("null")
+		}
+	})
 }
 
 // sendSync writes a sync message (outer type 0, raw payload) to this peer.
 func (p *peer) sendSync(syncMsg []byte) {
-	enc := encoding.NewEncoder()
-	enc.WriteVarUint(msgSync)
-	enc.WriteRaw(syncMsg) // sync payload is NOT VarBytes-wrapped
-	p.write(enc.Bytes())
+	p.write(encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgSync)
+		enc.WriteRaw(syncMsg) // sync payload is NOT VarBytes-wrapped
+	}))
 }
 
 // sendAwareness writes an awareness message (outer type 1, VarBytes payload)
 // to this peer.
 func (p *peer) sendAwareness(awMsg []byte) {
-	enc := encoding.NewEncoder()
-	enc.WriteVarUint(msgAwareness)
-	enc.WriteVarBytes(awMsg) // awareness payload IS VarBytes-wrapped
-	p.write(enc.Bytes())
+	p.write(encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgAwareness)
+		enc.WriteVarBytes(awMsg) // awareness payload IS VarBytes-wrapped
+	}))
 }
 
 // broadcastSync sends a sync message to all OTHER peers in the room.
 func (p *peer) broadcastSync(syncMsg []byte) {
-	enc := encoding.NewEncoder()
-	enc.WriteVarUint(msgSync)
-	enc.WriteRaw(syncMsg)
-	p.broadcast(enc.Bytes(), true)
+	p.broadcast(encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgSync)
+		enc.WriteRaw(syncMsg)
+	}), true)
 }
 
 // broadcastAwareness sends an awareness message to all OTHER peers in the room.
 func (p *peer) broadcastAwareness(awMsg []byte) {
-	enc := encoding.NewEncoder()
-	enc.WriteVarUint(msgAwareness)
-	enc.WriteVarBytes(awMsg)
-	p.broadcast(enc.Bytes(), true)
+	p.broadcast(encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgAwareness)
+		enc.WriteVarBytes(awMsg)
+	}), true)
 }
 
 // broadcastAwarenessFromRoom sends an awareness message to ALL peers (called
 // from disconnect handler which has already removed itself from the room).
 func (p *peer) broadcastAwarenessFromRoom(awMsg []byte) {
-	enc := encoding.NewEncoder()
-	enc.WriteVarUint(msgAwareness)
-	enc.WriteVarBytes(awMsg)
-	p.broadcast(enc.Bytes(), false)
+	p.broadcast(encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgAwareness)
+		enc.WriteVarBytes(awMsg)
+	}), false)
 }
 
 // broadcast enqueues data for delivery to peers in the room. If excludeSelf

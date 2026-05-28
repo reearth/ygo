@@ -19,13 +19,16 @@ const DefaultTimeout = 30 * time.Second
 // treated as null (removed).
 const maxJSONDepth = 20
 
-// checkJSONDepth reports whether the JSON string s has at most maxJSONDepth
+// checkJSONDepth reports whether the JSON byte slice s has at most maxJSONDepth
 // levels of nesting. It scans bytes rather than parsing, so it runs in O(n).
 //
 // It tracks string context to avoid counting bracket characters inside JSON
 // string values. Without this, {"key": "[[[["}  would be counted as depth 5
 // instead of the correct depth 1, causing false-positive rejections (N-C3).
-func checkJSONDepth(s string) bool {
+//
+// Takes []byte (not string) so callers can pass a Decoder sub-slice without
+// the []byte→string conversion copy.
+func checkJSONDepth(s []byte) bool {
 	depth := 0
 	inString := false
 	i := 0
@@ -377,7 +380,13 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 	type entry struct {
 		clientID uint64
 		clock    uint64
-		jsonStr  string
+		// jsonBytes aliases the decoder's underlying buffer (zero-copy).
+		// Stable for the duration of ApplyUpdate; callers must not mutate
+		// the input slice while ApplyUpdate is running. Replacing string
+		// with []byte here eliminates two copies per entry: one in
+		// ReadVarString's []byte→string conversion and one in
+		// json.Unmarshal's string→[]byte conversion downstream.
+		jsonBytes []byte
 	}
 	entries := make([]entry, 0, numClients)
 	for i := uint64(0); i < numClients; i++ {
@@ -389,14 +398,14 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 		if err != nil {
 			return err
 		}
-		jsonStr, err := dec.ReadVarString()
+		jsonBytes, err := dec.ReadVarBytes()
 		if err != nil {
 			return err
 		}
-		if len(jsonStr) > maxAwarenessStateBytes {
+		if len(jsonBytes) > maxAwarenessStateBytes {
 			return ErrStateTooLarge
 		}
-		entries = append(entries, entry{clientID, clock, jsonStr})
+		entries = append(entries, entry{clientID, clock, jsonBytes})
 	}
 
 	a.mu.Lock()
@@ -404,7 +413,9 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 
 	for _, e := range entries {
 		current, exists := a.states[e.clientID]
-		isNullEntry := e.jsonStr == "null" || e.jsonStr == ""
+		// string([]byte) == "constant" is optimised by the Go compiler to
+		// length+content comparison without allocating, since Go 1.5.
+		isNullEntry := string(e.jsonBytes) == "null" || len(e.jsonBytes) == 0
 
 		// y-protocols clock gate (#73 vector C2):
 		//   - strictly-older clock → drop
@@ -451,9 +462,9 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 		isNull := isNullEntry
 		var state map[string]any
 		if !isNull {
-			if !checkJSONDepth(e.jsonStr) {
+			if !checkJSONDepth(e.jsonBytes) {
 				isNull = true
-			} else if err := json.Unmarshal([]byte(e.jsonStr), &state); err != nil {
+			} else if err := json.Unmarshal(e.jsonBytes, &state); err != nil {
 				isNull = true
 			}
 			if state == nil {
@@ -473,7 +484,7 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 		// the byte delta this entry would introduce (new size minus the
 		// previously-tracked size for this client) and drop the entry if
 		// applying it would exceed maxBytes.
-		newSize := len(e.jsonStr)
+		newSize := len(e.jsonBytes)
 		oldSize := a.wireBytes[e.clientID]
 		if !isNull && a.maxBytes > 0 {
 			delta := int64(newSize - oldSize)

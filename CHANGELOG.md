@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0] — 2026-05-27
+
+Wire-framing performance pass. Focused on the encoder allocation churn on the WebSocket send path and the redundant copies on the awareness JSON decode path. No public API breaks; one new helper and one decoder-method rename.
+
+### Added
+
+- **`encoding.GetEncoder` / `encoding.PutEncoder` / `encoding.EncodeBytes`** (#52). A package-level `sync.Pool` for `*Encoder`. `EncodeBytes(fn)` is the recommended wrapper for wire-framing call sites: it gets an encoder from the pool, runs `fn`, copies the resulting bytes into an independent allocation, and returns the encoder to the pool. The returned slice is safe to hand to write channels or other long-lived consumers.
+
+- **`encoding.Decoder.RemainingBytesCopy`** (#53 A). Returns an independently-allocated copy of the unread buffer portion — the previous behaviour of `RemainingBytes`. Use when callers need to retain the bytes across decoder buffer mutations.
+
+### Performance
+
+- **`Decoder.RemainingBytes` is now zero-copy** (#53 A). Returns a sub-slice of the underlying buffer instead of allocating a fresh copy. The documented contract is now: callers must treat the result as read-only and copy if they need a slice with an independent lifetime. The only non-test caller in this repo (`provider/websocket/peer.go:47`) hands the bytes straight to `ApplySyncMessage` and `broadcastSync`, both of which only read or copy.
+
+- **`Awareness.ApplyUpdate` zero-copy JSON decode** (#53 B). The per-entry JSON payload is now held as `[]byte` end-to-end (decoded via `ReadVarBytes`, which already returns a sub-slice of the decoder buffer) and passed directly to `json.Unmarshal`. Pre-fix, the bytes were converted to `string` by `ReadVarString` (one copy) and back to `[]byte` by `json.Unmarshal([]byte(s), ...)` (a second copy). On `BenchmarkApplyUpdate_Many` (100 entries): **-15.97% allocs/op (626 → 526), -9.93% sec/op on `_Single`**.
+
+- **WebSocket send/broadcast paths use the pooled encoder** (#52). All six `encoding.NewEncoder()` call sites in `provider/websocket/peer.go` (`sendSync`, `sendAwareness`, `broadcastSync`, `broadcastAwareness`, `broadcastAwarenessFromRoom`, `encodeAwarenessRemoval`) now go through `EncodeBytes`. `crdt/update.go`'s `encodeV1Locked` and `EncodeStateVectorV1` also switched. The pool keeps the underlying buffer warm across calls, eliminating the growth allocations that occurred on each `WriteVarUint`/`WriteRaw` past the 64-byte initial capacity.
+
+Benchstat n=5 (awareness package geomean): **-7.97% sec/op, -3.58% allocs/op**. Encoding package geomean: -1.81% sec/op, neutral allocs.
+
+### Internal refactor
+
+- `awareness.checkJSONDepth` signature changed from `string` to `[]byte` so it can scan the decoder sub-slice without an intermediate string conversion. Private — no external impact.
+
 ## [1.16.0] — 2026-05-26
 
 First post-audit release. Focused exclusively on `crdt/` internal performance — no public API changes.
