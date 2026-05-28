@@ -44,12 +44,17 @@ func PutEncoder(e *Encoder) {
 // safe to retain across goroutines and outlive the call. This is the
 // preferred wrapper for wire-framing call sites that hand bytes to a
 // write channel or other long-lived consumer.
-func EncodeBytes(fn func(*Encoder)) []byte {
+//
+// PutEncoder is deferred so a panic from fn still returns the encoder to
+// the pool (GetEncoder calls Reset on the way out, so any partially-
+// written bytes from the panicking call are discarded before the encoder
+// is reused).
+func EncodeBytes(fn func(*Encoder)) (out []byte) {
 	e := GetEncoder()
+	defer PutEncoder(e)
 	fn(e)
 	src := e.Bytes()
-	out := make([]byte, len(src))
+	out = make([]byte, len(src))
 	copy(out, src)
-	PutEncoder(e)
 	return out
 }

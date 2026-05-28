@@ -81,6 +81,40 @@ func TestUnit_EncodeBytes_ConcurrentSafe(t *testing.T) {
 	}
 }
 
+// #52 — EncodeBytes must return the encoder to the pool even when fn
+// panics, otherwise the pooled encoder leaks and subsequent callers pay
+// fresh allocations. Verified by panicking inside fn, then confirming the
+// pool still hands out a clean Reset encoder afterwards.
+func TestUnit_EncodeBytes_PanicReturnsEncoderToPool(t *testing.T) {
+	// Drain the pool of any pre-warm entries so the panicking encoder is
+	// the one most likely to be re-handed to the next Get.
+	for i := 0; i < 4; i++ {
+		PutEncoder(GetEncoder())
+	}
+
+	// Fire a panic inside fn. EncodeBytes must propagate it, but the
+	// deferred PutEncoder must still run.
+	func() {
+		defer func() {
+			r := recover()
+			require.NotNil(t, r, "panic must propagate through EncodeBytes")
+		}()
+		_ = EncodeBytes(func(enc *Encoder) {
+			enc.WriteVarUint(0xDEADBEEF) // dirty the buffer first
+			panic("simulated encode failure")
+		})
+	}()
+
+	// Subsequent Get must return a Reset encoder. If PutEncoder didn't run
+	// on the panic path the pool would still hold the dirty encoder.
+	for i := 0; i < 8; i++ {
+		e := GetEncoder()
+		assert.Empty(t, e.Bytes(),
+			"encoder %d from pool after panicking EncodeBytes must be Reset", i)
+		PutEncoder(e)
+	}
+}
+
 // #53 A — RemainingBytes is documented to alias the decoder buffer.
 // Verify that explicitly so future maintainers know not to "fix" it by
 // adding a copy.
