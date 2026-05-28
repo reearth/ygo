@@ -62,6 +62,36 @@ type InjectInfo struct {
 // the caller.
 type InjectHook func(ctx context.Context, info InjectInfo) error
 
+// StatelessInfo is passed to Server.OnStateless when a Hocuspocus
+// Stateless (#55, tag 5) or BroadcastStateless (#55, tag 6) message
+// arrives from a peer. Additional fields may be added in future
+// versions; callers must not rely on the struct being fixed-size.
+type StatelessInfo struct {
+	// Room is the room name the message arrived on.
+	Room string
+	// Payload is the UTF-8 string carried by the stateless message.
+	// Empty payloads are valid (Hocuspocus does not require non-empty).
+	Payload string
+	// IsBroadcast reports whether the message arrived as
+	// BroadcastStateless (tag 6) rather than plain Stateless (tag 5).
+	// When true the server has already fanned the payload out to all
+	// other peers in the room as a Stateless (tag 5) frame by the time
+	// the hook fires.
+	IsBroadcast bool
+}
+
+// StatelessHook is called when a peer sends a Hocuspocus Stateless or
+// BroadcastStateless message. The hook is purely informational — it
+// runs after any broadcast fan-out has already happened and its return
+// value has no effect on the server. Use it to surface out-of-band
+// signals (Tiptap comments, custom presence metadata, application
+// heartbeats) to the embedding application.
+//
+// The hook is invoked on the peer's read goroutine; long-running work
+// should be dispatched to a separate goroutine to avoid blocking
+// subsequent message processing for that peer.
+type StatelessHook func(info StatelessInfo)
+
 // Error sentinels returned by BroadcastUpdate, Apply, and CloseRoom.
 // Callers should compare with errors.Is rather than ==.
 var (

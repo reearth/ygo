@@ -26,12 +26,31 @@ import (
 // a slow-reader from blocking the broadcast loop for all other peers.
 const writeTimeout = 10 * time.Second
 
-// Outer message type codes defined by y-protocols / y-websocket.
+// Outer message type codes. Tags 0-3 are the y-protocols / y-websocket
+// core; tags 4-10 are the Hocuspocus protocol extensions ygo accepts
+// from clients (#55). See the StatelessHook godoc for the application-
+// level contract on Stateless and BroadcastStateless.
+//
+// NOTE: Hocuspocus's framing prepends a VarString(docName) to every
+// frame so a single WebSocket connection can multiplex multiple
+// documents. ygo's framing is the y-websocket layout (tag + payload),
+// one document per connection. So ygo accepts the Hocuspocus message
+// TYPES on the existing y-websocket framing but does not implement
+// multi-document multiplexing.
 const (
 	msgSync           = uint64(0)
 	msgAwareness      = uint64(1)
 	msgAuth           = uint64(2) // y-websocket auth; silently ignored
 	msgQueryAwareness = uint64(3)
+
+	// Hocuspocus extensions, accepted on the y-websocket framing.
+	msgSyncReply          = uint64(4)  // SyncStep2 / Update that must NOT trigger a SyncStep1 reply
+	msgStateless          = uint64(5)  // arbitrary VarString payload, surfaced via Server.OnStateless
+	msgBroadcastStateless = uint64(6)  // VarString payload, fanned out to other peers as msgStateless
+	msgClose              = uint64(7)  // peer-requested graceful close (optional VarString reason)
+	msgSyncStatus         = uint64(8)  // server→client update-applied ack; if a client sends it, no-op consume
+	msgPing               = uint64(9)  // liveness check; replies with msgPong
+	msgPong               = uint64(10) // liveness reply to a server-sent Ping; no-op
 )
 
 // maxWSMessageBytes is the maximum size of a single WebSocket frame accepted
@@ -223,6 +242,15 @@ type Server struct {
 	// For BroadcastUpdate, InjectInfo.UpdateSize is len(update); for
 	// Apply it is 0 (the delta has not yet been produced).
 	OnInject InjectHook
+
+	// OnStateless, if non-nil, is called when a peer sends a Hocuspocus
+	// Stateless (tag 5) or BroadcastStateless (tag 6) message. The hook
+	// is purely informational — for BroadcastStateless the server has
+	// already fanned the payload out to other peers in the room by the
+	// time the hook fires. Use this to surface out-of-band signals
+	// (Tiptap comments, custom presence metadata, application heartbeats)
+	// to the embedding application.
+	OnStateless StatelessHook
 
 	// MaxUpdateBytes is the maximum size of a single V1 update that
 	// BroadcastUpdate will fan out, or that Apply will produce and

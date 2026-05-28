@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] — 2026-05-28
+
+First Hocuspocus compatibility release. `provider/websocket` now accepts the seven additional message types Hocuspocus extends y-protocols with, so Hocuspocus-aware clients (Tiptap stateless extensions, custom liveness pings, application close signals) no longer have their frames silently dropped.
+
+### Added
+
+- **Hocuspocus message types 4-10 in `provider/websocket`** (#55):
+  - **`SyncReply`** (tag 4) — applied to the local doc and broadcast to other peers, but never echoed back to the sender (breaks the SyncStep1 ping-pong loop on noisy links).
+  - **`Stateless`** (tag 5) — surfaced to the application via the new `Server.OnStateless` hook with `IsBroadcast: false`. Not broadcast to other peers.
+  - **`BroadcastStateless`** (tag 6) — fanned out to all other peers in the room as plain `Stateless` (tag 5) frames; `OnStateless` fires on the server with `IsBroadcast: true`.
+  - **`CLOSE`** (tag 7) — closes the underlying WebSocket connection; logs the optional reason if present.
+  - **`SyncStatus`** (tag 8) — server→client ack; silently consumed if a client sends it.
+  - **`Ping`** (tag 9) — replied to with a single-byte `Pong` (tag 10) frame.
+  - **`Pong`** (tag 10) — silently consumed.
+
+- **`Server.OnStateless StatelessHook`** and **`StatelessInfo` struct** — new public types in `provider/websocket`. The hook is invoked on the peer's read goroutine after any broadcast fan-out has already happened; long-running work should be dispatched to a separate goroutine.
+
+### Framing limitation
+
+Hocuspocus's full client framing prepends a `VarString(docName)` to every frame so a single connection can multiplex multiple documents. ygo's framing remains the y-websocket layout (tag + payload), one document per WebSocket. This release adds the Hocuspocus message **types** on the existing y-websocket framing — so Hocuspocus-aware **handlers** can be used by clients that speak y-websocket, but Hocuspocus's multi-doc multiplex is a separate architectural change not in scope here.
+
+### Tests
+
+- 7 new integration tests in `provider/websocket/hocuspocus_test.go` exercise each new tag end-to-end (real WebSocket peers via `httptest`): `SyncReply` apply+broadcast+no-echo, `Stateless` hook fires + no broadcast, `BroadcastStateless` fan-out as tag 5 + hook fires with `IsBroadcast: true`, `Ping` → `Pong`, `Pong` silently consumed, `CLOSE` closes the connection, `SyncStatus` silently consumed.
+
 ## [1.17.0] — 2026-05-27
 
 Wire-framing performance pass. Focused on the encoder allocation churn on the WebSocket send path and the redundant copies on the awareness JSON decode path. No public API breaks; one new helper and one decoder-method rename.

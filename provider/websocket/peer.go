@@ -75,6 +75,83 @@ func (p *peer) handleMessage(data []byte) {
 
 	case msgQueryAwareness:
 		p.sendAwareness(p.room.awareness.EncodeUpdate(nil))
+
+	case msgSyncReply:
+		// Hocuspocus tag 4 (#55). Same payload shape as msgSync but the
+		// sender explicitly does NOT want a reply — used by the original
+		// requester to apply a SyncStep2 without bouncing another step-1
+		// back, which would cause an infinite ping-pong on noisy links.
+		// Apply locally and broadcast updates, but never reply with our
+		// own step-1.
+		payload := dec.RemainingBytes()
+		if _, err := ygsync.ApplySyncMessage(p.room.doc, payload, p); err != nil {
+			return
+		}
+		p.broadcastSync(payload)
+
+	case msgStateless:
+		// Hocuspocus tag 5 (#55). Arbitrary out-of-band signal addressed
+		// to the server only (no broadcast). Surface to the embedding
+		// application via Server.OnStateless if configured.
+		payload, err := dec.ReadVarString()
+		if err != nil {
+			return
+		}
+		if hook := p.server.OnStateless; hook != nil {
+			hook(StatelessInfo{Room: p.roomName, Payload: payload, IsBroadcast: false})
+		}
+
+	case msgBroadcastStateless:
+		// Hocuspocus tag 6 (#55). Arbitrary out-of-band signal that the
+		// sender wants delivered to all other peers in the room. Re-emit
+		// as a plain Stateless (tag 5) frame so the receiving clients
+		// can dispatch it through the same handler they already use for
+		// server-originated stateless messages — matches Hocuspocus's
+		// behaviour where BroadcastStateless from one connection arrives
+		// at others as Stateless.
+		payload, err := dec.ReadVarString()
+		if err != nil {
+			return
+		}
+		p.broadcast(encoding.EncodeBytes(func(enc *encoding.Encoder) {
+			enc.WriteVarUint(msgStateless)
+			enc.WriteVarString(payload)
+		}), true)
+		if hook := p.server.OnStateless; hook != nil {
+			hook(StatelessInfo{Room: p.roomName, Payload: payload, IsBroadcast: true})
+		}
+
+	case msgClose:
+		// Hocuspocus tag 7 (#55). Graceful close with an optional VarString
+		// reason. The reason is informational; the canonical Hocuspocus
+		// server discards it. We read it for the log line (best effort)
+		// and close the underlying connection. handleDisconnect will run
+		// when the read loop notices EOF.
+		reason, _ := dec.ReadVarString() // optional; silent on parse error
+		p.server.log().Info("peer requested close",
+			"room", p.roomName, "reason", reason)
+		_ = p.conn.Close()
+
+	case msgSyncStatus:
+		// Hocuspocus tag 8 (#55). Server→client ack carrying a single
+		// VarUint flag (1 = applied, 0 = rejected). If a client sends it
+		// to us, consume the payload silently — we don't track per-update
+		// delivery confirmations.
+		_, _ = dec.ReadVarUint()
+
+	case msgPing:
+		// Hocuspocus tag 9 (#55). Liveness check — reply with a single-byte
+		// Pong frame. (gorilla/websocket's protocol-level ping/pong is
+		// separate; Hocuspocus uses an application-level ping because some
+		// load balancers eat the protocol frames.)
+		p.write(encoding.EncodeBytes(func(enc *encoding.Encoder) {
+			enc.WriteVarUint(msgPong)
+		}))
+
+	case msgPong:
+		// Hocuspocus tag 10 (#55). Reply to a server-sent Ping. ygo does
+		// not currently send Pings, so this is a no-op pass-through that
+		// just keeps the dispatcher from dropping the frame.
 	}
 }
 
