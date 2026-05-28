@@ -118,14 +118,14 @@ func EncodeStateVectorV1(doc *Doc) []byte {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 	sv := doc.store.StateVector()
-	enc := encoding.NewEncoder()
 	clients := clientsSorted(sv)
-	enc.WriteVarUint(uint64(len(clients)))
-	for _, c := range clients {
-		enc.WriteVarUint(uint64(c))
-		enc.WriteVarUint(sv[c])
-	}
-	return enc.Bytes()
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(uint64(len(clients)))
+		for _, c := range clients {
+			enc.WriteVarUint(uint64(c))
+			enc.WriteVarUint(sv[c])
+		}
+	})
 }
 
 // DecodeStateVectorV1 parses a blob produced by EncodeStateVectorV1.
@@ -158,8 +158,6 @@ func DecodeStateVectorV1(data []byte) (StateVector, error) {
 // ── V1 encoding ───────────────────────────────────────────────────────────────
 
 func encodeV1Locked(doc *Doc, sv StateVector) []byte {
-	enc := encoding.NewEncoder()
-
 	type clientGroup struct {
 		client     ClientID
 		items      []*Item
@@ -181,22 +179,24 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].client < groups[j].client })
 
-	enc.WriteVarUint(uint64(len(groups)))
-	for _, g := range groups {
-		enc.WriteVarUint(uint64(len(g.items)))
-		enc.WriteVarUint(uint64(g.client))
-		enc.WriteVarUint(g.startClock)
-		for i, item := range g.items {
-			offset := 0
-			if i == 0 && g.startClock > item.ID.Clock {
-				offset = int(g.startClock - item.ID.Clock)
-			}
-			encodeItem(enc, item, offset, doc.store)
-		}
-	}
+	deleteSet := buildDeleteSet(doc.store)
 
-	encodeDeleteSet(enc, buildDeleteSet(doc.store))
-	return enc.Bytes()
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(uint64(len(groups)))
+		for _, g := range groups {
+			enc.WriteVarUint(uint64(len(g.items)))
+			enc.WriteVarUint(uint64(g.client))
+			enc.WriteVarUint(g.startClock)
+			for i, item := range g.items {
+				offset := 0
+				if i == 0 && g.startClock > item.ID.Clock {
+					offset = int(g.startClock - item.ID.Clock)
+				}
+				encodeItem(enc, item, offset, doc.store)
+			}
+		}
+		encodeDeleteSet(enc, deleteSet)
+	})
 }
 
 func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStore) {
