@@ -13,6 +13,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 	ygws "github.com/reearth/ygo/provider/websocket"
+	ygsync "github.com/reearth/ygo/sync"
 )
 
 // Tests for #55 — Hocuspocus message types 4-10 routed through
@@ -62,16 +63,19 @@ func TestInteg_Hocuspocus_SyncReply_AppliesAndBroadcastsNoEcho(t *testing.T) {
 	drainHandshake(t, connA, docA)
 	drainHandshake(t, connB, docB)
 
-	// A produces a local update and wraps it as a SyncStep2-style payload,
-	// then sends it as msgSyncReply (tag 4) instead of msgSync (tag 0).
+	// A produces a local update and wraps it as a sync MsgUpdate payload
+	// (VarUint tag + VarBytes(update)), then sends it framed as
+	// msgSyncReply (tag 4) instead of msgSync (tag 0). SyncReply carries
+	// the same inner sync payload shapes as Sync — typically MsgUpdate or
+	// MsgSyncStep2 — but is dispatched without the auto step-1 echo back.
 	txt := docA.GetText("t")
 	docA.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "hi", nil) })
 	update := crdt.EncodeStateAsUpdateV1(docA, nil)
 
 	require.NoError(t, connA.WriteMessage(gws.BinaryMessage, encoding.EncodeBytes(func(enc *encoding.Encoder) {
-		enc.WriteVarUint(4)       // msgSyncReply
-		enc.WriteVarUint(2)       // syncStep2 marker
-		enc.WriteVarBytes(update) // update bytes
+		enc.WriteVarUint(4)                        // msgSyncReply
+		enc.WriteVarUint(uint64(ygsync.MsgUpdate)) // inner sync subtype
+		enc.WriteVarBytes(update)
 	})))
 
 	// B must receive the broadcast as a regular Sync (tag 0) frame.
