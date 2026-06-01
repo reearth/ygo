@@ -42,6 +42,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -90,11 +91,12 @@ type Config struct {
 	// If empty, no signature header is emitted (suitable only for
 	// trusted internal networks).
 	Secret []byte
-	// Debounce is the window within which consecutive Update events
-	// for the same room are coalesced into a single delivery carrying
-	// the most recent update. Zero disables debounce; the default
-	// (1 * time.Second) is applied when Config.Debounce is unset.
-	// Capped at 10 * time.Second to prevent runaway buffering.
+	// Debounce is the window within which consecutive events with the
+	// same (Room, Type) are coalesced into a single delivery carrying
+	// the most-recent event. Zero applies the default (1 * time.Second);
+	// values above 10 * time.Second are capped at the maximum to prevent
+	// runaway buffering. There is no way to disable debounce — Enqueue
+	// is always at least minimally batched.
 	Debounce time.Duration
 	// MaxRetries is the number of delivery attempts before the event
 	// is dropped on transient failure. Zero uses the default (5).
@@ -111,6 +113,9 @@ type Config struct {
 	// HTTPClient is the http.Client used for outbound requests. Zero
 	// value uses a default client with a 10-second per-request timeout.
 	HTTPClient *http.Client
+	// Logger receives structured log entries when events are dropped
+	// for size or retry exhaustion. nil falls back to slog.Default().
+	Logger *slog.Logger
 }
 
 const (
@@ -126,15 +131,24 @@ const (
 	SignatureHeader = "X-YGo-Signature-256"
 )
 
+// pendingKey identifies a coalescing bucket. Two events in the same
+// window collapse only when they target the same room AND have the same
+// EventType — without the type discriminator a Connect followed by an
+// Update for the same room would lose the Update (or vice-versa).
+type pendingKey struct {
+	Room string
+	Type EventType
+}
+
 // Webhook is a running webhook delivery worker. Construct with New, push
 // events with Enqueue, and call Close when done.
 type Webhook struct {
 	cfg Config
 
 	mu       sync.Mutex
-	pending  map[string]*Event // room → most-recent debounced event
-	timer    *time.Timer       // fires when the next debounce window expires
-	deadline time.Time         // when the current debounce window expires
+	pending  map[pendingKey]*Event // (room, type) → most-recent debounced event
+	timer    *time.Timer           // fires when the next debounce window expires
+	deadline time.Time             // when the current debounce window expires
 
 	wg     sync.WaitGroup
 	closed chan struct{} // closed by Close to signal the flush goroutine to exit
@@ -166,18 +180,23 @@ func New(cfg Config) (*Webhook, error) {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
 	return &Webhook{
 		cfg:     cfg,
-		pending: make(map[string]*Event),
+		pending: make(map[pendingKey]*Event),
 		closed:  make(chan struct{}),
 	}, nil
 }
 
-// Enqueue submits an event for delivery. EventUpdate events with the
-// same Room name within the debounce window are coalesced: only the
-// most recent update bytes survive. Other event types are not
-// coalesced and dispatch on the next debounce tick alongside any
-// pending updates.
+// Enqueue submits an event for delivery. Events are coalesced by the
+// pair (Room, Type): two events in the same debounce window with the
+// same room AND same event type collapse to the most-recent one. A
+// Connect followed by an Update for the same room in the same window
+// produces two separate POSTs (one Connect, one Update) — only same-
+// type same-room events get coalesced, so distinct event categories
+// never overwrite each other.
 func (w *Webhook) Enqueue(e Event) {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now()
@@ -193,9 +212,7 @@ func (w *Webhook) Enqueue(e Event) {
 	default:
 	}
 
-	// Coalesce by room: most recent wins. (Even for non-Update events
-	// the latest within a window is what we deliver — simpler model.)
-	w.pending[e.Room] = &e
+	w.pending[pendingKey{Room: e.Room, Type: e.Type}] = &e
 
 	// Start / restart the debounce timer.
 	w.deadline = time.Now().Add(w.cfg.Debounce)
@@ -219,7 +236,7 @@ func (w *Webhook) flush() {
 	for _, e := range w.pending {
 		batch = append(batch, e)
 	}
-	w.pending = make(map[string]*Event)
+	w.pending = make(map[pendingKey]*Event)
 	w.mu.Unlock()
 
 	for _, e := range batch {
@@ -238,11 +255,15 @@ func (w *Webhook) flush() {
 func (w *Webhook) deliver(e Event) {
 	body, err := json.Marshal(e)
 	if err != nil {
-		// json.Marshal failing on our own struct is a programming bug, not
-		// a transient error — surface but don't retry.
+		// json.Marshal failing on our own struct is a programming bug.
+		w.cfg.Logger.Error("webhook: marshal failed; event dropped",
+			"room", e.Room, "type", e.Type, "err", err)
 		return
 	}
 	if int64(len(body)) > w.cfg.MaxBodyBytes {
+		w.cfg.Logger.Warn("webhook: event body exceeds MaxBodyBytes; dropped",
+			"room", e.Room, "type", e.Type,
+			"bodyBytes", len(body), "maxBodyBytes", w.cfg.MaxBodyBytes)
 		return
 	}
 
@@ -273,6 +294,9 @@ func (w *Webhook) deliver(e Event) {
 		}
 	}
 	// Exceeded MaxRetries; drop.
+	w.cfg.Logger.Warn("webhook: retry budget exhausted; event dropped",
+		"room", e.Room, "type", e.Type,
+		"url", w.cfg.URL, "attempts", w.cfg.MaxRetries)
 }
 
 // postOnce performs a single POST attempt. Returns (retry, ok) where

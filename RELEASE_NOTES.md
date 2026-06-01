@@ -6,14 +6,12 @@ Second Hocuspocus-compatibility release. Closes out the server-side parity story
 
 Four new optional hook fields on `Server`:
 
-| Hook | Fires when |
-|---|---|
-| `OnLoadDocument(ctx, room, doc) error` | After the persistence adapter has bootstrapped the doc, before any peer can interact. Returning an error fails room creation. |
-| `OnUnloadDocument(ctx, room)` | Room is evicted from the server map (last-peer-leaves or `CloseRoom`). |
-| `OnFirstPeer(room)` | 0→1 peer transition (warm-up tasks). |
-| `OnLastPeer(room)` | 1→0 peer transition (cool-down tasks). Fires before `OnUnloadDocument`. |
-
-All hooks fire after server locks are released, so implementations may block on I/O without contending with other peers.
+| Hook | Fires when | Locking |
+|---|---|---|
+| `OnLoadDocument(ctx, room, doc) error` | After the persistence adapter has bootstrapped the doc, before any peer can interact. Returning an error fails room creation. | **Under the server room-map lock** (same as `PersistenceAdapter.LoadDoc`). Return promptly; defer heavy I/O to a goroutine. |
+| `OnUnloadDocument(ctx, room)` | Room is evicted from the server map (last-peer-leaves or `CloseRoom`). | After locks released; safe to block on I/O. |
+| `OnFirstPeer(room)` | 0→1 peer transition (warm-up tasks). | After locks released. |
+| `OnLastPeer(room)` | 1→0 peer transition (cool-down tasks). Fires before `OnUnloadDocument`. | After locks released. |
 
 ### `provider/webhook` subpackage (#61)
 

@@ -24,23 +24,14 @@ import (
 
 // VerifySignature must accept a valid sha256= HMAC and reject everything
 // else (wrong prefix, bad hex, wrong key, tampered body).
+//
+// The end-to-end signing path (Webhook signs body → VerifySignature
+// accepts it) is exercised by TestInteg_Webhook_PostSignedEventEndToEnd
+// below; this test focuses on the verifier itself across forged inputs.
 func TestUnit_VerifySignature(t *testing.T) {
 	secret := []byte("super-secret-key")
 	body := []byte(`{"hello":"world"}`)
 
-	// Generate the canonical signature via EncodeBody-equivalent path:
-	// we know the implementation uses crypto/hmac+sha256, so use the same.
-	// The point of the test is to verify that VerifySignature catches both
-	// happy and tampered cases.
-	wh, err := webhook.New(webhook.Config{URL: "http://example.invalid", Secret: secret})
-	require.NoError(t, err)
-	defer func() { _ = wh.Close(context.Background()) }()
-
-	// Build a known signature by re-using the public surface: encode an
-	// event, sign manually (the test below proves end-to-end correctness).
-	// For this unit test we construct the signature directly.
-	// Use Enqueue → captured by an httptest server below in the integration
-	// test. Here we just test the verifier symmetry:
 	good := signFor(secret, body)
 	assert.True(t, webhook.VerifySignature(body, secret, good))
 
@@ -164,6 +155,54 @@ func TestInteg_Webhook_DebounceCoalesces(t *testing.T) {
 	require.Len(t, posts, 1)
 	assert.Equal(t, []byte{9}, posts[0].Update,
 		"the coalesced post must carry the LATEST update bytes")
+}
+
+// Regression for Copilot review: pending coalescing must key by
+// (Room, Type), not by Room alone. A Connect followed by an Update for
+// the same room within the debounce window must NOT overwrite each
+// other — two POSTs are expected, one Connect and one Update.
+func TestInteg_Webhook_CoalescesPerEventType(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		types []webhook.EventType
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var e webhook.Event
+		_ = json.Unmarshal(body, &e)
+		mu.Lock()
+		types = append(types, e.Type)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	wh, err := webhook.New(webhook.Config{
+		URL:      ts.URL,
+		Debounce: 100 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	defer func() { _ = wh.Close(context.Background()) }()
+
+	// Enqueue three distinct event types for the same room within a
+	// single debounce window. All three must be delivered.
+	wh.Enqueue(webhook.Event{Type: webhook.EventConnect, Room: "mixroom"})
+	wh.Enqueue(webhook.Event{Type: webhook.EventUpdate, Room: "mixroom", Update: []byte{0x01}})
+	wh.Enqueue(webhook.Event{Type: webhook.EventDisconnect, Room: "mixroom"})
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(types) == 3
+	}, 2*time.Second, 10*time.Millisecond,
+		"three distinct event types in one window must produce three POSTs, "+
+			"not collapse via Room-only coalescing")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.ElementsMatch(t, types,
+		[]webhook.EventType{webhook.EventConnect, webhook.EventUpdate, webhook.EventDisconnect},
+		"each event type must arrive exactly once")
 }
 
 // Retry: 5xx responses must trigger exponential backoff retries until

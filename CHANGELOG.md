@@ -12,11 +12,10 @@ Second Hocuspocus-compatibility release. Adds the application-level extension po
 ### Added
 
 - **`provider/websocket` lifecycle hooks** (#60). Four new optional hook fields on `Server`:
-  - `OnLoadDocument func(ctx context.Context, room string, doc *crdt.Doc) error` — fires once per room after the persistence adapter has bootstrapped the doc, before any peer interacts. Returning a non-nil error fails room creation and propagates to the caller.
-  - `OnUnloadDocument func(ctx context.Context, room string)` — fires when a room is evicted from the server map (last-peer-leaves or `CloseRoom`).
-  - `OnFirstPeer func(room string)` — fires on the 0→1 peer transition; useful for warm-up tasks.
-  - `OnLastPeer func(room string)` — fires on the 1→0 peer transition; useful for cool-down tasks.
-  All hooks fire after server locks are released so they may block on I/O without contending with other peers. `OnLastPeer` fires before `OnUnloadDocument` when both apply.
+  - `OnLoadDocument func(ctx context.Context, room string, doc *crdt.Doc) error` — fires once per room after the persistence adapter has bootstrapped the doc, before any peer interacts. Returning a non-nil error fails room creation and propagates to the caller. **Runs while the server room-map lock is held**, so implementations must return promptly; defer heavy I/O to a goroutine if needed. This mirrors `PersistenceAdapter.LoadDoc` which also runs under the same lock.
+  - `OnUnloadDocument func(ctx context.Context, room string)` — fires when a room is evicted from the server map (last-peer-leaves or `CloseRoom`). Runs after all server locks are released; safe to block on I/O.
+  - `OnFirstPeer func(room string)` — fires on the 0→1 peer transition; useful for warm-up tasks. Runs after locks released.
+  - `OnLastPeer func(room string)` — fires on the 1→0 peer transition; useful for cool-down tasks. Runs after locks released. Fires before `OnUnloadDocument` when both apply.
 
 - **`provider/webhook` subpackage** (#61). New optional package that POSTs ygo events to a configurable HTTP endpoint:
   - `webhook.Config` with `URL`, `Secret`, `Debounce`, `MaxRetries`, `BackoffBase`, `MaxBodyBytes`, `HTTPClient`.
