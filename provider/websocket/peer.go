@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -238,6 +239,20 @@ func (p *peer) handleDisconnect() {
 		// room reference becomes garbage. This runs outside the locks above.
 		if empty && rm.persistDone != nil {
 			<-rm.persistDone
+		}
+
+		// #60 — Fire lifecycle hooks AFTER locks released and persistence
+		// drain finished. OnLastPeer signals the 1→0 transition; the room
+		// may or may not also be evicted (eviction is currently eager but
+		// could become lazy in a future release). OnUnloadDocument fires
+		// only when the room is actually evicted from the server map.
+		if empty {
+			if hook := p.server.OnLastPeer; hook != nil {
+				hook(p.roomName)
+			}
+			if hook := p.server.OnUnloadDocument; hook != nil {
+				hook(context.Background(), p.roomName)
+			}
 		}
 
 		p.cidMu.Lock()

@@ -252,6 +252,43 @@ type Server struct {
 	// to the embedding application.
 	OnStateless StatelessHook
 
+	// OnLoadDocument, if non-nil, is called once per room immediately
+	// after the document has been bootstrapped from the PersistenceAdapter
+	// (or freshly constructed when no adapter is configured) but before
+	// any peer can interact with it. Returning a non-nil error fails room
+	// creation: peer upgrades / Apply / BroadcastUpdate against the room
+	// receive that error wrapped as a room-load failure. Use this to wire
+	// in a custom resolver, decrypt-at-rest, schema-migration check, or
+	// any other one-time per-room setup. (#60)
+	//
+	// The hook runs while the server room-map lock is held, so
+	// implementations must return promptly; defer heavy I/O to a
+	// goroutine if needed. The doc passed in is owned by the server —
+	// retaining a reference past the hook return is safe as long as the
+	// caller serialises access through Transact / public APIs.
+	OnLoadDocument func(ctx context.Context, room string, doc *crdt.Doc) error
+
+	// OnUnloadDocument, if non-nil, is called once per room immediately
+	// after the room has been evicted from the server's in-memory map.
+	// Fires from both handleDisconnect (last-peer-leaves) and CloseRoom.
+	// Use this to release per-room caches, flush metrics, or notify
+	// downstream systems that the doc is no longer hot. (#60)
+	OnUnloadDocument func(ctx context.Context, room string)
+
+	// OnFirstPeer, if non-nil, fires when a room transitions from 0 to 1
+	// peers — i.e. the first peer just joined this active session of the
+	// document. Useful for warm-up tasks (preloading caches, opening
+	// downstream connections). Fires after the peer has been registered
+	// with the room and after all server locks have been released. (#60)
+	OnFirstPeer func(room string)
+
+	// OnLastPeer, if non-nil, fires when a room transitions from 1 to 0
+	// peers — i.e. the last peer just disconnected. Useful for cool-down
+	// tasks (releasing caches, closing downstream connections, scheduling
+	// the eventual OnUnloadDocument). Fires before OnUnloadDocument when
+	// both apply. (#60)
+	OnLastPeer func(room string)
+
 	// MaxUpdateBytes is the maximum size of a single V1 update that
 	// BroadcastUpdate will fan out, or that Apply will produce and
 	// fan out. Zero means use the same 64 MiB default applied to
@@ -455,7 +492,7 @@ func (s *Server) GetDoc(name string) *crdt.Doc {
 	return nil
 }
 
-func (s *Server) getOrCreateRoom(name string) (*room, error) {
+func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error) {
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
 	if r, ok := s.rooms[name]; ok {
@@ -490,6 +527,17 @@ func (s *Server) getOrCreateRoom(name string) (*room, error) {
 				return nil, fmt.Errorf("bootstrapping room %q: %w", name, err)
 			}
 		}
+	}
+	// #60 — fire OnLoadDocument AFTER persistence bootstrap but BEFORE the
+	// persistence worker starts and the room is registered, so a hook
+	// returning an error fails room creation cleanly with nothing left to
+	// clean up. Hook runs under s.rmu.Lock; implementations must be fast.
+	if hook := s.OnLoadDocument; hook != nil {
+		if err := hook(ctx, name, r.doc); err != nil {
+			return nil, fmt.Errorf("OnLoadDocument for room %q: %w", name, err)
+		}
+	}
+	if s.persistence != nil {
 		// Serialise persistence writes through a buffered channel so that a
 		// slow storage backend does not block the Transact caller (N-H7) and
 		// writes arrive in order.
@@ -526,7 +574,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rm, err := s.getOrCreateRoom(name)
+	rm, err := s.getOrCreateRoom(r.Context(), name)
 	if err != nil {
 		if errors.Is(err, ErrTooManyRooms) {
 			http.Error(w, "too many rooms", http.StatusServiceUnavailable)
@@ -599,8 +647,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rm.mu.Lock()
 	rm.peers[p] = struct{}{}
+	firstPeer := len(rm.peers) == 1 // #60: 0→1 transition
 	rm.mu.Unlock()
 	s.rmu.RUnlock()
+
+	// #60 — OnFirstPeer fires after all server locks are released so the
+	// hook is free to do blocking work (warm caches, open connections,
+	// emit metrics) without holding up other peers from joining.
+	if firstPeer {
+		if hook := s.OnFirstPeer; hook != nil {
+			hook(name)
+		}
+	}
 
 	// Start the per-peer writer ONLY after the peer is registered with the
 	// room. From this point handleDisconnect (registered next) owns the

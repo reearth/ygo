@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] — 2026-05-28
+
+Second Hocuspocus-compatibility release. Adds the application-level extension points that production deployments need on top of v1.18.0's wire-protocol message types: per-room lifecycle hooks on the WebSocket server, and a new optional `provider/webhook` subpackage for forwarding events to external HTTP endpoints.
+
+### Added
+
+- **`provider/websocket` lifecycle hooks** (#60). Four new optional hook fields on `Server`:
+  - `OnLoadDocument func(ctx context.Context, room string, doc *crdt.Doc) error` — fires once per room after the persistence adapter has bootstrapped the doc, before any peer interacts. Returning a non-nil error fails room creation and propagates to the caller.
+  - `OnUnloadDocument func(ctx context.Context, room string)` — fires when a room is evicted from the server map (last-peer-leaves or `CloseRoom`).
+  - `OnFirstPeer func(room string)` — fires on the 0→1 peer transition; useful for warm-up tasks.
+  - `OnLastPeer func(room string)` — fires on the 1→0 peer transition; useful for cool-down tasks.
+  All hooks fire after server locks are released so they may block on I/O without contending with other peers. `OnLastPeer` fires before `OnUnloadDocument` when both apply.
+
+- **`provider/webhook` subpackage** (#61). New optional package that POSTs ygo events to a configurable HTTP endpoint:
+  - `webhook.Config` with `URL`, `Secret`, `Debounce`, `MaxRetries`, `BackoffBase`, `MaxBodyBytes`, `HTTPClient`.
+  - `webhook.New` / `webhook.Webhook.Enqueue` / `webhook.Webhook.Close`.
+  - HMAC-SHA256 request signing on every body, emitted as `X-YGo-Signature-256: sha256=<hex>`. `webhook.VerifySignature` for receivers; constant-time comparison.
+  - Debounce / coalescing window (default 1s, capped at 10s) — rapid same-room updates collapse into a single POST carrying the latest update bytes.
+  - Retry with exponential backoff (default 5 attempts, 250ms base) on transport errors and 5xx responses. 4xx drops immediately (receiver said no).
+  - `webhook.Event` shape with type / room / update bytes (base64 on the wire) / timestamp.
+  - `webhook.Close` drains pending events before returning; events enqueued after Close are silently dropped.
+
+### Internal
+
+- `Server.getOrCreateRoom` now takes a `context.Context` so `OnLoadDocument` receives a request-scoped ctx. Internal API change; no public callers affected.
+
 ## [1.18.0] — 2026-05-28
 
 First Hocuspocus compatibility release. `provider/websocket` now accepts the seven additional message types Hocuspocus extends y-protocols with, so Hocuspocus-aware clients (Tiptap stateless extensions, custom liveness pings, application close signals) no longer have their frames silently dropped.

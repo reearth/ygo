@@ -1,33 +1,51 @@
 ## What's new
 
-First Hocuspocus compatibility release. `provider/websocket` now accepts the seven additional message types Hocuspocus extends y-protocols with — so Hocuspocus-aware clients (Tiptap stateless extensions, custom liveness pings, application close signals) no longer have their frames silently dropped.
+Second Hocuspocus-compatibility release. Closes out the server-side parity story started in v1.18.0: lifecycle hooks for the WebSocket server, and a new optional `provider/webhook` subpackage for forwarding events to external HTTP endpoints.
 
-### Hocuspocus message types 4-10 (#55)
+### `provider/websocket` lifecycle hooks (#60)
 
-| Tag | Message | ygo behaviour |
-|---|---|---|
-| 4 | `SyncReply` | Apply locally, broadcast to other peers, never echo to sender. |
-| 5 | `Stateless` | Fire `Server.OnStateless` with `IsBroadcast: false`. No broadcast. |
-| 6 | `BroadcastStateless` | Fan out to other peers as `Stateless` (tag 5); fire `Server.OnStateless` with `IsBroadcast: true`. |
-| 7 | `CLOSE` | Close the WebSocket connection; log the optional reason. |
-| 8 | `SyncStatus` | Silently consume (server-to-client message). |
-| 9 | `Ping` | Reply with single-byte `Pong` (tag 10). |
-| 10 | `Pong` | Silently consume. |
+Four new optional hook fields on `Server`:
 
-### New public API
+| Hook | Fires when |
+|---|---|
+| `OnLoadDocument(ctx, room, doc) error` | After the persistence adapter has bootstrapped the doc, before any peer can interact. Returning an error fails room creation. |
+| `OnUnloadDocument(ctx, room)` | Room is evicted from the server map (last-peer-leaves or `CloseRoom`). |
+| `OnFirstPeer(room)` | 0→1 peer transition (warm-up tasks). |
+| `OnLastPeer(room)` | 1→0 peer transition (cool-down tasks). Fires before `OnUnloadDocument`. |
 
-- `Server.OnStateless StatelessHook` — optional hook on `provider/websocket.Server`.
-- `StatelessHook = func(StatelessInfo)` — invoked on the peer's read goroutine.
-- `StatelessInfo` — carries `Room`, `Payload`, `IsBroadcast`.
+All hooks fire after server locks are released, so implementations may block on I/O without contending with other peers.
 
-### Framing limitation (intentional)
+### `provider/webhook` subpackage (#61)
 
-Hocuspocus's full client framing prepends a `VarString(docName)` to every frame so one WebSocket can multiplex multiple documents. ygo's framing remains the y-websocket layout (tag + payload), one document per WebSocket. This release adds the Hocuspocus message **types** on the existing y-websocket framing; Hocuspocus's multi-doc multiplex is a separate, larger architectural change not in scope here.
+POSTs ygo document events to a configurable HTTP endpoint. Mirrors Hocuspocus's `extension-webhook`:
+
+- **HMAC-SHA256 signing** — every request carries `X-YGo-Signature-256: sha256=<hex>`. `webhook.VerifySignature` for receivers; constant-time comparison.
+- **Debounce / coalescing** — rapid same-room updates collapse into a single POST carrying the latest update bytes. Default 1s, capped at 10s.
+- **Retry with exponential backoff** — 5 attempts × 250ms base by default on 5xx and transport errors. 4xx drops immediately.
+- **Drain on Close** — `webhook.Close(ctx)` flushes pending events before returning; events enqueued after Close are silently dropped.
+
+```go
+wh, _ := webhook.New(webhook.Config{
+    URL:      "https://hooks.example.com/ygo",
+    Secret:   []byte("shared-secret"),
+    Debounce: time.Second,
+})
+defer wh.Close(context.Background())
+
+srv.OnLoadDocument = func(_ context.Context, room string, doc *crdt.Doc) error {
+    doc.OnUpdate(func(update []byte, _ any) {
+        wh.Enqueue(webhook.Event{
+            Type: webhook.EventUpdate, Room: room, Update: update,
+        })
+    })
+    return nil
+}
+```
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.18.0
+go get github.com/reearth/ygo@v1.19.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
