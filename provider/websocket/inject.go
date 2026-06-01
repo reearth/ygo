@@ -275,7 +275,7 @@ func (s *Server) Apply(
 			return fmt.Errorf("%w: %w", ErrInjectRefused, err)
 		}
 	}
-	rm, err := s.getOrCreateRoom(room)
+	rm, err := s.getOrCreateRoom(ctx, room)
 	if err != nil {
 		return err
 	}
@@ -486,6 +486,8 @@ func (s *Server) CloseRoom(name string, force bool) error {
 		if rm.persistDone != nil {
 			<-rm.persistDone
 		}
+		// #60 — handleDisconnect already evicted the room and fired
+		// OnUnloadDocument; nothing more for CloseRoom to do here.
 		return nil
 	}
 	delete(s.rooms, name)
@@ -501,6 +503,20 @@ func (s *Server) CloseRoom(name string, force bool) error {
 
 	if rm.persistDone != nil {
 		<-rm.persistDone
+	}
+
+	// #60 — Fire OnUnloadDocument after locks are released and the
+	// persistence drain finished. (CloseRoom does not have its own
+	// OnLastPeer fire path — the per-peer handleDisconnect path fires
+	// it as those peers' read loops notice the closed connections.)
+	// Reaching this line implies we were the path that removed rm from
+	// s.rooms (the early-return above handled the lost-race case), so
+	// firing here is exactly-once vs handleDisconnect — see #93 self-
+	// review B1.
+	if hook := s.OnUnloadDocument; hook != nil {
+		s.safeHook("OnUnloadDocument", func() {
+			hook(context.Background(), name)
+		})
 	}
 	return nil
 }

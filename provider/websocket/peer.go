@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -98,7 +99,9 @@ func (p *peer) handleMessage(data []byte) {
 			return
 		}
 		if hook := p.server.OnStateless; hook != nil {
-			hook(StatelessInfo{Room: p.roomName, Payload: payload, IsBroadcast: false})
+			p.server.safeHook("OnStateless", func() {
+				hook(StatelessInfo{Room: p.roomName, Payload: payload, IsBroadcast: false})
+			})
 		}
 
 	case msgBroadcastStateless:
@@ -118,7 +121,9 @@ func (p *peer) handleMessage(data []byte) {
 			enc.WriteVarString(payload)
 		}), true)
 		if hook := p.server.OnStateless; hook != nil {
-			hook(StatelessInfo{Room: p.roomName, Payload: payload, IsBroadcast: true})
+			p.server.safeHook("OnStateless", func() {
+				hook(StatelessInfo{Room: p.roomName, Payload: payload, IsBroadcast: true})
+			})
 		}
 
 	case msgClose:
@@ -217,10 +222,24 @@ func (p *peer) handleDisconnect() {
 		rm.mu.Lock()
 		delete(rm.peers, p)
 		empty := len(rm.peers) == 0
+		// roomEvicted distinguishes "we were the path that removed rm from
+		// s.rooms" from "rm was already gone (CloseRoom won the race)".
+		// Only the evicting path fires OnUnloadDocument — without this
+		// guard a concurrent CloseRoom + last-peer-disconnect double-fires
+		// the hook on the same room name. (#93 self-review B1.)
+		roomEvicted := false
 		if empty {
-			delete(p.server.rooms, p.roomName)
+			if current, stillIn := p.server.rooms[p.roomName]; stillIn && current == rm {
+				delete(p.server.rooms, p.roomName)
+				roomEvicted = true
+			}
 			if rm.persistStop != nil {
-				close(rm.persistStop)
+				select {
+				case <-rm.persistStop:
+					// already closed by CloseRoom
+				default:
+					close(rm.persistStop)
+				}
 			}
 		}
 		rm.mu.Unlock()
@@ -238,6 +257,28 @@ func (p *peer) handleDisconnect() {
 		// room reference becomes garbage. This runs outside the locks above.
 		if empty && rm.persistDone != nil {
 			<-rm.persistDone
+		}
+
+		// #60 — Fire lifecycle hooks AFTER locks released and persistence
+		// drain finished. OnLastPeer signals the 1→0 transition; the room
+		// may or may not also be evicted (eviction is currently eager but
+		// could become lazy in a future release). OnUnloadDocument fires
+		// only when we were the path that actually evicted the room from
+		// the server map (roomEvicted) — otherwise CloseRoom raced us and
+		// has already / will already fire it. Both hooks are panic-safe.
+		if empty {
+			if hook := p.server.OnLastPeer; hook != nil {
+				p.server.safeHook("OnLastPeer", func() {
+					hook(context.Background(), p.roomName)
+				})
+			}
+		}
+		if roomEvicted {
+			if hook := p.server.OnUnloadDocument; hook != nil {
+				p.server.safeHook("OnUnloadDocument", func() {
+					hook(context.Background(), p.roomName)
+				})
+			}
 		}
 
 		p.cidMu.Lock()

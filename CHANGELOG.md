@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] — 2026-05-28
+
+Second Hocuspocus-compatibility release. Adds the application-level extension points that production deployments need on top of v1.18.0's wire-protocol message types: per-room lifecycle hooks on the WebSocket server, and a new optional `provider/webhook` subpackage for forwarding events to external HTTP endpoints.
+
+### Added
+
+- **`provider/websocket` lifecycle hooks** (#60). Four new optional hook fields on `Server`:
+  - `OnLoadDocument func(ctx context.Context, room string, doc *crdt.Doc) error` — fires once per room after the persistence adapter has bootstrapped the doc, before any peer interacts. Returning a non-nil error fails room creation and propagates to the caller. **Runs while the server room-map lock is held**, so implementations must return promptly; defer heavy I/O to a goroutine if needed. This mirrors `PersistenceAdapter.LoadDoc` which also runs under the same lock.
+  - `OnUnloadDocument func(ctx context.Context, room string)` — fires when a room is evicted from the server map (last-peer-leaves or `CloseRoom`). Runs after all server locks are released; safe to block on I/O.
+  - `OnFirstPeer func(ctx context.Context, room string)` — fires on the 0→1 peer transition; useful for warm-up tasks. Runs after locks released. `ctx` is the WebSocket request context.
+  - `OnLastPeer func(ctx context.Context, room string)` — fires on the 1→0 peer transition; useful for cool-down tasks. Runs after locks released. Fires before `OnUnloadDocument` when both apply.
+
+  All four hooks are panic-safe: a `recover()` wraps each invocation and logs the panic + stack at `Error` level via the server logger — a misbehaving hook can no longer crash the connection-handling or disposal goroutine.
+
+- **`provider/webhook` subpackage** (#61). New optional package that POSTs ygo events to a configurable HTTP endpoint:
+  - `webhook.Config` with `URL`, `Secret`, `Debounce`, `MaxRetries`, `BackoffBase`, `MaxBackoff`, `MaxBodyBytes`, `MaxConcurrentDeliveries`, `HTTPClient`, `Logger`.
+  - `webhook.New` / `webhook.Webhook.Enqueue` / `webhook.Webhook.Close`.
+  - **`webhook.AttachTo(srv, wh) func()`** convenience that wires every relevant `Server` hook (`OnLoadDocument` → `EventLoad` + per-doc `OnUpdate` → `EventUpdate`; `OnUnloadDocument` → `EventUnload`; `OnFirstPeer` → `EventConnect`; `OnLastPeer` → `EventDisconnect`) in a single call. Returns an idempotent detach func that restores the previous hook values. Composes with any hooks the caller has already set.
+  - HMAC-SHA256 request signing on every body, emitted as `X-YGo-Signature-256: sha256=<hex>`. `webhook.VerifySignature` for receivers; constant-time comparison.
+  - Debounce / coalescing window (default 1s, capped at 10s) — rapid same-`(Room, Type)` events collapse into a single POST. Different event types for the same room never collapse into each other.
+  - Retry with exponential backoff (default 5 attempts, 250ms base, **capped at `MaxBackoff` (default 30s)**) on transport errors and 5xx responses. **±20% jitter** added to each retry sleep to defeat thundering-herd retry alignment when many concurrent webhooks fail against the same receiver. 4xx drops immediately.
+  - **Bounded delivery concurrency** via `MaxConcurrentDeliveries` (default 8) — a slow / dead receiver no longer accumulates unbounded delivery goroutines under burst load.
+  - **Single dispatcher goroutine** owns the debounce timer (replaces the previous `time.AfterFunc` + `Timer.Reset` pattern that allowed a queued firing to escape `Close`). Both `Close` and the dispatcher cooperate on a single `closed` channel for clean teardown.
+  - `webhook.Event` shape with type / room / update bytes (base64 on the wire) / timestamp.
+  - `webhook.Close` drains pending events before returning; events enqueued after Close are silently dropped.
+
+### Internal
+
+- `Server.getOrCreateRoom` now takes a `context.Context` so `OnLoadDocument` receives a request-scoped ctx. Internal API change; no public callers affected.
+
 ## [1.18.0] — 2026-05-28
 
 First Hocuspocus compatibility release. `provider/websocket` now accepts the seven additional message types Hocuspocus extends y-protocols with, so Hocuspocus-aware clients (Tiptap stateless extensions, custom liveness pings, application close signals) no longer have their frames silently dropped.
