@@ -491,7 +491,6 @@ func (s *Server) CloseRoom(name string, force bool) error {
 		return nil
 	}
 	delete(s.rooms, name)
-	evicted := true
 	if rm.persistStop != nil {
 		select {
 		case <-rm.persistStop:
@@ -510,10 +509,14 @@ func (s *Server) CloseRoom(name string, force bool) error {
 	// persistence drain finished. (CloseRoom does not have its own
 	// OnLastPeer fire path — the per-peer handleDisconnect path fires
 	// it as those peers' read loops notice the closed connections.)
-	if evicted {
-		if hook := s.OnUnloadDocument; hook != nil {
+	// Reaching this line implies we were the path that removed rm from
+	// s.rooms (the early-return above handled the lost-race case), so
+	// firing here is exactly-once vs handleDisconnect — see #93 self-
+	// review B1.
+	if hook := s.OnUnloadDocument; hook != nil {
+		s.safeHook("OnUnloadDocument", func() {
 			hook(context.Background(), name)
-		}
+		})
 	}
 	return nil
 }

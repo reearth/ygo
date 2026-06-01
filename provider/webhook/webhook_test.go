@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,7 +18,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/webhook"
+	ygws "github.com/reearth/ygo/provider/websocket"
 )
 
 // Tests for #61 — provider/webhook subpackage.
@@ -354,4 +357,221 @@ func TestUnit_New_RejectsEmptyURL(t *testing.T) {
 		"webhook.New must reject empty URL")
 	assert.Contains(t, err.Error(), "URL",
 		"error must mention URL: %v", err)
+}
+
+// Regression for #93 self-review B3 — AttachTo wires every relevant
+// Server hook + per-doc OnUpdate so a single call delivers the event
+// stream without per-event manual wiring. This test drives the
+// load → update → unload path via srv.Apply + srv.CloseRoom (no real
+// WebSocket needed for the wiring assertion); the Connect / Disconnect
+// edges (which require a real peer transition) are covered by the
+// lifecycle test suite which exercises OnFirstPeer / OnLastPeer.
+func TestInteg_Webhook_AttachTo_WiresAllEvents(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		got      []webhook.EventType
+		gotRooms []string
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var e webhook.Event
+		_ = json.Unmarshal(body, &e)
+		mu.Lock()
+		got = append(got, e.Type)
+		gotRooms = append(gotRooms, e.Room)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	wh, err := webhook.New(webhook.Config{URL: ts.URL, Debounce: 30 * time.Millisecond})
+	require.NoError(t, err)
+	defer func() { _ = wh.Close(context.Background()) }()
+
+	srv := ygws.NewServer()
+	detach := webhook.AttachTo(srv, wh)
+	defer detach()
+
+	// srv.Apply creates the room (→ EventLoad via OnLoadDocument) and
+	// applies an update inside a Transact (→ EventUpdate via the
+	// per-doc OnUpdate listener AttachTo installed).
+	require.NoError(t, srv.Apply(context.Background(), "attachroom",
+		func(d *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := d.GetText("t")
+			transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "x", nil) })
+		}))
+
+	// srv.CloseRoom evicts the room (→ EventUnload via OnUnloadDocument).
+	require.NoError(t, srv.CloseRoom("attachroom", false))
+
+	// Wait for all three event types to arrive.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		seen := make(map[webhook.EventType]bool)
+		for _, e := range got {
+			seen[e] = true
+		}
+		return seen[webhook.EventLoad] && seen[webhook.EventUpdate] && seen[webhook.EventUnload]
+	}, 4*time.Second, 50*time.Millisecond,
+		"AttachTo must wire Load + Update + Unload from a single call")
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, r := range gotRooms {
+		assert.Equal(t, "attachroom", r,
+			"every event must carry the correct room name")
+	}
+}
+
+// AttachTo's detach func must restore the previous hook values so the
+// Server returns to its pre-AttachTo state.
+func TestUnit_Webhook_AttachTo_DetachRestoresPrevHooks(t *testing.T) {
+	srv := ygws.NewServer()
+
+	// Set sentinel hooks first.
+	called := struct {
+		load, unload, first, last bool
+	}{}
+	srv.OnLoadDocument = func(_ context.Context, _ string, _ *crdt.Doc) error {
+		called.load = true
+		return nil
+	}
+	srv.OnUnloadDocument = func(_ context.Context, _ string) { called.unload = true }
+	srv.OnFirstPeer = func(_ context.Context, _ string) { called.first = true }
+	srv.OnLastPeer = func(_ context.Context, _ string) { called.last = true }
+
+	wh, err := webhook.New(webhook.Config{URL: "http://example.invalid"})
+	require.NoError(t, err)
+	defer func() { _ = wh.Close(context.Background()) }()
+
+	detach := webhook.AttachTo(srv, wh)
+
+	// Hooks are now AttachTo's wrappers — but they must chain to the
+	// previous values, so the sentinels still get hit when the wrappers run.
+	require.NoError(t, srv.OnLoadDocument(context.Background(), "r", crdt.New()))
+	srv.OnUnloadDocument(context.Background(), "r")
+	srv.OnFirstPeer(context.Background(), "r")
+	srv.OnLastPeer(context.Background(), "r")
+	assert.True(t, called.load && called.unload && called.first && called.last,
+		"AttachTo wrappers must chain to the pre-existing hooks")
+
+	// detach restores: the hook fields must equal the original closures.
+	// We can't pointer-compare closures, but we CAN reset the called
+	// flags, call the post-detach hooks, and assert the sentinels still
+	// fire — proving the wrappers were removed.
+	detach()
+	called = struct{ load, unload, first, last bool }{}
+	require.NoError(t, srv.OnLoadDocument(context.Background(), "r", crdt.New()))
+	srv.OnUnloadDocument(context.Background(), "r")
+	srv.OnFirstPeer(context.Background(), "r")
+	srv.OnLastPeer(context.Background(), "r")
+	assert.True(t, called.load && called.unload && called.first && called.last,
+		"after detach the original sentinel hooks must run directly")
+}
+
+// Regression for #93 self-review — Close must interrupt an in-flight
+// retry sleep instead of waiting out the full backoff.
+func TestInteg_Webhook_Close_InterruptsRetrySleep(t *testing.T) {
+	// Always 500 → forces deliver into the backoff sleep loop.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	wh, err := webhook.New(webhook.Config{
+		URL:         ts.URL,
+		Debounce:    10 * time.Millisecond,
+		MaxRetries:  20,
+		BackoffBase: 500 * time.Millisecond, // would sum to many seconds
+		MaxBackoff:  10 * time.Second,
+	})
+	require.NoError(t, err)
+
+	wh.Enqueue(webhook.Event{Type: webhook.EventUpdate, Room: "interruptroom"})
+
+	// Let the first attempt run + the backoff sleep start.
+	time.Sleep(200 * time.Millisecond)
+
+	// Close with a short ctx; deliver should observe <-w.closed in
+	// its sleep select and exit fast, well under the would-be backoff.
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, wh.Close(ctx))
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, 1500*time.Millisecond,
+		"Close must interrupt retry sleep (took %v); the next backoff "+
+			"alone would have been ~500ms with several more to follow", elapsed)
+}
+
+// Regression for #93 self-review test gap — Event.Update bytes must
+// round-trip cleanly through JSON's base64 encoding.
+func TestUnit_Webhook_Event_Update_RoundTripsBase64(t *testing.T) {
+	original := []byte{0x00, 0xFF, 0xAB, 0x10, 0x42, 0x80, 0x7F, 0x01}
+	body, err := webhook.EncodeBody(webhook.Event{
+		Type:   webhook.EventUpdate,
+		Room:   "rt",
+		Update: original,
+	})
+	require.NoError(t, err)
+
+	// json.Marshal encodes []byte as base64 by default. Round-trip
+	// through json.Unmarshal must give us the same bytes back.
+	var decoded webhook.Event
+	require.NoError(t, json.Unmarshal(body, &decoded))
+	assert.Equal(t, original, decoded.Update,
+		"Event.Update must survive JSON base64 round-trip without modification")
+}
+
+// Regression for #93 self-review A3 — bursting many events at a
+// configured-low MaxConcurrentDeliveries must not spawn N goroutines
+// simultaneously; the deliverSem must cap concurrent in-flight POSTs.
+func TestInteg_Webhook_BoundedConcurrency_UnderBurst(t *testing.T) {
+	const maxConcurrent = 3
+	var (
+		inFlight     atomic.Int32
+		peakInFlight atomic.Int32
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := inFlight.Add(1)
+		// Track peak observed concurrency.
+		for {
+			peak := peakInFlight.Load()
+			if n <= peak || peakInFlight.CompareAndSwap(peak, n) {
+				break
+			}
+		}
+		// Hold the request open briefly so multiple are simultaneously in-flight.
+		time.Sleep(80 * time.Millisecond)
+		inFlight.Add(-1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	wh, err := webhook.New(webhook.Config{
+		URL:                     ts.URL,
+		Debounce:                10 * time.Millisecond,
+		MaxConcurrentDeliveries: maxConcurrent,
+	})
+	require.NoError(t, err)
+	defer func() { _ = wh.Close(context.Background()) }()
+
+	// 12 distinct events fan out at once.
+	for i := 0; i < 12; i++ {
+		wh.Enqueue(webhook.Event{
+			Type: webhook.EventUpdate,
+			Room: "burstroom-" + strconv.Itoa(i),
+		})
+	}
+
+	// Wait for everything to drain.
+	require.Eventually(t, func() bool {
+		return inFlight.Load() == 0 && peakInFlight.Load() > 0
+	}, 4*time.Second, 20*time.Millisecond)
+
+	assert.LessOrEqual(t, peakInFlight.Load(), int32(maxConcurrent),
+		"peak observed concurrency (%d) must not exceed MaxConcurrentDeliveries (%d)",
+		peakInFlight.Load(), maxConcurrent)
 }

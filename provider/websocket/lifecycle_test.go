@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -89,7 +90,7 @@ func TestInteg_Lifecycle_OnUnloadDocument_FiresOnLastDisconnect(t *testing.T) {
 		mu    sync.Mutex
 		order []string
 	)
-	srv.OnLastPeer = func(room string) {
+	srv.OnLastPeer = func(_ context.Context, room string) {
 		mu.Lock()
 		defer mu.Unlock()
 		order = append(order, "last:"+room)
@@ -127,12 +128,12 @@ func TestInteg_Lifecycle_OnFirstPeer_OnlyOnZeroToOne(t *testing.T) {
 	srv := ygws.NewServer()
 
 	var firstCalls, lastCalls atomic.Int32
-	srv.OnFirstPeer = func(room string) {
+	srv.OnFirstPeer = func(_ context.Context, room string) {
 		if room == "transitroom" {
 			firstCalls.Add(1)
 		}
 	}
-	srv.OnLastPeer = func(room string) {
+	srv.OnLastPeer = func(_ context.Context, room string) {
 		if room == "transitroom" {
 			lastCalls.Add(1)
 		}
@@ -168,6 +169,119 @@ func TestInteg_Lifecycle_OnFirstPeer_OnlyOnZeroToOne(t *testing.T) {
 		return lastCalls.Load() == 1
 	}, 2*time.Second, 10*time.Millisecond,
 		"OnLastPeer must fire exactly once for the 1→0 transition")
+}
+
+// Regression for #93 self-review B1 — CloseRoom must fire
+// OnUnloadDocument when it is the path that evicts the room.
+func TestInteg_Lifecycle_CloseRoom_FiresOnUnloadDocument(t *testing.T) {
+	srv := ygws.NewServer()
+	var (
+		mu    sync.Mutex
+		fired []string
+	)
+	srv.OnUnloadDocument = func(_ context.Context, room string) {
+		mu.Lock()
+		defer mu.Unlock()
+		fired = append(fired, room)
+	}
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// Bootstrap the room via Apply (so there's a room with no peers).
+	require.NoError(t, srv.Apply(context.Background(), "closeroom", func(d *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		txt := d.GetText("t")
+		transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "x", nil) })
+	}))
+
+	require.NoError(t, srv.CloseRoom("closeroom", false))
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(fired) == 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"CloseRoom must fire OnUnloadDocument exactly once")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"closeroom"}, fired)
+}
+
+// Regression for #93 self-review B1 — CloseRoom racing with the
+// last-peer disconnect must fire OnUnloadDocument exactly once, not
+// twice. Pre-fix, both paths fired the hook because handleDisconnect
+// didn't check whether it actually evicted rm from s.rooms.
+func TestInteg_Lifecycle_CloseRoom_VsDisconnect_FiresUnloadOnce(t *testing.T) {
+	srv := ygws.NewServer()
+	srv.MaxPeersPerRoom = 1
+	var fireCount atomic.Int32
+	srv.OnUnloadDocument = func(_ context.Context, _ string) {
+		fireCount.Add(1)
+	}
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// Run the race ~50 times to exercise both interleavings.
+	const trials = 50
+	for i := 0; i < trials; i++ {
+		fireCount.Store(0)
+		roomName := "raceroom" + strconv.Itoa(i)
+
+		conn := dial(t, ts, roomName)
+		drainHandshake(t, conn, crdt.New())
+
+		// Concurrently fire CloseRoom while the peer disconnects.
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = conn.Close() }()
+		go func() { defer wg.Done(); _ = srv.CloseRoom(roomName, true) }()
+		wg.Wait()
+
+		// Both paths drained; assert exactly one OnUnloadDocument fired.
+		require.Eventually(t, func() bool {
+			return fireCount.Load() >= 1
+		}, 2*time.Second, 5*time.Millisecond,
+			"trial %d: at least one path must fire OnUnloadDocument", i)
+		// Small settle in case the loser path is mid-execution.
+		time.Sleep(20 * time.Millisecond)
+		got := fireCount.Load()
+		require.EqualValues(t, 1, got,
+			"trial %d: OnUnloadDocument fired %d times for %s; want exactly 1",
+			i, got, roomName)
+	}
+}
+
+// Regression for #93 self-review B2 — a panicking lifecycle hook must
+// not crash the server or break the peer-disconnect cleanup path.
+// Verifies via a follow-up Ping that the server is still responsive.
+func TestInteg_Lifecycle_PanickingHook_DoesNotCrashServer(t *testing.T) {
+	srv := ygws.NewServer()
+	srv.OnFirstPeer = func(_ context.Context, _ string) {
+		panic("hostile hook")
+	}
+	srv.OnLastPeer = func(_ context.Context, _ string) {
+		panic("hostile hook")
+	}
+	srv.OnUnloadDocument = func(_ context.Context, _ string) {
+		panic("hostile hook")
+	}
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// Connect (triggers OnFirstPeer panic), then disconnect (triggers
+	// OnLastPeer + OnUnloadDocument panics). The server must absorb
+	// all three panics without bringing down its goroutines.
+	conn := dial(t, ts, "panicroom")
+	drainHandshake(t, conn, crdt.New())
+	_ = conn.Close()
+
+	// New connection on a different room — proves the server is alive.
+	conn2 := dial(t, ts, "alive-check-room")
+	drainHandshake(t, conn2, crdt.New())
+	defer func() { _ = conn2.Close() }()
 }
 
 // All four hooks are optional — a server with none of them set must

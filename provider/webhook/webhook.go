@@ -8,20 +8,18 @@
 //
 // # Usage
 //
-//	wh := webhook.New(webhook.Config{
-//	    URL:      "https://hooks.example.com/ygo",
-//	    Secret:   []byte("shared-secret-for-hmac"),
-//	    Debounce: 1 * time.Second,
-//	})
+// The easiest path is AttachTo, which wires every relevant Server hook
+// (OnLoadDocument, OnUnloadDocument, OnFirstPeer, OnLastPeer, and the
+// per-doc OnUpdate stream) onto the Webhook in one call:
+//
+//	wh, _ := webhook.New(webhook.Config{URL: "https://hooks.example.com/ygo"})
 //	defer wh.Close(context.Background())
 //
 //	srv := ygws.NewServer()
-//	srv.OnLoadDocument = func(_ context.Context, room string, doc *crdt.Doc) error {
-//	    doc.OnUpdate(func(update []byte, _ any) {
-//	        wh.Enqueue(webhook.Event{Type: webhook.EventUpdate, Room: room, Update: update})
-//	    })
-//	    return nil
-//	}
+//	detach := webhook.AttachTo(srv, wh)
+//	defer detach()
+//
+// For finer control, drive the Webhook directly via Enqueue.
 //
 // # Signature
 //
@@ -36,8 +34,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -106,10 +106,22 @@ type Config struct {
 	// BackoffBase is the first retry delay; each subsequent attempt
 	// doubles the delay. Zero uses the default (250 * time.Millisecond).
 	BackoffBase time.Duration
+	// MaxBackoff caps the per-attempt sleep, defending against very high
+	// MaxRetries producing minute-scale waits. Zero uses the default
+	// (30 * time.Second). Up to ±20% jitter is added on top of the
+	// computed delay to break thundering-herd retry alignment when
+	// many concurrent webhooks fail against the same receiver.
+	MaxBackoff time.Duration
 	// MaxBodyBytes caps the size of a single POST body. Zero uses the
 	// default (16 MiB). Events whose JSON encoding exceeds this size
 	// are dropped with a logged warning.
 	MaxBodyBytes int64
+	// MaxConcurrentDeliveries bounds the number of in-flight POSTs at
+	// any one time. Zero uses the default (8). A burst of pending
+	// events past this cap blocks the dispatch loop until in-flight
+	// deliveries finish — preventing unbounded goroutine creation when
+	// a slow / dead receiver collects a long queue.
+	MaxConcurrentDeliveries int
 	// HTTPClient is the http.Client used for outbound requests. Zero
 	// value uses a default client with a 10-second per-request timeout.
 	HTTPClient *http.Client
@@ -119,12 +131,15 @@ type Config struct {
 }
 
 const (
-	defaultDebounce     = 1 * time.Second
-	maxDebounce         = 10 * time.Second
-	defaultMaxRetries   = 5
-	defaultBackoffBase  = 250 * time.Millisecond
-	defaultMaxBodyBytes = 16 << 20 // 16 MiB
-	defaultHTTPTimeout  = 10 * time.Second
+	defaultDebounce           = 1 * time.Second
+	maxDebounce               = 10 * time.Second
+	defaultMaxRetries         = 5
+	defaultBackoffBase        = 250 * time.Millisecond
+	defaultMaxBackoff         = 30 * time.Second
+	defaultMaxBodyBytes       = 16 << 20 // 16 MiB
+	defaultMaxConcurrent      = 8
+	defaultHTTPTimeout        = 10 * time.Second
+	jitterFractionDenominator = 5 // ±20% of the computed backoff
 
 	// SignatureHeader is the HTTP request header that carries the
 	// HMAC-SHA256 signature of the body when Config.Secret is set.
@@ -136,28 +151,40 @@ const (
 // EventType — without the type discriminator a Connect followed by an
 // Update for the same room would lose the Update (or vice-versa).
 type pendingKey struct {
-	Room string
-	Type EventType
+	room      string
+	eventType EventType
 }
 
 // Webhook is a running webhook delivery worker. Construct with New, push
 // events with Enqueue, and call Close when done.
+//
+// Internally a single dispatcher goroutine owns the pending map and the
+// debounce timer (avoids the Timer.Reset semantics that previously
+// allowed a queued AfterFunc to fire after Close, see #93 self-review
+// C1/C2). Delivery goroutines are bounded by Config.MaxConcurrentDeliveries.
 type Webhook struct {
 	cfg Config
 
-	mu       sync.Mutex
-	pending  map[pendingKey]*Event // (room, type) → most-recent debounced event
-	timer    *time.Timer           // fires when the next debounce window expires
-	deadline time.Time             // when the current debounce window expires
+	mu      sync.Mutex
+	pending map[pendingKey]*Event
+
+	// wake is signalled (non-blocking) by Enqueue whenever the pending
+	// set transitions from empty → non-empty, prompting the dispatcher
+	// to (re)start the debounce timer. The dispatcher reads at most one
+	// value per debounce tick.
+	wake chan struct{}
+
+	// deliverSem bounds in-flight POSTs to MaxConcurrentDeliveries.
+	deliverSem chan struct{}
 
 	wg     sync.WaitGroup
-	closed chan struct{} // closed by Close to signal the flush goroutine to exit
+	closed chan struct{} // closed by Close to signal teardown
 }
 
-// New constructs a Webhook from cfg. The returned Webhook owns a small
-// pool of goroutines for debounce timing and retry; call Close to release.
+// New constructs a Webhook from cfg and starts its dispatcher goroutine.
+// Call Close to release.
 //
-// Returns an error if cfg.URL is empty or not http/https.
+// Returns an error if cfg.URL is empty.
 func New(cfg Config) (*Webhook, error) {
 	if cfg.URL == "" {
 		return nil, errors.New("webhook: Config.URL is required")
@@ -174,8 +201,14 @@ func New(cfg Config) (*Webhook, error) {
 	if cfg.BackoffBase == 0 {
 		cfg.BackoffBase = defaultBackoffBase
 	}
+	if cfg.MaxBackoff == 0 {
+		cfg.MaxBackoff = defaultMaxBackoff
+	}
 	if cfg.MaxBodyBytes == 0 {
 		cfg.MaxBodyBytes = defaultMaxBodyBytes
+	}
+	if cfg.MaxConcurrentDeliveries <= 0 {
+		cfg.MaxConcurrentDeliveries = defaultMaxConcurrent
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
@@ -183,11 +216,17 @@ func New(cfg Config) (*Webhook, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Webhook{
-		cfg:     cfg,
-		pending: make(map[pendingKey]*Event),
-		closed:  make(chan struct{}),
-	}, nil
+
+	w := &Webhook{
+		cfg:        cfg,
+		pending:    make(map[pendingKey]*Event),
+		wake:       make(chan struct{}, 1),
+		deliverSem: make(chan struct{}, cfg.MaxConcurrentDeliveries),
+		closed:     make(chan struct{}),
+	}
+	w.wg.Add(1)
+	go w.dispatchLoop()
+	return w, nil
 }
 
 // Enqueue submits an event for delivery. Events are coalesced by the
@@ -197,65 +236,112 @@ func New(cfg Config) (*Webhook, error) {
 // produces two separate POSTs (one Connect, one Update) — only same-
 // type same-room events get coalesced, so distinct event categories
 // never overwrite each other.
+//
+// Enqueue on a closed Webhook silently drops the event.
 func (w *Webhook) Enqueue(e Event) {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now()
 	}
 
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	// Closed Webhook silently drops new events (Close docs this).
 	select {
 	case <-w.closed:
+		w.mu.Unlock()
 		return
 	default:
 	}
+	w.pending[pendingKey{room: e.Room, eventType: e.Type}] = &e
+	w.mu.Unlock()
 
-	w.pending[pendingKey{Room: e.Room, Type: e.Type}] = &e
-
-	// Start / restart the debounce timer.
-	w.deadline = time.Now().Add(w.cfg.Debounce)
-	if w.timer == nil {
-		w.timer = time.AfterFunc(w.cfg.Debounce, w.flush)
-	} else {
-		w.timer.Reset(w.cfg.Debounce)
+	// Non-blocking signal: the dispatcher reads at most once per tick.
+	select {
+	case w.wake <- struct{}{}:
+	default:
 	}
 }
 
-// flush is fired by the debounce timer. It snapshots the pending
-// events and dispatches each in its own goroutine (one inflight HTTP
-// call per pending room). Subsequent Enqueues build a new pending set.
-func (w *Webhook) flush() {
+// dispatchLoop is the single goroutine that owns the debounce timer.
+// Replacing the previous AfterFunc + Timer.Reset structure with a single
+// dedicated goroutine eliminates the race where a queued AfterFunc fires
+// after Close returns (#93 self-review C1, C2) — here the only exit path
+// is Close → close(w.closed), which both stops any in-flight timer and
+// guarantees no further dispatches.
+func (w *Webhook) dispatchLoop() {
+	defer w.wg.Done()
+	var timer *time.Timer
+	for {
+		// Wait for either a wake (queue non-empty), close, or the
+		// debounce timer firing.
+		var timerC <-chan time.Time
+		if timer != nil {
+			timerC = timer.C
+		}
+		select {
+		case <-w.closed:
+			if timer != nil {
+				timer.Stop()
+			}
+			// Final drain pass so anything still pending when Close was
+			// called gets one last delivery attempt before Close's
+			// wg.Wait returns.
+			w.drainAndDeliver()
+			return
+		case <-w.wake:
+			// Start the debounce timer if not already running.
+			if timer == nil {
+				timer = time.NewTimer(w.cfg.Debounce)
+			}
+		case <-timerC:
+			timer = nil
+			w.drainAndDeliver()
+		}
+	}
+}
+
+// drainAndDeliver moves all pending events to a local batch and dispatches
+// each. Delivery goroutines obey the MaxConcurrentDeliveries semaphore so
+// a slow receiver cannot accumulate unbounded goroutines.
+func (w *Webhook) drainAndDeliver() {
 	w.mu.Lock()
 	if len(w.pending) == 0 {
 		w.mu.Unlock()
 		return
 	}
-	batch := make([]*Event, 0, len(w.pending))
+	batch := make([]Event, 0, len(w.pending))
 	for _, e := range w.pending {
-		batch = append(batch, e)
+		batch = append(batch, *e)
 	}
 	w.pending = make(map[pendingKey]*Event)
 	w.mu.Unlock()
 
-	for _, e := range batch {
+	for _, ev := range batch {
+		// Acquire a delivery slot. Block on close to avoid spawning new
+		// deliveries after Close, but otherwise let bursty workloads back
+		// up here rather than at the goroutine count.
+		select {
+		case w.deliverSem <- struct{}{}:
+		case <-w.closed:
+			return
+		}
 		w.wg.Add(1)
-		go func(ev *Event) {
-			defer w.wg.Done()
-			w.deliver(*ev)
-		}(e)
+		go func(e Event) {
+			defer func() {
+				<-w.deliverSem
+				w.wg.Done()
+			}()
+			w.deliver(e)
+		}(ev)
 	}
 }
 
 // deliver serialises one event to JSON, signs it, and POSTs it with
 // bounded retry. Drop policy: 4xx → no retry (receiver said no); 5xx
-// and transport errors retry up to MaxRetries with exponential backoff.
-// Body too large → drop immediately with a logged warning.
+// and transport errors retry up to MaxRetries with exponential backoff
+// capped at MaxBackoff, with ±20% jitter. Body too large → drop
+// immediately with a logged warning.
 func (w *Webhook) deliver(e Event) {
 	body, err := json.Marshal(e)
 	if err != nil {
-		// json.Marshal failing on our own struct is a programming bug.
 		w.cfg.Logger.Error("webhook: marshal failed; event dropped",
 			"room", e.Room, "type", e.Type, "err", err)
 		return
@@ -277,12 +363,16 @@ func (w *Webhook) deliver(e Event) {
 	backoff := w.cfg.BackoffBase
 	for attempt := 0; attempt < w.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
+			sleep := backoff + jitter(backoff)
 			select {
-			case <-time.After(backoff):
+			case <-time.After(sleep):
 			case <-w.closed:
-				return // give up on shutdown
+				return // abort on shutdown
 			}
 			backoff *= 2
+			if backoff > w.cfg.MaxBackoff {
+				backoff = w.cfg.MaxBackoff
+			}
 		}
 
 		retry, ok := w.postOnce(body, sig)
@@ -293,10 +383,30 @@ func (w *Webhook) deliver(e Event) {
 			return // 4xx — receiver rejected, no retry
 		}
 	}
-	// Exceeded MaxRetries; drop.
 	w.cfg.Logger.Warn("webhook: retry budget exhausted; event dropped",
 		"room", e.Room, "type", e.Type,
 		"url", w.cfg.URL, "attempts", w.cfg.MaxRetries)
+}
+
+// jitter returns a duration in [-d/5, +d/5] sourced from crypto/rand so
+// concurrent webhooks don't lock-step their retries against a struggling
+// receiver. crypto/rand keeps the jitter unbiased even when called from
+// many goroutines simultaneously — math/rand would need a lock or a
+// per-goroutine source.
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	span := int64(d) / jitterFractionDenominator
+	if span <= 0 {
+		return 0
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0 // jitter is an optimisation; failure is non-fatal
+	}
+	u := binary.LittleEndian.Uint64(b[:]) & 0x7FFFFFFFFFFFFFFF // strip sign bit
+	return time.Duration(int64(u%uint64(2*span)) - span)
 }
 
 // postOnce performs a single POST attempt. Returns (retry, ok) where
@@ -304,7 +414,7 @@ func (w *Webhook) deliver(e Event) {
 func (w *Webhook) postOnce(body []byte, sig string) (retry, ok bool) {
 	req, err := http.NewRequest(http.MethodPost, w.cfg.URL, bytes.NewReader(body))
 	if err != nil {
-		return false, false // malformed URL — no retry, no success
+		return false, false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if sig != "" {
@@ -321,15 +431,15 @@ func (w *Webhook) postOnce(body []byte, sig string) (retry, ok bool) {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return false, true
 	case resp.StatusCode >= 500:
-		return true, false // server error — retry
+		return true, false
 	default:
-		return false, false // 4xx — receiver said no, no retry
+		return false, false
 	}
 }
 
-// Close stops accepting new events, fires any pending debounce-window
-// events synchronously, and waits for in-flight deliveries to finish or
-// for ctx to cancel.
+// Close stops accepting new events, fires any pending events
+// synchronously, and waits for in-flight deliveries to finish or for
+// ctx to cancel.
 //
 // After Close returns, calls to Enqueue silently drop the event.
 func (w *Webhook) Close(ctx context.Context) error {
@@ -337,17 +447,11 @@ func (w *Webhook) Close(ctx context.Context) error {
 	select {
 	case <-w.closed:
 		w.mu.Unlock()
-		return nil // already closed
+		return nil
 	default:
 	}
 	close(w.closed)
-	if w.timer != nil {
-		w.timer.Stop()
-	}
 	w.mu.Unlock()
-
-	// Drain whatever was in the pending set at Close time.
-	w.flush()
 
 	done := make(chan struct{})
 	go func() { w.wg.Wait(); close(done) }()
@@ -361,7 +465,7 @@ func (w *Webhook) Close(ctx context.Context) error {
 
 // EncodeBody is a low-level helper that returns the exact JSON body the
 // Webhook would POST for the given event, including the auto-populated
-// Timestamp. Exported so test code (and downstream tooling) can verify
+// Timestamp. Exported so test code and downstream tooling can verify
 // signatures without spinning up a Webhook.
 func EncodeBody(e Event) ([]byte, error) {
 	if e.Timestamp.IsZero() {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,25 @@ import (
 	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
 )
+
+// safeHook invokes fn under a deferred recover so a panicking user hook
+// cannot crash the calling goroutine. The panic is logged with the stack
+// at Error level and the recovered value attached to the log entry; the
+// caller continues as if the hook completed normally. Use for every
+// user-supplied callback the server invokes (lifecycle hooks, stateless,
+// inject, etc.) so an embedding application bug never takes down a
+// connection-handling or room-disposal goroutine.
+func (s *Server) safeHook(name string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log().Error("hook panicked; recovered",
+				"hook", name,
+				"panic", r,
+				"stack", string(debug.Stack()))
+		}
+	}()
+	fn()
+}
 
 // writeTimeout is applied to every individual WebSocket write. A peer that
 // stops reading will be detected and disconnected within this window, preventing
@@ -279,15 +299,22 @@ type Server struct {
 	// peers — i.e. the first peer just joined this active session of the
 	// document. Useful for warm-up tasks (preloading caches, opening
 	// downstream connections). Fires after the peer has been registered
-	// with the room and after all server locks have been released. (#60)
-	OnFirstPeer func(room string)
+	// with the room and after all server locks have been released. ctx is
+	// the WebSocket request context; it is cancelled when the peer's HTTP
+	// request is cancelled. (#60)
+	//
+	// Note: under heavy churn the (OnFirstPeer / OnLastPeer) pair for the
+	// same room may interleave out of strict time order — implementations
+	// must be idempotent against repeated transitions.
+	OnFirstPeer func(ctx context.Context, room string)
 
 	// OnLastPeer, if non-nil, fires when a room transitions from 1 to 0
 	// peers — i.e. the last peer just disconnected. Useful for cool-down
 	// tasks (releasing caches, closing downstream connections, scheduling
 	// the eventual OnUnloadDocument). Fires before OnUnloadDocument when
-	// both apply. (#60)
-	OnLastPeer func(room string)
+	// both apply. ctx is context.Background() — the WS request that owned
+	// the peer has already terminated by this point. (#60)
+	OnLastPeer func(ctx context.Context, room string)
 
 	// MaxUpdateBytes is the maximum size of a single V1 update that
 	// BroadcastUpdate will fan out, or that Apply will produce and
@@ -532,9 +559,16 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 	// persistence worker starts and the room is registered, so a hook
 	// returning an error fails room creation cleanly with nothing left to
 	// clean up. Hook runs under s.rmu.Lock; implementations must be fast.
+	// A panic in the hook is recovered (logged at Error with the stack)
+	// and treated as a hook-failure error so room creation is not silently
+	// committed in an inconsistent state.
 	if hook := s.OnLoadDocument; hook != nil {
-		if err := hook(ctx, name, r.doc); err != nil {
-			return nil, fmt.Errorf("OnLoadDocument for room %q: %w", name, err)
+		var hookErr error
+		s.safeHook("OnLoadDocument", func() {
+			hookErr = hook(ctx, name, r.doc)
+		})
+		if hookErr != nil {
+			return nil, fmt.Errorf("OnLoadDocument for room %q: %w", name, hookErr)
 		}
 	}
 	if s.persistence != nil {
@@ -653,10 +687,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// #60 — OnFirstPeer fires after all server locks are released so the
 	// hook is free to do blocking work (warm caches, open connections,
-	// emit metrics) without holding up other peers from joining.
+	// emit metrics) without holding up other peers from joining. A panic
+	// in the hook is recovered + logged; the peer handshake below
+	// continues regardless.
 	if firstPeer {
 		if hook := s.OnFirstPeer; hook != nil {
-			hook(name)
+			s.safeHook("OnFirstPeer", func() { hook(r.Context(), name) })
 		}
 	}
 
