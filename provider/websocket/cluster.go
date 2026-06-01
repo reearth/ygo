@@ -27,6 +27,9 @@ type clusterRelay interface {
 // ErrRelayAlreadyAttached is returned by AttachRelay if a relay is already set.
 var ErrRelayAlreadyAttached = errors.New("ygo/websocket: relay already attached")
 
+// ErrNilRelay is returned by AttachRelay when passed a nil relay.
+var ErrNilRelay = errors.New("ygo/websocket: nil relay")
+
 // Compile-time check: *Server satisfies cluster.Sink.
 var _ cluster.Sink = (*Server)(nil)
 
@@ -41,7 +44,7 @@ var _ cluster.Sink = (*Server)(nil)
 // the echo guard drops changes whose origin is the relay sentinel.
 func (s *Server) AttachRelay(r cluster.Relay) error {
 	if r == nil {
-		return errors.New("ygo/websocket: nil relay")
+		return ErrNilRelay
 	}
 	var attachErr error
 	s.relayOnce.Do(func() {

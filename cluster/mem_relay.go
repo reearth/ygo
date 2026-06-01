@@ -115,6 +115,15 @@ func (n *memNode) run() {
 // via Inject — which the sentinel guard already enforces.
 //
 // Origin is observer-local and is not delivered (Inbound has no Origin field).
+//
+// Backpressure: delivery is via a bounded per-node channel. When a node's
+// channel is FULL, Publish BLOCKS until the node drains, ctx is cancelled, or
+// the node shuts down — and because Publish is called from the doc.OnUpdate
+// observer, a full channel back-pressures the publishing node's Transact
+// caller. MemRelay intentionally does NOT drop on full: it is an in-process
+// reference relay, not a real transport. A production relay over a message bus
+// is where drop-on-full (or persistent buffering) belongs; MemRelay favours
+// lossless delivery and lets the (large) WithBufferSize absorb bursts.
 func (m *MemRelay) Publish(ctx context.Context, out Outbound) error {
 	if err := ctx.Err(); err != nil {
 		return err

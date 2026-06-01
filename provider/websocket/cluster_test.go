@@ -59,6 +59,21 @@ func sendUpdate(t *testing.T, conn *gws.Conn, update []byte) {
 	sendSync(t, conn, enc.Bytes())
 }
 
+func TestUnit_AttachRelay_NilRelay(t *testing.T) {
+	srv := ygws.NewServer()
+	err := srv.AttachRelay(nil)
+	assert.ErrorIs(t, err, ygws.ErrNilRelay)
+}
+
+func TestUnit_AttachRelay_AlreadyAttached(t *testing.T) {
+	srv := ygws.NewServer()
+	r1 := cluster.NewMemRelay()
+	r2 := cluster.NewMemRelay()
+	require.NoError(t, srv.AttachRelay(r1))
+	err := srv.AttachRelay(r2)
+	assert.ErrorIs(t, err, ygws.ErrRelayAlreadyAttached)
+}
+
 func TestInteg_Cluster_SyncPropagatesAcrossServers(t *testing.T) {
 	relay := newRecordingRelay()
 	defer func() { require.NoError(t, relay.Close()) }()
