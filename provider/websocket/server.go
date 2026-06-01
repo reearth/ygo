@@ -210,6 +210,12 @@ type room struct {
 	persistCh   chan []byte   // buffered channel for serialised writes
 	persistStop chan struct{} // closed to signal goroutine to drain and exit
 	persistDone chan struct{} // closed when persistence goroutine exits
+
+	// relayUnsub holds the doc.OnUpdate / awareness.OnChange unsubscribe
+	// functions registered when a Relay is attached. nil when no relay. Called
+	// once when the room is evicted so the relay observers don't leak. Guarded
+	// by the room's mu via registerRelayObservers / unregisterRelayObservers.
+	relayUnsub []func()
 }
 
 // Server is a net/http-compatible WebSocket handler.
@@ -219,6 +225,17 @@ type Server struct {
 	rmu         sync.RWMutex
 	rooms       map[string]*room
 	persistence PersistenceAdapter
+
+	// relay, when non-nil, mirrors local doc/awareness changes to other server
+	// nodes and applies inbound changes. Set once via AttachRelay. relayCtx /
+	// relayCancel govern the relay's delivery lifetime; cancelled on Shutdown.
+	// relaySentinel is the origin stamped on relay-injected changes so the
+	// per-room observers can drop echoes (pointer-identity guard).
+	relay         clusterRelay
+	relaySentinel any
+	relayCtx      context.Context
+	relayCancel   context.CancelFunc
+	relayOnce     sync.Once
 
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{} // closed by Shutdown
@@ -458,6 +475,15 @@ func NewServer() *Server {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
 
+	// Cancel the relay delivery context so its goroutines wind down, then close
+	// the relay. No-op when no relay is attached.
+	if s.relayCancel != nil {
+		s.relayCancel()
+	}
+	if s.relay != nil {
+		_ = s.relay.Close()
+	}
+
 	// Collect all active peer connections and persistence channels.
 	s.rmu.RLock()
 	var conns []*gws.Conn
@@ -585,6 +611,14 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 			case <-r.persistStop:
 			}
 		})
+	}
+	// Wire relay observers (doc.OnUpdate + awareness.OnChange) so local changes
+	// are published to other nodes. Registered under s.rmu.Lock (held by the
+	// caller) before the room is published into s.rooms, so no change is missed.
+	// No-op when no relay is attached.
+	if s.relay != nil {
+		s.registerRelayObservers(r, name)
+		s.relay.RoomActivated(name)
 	}
 	s.rooms[name] = r
 	return r, nil

@@ -274,6 +274,7 @@ func (p *peer) handleDisconnect() {
 			}
 		}
 		if roomEvicted {
+			p.server.teardownRelayRoom(rm, p.roomName)
 			if hook := p.server.OnUnloadDocument; hook != nil {
 				p.server.safeHook("OnUnloadDocument", func() {
 					hook(context.Background(), p.roomName)
