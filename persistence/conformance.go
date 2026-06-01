@@ -157,7 +157,7 @@ func RunConformance(t *testing.T, factory func() VersionedPersistence) {
 		p := factory()
 		ctx := context.Background()
 		updates, _ := genUpdates(t, 3)
-		var versions []Version
+		versions := make([]Version, 0, len(updates))
 		for _, u := range updates {
 			v, err := p.AppendUpdate(ctx, "room", u)
 			if err != nil {
