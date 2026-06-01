@@ -24,8 +24,16 @@ type memRoom struct {
 	// checkpoint is a hard ceiling on the visible version range, set by
 	// PruneAfter before it deletes. Updates with version > checkpoint are never
 	// returned even if they linger (crash between checkpoint-write and delete).
-	// 0 means "no ceiling".
-	checkpoint Version
+	//
+	// checkpointSet, not the value of checkpoint, gates whether the ceiling is
+	// active. We MUST NOT overload checkpoint==0 to mean "no ceiling": a
+	// PruneAfter(target=0) sets a legitimate ceiling of 0 (roll back to the
+	// empty/rolled-back head), and treating that as "no ceiling" would resurrect
+	// lingering records 1..N after a mid-prune crash (the spurious-future-version
+	// regression). Mirrors FilePersistence, where checkpoint presence is encoded
+	// by the existence of the checkpoint file, not by its value.
+	checkpoint    Version
+	checkpointSet bool
 	// rolledBack is the V1 head persisted at checkpoint time, used to bootstrap
 	// the room after a prune so Load reflects target state even if a crash left
 	// stale records behind.
@@ -66,7 +74,7 @@ func (m *MemoryPersistence) SetCrashAfterCheckpoint(fn func() bool) {
 // visibleRecords returns the records whose version is within the room's
 // checkpoint ceiling, ascending. Must be called with mu held.
 func (r *memRoom) visibleRecords() []record {
-	if r.checkpoint == 0 {
+	if !r.checkpointSet {
 		return r.records
 	}
 	out := make([]record, 0, len(r.records))
@@ -105,7 +113,7 @@ func (m *MemoryPersistence) Load(ctx context.Context, room string) (LoadResult, 
 // checkpointOrMaxVisible returns the ceiling version to materialize to: the
 // checkpoint if set, else the highest visible record version (or 0).
 func (r *memRoom) checkpointOrMaxVisible() Version {
-	if r.checkpoint != 0 {
+	if r.checkpointSet {
 		return r.checkpoint
 	}
 	recs := r.records
@@ -131,7 +139,7 @@ func materializeLocked(r *memRoom, v Version) (LoadResult, error) {
 		blobs = append(blobs, rec.update)
 		head = rec.version
 	}
-	if r.checkpoint != 0 && r.checkpoint <= v {
+	if r.checkpointSet && r.checkpoint <= v {
 		head = r.checkpoint
 	}
 	if len(blobs) == 0 {
@@ -256,35 +264,43 @@ func (m *MemoryPersistence) RestoreSnapshot(ctx context.Context, room, name stri
 }
 
 // PruneAfter implements snapshot-before-delete.
+//
+// Steps 1 (checkpoint write) and 2 (delete) run in a SINGLE critical section so
+// a concurrent Delete(room) cannot slip in between them — without the single
+// lock, step 2 would mutate a *memRoom already detached from m.rooms and
+// silently lose the prune. The crash-injector hook is invoked while the lock is
+// still held: the conformance suite only needs the crash to be observable AFTER
+// the checkpoint is set and BEFORE the deletes, which is exactly this point. On
+// a simulated crash we return with the checkpoint set but the records still
+// present — readers clamp to the checkpoint (checkpointSet), so the lingering
+// future records stay invisible even across a "reopen".
 func (m *MemoryPersistence) PruneAfter(ctx context.Context, room string, target Version, rolledBack []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	r, ok := m.rooms[room]
 	if !ok {
-		m.mu.Unlock()
 		return ErrRoomNotFound
 	}
 
 	// Step 1: persist checkpoint + rolled-back head. From this instant the
 	// checkpoint is the hard ceiling; any records > target are already
-	// invisible to readers, even before the delete in step 2 runs.
+	// invisible to readers, even before the delete in step 2 runs. Gate on
+	// checkpointSet (not the value) so target==0 is a real ceiling.
 	r.checkpoint = target
+	r.checkpointSet = true
 	r.rolledBack = append([]byte(nil), rolledBack...)
-	crash := m.crashAfterCheckpoint
-	m.mu.Unlock()
 
 	// Simulated crash point for the conformance regression test: return before
-	// the deletes, leaving stale future records behind. On "reopen" the
-	// checkpoint must still suppress them.
-	if crash != nil && crash() {
+	// the deletes, leaving stale future records behind. The checkpoint must
+	// still suppress them on reopen.
+	if m.crashAfterCheckpoint != nil && m.crashAfterCheckpoint() {
 		return nil
 	}
 
 	// Step 2: delete records newer than target.
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	kept := r.records[:0]
 	for _, rec := range r.records {
 		if rec.version <= target {

@@ -83,6 +83,69 @@ func textOf(t *testing.T, v1 []byte) string {
 	return d.GetText("t").ToString()
 }
 
+// runCrashSafePrune appends 5 updates, materializes the rolled-back head at
+// target, injects a crash between PruneAfter's checkpoint write and its deletes,
+// "reopens" the store, and asserts no version > target survives and Load returns
+// wantText at version <= target. Skips when the impl can't inject a crash.
+func runCrashSafePrune(t *testing.T, factory func() VersionedPersistence, target Version, wantText string) {
+	t.Helper()
+	p := factory()
+	ci, canInject := p.(CrashInjector)
+	if !canInject {
+		t.Skip("implementation does not support crash injection; skipping crash-safety subtest")
+	}
+	ctx := context.Background()
+	updates, _ := genUpdates(t, 5)
+	for _, u := range updates {
+		if _, err := p.AppendUpdate(ctx, "room", u); err != nil {
+			t.Fatalf("AppendUpdate: %v", err)
+		}
+	}
+	rolledBack, err := p.MaterializeAt(ctx, "room", target)
+	if err != nil {
+		t.Fatalf("MaterializeAt(%d): %v", target, err)
+	}
+
+	// Inject a crash right after the checkpoint write, before the deletes.
+	ci.SetCrashAfterCheckpoint(func() bool { return true })
+	if err := p.PruneAfter(ctx, "room", target, rolledBack); err != nil {
+		t.Fatalf("PruneAfter (crashing): %v", err)
+	}
+	ci.SetCrashAfterCheckpoint(nil)
+
+	// "Reopen" the store (file: re-read dir; memory: same handle).
+	reopened := p
+	if ro, ok := p.(Reopener); ok {
+		r, rerr := ro.Reopen()
+		if rerr != nil {
+			t.Fatalf("Reopen: %v", rerr)
+		}
+		reopened = r
+	}
+
+	// Despite the simulated crash leaving future records physically behind, no
+	// version > target may be visible: the checkpoint is a hard ceiling.
+	metas, err := reopened.ListVersions(ctx, "room")
+	if err != nil {
+		t.Fatalf("ListVersions after crash: %v", err)
+	}
+	for _, m := range metas {
+		if m.Version > target {
+			t.Fatalf("RESURRECTED future version %d after mid-prune crash (target=%d)", m.Version, target)
+		}
+	}
+	lr, err := reopened.Load(ctx, "room")
+	if err != nil {
+		t.Fatalf("Load after crash: %v", err)
+	}
+	if lr.Version > target {
+		t.Fatalf("Load head %d > target %d after mid-prune crash", lr.Version, target)
+	}
+	if got := textOf(t, lr.Update); got != wantText {
+		t.Fatalf("post-crash Load text = %q, want %q", got, wantText)
+	}
+}
+
 // RunConformance runs the full VersionedPersistence behavioural suite against a
 // fresh store produced by factory. External adapters (e.g. a GCS-backed store)
 // import this package and call RunConformance with their own factory to verify
@@ -215,99 +278,96 @@ func RunConformance(t *testing.T, factory func() VersionedPersistence) {
 	})
 
 	t.Run("PruneAfterRemovesFutureVersions", func(t *testing.T) {
-		p := factory()
-		ctx := context.Background()
-		updates, _ := genUpdates(t, 5)
-		for _, u := range updates {
-			if _, err := p.AppendUpdate(ctx, "room", u); err != nil {
-				t.Fatalf("AppendUpdate: %v", err)
+		t.Run("target=2", func(t *testing.T) {
+			p := factory()
+			ctx := context.Background()
+			updates, _ := genUpdates(t, 5)
+			for _, u := range updates {
+				if _, err := p.AppendUpdate(ctx, "room", u); err != nil {
+					t.Fatalf("AppendUpdate: %v", err)
+				}
 			}
-		}
-		rolledBack, err := p.MaterializeAt(ctx, "room", 2)
-		if err != nil {
-			t.Fatalf("MaterializeAt(2): %v", err)
-		}
-		if err := p.PruneAfter(ctx, "room", 2, rolledBack); err != nil {
-			t.Fatalf("PruneAfter: %v", err)
-		}
-		metas, err := p.ListVersions(ctx, "room")
-		if err != nil {
-			t.Fatalf("ListVersions: %v", err)
-		}
-		for _, m := range metas {
-			if m.Version > 2 {
-				t.Fatalf("PruneAfter(2) left future version %d", m.Version)
+			rolledBack, err := p.MaterializeAt(ctx, "room", 2)
+			if err != nil {
+				t.Fatalf("MaterializeAt(2): %v", err)
 			}
-		}
-		// Load head must reflect target state (text "ba" after inserts a,b).
-		lr, err := p.Load(ctx, "room")
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		if lr.Version > 2 {
-			t.Fatalf("Load head version %d > target 2 after prune", lr.Version)
-		}
-		if got := textOf(t, lr.Update); got != "ba" {
-			t.Fatalf("post-prune Load text = %q, want %q", got, "ba")
-		}
+			if err := p.PruneAfter(ctx, "room", 2, rolledBack); err != nil {
+				t.Fatalf("PruneAfter: %v", err)
+			}
+			metas, err := p.ListVersions(ctx, "room")
+			if err != nil {
+				t.Fatalf("ListVersions: %v", err)
+			}
+			for _, m := range metas {
+				if m.Version > 2 {
+					t.Fatalf("PruneAfter(2) left future version %d", m.Version)
+				}
+			}
+			// Load head must reflect target state (text "ba" after inserts a,b).
+			lr, err := p.Load(ctx, "room")
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if lr.Version > 2 {
+				t.Fatalf("Load head version %d > target 2 after prune", lr.Version)
+			}
+			if got := textOf(t, lr.Update); got != "ba" {
+				t.Fatalf("post-prune Load text = %q, want %q", got, "ba")
+			}
+		})
+
+		// target=0 is the boundary case the checkpoint-zero overload broke:
+		// pruning to the empty head must remove ALL versions and leave Load
+		// returning the empty/rolled-back head with version 0.
+		t.Run("target=0", func(t *testing.T) {
+			p := factory()
+			ctx := context.Background()
+			updates, _ := genUpdates(t, 5)
+			for _, u := range updates {
+				if _, err := p.AppendUpdate(ctx, "room", u); err != nil {
+					t.Fatalf("AppendUpdate: %v", err)
+				}
+			}
+			rolledBack, err := p.MaterializeAt(ctx, "room", 0) // empty head
+			if err != nil {
+				t.Fatalf("MaterializeAt(0): %v", err)
+			}
+			if err := p.PruneAfter(ctx, "room", 0, rolledBack); err != nil {
+				t.Fatalf("PruneAfter(0): %v", err)
+			}
+			metas, err := p.ListVersions(ctx, "room")
+			if err != nil {
+				t.Fatalf("ListVersions: %v", err)
+			}
+			if len(metas) != 0 {
+				t.Fatalf("PruneAfter(0) left %d versions, want 0", len(metas))
+			}
+			lr, err := p.Load(ctx, "room")
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if lr.Version != 0 {
+				t.Fatalf("post-prune(0) Load version = %d, want 0", lr.Version)
+			}
+			if got := textOf(t, lr.Update); got != "" {
+				t.Fatalf("post-prune(0) Load text = %q, want empty", got)
+			}
+		})
 	})
 
 	t.Run("PruneAfterCrashSafe_NoSpuriousFutureVersions", func(t *testing.T) {
-		p := factory()
-		ci, canInject := p.(CrashInjector)
-		if !canInject {
-			t.Skip("implementation does not support crash injection; skipping crash-safety subtest")
-		}
-		ctx := context.Background()
-		updates, _ := genUpdates(t, 5)
-		for _, u := range updates {
-			if _, err := p.AppendUpdate(ctx, "room", u); err != nil {
-				t.Fatalf("AppendUpdate: %v", err)
-			}
-		}
-		rolledBack, err := p.MaterializeAt(ctx, "room", 2)
-		if err != nil {
-			t.Fatalf("MaterializeAt(2): %v", err)
-		}
-
-		// Inject a crash right after the checkpoint write, before the deletes.
-		ci.SetCrashAfterCheckpoint(func() bool { return true })
-		if err := p.PruneAfter(ctx, "room", 2, rolledBack); err != nil {
-			t.Fatalf("PruneAfter (crashing): %v", err)
-		}
-		ci.SetCrashAfterCheckpoint(nil)
-
-		// "Reopen" the store (file: re-read dir; memory: same handle).
-		reopened := p
-		if ro, ok := p.(Reopener); ok {
-			r, err := ro.Reopen()
-			if err != nil {
-				t.Fatalf("Reopen: %v", err)
-			}
-			reopened = r
-		}
-
-		// Despite the simulated crash leaving versions 3,4,5 physically behind,
-		// no future version may be visible: the checkpoint is a hard ceiling.
-		metas, err := reopened.ListVersions(ctx, "room")
-		if err != nil {
-			t.Fatalf("ListVersions after crash: %v", err)
-		}
-		for _, m := range metas {
-			if m.Version > 2 {
-				t.Fatalf("RESURRECTED future version %d after mid-prune crash", m.Version)
-			}
-		}
-		lr, err := reopened.Load(ctx, "room")
-		if err != nil {
-			t.Fatalf("Load after crash: %v", err)
-		}
-		if lr.Version > 2 {
-			t.Fatalf("Load head %d > target 2 after mid-prune crash", lr.Version)
-		}
-		if got := textOf(t, lr.Update); got != "ba" {
-			t.Fatalf("post-crash Load text = %q, want %q", got, "ba")
-		}
+		// target=2: a crash mid-prune must not resurrect versions 3,4,5; head
+		// stays at the rolled-back text "ba".
+		t.Run("target=2", func(t *testing.T) {
+			runCrashSafePrune(t, factory, 2, "ba")
+		})
+		// target=0: the boundary the checkpoint-zero overload broke. A crash
+		// mid-prune-to-empty must NOT resurrect ANY version (1..5); head is the
+		// empty rolled-back state at version 0. This is the airtight gate WS4's
+		// GCS adapter is held to.
+		t.Run("target=0", func(t *testing.T) {
+			runCrashSafePrune(t, factory, 0, "")
+		})
 	})
 
 	t.Run("CompactTrimsOldest", func(t *testing.T) {

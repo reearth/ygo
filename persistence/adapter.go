@@ -9,7 +9,7 @@ import "context"
 // PersistenceAdapter dependency structurally, so matching method signatures is
 // sufficient and avoids an import cycle.
 //
-// Mapping (per NOTES §7 M7):
+// Mapping:
 //   - LoadDoc(room)          → Load(ctx, room).Update          (materialized head)
 //   - StoreUpdate(room, upd) → AppendUpdate(ctx, room, upd)    (drops the Version)
 //

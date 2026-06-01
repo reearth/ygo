@@ -285,6 +285,11 @@ func (f *FilePersistence) AppendUpdate(ctx context.Context, room string, update 
 }
 
 // ListVersions returns metadata newest-first.
+//
+// Cost: O(n) in the number of stored versions — it does one os.Stat per record
+// to read the modification time. Keep histories bounded with Compact (or
+// PruneAfter) so this stays cheap; an unbounded log makes every ListVersions
+// (and Load/MaterializeAt) linearly slower.
 func (f *FilePersistence) ListVersions(ctx context.Context, room string) ([]VersionMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
