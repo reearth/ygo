@@ -16,7 +16,7 @@ purely additive — no breaking changes.
 
 ### Added
 
-- **`cluster` package — cross-node relay** (WS1). A first-class abstraction for
+- **`cluster` package — cross-node relay**. A first-class abstraction for
   sharing one logical document across multiple `websocket.Server` instances,
   carrying **both CRDT document updates and awareness (presence)** — superseding
   the doc-sample clustered-adapter pattern that relayed documents only and
@@ -45,7 +45,7 @@ purely additive — no breaking changes.
     **`Rooms() []string`** (both thread-safe over the room map).
   - See [docs/CLUSTERING.md](docs/CLUSTERING.md).
 
-- **`persistence` package — versioned persistence** (WS1). An append-only,
+- **`persistence` package — versioned persistence**. An append-only,
   versioned store keyed by room, layered on the low-level `PersistenceAdapter`
   primitive.
   - `persistence.VersionedPersistence` interface: `Load`, `AppendUpdate`,

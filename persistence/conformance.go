@@ -147,9 +147,9 @@ func runCrashSafePrune(t *testing.T, factory func() VersionedPersistence, target
 }
 
 // RunConformance runs the full VersionedPersistence behavioural suite against a
-// fresh store produced by factory. External adapters (e.g. a GCS-backed store)
-// import this package and call RunConformance with their own factory to verify
-// conformance. The factory must return an empty store on each call.
+// fresh store produced by factory. External adapters import this package and
+// call RunConformance with their own factory to verify conformance. The factory
+// must return an empty store on each call.
 func RunConformance(t *testing.T, factory func() VersionedPersistence) {
 	t.Helper()
 
@@ -361,10 +361,8 @@ func RunConformance(t *testing.T, factory func() VersionedPersistence) {
 		t.Run("target=2", func(t *testing.T) {
 			runCrashSafePrune(t, factory, 2, "ba")
 		})
-		// target=0: the boundary the checkpoint-zero overload broke. A crash
-		// mid-prune-to-empty must NOT resurrect ANY version (1..5); head is the
-		// empty rolled-back state at version 0. This is the airtight gate WS4's
-		// GCS adapter is held to.
+		// target=0: a crash mid-prune-to-empty must NOT resurrect ANY version
+		// (1..5); the head is the empty rolled-back state at version 0.
 		t.Run("target=0", func(t *testing.T) {
 			runCrashSafePrune(t, factory, 0, "")
 		})

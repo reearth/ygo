@@ -72,9 +72,8 @@ func (s *Server) registerRelayObservers(r *room, name string) {
 			return // echo guard: this change arrived via the relay
 		}
 		// Copy the update: the slice handed to OnUpdate observers may alias
-		// internal buffers, and Publish must not block — transports are expected to
-		// enqueue and return (the Redis transport uses a bounded async write queue),
-		// so the data may be read after this observer returns.
+		// internal buffers, and Publish must not block — transports are expected
+		// to enqueue and return, so the data may be read after this observer returns.
 		cp := append([]byte(nil), update...)
 		_ = s.relay.Publish(s.relayCtx, cluster.Outbound{
 			Room: name, Kind: cluster.KindSync, Data: cp, Origin: origin,

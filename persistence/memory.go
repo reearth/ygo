@@ -29,9 +29,9 @@ type memRoom struct {
 	// active. We MUST NOT overload checkpoint==0 to mean "no ceiling": a
 	// PruneAfter(target=0) sets a legitimate ceiling of 0 (roll back to the
 	// empty/rolled-back head), and treating that as "no ceiling" would resurrect
-	// lingering records 1..N after a mid-prune crash (the spurious-future-version
-	// regression). Mirrors FilePersistence, where checkpoint presence is encoded
-	// by the existence of the checkpoint file, not by its value.
+	// lingering records 1..N after a mid-prune crash. Mirrors FilePersistence,
+	// where checkpoint presence is encoded by the existence of the checkpoint
+	// file, not by its value.
 	checkpoint    Version
 	checkpointSet bool
 	// rolledBack is the V1 head persisted at checkpoint time, used to bootstrap
@@ -293,7 +293,7 @@ func (m *MemoryPersistence) PruneAfter(ctx context.Context, room string, target 
 	r.checkpointSet = true
 	r.rolledBack = append([]byte(nil), rolledBack...)
 
-	// Simulated crash point for the conformance regression test: return before
+	// Simulated crash point for the conformance crash-safety test: return before
 	// the deletes, leaving stale future records behind. The checkpoint must
 	// still suppress them on reopen.
 	if m.crashAfterCheckpoint != nil && m.crashAfterCheckpoint() {

@@ -23,8 +23,7 @@
 // head plus a checkpoint at the target version, and only then deletes the
 // updates newer than the target. A crash between those steps must never
 // resurrect a "future" version on reopen — implementations enforce the
-// checkpoint as a hard ceiling on the visible version range. This guards the
-// spurious-future-version regression.
+// checkpoint as a hard ceiling on the visible version range.
 package persistence
 
 import (
