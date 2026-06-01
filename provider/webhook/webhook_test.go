@@ -359,6 +359,38 @@ func TestUnit_New_RejectsEmptyURL(t *testing.T) {
 		"error must mention URL: %v", err)
 }
 
+// New must reject URLs whose scheme isn't http or https — the docs say
+// so, and failing fast at construction is much more debuggable than
+// every delivery silently dropping at request-build time.
+func TestUnit_New_RejectsNonHTTPURL(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"ftp scheme", "ftp://example.com/hook"},
+		{"file scheme", "file:///etc/passwd"},
+		{"missing host", "http://"},
+		{"unparseable", "://not-a-url"},
+		{"javascript URL", "javascript:alert(1)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := webhook.New(webhook.Config{URL: tc.url})
+			require.Error(t, err,
+				"webhook.New must reject %q (%s)", tc.url, tc.name)
+		})
+	}
+}
+
+// And the happy path: http and https URLs both succeed.
+func TestUnit_New_AcceptsHTTPAndHTTPS(t *testing.T) {
+	for _, scheme := range []string{"http", "https"} {
+		wh, err := webhook.New(webhook.Config{URL: scheme + "://example.com/hook"})
+		require.NoError(t, err, "webhook.New must accept %s URLs", scheme)
+		require.NoError(t, wh.Close(context.Background()))
+	}
+}
+
 // Regression for #93 self-review B3 — AttachTo wires every relevant
 // Server hook + per-doc OnUpdate so a single call delivers the event
 // stream without per-event manual wiring. This test drives the

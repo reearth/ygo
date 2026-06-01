@@ -41,9 +41,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -184,10 +186,26 @@ type Webhook struct {
 // New constructs a Webhook from cfg and starts its dispatcher goroutine.
 // Call Close to release.
 //
-// Returns an error if cfg.URL is empty.
+// Returns an error if cfg.URL is empty, unparseable, missing a host,
+// or uses a scheme other than http / https. Validating up front means
+// construction fails fast rather than every delivery silently dropping
+// later at request build time.
 func New(cfg Config) (*Webhook, error) {
 	if cfg.URL == "" {
 		return nil, errors.New("webhook: Config.URL is required")
+	}
+	u, err := url.Parse(cfg.URL)
+	if err != nil {
+		return nil, fmt.Errorf("webhook: Config.URL is not a valid URL: %w", err)
+	}
+	switch u.Scheme {
+	case "http", "https":
+		// ok
+	default:
+		return nil, fmt.Errorf("webhook: Config.URL scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, errors.New("webhook: Config.URL is missing a host")
 	}
 	if cfg.Debounce == 0 {
 		cfg.Debounce = defaultDebounce
@@ -301,6 +319,20 @@ func (w *Webhook) dispatchLoop() {
 // drainAndDeliver moves all pending events to a local batch and dispatches
 // each. Delivery goroutines obey the MaxConcurrentDeliveries semaphore so
 // a slow receiver cannot accumulate unbounded goroutines.
+//
+// wg.Add is performed in a single batch call under w.mu — the same lock
+// Close acquires before signalling close(w.closed). This ordering means
+// the WaitGroup counter has already been incremented before Close can
+// reach its wg.Wait, eliminating the "Add called concurrently with Wait"
+// runtime check failure.
+//
+// There is intentionally NO <-w.closed bail in the inner sem-acquire
+// loop: when this is called from the post-Close final-drain path (the
+// dispatcher's <-w.closed case), w.closed is already closed and a bail
+// would silently drop every pending event. The deliverSem still bounds
+// concurrency; the dispatcher waits for in-flight deliveries to finish
+// before exiting, and deliver itself checks <-w.closed during its retry
+// sleep to exit fast on shutdown.
 func (w *Webhook) drainAndDeliver() {
 	w.mu.Lock()
 	if len(w.pending) == 0 {
@@ -312,18 +344,11 @@ func (w *Webhook) drainAndDeliver() {
 		batch = append(batch, *e)
 	}
 	w.pending = make(map[pendingKey]*Event)
+	w.wg.Add(len(batch))
 	w.mu.Unlock()
 
 	for _, ev := range batch {
-		// Acquire a delivery slot. Block on close to avoid spawning new
-		// deliveries after Close, but otherwise let bursty workloads back
-		// up here rather than at the goroutine count.
-		select {
-		case w.deliverSem <- struct{}{}:
-		case <-w.closed:
-			return
-		}
-		w.wg.Add(1)
+		w.deliverSem <- struct{}{}
 		go func(e Event) {
 			defer func() {
 				<-w.deliverSem
