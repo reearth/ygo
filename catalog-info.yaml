@@ -1,0 +1,26 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ygo
+  namespace: reearth
+  description: A pure-Go implementation of the Yjs CRDT framework. Binary-compatible
+    with yjs@13.x.
+  annotations:
+    github.com/project-slug: reearth/ygo
+  links:
+  - url: https://github.com/reearth/ygo
+    title: GitHub
+    icon: github
+  - url: https://pkg.go.dev/github.com/reearth/ygo
+    title: Website
+    icon: web
+  tags:
+  - go
+  - collaborative-editing
+  - crdt
+  - golang
+  - realtime
+spec:
+  type: service
+  lifecycle: production
+  owner: reearth/lib
