@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -144,6 +145,88 @@ func runCrashSafePrune(t *testing.T, factory func() VersionedPersistence, target
 	if got := textOf(t, lr.Update); got != wantText {
 		t.Fatalf("post-crash Load text = %q, want %q", got, wantText)
 	}
+
+	// Recovery: an append after the crashed prune must finish the interrupted
+	// prune (drop the leaked future records) and then commit a fresh version.
+	// The 5 original updates produced versions 1..5; everything > target leaked.
+	fresh := markerUpdate(t, "Z")
+	nv, err := reopened.AppendUpdate(ctx, "room", fresh)
+	if err != nil {
+		t.Fatalf("AppendUpdate after crashed prune: %v", err)
+	}
+	// Impl-agnostic: do NOT assert nv == target+1. Both impls densely reuse
+	// target+1, but the contract only requires the new version exceeds target.
+	if nv <= target {
+		t.Fatalf("append after crashed prune returned version %d, want > target %d", nv, target)
+	}
+	lr2, err := reopened.Load(ctx, "room")
+	if err != nil {
+		t.Fatalf("Load after recovery append: %v", err)
+	}
+	if lr2.Version != nv {
+		t.Fatalf("Load head = %d after recovery append, want %d", lr2.Version, nv)
+	}
+	// Content must be state-at-target (wantText) ⊕ the fresh marker, and must NOT
+	// contain any leaked record content. The leaked updates 'c'/'d'/'e' (and 'a'
+	// when target=0) inserted distinct runes; assert none resurfaced.
+	got := textOf(t, lr2.Update)
+	if !strings.Contains(got, "Z") {
+		t.Fatalf("recovery Load text = %q, missing fresh marker %q", got, "Z")
+	}
+	if wantText != "" && !strings.Contains(got, wantText) {
+		t.Fatalf("recovery Load text = %q, lost rolled-back head %q", got, wantText)
+	}
+	for _, leaked := range leakedRunes(target) {
+		if strings.ContainsRune(got, leaked) {
+			t.Fatalf("recovery Load text = %q resurrected leaked rune %q", got, string(leaked))
+		}
+	}
+	// No leaked future version may be resurrected by GetUpdate, except the one
+	// version the recovery append legitimately (densely) reused.
+	for v := target + 1; v <= 5; v++ {
+		if v == nv {
+			continue // densely reused by the recovery append
+		}
+		_, _, ok, err := reopened.GetUpdate(ctx, "room", v)
+		if err != nil {
+			t.Fatalf("GetUpdate(%d) after recovery: %v", v, err)
+		}
+		if ok {
+			t.Fatalf("GetUpdate(%d) resurrected a leaked version after recovery (target=%d, nv=%d)", v, target, nv)
+		}
+	}
+}
+
+// leakedRunes returns the inserted runes for the original updates with version
+// > target, which a crashed-then-recovered prune must NOT resurface. genUpdates
+// inserts rune 'a'+i at version i+1, so version v carries rune 'a'+(v-1).
+func leakedRunes(target Version) []rune {
+	var out []rune
+	for v := target + 1; v <= 5; v++ {
+		out = append(out, rune('a'+(v-1)))
+	}
+	return out
+}
+
+// markerUpdate builds a standalone well-formed V1 update on shared text "t" that
+// inserts marker at index 0. It uses a distinct client ID so it merges cleanly
+// onto any pruned/rolled-back head without colliding with genUpdates' client.
+func markerUpdate(t *testing.T, marker string) []byte {
+	t.Helper()
+	doc := crdt.New(crdt.WithClientID(9999))
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, marker, nil) })
+	return crdt.EncodeStateAsUpdateV1(doc, nil)
+}
+
+// containsVersion reports whether metas includes version v.
+func containsVersion(metas []VersionMeta, v Version) bool {
+	for _, m := range metas {
+		if m.Version == v {
+			return true
+		}
+	}
+	return false
 }
 
 // RunConformance runs the full VersionedPersistence behavioural suite against a
@@ -313,6 +396,42 @@ func RunConformance(t *testing.T, factory func() VersionedPersistence) {
 			}
 			if got := textOf(t, lr.Update); got != "ba" {
 				t.Fatalf("post-prune Load text = %q, want %q", got, "ba")
+			}
+
+			// An append after the prune must be visible — the prune must NOT
+			// freeze the room at target. Append a fresh well-formed update that
+			// inserts a marker, and assert it surfaces through Load/ListVersions.
+			fresh := markerUpdate(t, "Z")
+			nv, err := p.AppendUpdate(ctx, "room", fresh)
+			if err != nil {
+				t.Fatalf("AppendUpdate after prune: %v", err)
+			}
+			if nv <= 2 {
+				t.Fatalf("append after prune returned version %d, want > target 2", nv)
+			}
+			lr2, err := p.Load(ctx, "room")
+			if err != nil {
+				t.Fatalf("Load after post-prune append: %v", err)
+			}
+			if lr2.Version != nv {
+				t.Fatalf("Load head version = %d after post-prune append, want %d", lr2.Version, nv)
+			}
+			metas2, err := p.ListVersions(ctx, "room")
+			if err != nil {
+				t.Fatalf("ListVersions after post-prune append: %v", err)
+			}
+			if !containsVersion(metas2, nv) {
+				t.Fatalf("ListVersions missing post-prune append version %d: %v", nv, metas2)
+			}
+			// The materialized head must reflect state-at-target ("ba") AND the
+			// freshly appended marker, proving the append folded onto the
+			// rolled-back head rather than being clamped away by the prune ceiling.
+			got := textOf(t, lr2.Update)
+			if !strings.Contains(got, "ba") {
+				t.Fatalf("post-prune append Load text = %q, lost rolled-back head %q", got, "ba")
+			}
+			if !strings.Contains(got, "Z") {
+				t.Fatalf("post-prune append Load text = %q, missing fresh marker %q", got, "Z")
 			}
 		})
 

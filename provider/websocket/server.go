@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gws "github.com/gorilla/websocket"
@@ -231,11 +232,20 @@ type Server struct {
 	// relayCancel govern the relay's delivery lifetime; cancelled on Shutdown.
 	// relaySentinel is the origin stamped on relay-injected changes so the
 	// per-room observers can drop echoes (pointer-identity guard).
+	//
+	// relayMu guards the attach handshake: AttachRelay only commits s.relay
+	// after relay.Start succeeds, so a Start failure leaves the server
+	// unattached and the call is retryable (no sync.Once latching a partial
+	// attach). relayOut is the bounded outbound queue the CRDT observers
+	// enqueue onto; a dedicated worker drains it and drives relay.Publish so
+	// the commit path never blocks on a slow relay. See cluster.go.
+	relayMu       sync.Mutex
 	relay         clusterRelay
 	relaySentinel any
 	relayCtx      context.Context
 	relayCancel   context.CancelFunc
-	relayOnce     sync.Once
+	relayOut      chan relayOutbound
+	relayDropped  atomic.Uint64
 
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{} // closed by Shutdown
@@ -475,13 +485,15 @@ func NewServer() *Server {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
 
-	// Cancel the relay delivery context so its goroutines wind down, then close
-	// the relay. No-op when no relay is attached.
+	// Stop THIS server's relay delivery by cancelling the relay context: this
+	// winds down the relay worker and the relay's per-node delivery goroutine
+	// (started under relayCtx). It does NOT Close the relay — the caller owns
+	// the relay lifetime and must Close() it once every attached server is done,
+	// because a single relay is commonly shared across multiple in-process
+	// Servers (the MemRelay pattern) and Closing it would stop delivery for all
+	// of them (FIX C). No-op when no relay is attached.
 	if s.relayCancel != nil {
 		s.relayCancel()
-	}
-	if s.relay != nil {
-		_ = s.relay.Close()
 	}
 
 	// Collect all active peer connections and persistence channels.

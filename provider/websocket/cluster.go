@@ -24,6 +24,12 @@ type clusterRelay interface {
 	Close() error
 }
 
+// relayOutbound is the queue element drained by the relay worker. It is a local
+// alias for cluster.Outbound so server.go can hold the chan field (s.relayOut)
+// without importing the cluster package — the same import-discipline reason the
+// clusterRelay interface lives here rather than in server.go.
+type relayOutbound = cluster.Outbound
+
 // ErrRelayAlreadyAttached is returned by AttachRelay if a relay is already set.
 var ErrRelayAlreadyAttached = errors.New("ygo/websocket: relay already attached")
 
@@ -36,28 +42,70 @@ var _ cluster.Sink = (*Server)(nil)
 // AttachRelay binds a cluster.Relay to this server so that local document and
 // awareness changes are mirrored to other server nodes, and remote changes are
 // injected into local rooms. It must be called once, before the server begins
-// serving connections; a second call returns ErrRelayAlreadyAttached.
+// serving connections; once a relay is attached a second call returns
+// ErrRelayAlreadyAttached.
 //
 // AttachRelay starts the relay (relay.Start(ctx, s)) with a context that is
-// cancelled when Server.Shutdown is called. Rooms that become resident after
-// attach are wired automatically (doc.OnUpdate + awareness.OnChange → Publish);
-// the echo guard drops changes whose origin is the relay sentinel.
+// cancelled when Server.Shutdown is called. If relay.Start returns an error the
+// server is left UNATTACHED (s.relay stays nil) and the call may be retried —
+// it does not latch a partial attach. Rooms that become resident after attach
+// are wired automatically (doc.OnUpdate + awareness.OnChange → a bounded
+// outbound queue drained by a worker → Publish); the echo guard drops changes
+// whose origin is the relay sentinel.
+//
+// Relay lifetime: the CALLER owns the relay and must Close() it once every
+// attached server is done with it. Server.Shutdown only stops THIS server's
+// delivery (it cancels the relay context); it does NOT Close the relay, because
+// a single relay is commonly shared across multiple in-process Servers (the
+// documented MemRelay pattern) and Closing it would stop delivery for all of
+// them.
 func (s *Server) AttachRelay(r cluster.Relay) error {
 	if r == nil {
 		return ErrNilRelay
 	}
-	var attachErr error
-	s.relayOnce.Do(func() {
-		s.relay = r
-		s.relaySentinel = new(struct{})
-		s.relayCtx, s.relayCancel = context.WithCancel(context.Background())
-		attachErr = r.Start(s.relayCtx, s)
-	})
-	if s.relay != r {
-		// relayOnce already fired for a different relay.
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	if s.relay != nil {
 		return ErrRelayAlreadyAttached
 	}
-	return attachErr
+
+	sentinel := new(struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	// Start before committing any state: a Start failure must leave the server
+	// unattached and retryable.
+	if err := r.Start(ctx, s); err != nil {
+		cancel()
+		return err
+	}
+
+	s.relaySentinel = sentinel
+	s.relayCtx, s.relayCancel = ctx, cancel
+	// Bounded outbound queue + worker (FIX B): CRDT observers enqueue
+	// non-blockingly so the commit path never stalls on a slow relay; the
+	// worker drives Publish and logs failures.
+	s.relayOut = make(chan relayOutbound, 1024)
+	go s.relayWorker(ctx, s.relayOut)
+	// Publish s.relay last: anything gated on s.relay != nil (getOrCreateRoom
+	// registering observers) then always sees a ready outbound queue + worker.
+	s.relay = r
+	return nil
+}
+
+// relayWorker drains the bounded outbound queue and drives relay.Publish. It is
+// the only goroutine that calls Publish, so a blocking relay back-pressures only
+// the worker (and, via a full queue, causes the observers to drop) — never the
+// CRDT commit path. The worker exits when relayCtx is cancelled (Shutdown).
+func (s *Server) relayWorker(ctx context.Context, out <-chan relayOutbound) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ob := <-out:
+			if err := s.relay.Publish(ctx, ob); err != nil {
+				s.log().Warn("relay publish failed", "room", ob.Room, "err", err)
+			}
+		}
+	}
 }
 
 // registerRelayObservers wires doc.OnUpdate and awareness.OnChange for a room so
@@ -72,10 +120,11 @@ func (s *Server) registerRelayObservers(r *room, name string) {
 			return // echo guard: this change arrived via the relay
 		}
 		// Copy the update: the slice handed to OnUpdate observers may alias
-		// internal buffers, and Publish must not block — transports are expected
-		// to enqueue and return, so the data may be read after this observer returns.
+		// internal buffers, and the observer must not block — it enqueues onto
+		// the bounded outbound queue and returns, so the data may be read by the
+		// worker after this observer returns.
 		cp := append([]byte(nil), update...)
-		_ = s.relay.Publish(s.relayCtx, cluster.Outbound{
+		s.enqueueRelayOutbound(name, cluster.Outbound{
 			Room: name, Kind: cluster.KindSync, Data: cp, Origin: origin,
 		})
 	})
@@ -89,7 +138,7 @@ func (s *Server) registerRelayObservers(r *room, name string) {
 			return
 		}
 		data := r.awareness.EncodeUpdate(ids)
-		_ = s.relay.Publish(s.relayCtx, cluster.Outbound{
+		s.enqueueRelayOutbound(name, cluster.Outbound{
 			Room: name, Kind: cluster.KindAwareness, Data: data, Origin: ev.Origin,
 		})
 	})
@@ -97,6 +146,22 @@ func (s *Server) registerRelayObservers(r *room, name string) {
 	r.mu.Lock()
 	r.relayUnsub = append(r.relayUnsub, unsubDoc, unsubAw)
 	r.mu.Unlock()
+}
+
+// enqueueRelayOutbound is the observer-side, NON-BLOCKING hand-off to the relay
+// worker. The provider buffers outbound events on a bounded queue and drives
+// Publish from a dedicated worker goroutine, so Publish may block only that
+// worker, never the CRDT commit path the observer runs on (the Transact caller
+// goroutine). On sustained overflow the queue drops the event and bumps a
+// counter — losing a relay echo is recoverable (peers reconcile via sync
+// step 1/2), stalling every local commit is not.
+func (s *Server) enqueueRelayOutbound(name string, out cluster.Outbound) {
+	select {
+	case s.relayOut <- out:
+	default:
+		s.relayDropped.Add(1)
+		s.log().Debug("relay outbound queue full, dropping", "room", name)
+	}
 }
 
 // changedAwarenessIDs returns the union of added/updated/removed client IDs.
@@ -160,9 +225,12 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, s.relaySentinel); err != nil {
 			return err
 		}
-		// Rebroadcast to locally-connected peers. BroadcastUpdate re-validates
+		// Rebroadcast to locally-connected peers. broadcastUpdate re-validates
 		// and frames; it does not re-apply to the doc (already applied above).
-		return s.BroadcastUpdate(ctx, in.Room, in.Data)
+		// fireHook=false: OnInject governs LOCALLY-originated writes; firing it
+		// here could veto the fan-out after the doc was already mutated above,
+		// silently diverging this node from the cluster (FIX H).
+		return s.broadcastUpdate(ctx, in.Room, in.Data, false)
 
 	case cluster.KindAwareness:
 		rm, err := s.getOrCreateRoom(ctx, in.Room)

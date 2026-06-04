@@ -274,6 +274,18 @@ func (f *FilePersistence) AppendUpdate(ctx context.Context, room string, update 
 	if err := os.MkdirAll(f.updatesDir(room), 0o755); err != nil {
 		return 0, err
 	}
+
+	// Crash recovery: a PruneAfter that crashed after writing its checkpoint but
+	// before its deletes leaves the checkpoint file present with stale update
+	// files >target still on disk. Finish the interrupted prune now — delete the
+	// leaked files and remove the checkpoint — before computing this update's
+	// version. Otherwise the checkpoint would clamp the new version away (freeze)
+	// and the leaked files would linger. Dense reuse: nextVersion then resolves to
+	// maxOnDisk+1 = target+1.
+	if err := f.recoverInterruptedPrune(room); err != nil {
+		return 0, err
+	}
+
 	v, err := f.nextVersion(room)
 	if err != nil {
 		return 0, err
@@ -282,6 +294,40 @@ func (f *FilePersistence) AppendUpdate(ctx context.Context, room string, update 
 		return 0, err
 	}
 	return v, nil
+}
+
+// recoverInterruptedPrune finishes a PruneAfter that crashed between its
+// checkpoint write and its deletes: it removes any update files with
+// version > checkpoint.target and then removes the checkpoint file. A no-op when
+// no checkpoint is present. Must be called with f.mu held.
+func (f *FilePersistence) recoverInterruptedPrune(room string) error {
+	cp, err := f.readCheckpoint(room)
+	if err != nil {
+		return err
+	}
+	if cp == nil {
+		return nil
+	}
+	entries, err := os.ReadDir(f.updatesDir(room))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, e := range entries {
+		base := strings.TrimSuffix(e.Name(), ".bin")
+		n, perr := strconv.ParseUint(base, 10, 64)
+		if perr != nil {
+			continue
+		}
+		if Version(n) > cp.target {
+			if rmErr := os.Remove(filepath.Join(f.updatesDir(room), e.Name())); rmErr != nil {
+				return rmErr
+			}
+		}
+	}
+	if err := os.Remove(f.checkpointPath(room)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // ListVersions returns metadata newest-first.
@@ -421,32 +467,34 @@ func (f *FilePersistence) PruneAfter(ctx context.Context, room string, target Ve
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Hold f.mu for the ENTIRE sequence (checkpoint write -> crash hook ->
+	// deletes -> checkpoint removal). Releasing it mid-sequence would let a
+	// concurrent AppendUpdate/Delete race into the window between the checkpoint
+	// write and the deletes. The crash hook runs under the lock (mirroring
+	// MemoryPersistence); the conformance suite only needs the crash observable
+	// after the checkpoint is written and before the deletes, which is here.
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	if _, err := os.Stat(f.roomDir(room)); errors.Is(err, os.ErrNotExist) {
-		f.mu.Unlock()
 		return ErrRoomNotFound
 	}
 
 	// Step 1: write checkpoint (atomic). From this point readers clamp to target.
 	if err := f.writeCheckpoint(room, &checkpoint{target: target, rolledBack: rolledBack}); err != nil {
-		f.mu.Unlock()
 		return err
 	}
-	crash := f.crashAfterCheckpoint
-	f.mu.Unlock()
 
+	// Simulated crash point: return with the checkpoint written but the future
+	// update files still present. Readers clamp to target via the checkpoint file,
+	// so the lingering files stay invisible even across a reopen.
+	crash := f.crashAfterCheckpoint
 	if crash != nil && crash() {
 		return nil // simulated crash before deletes
 	}
 
 	// Step 2: delete update files newer than target.
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	entries, err := os.ReadDir(f.updatesDir(room))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	for _, e := range entries {
@@ -460,6 +508,16 @@ func (f *FilePersistence) PruneAfter(ctx context.Context, room string, target Ve
 				return rmErr
 			}
 		}
+	}
+
+	// Prune committed: the surviving update files (<=target) plus the rolled-back
+	// head fully reconstruct the head, so the checkpoint ceiling has done its job
+	// and MUST be removed — otherwise listUpdateVersions would clamp to target
+	// forever and freeze the room, hiding any later AppendUpdate. Dense reuse: the
+	// next append continues at target+1 (= maxOnDisk+1). Keep the checkpoint file
+	// ONLY on the crash early-return above.
+	if err := os.Remove(f.checkpointPath(room)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	return nil
 }

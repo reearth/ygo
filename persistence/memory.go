@@ -165,6 +165,27 @@ func (m *MemoryPersistence) AppendUpdate(ctx context.Context, room string, updat
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r := m.getRoom(room)
+
+	// Crash recovery: a PruneAfter that crashed after writing its checkpoint but
+	// before its deletes leaves checkpointSet=true with stale records>checkpoint
+	// still present. Finish the interrupted prune now — drop the leaked records
+	// and clear the ceiling — before assigning this update's version. Otherwise
+	// the new version (>checkpoint) would itself be clamped away (freeze) and the
+	// leaked records would linger. Dense reuse: resume at checkpoint+1.
+	if r.checkpointSet {
+		kept := r.records[:0]
+		for _, rec := range r.records {
+			if rec.version <= r.checkpoint {
+				kept = append(kept, rec)
+			}
+		}
+		r.records = kept
+		r.nextVer = r.checkpoint + 1
+		r.checkpointSet = false
+		r.checkpoint = 0
+		r.rolledBack = nil
+	}
+
 	v := r.nextVer
 	r.nextVer++
 	cp := append([]byte(nil), update...)
@@ -308,9 +329,17 @@ func (m *MemoryPersistence) PruneAfter(ctx context.Context, room string, target 
 		}
 	}
 	r.records = kept
-	if r.nextVer <= target {
-		r.nextVer = target + 1
-	}
+
+	// Prune committed: the surviving records (<=target) now fully reconstruct the
+	// head, so the checkpoint ceiling has done its job and MUST be cleared —
+	// otherwise visibleRecords() would clamp to target forever and freeze the
+	// room, hiding any later AppendUpdate. The rolled-back head is likewise no
+	// longer needed (records<=target rebuild it). Dense reuse: the next append
+	// continues at target+1.
+	r.checkpointSet = false
+	r.checkpoint = 0
+	r.rolledBack = nil
+	r.nextVer = target + 1
 	return nil
 }
 

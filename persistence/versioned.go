@@ -12,10 +12,14 @@
 //
 // # Versions
 //
-// A Version is a monotonically increasing per-room sequence number assigned by
-// AppendUpdate. Versions are dense and never reused. ListVersions returns the
-// single (non-cumulative) updates newest-first; MaterializeAt folds the updates
-// up to and including a version into a head state via MergeUpdatesV1.
+// A Version is a per-room sequence number assigned by AppendUpdate, starting at
+// 1. Within an unbroken history versions are dense and increasing; PruneAfter
+// resets the head to its target and subsequent appends continue at target+1, so
+// version numbers above a pruned point are superseded and reused for the new
+// history. Named snapshots carry their own captured version independently.
+// ListVersions returns the single (non-cumulative) updates newest-first;
+// MaterializeAt folds the updates up to and including a version into a head
+// state via MergeUpdatesV1.
 //
 // # Crash safety
 //
@@ -32,9 +36,11 @@ import (
 	"time"
 )
 
-// Version is a monotonically increasing per-room update sequence number,
-// assigned by AppendUpdate starting at 1. Zero is the "no version" sentinel
-// (an empty room).
+// Version is a per-room update sequence number assigned by AppendUpdate,
+// starting at 1. Within an unbroken history it is dense and increasing;
+// PruneAfter resets the head to its target, after which appends continue at
+// target+1 (versions above a pruned point are superseded and reused for the new
+// history). Zero is the "no version" sentinel (an empty room).
 type Version uint64
 
 // VersionMeta describes one stored update without its payload.

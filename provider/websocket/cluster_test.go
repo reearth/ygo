@@ -3,8 +3,10 @@ package websocket_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,6 +173,73 @@ func TestInteg_Cluster_AwarenessPropagatesAcrossServers(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	_, awarePubs := relay.counts()
 	assert.Equal(t, 1, awarePubs, "exactly one awareness publish (no echo)")
+}
+
+// TestInteg_Inject_KindSync_DoesNotFireOnInject verifies FIX H: a remote
+// KindSync update delivered via the relay (Server.Inject) must NOT run the
+// OnInject policy hook. OnInject governs LOCALLY-originated server writes
+// (rate limits / content policy); if it could veto an inbound relay update,
+// the local doc — already applied inside Inject — would be mutated while peers
+// never receive the rebroadcast, silently diverging this node from the cluster.
+// The test asserts: (1) OnInject is never invoked for the relay-injected
+// update, (2) the doc IS updated, and (3) the locally-connected peer DOES
+// receive the broadcast.
+func TestInteg_Inject_KindSync_DoesNotFireOnInject(t *testing.T) {
+	relay := cluster.NewMemRelay()
+	defer func() { require.NoError(t, relay.Close()) }()
+
+	srv := ygws.NewServer()
+	// A hook that records every call and would refuse the write if invoked.
+	var onInjectCalls atomic.Int64
+	srv.OnInject = func(_ context.Context, _ ygws.InjectInfo) error {
+		onInjectCalls.Add(1)
+		return errors.New("policy refusal: must not run for relay-injected updates")
+	}
+	require.NoError(t, srv.AttachRelay(relay))
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// A local peer joins the room so we can observe the rebroadcast.
+	peerDoc := crdt.New(crdt.WithClientID(7))
+	conn := dial(t, ts, "room")
+	drainHandshake(t, conn, peerDoc)
+
+	// Build a remote update (as another node's doc would produce) and deliver
+	// it to this server exactly as the relay would.
+	remoteDoc := crdt.New(crdt.WithClientID(99))
+	txt := remoteDoc.GetText("t")
+	remoteDoc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "remote", nil) })
+	update := crdt.EncodeStateAsUpdateV1(remoteDoc, nil)
+
+	require.NoError(t, srv.Inject(context.Background(), cluster.Inbound{
+		Room: "room", Kind: cluster.KindSync, Data: update,
+	}))
+
+	// (2) The doc IS updated despite OnInject's refusal.
+	require.NotNil(t, srv.GetDoc("room"))
+	assert.Equal(t, "remote", srv.GetDoc("room").GetText("t").ToString())
+
+	// (3) The connected peer received the rebroadcast.
+	outerType, payload := readOne(t, conn, 2*time.Second)
+	require.Equal(t, uint64(0), outerType, "expected a sync message")
+	_, _ = ygsync.ApplySyncMessage(peerDoc, payload, nil)
+	assert.Equal(t, "remote", peerDoc.GetText("t").ToString())
+
+	// (1) OnInject was NOT invoked for the relay-injected update.
+	assert.Equal(t, int64(0), onInjectCalls.Load(),
+		"OnInject must not fire for relay-injected KindSync updates")
+
+	// Sanity: OnInject DOES still fire for a locally-originated BroadcastUpdate,
+	// so FIX H did not disable the hook wholesale. It refuses, so we expect the
+	// refusal error and exactly one call.
+	localDoc := crdt.New(crdt.WithClientID(5))
+	lt := localDoc.GetText("t")
+	localDoc.Transact(func(txn *crdt.Transaction) { lt.Insert(txn, 0, "x", nil) })
+	err := srv.BroadcastUpdate(context.Background(), "room", crdt.EncodeStateAsUpdateV1(localDoc, nil))
+	require.ErrorIs(t, err, ygws.ErrInjectRefused)
+	assert.Equal(t, int64(1), onInjectCalls.Load(),
+		"OnInject must still fire for locally-originated BroadcastUpdate")
 }
 
 // buildAwarenessUpdate encodes a single-client awareness update.

@@ -93,10 +93,11 @@ type Relay interface {
 	// the caller's responsibility (the provider wiring) to drop changes whose
 	// Origin is the relay sentinel before calling Publish.
 	Publish(ctx context.Context, out Outbound) error
-	// Start binds the relay to a Sink and begins delivering inbound changes.
-	// It must be called exactly once before the relay delivers anything. The
-	// supplied ctx governs the relay's delivery lifetime; cancelling it (or
-	// calling Close) stops delivery.
+	// Start binds a Sink for one node and begins delivering inbound changes to
+	// it. Each node (each Server) calls Start once; a relay shared across
+	// multiple nodes is Started once per node (a shared MemRelay therefore sees
+	// multiple Start calls). The supplied ctx governs that node's delivery
+	// lifetime; cancelling it (or calling Close) stops delivery.
 	Start(ctx context.Context, sink Sink) error
 	// RoomActivated tells the relay a room became resident on this node, so it
 	// may begin subscribing to / delivering that room's traffic. Idempotent.

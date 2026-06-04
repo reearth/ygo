@@ -179,6 +179,65 @@ func TestMemRelay_PublishAfterClose(t *testing.T) {
 	assert.ErrorIs(t, err, cluster.ErrRelayClosed)
 }
 
+// TestMemRelay_CloseDuringPublish_NoPanic stress-tests Close racing many
+// concurrent Publish calls. Before FIX A, Close closed each per-node channel,
+// so a Publish send that lost the race to Close's closed-check panicked with
+// "send on closed channel". With FIX A, Close only closes a relay-level done
+// channel (never n.ch), so the send can never panic; Publish after Close
+// returns ErrRelayClosed (or nil), never panics. This guards FIX A.
+func TestMemRelay_CloseDuringPublish_NoPanic(t *testing.T) {
+	relay := cluster.NewMemRelay(cluster.WithBufferSize(8)) // small buffer => sends contend
+	a := newFakeSink("room", relay)
+	require.NoError(t, relay.Start(context.Background(), a))
+
+	const publishers = 400
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < publishers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 50; j++ {
+				// Must never panic. After Close, returns ErrRelayClosed or nil.
+				err := relay.Publish(context.Background(), cluster.Outbound{
+					Room: "room", Kind: cluster.KindSync, Data: []byte{0x01},
+				})
+				if err != nil && err != cluster.ErrRelayClosed {
+					// ctx is never cancelled here; only ErrRelayClosed is legal.
+					assert.ErrorIs(t, err, cluster.ErrRelayClosed)
+				}
+			}
+		}()
+	}
+
+	close(start)
+	// Close mid-flight from another goroutine. Capture its error and assert it on
+	// the test goroutine (testifylint go-require: require must not run in a spawned
+	// goroutine).
+	closeErr := make(chan error, 1)
+	go func() {
+		time.Sleep(time.Millisecond)
+		closeErr <- relay.Close()
+	}()
+
+	// Everything must wind down with no panic and no leaked goroutine hang.
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("publishers did not wind down after Close")
+	}
+	require.NoError(t, <-closeErr)
+
+	// Publish after Close is settled returns ErrRelayClosed, never panics.
+	err := relay.Publish(context.Background(), cluster.Outbound{
+		Room: "room", Kind: cluster.KindSync, Data: []byte{0x01},
+	})
+	assert.ErrorIs(t, err, cluster.ErrRelayClosed)
+}
+
 func TestMemRelay_ConcurrentPublishInject_Race(t *testing.T) {
 	relay := cluster.NewMemRelay(cluster.WithBufferSize(1024))
 	defer func() { require.NoError(t, relay.Close()) }()

@@ -9,14 +9,17 @@ import (
 // ErrRelayClosed is returned by MemRelay.Publish / Start after Close.
 var ErrRelayClosed = errors.New("cluster: relay closed")
 
-// ErrRelayNotStarted is returned by MemRelay.Publish before Start has bound a
-// Sink, or by Start when called a second time.
+// ErrRelayNotStarted is returned by MemRelay.Publish before any node has
+// Started (no Sink is bound yet), and by Start when sink is nil. MemRelay
+// supports multiple Start calls (one per node) and does not reject subsequent
+// ones.
 var ErrRelayNotStarted = errors.New("cluster: relay not started")
 
 // MemRelay is an in-process, channel-backed Relay. It is the reference
 // implementation: multiple nodes (each a websocket.Server) share one MemRelay
-// instance; a change Published by one node is delivered to every OTHER node's
-// Sink. It is safe for concurrent use and primarily intended for tests and
+// instance; a change Published by one node is delivered to every node's Sink
+// (including the publisher, which drops its own change via the echo sentinel).
+// It is safe for concurrent use and primarily intended for tests and
 // single-process multi-server simulations.
 //
 // Delivery is asynchronous: Publish enqueues to a per-node buffered channel
@@ -28,6 +31,11 @@ type MemRelay struct {
 	mu     sync.Mutex
 	nodes  []*memNode // every node that has called Start
 	closed bool
+	// done is closed exactly once by Close. Delivery goroutines and in-flight
+	// Publish sends select on it so they unwind without ever closing the
+	// per-node channels (n.ch) — closing those would race a concurrent send
+	// and panic ("send on closed channel").
+	done chan struct{}
 }
 
 // memNode is one Start-ed Sink with its own delivery queue and goroutine.
@@ -53,7 +61,7 @@ func WithBufferSize(n int) MemRelayOption {
 
 // NewMemRelay returns a started-on-demand in-process relay.
 func NewMemRelay(opts ...MemRelayOption) *MemRelay {
-	m := &MemRelay{bufSize: 256}
+	m := &MemRelay{bufSize: 256, done: make(chan struct{})}
 	for _, opt := range opts {
 		opt(m)
 	}
@@ -84,16 +92,18 @@ func (m *MemRelay) Start(ctx context.Context, sink Sink) error {
 	return nil
 }
 
-// run drains the node's delivery queue until ctx is cancelled or ch is closed.
+// run drains the node's delivery queue until ctx is cancelled or the relay is
+// Closed. The per-node channel (n.ch) is never closed; the goroutine instead
+// exits on n.ctx or the relay-level done signal, so a concurrent Publish send
+// can never race a channel close.
 func (n *memNode) run() {
 	for {
 		select {
 		case <-n.ctx.Done():
 			return
-		case in, ok := <-n.ch:
-			if !ok {
-				return
-			}
+		case <-n.relay.done:
+			return
+		case in := <-n.ch:
 			// Best-effort: a Sink.Inject error (e.g. room evicted between
 			// publish and delivery) must not stall delivery to other events
 			// or panic the goroutine. There is no caller to surface it to.
@@ -145,6 +155,10 @@ func (m *MemRelay) Publish(ctx context.Context, out Outbound) error {
 	for _, n := range targets {
 		select {
 		case n.ch <- in:
+		case <-m.done:
+			// Relay Closed mid-publish. n.ch is never closed, so the send
+			// above can never panic; we just stop fanning out and report it.
+			return ErrRelayClosed
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-n.ctx.Done():
@@ -162,6 +176,13 @@ func (m *MemRelay) RoomActivated(string) {}
 func (m *MemRelay) RoomDeactivated(string) {}
 
 // Close stops all node-delivery goroutines and rejects further Publish/Start.
+//
+// Close signals shutdown by closing the relay-level done channel exactly once;
+// it deliberately does NOT close the per-node delivery channels (n.ch). Closing
+// n.ch would race a concurrent Publish send and panic ("send on closed
+// channel"). Instead, run() and Publish both select on done and unwind. A send
+// that wins the race against done merely buffers an item nobody drains — benign,
+// and the node goroutine has already exited so there is no leak.
 func (m *MemRelay) Close() error {
 	m.mu.Lock()
 	if m.closed {
@@ -169,12 +190,8 @@ func (m *MemRelay) Close() error {
 		return nil
 	}
 	m.closed = true
-	nodes := m.nodes
 	m.nodes = nil
+	close(m.done)
 	m.mu.Unlock()
-
-	for _, n := range nodes {
-		close(n.ch)
-	}
 	return nil
 }
