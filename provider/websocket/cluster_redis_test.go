@@ -135,7 +135,9 @@ func TestInteg_RedisCluster_TwoServers_AwarenessPropagates(t *testing.T) {
 	connB := dial(t, tsB, "room")
 	drainHandshake(t, connB, crdt.New())
 
-	time.Sleep(100 * time.Millisecond)
+	// Same polled-handshake pattern as the sync test — no timing-dependent
+	// sleeps.
+	waitSubscribed(t, mr, ygoredis.DefaultChannelPrefix+"room", 2)
 
 	// Peer-A publishes an awareness state.
 	awA := buildAwarenessUpdate(t, 42, 1, map[string]any{"cursor": 7})

@@ -400,6 +400,13 @@ func (r *Relay) Publish(ctx context.Context, out cluster.Outbound) error {
 // so two concurrent Activate/Deactivate calls for the same room cannot
 // reorder the underlying RPCs and leave the channel subscribed with a
 // zero refcount.
+//
+// The RPC uses the relay's bound start context (the one passed to Start, in
+// practice Server.relayCtx) so a slow/unreachable Redis cannot pin this
+// goroutine indefinitely — Server.Shutdown cancels the ctx and the SUBSCRIBE
+// returns promptly. Note that the websocket provider calls RoomActivated
+// under s.rmu.Lock during room creation; a non-cancelable Background ctx
+// here would let a Redis stall block the entire server's room-create path.
 func (r *Relay) RoomActivated(room string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -407,25 +414,40 @@ func (r *Relay) RoomActivated(room string) {
 	if !r.started.Load() || r.closed.Load() {
 		return
 	}
+	// Short-circuit if the relay's bound ctx is already cancelled (e.g.
+	// Shutdown is in flight): skip the doomed RPC and the bookkeeping it
+	// would leave behind.
+	select {
+	case <-r.startCtx.Done():
+		return
+	default:
+	}
 
 	r.activeRooms[room]++
 	if r.activeRooms[room] > 1 {
 		return // already subscribed
 	}
-	if err := r.pubSub.Subscribe(context.Background(), r.channelFor(room)); err != nil {
+	if err := r.pubSub.Subscribe(r.startCtx, r.channelFor(room)); err != nil {
 		r.log.Warn("cluster/redis: SUBSCRIBE failed", "room", room, "err", err)
 	}
 }
 
 // RoomDeactivated unsubscribes from the room's pub/sub channel. See the
 // RoomActivated godoc for idempotency / reference-counting / locking
-// semantics.
+// semantics. The UNSUBSCRIBE RPC is cancelable via the relay's bound start
+// context for the same reason: a stalled Redis must not pin the websocket
+// provider's room-teardown path.
 func (r *Relay) RoomDeactivated(room string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if !r.started.Load() || r.closed.Load() {
 		return
+	}
+	select {
+	case <-r.startCtx.Done():
+		return
+	default:
 	}
 	if r.activeRooms[room] <= 0 {
 		return
@@ -439,7 +461,7 @@ func (r *Relay) RoomDeactivated(room string) {
 	if count > 0 {
 		return // still active elsewhere on this node
 	}
-	if err := r.pubSub.Unsubscribe(context.Background(), r.channelFor(room)); err != nil {
+	if err := r.pubSub.Unsubscribe(r.startCtx, r.channelFor(room)); err != nil {
 		r.log.Warn("cluster/redis: UNSUBSCRIBE failed", "room", room, "err", err)
 	}
 }
