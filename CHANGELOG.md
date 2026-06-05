@@ -5,6 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] — 2026-06-01
+
+Horizontal-scale release. Adds two independent building blocks for running ygo
+across multiple processes: a **cluster relay** that mirrors document updates
+*and* awareness between server nodes, and a **versioned persistence** layer with
+history, snapshots, and crash-safe pruning on top of the existing
+`PersistenceAdapter` primitive. Both ship with reference implementations and are
+purely additive — no breaking changes.
+
+### Added
+
+- **`cluster` package — cross-node relay**. A first-class abstraction for
+  sharing one logical document across multiple `websocket.Server` instances,
+  carrying **both CRDT document updates and awareness (presence)** — superseding
+  the doc-sample clustered-adapter pattern that relayed documents only and
+  punted on awareness.
+  - `cluster.Relay` interface (`Publish`, `Start`, `RoomActivated`,
+    `RoomDeactivated`, `Close`) and `cluster.Sink` interface (`Inject`, `Rooms`,
+    `GetAwareness`, `GetDoc`). `*websocket.Server` satisfies `cluster.Sink`
+    directly (compile-time asserted).
+  - `cluster.Outbound` / `cluster.Inbound` events tagged `KindSync` /
+    `KindAwareness`.
+  - `cluster.MemRelay` — channel-backed in-process reference implementation
+    (`NewMemRelay`, `WithBufferSize`), ideal for tests and single-process
+    multi-server simulations.
+  - **`(*websocket.Server).AttachRelay(cluster.Relay) error`** — wires
+    `doc.OnUpdate` + `awareness.OnChange` per room to `Publish` local changes,
+    and injects remote changes via `Inject` (sync → `ApplyUpdateV1` +
+    `BroadcastUpdate`; awareness → `ApplyUpdate` + peer fan-out). Started with a
+    context cancelled on `Server.Shutdown`, which also closes the relay.
+  - **Echo guard**: relay-injected changes are applied with a process-local
+    origin sentinel; the per-room observers drop sentinel-origin changes by
+    pointer identity (the same trick `Server.Apply` uses), so a change crosses
+    the cluster exactly once and never loops. The sentinel never crosses the
+    wire.
+  - New `Server` accessors backing the `Sink` contract:
+    **`GetAwareness(room) (*awareness.Awareness, bool)`** and
+    **`Rooms() []string`** (both thread-safe over the room map).
+  - See [docs/CLUSTERING.md](docs/CLUSTERING.md).
+
+- **`persistence` package — versioned persistence**. An append-only,
+  versioned store keyed by room, layered on the low-level `PersistenceAdapter`
+  primitive.
+  - `persistence.VersionedPersistence` interface: `Load`, `AppendUpdate`,
+    `ListVersions` (newest-first, non-cumulative), `GetUpdate`, `MaterializeAt`
+    (point-in-time rebuild via `MergeUpdatesV1`), `CaptureSnapshot` /
+    `RestoreSnapshot` (named V1 head blobs), `PruneAfter`, `Compact`, `Delete`.
+    Standardised on lib0 **V1** internally.
+  - **Crash-safe `PruneAfter`** (snapshot-before-delete): writes a checkpoint
+    (`target` ceiling + rolled-back head) *before* deleting newer updates, and
+    clamps every read to the checkpoint — a crash mid-prune can never resurrect
+    a "future" version on reopen.
+  - Reference implementations: `NewMemoryPersistence()` (in-process) and
+    `NewFilePersistence(dir)` (directory-backed, atomic temp+rename writes,
+    `Reopen()` restart modelling).
+  - **Exported conformance suite** `persistence.RunConformance(t, factory)` so
+    external adapters (e.g. a GCS store) verify themselves with one call. Covers
+    append/list/get, materialise, prune (incl. the **mid-prune crash**
+    regression), compact, and snapshot round-trip. Optional
+    `CrashInjector` / `Reopener` interfaces unlock the crash-safety subtest;
+    both reference impls implement them.
+  - **`persistence.LegacyAdapter`** (`NewLegacyAdapter` /
+    `NewLegacyAdapterContext`) maps `Load`/`AppendUpdate` onto the provider's
+    `LoadDoc`/`StoreUpdate` (and the optional `StoreUpdateContext`), so a
+    `VersionedPersistence` plugs straight into
+    `websocket.NewServerWithPersistence` — every committed transaction becomes
+    one version.
+  - See [docs/PERSISTENCE.md](docs/PERSISTENCE.md#versioned-persistence-the-persistence-package).
+
+### Documentation
+
+- New [docs/CLUSTERING.md](docs/CLUSTERING.md) documenting the relay, `MemRelay`,
+  `AttachRelay`, the origin-sentinel echo guard, and implementing a custom
+  broker-backed `Relay`.
+- [docs/PERSISTENCE.md](docs/PERSISTENCE.md) gains a versioned-persistence
+  section and now frames `PersistenceAdapter` as the low-level primitive the
+  versioned layer builds on; the multi-node section cross-links to the relay for
+  cluster-wide awareness.
+
 ## [1.19.0] — 2026-05-28
 
 Second Hocuspocus-compatibility release. Adds the application-level extension points that production deployments need on top of v1.18.0's wire-protocol message types: per-room lifecycle hooks on the WebSocket server, and a new optional `provider/webhook` subpackage for forwarding events to external HTTP endpoints.

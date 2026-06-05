@@ -59,7 +59,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.3"
+          # Track the latest 1.26 patch so the scan always runs on a toolchain
+          # with current standard-library fixes (avoids failing on stdlib CVEs
+          # that are already fixed in a newer patch).
+          go-version: "1.26"
           cache: true
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...

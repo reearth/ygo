@@ -148,6 +148,18 @@ func (s *Server) effectiveMaxUpdateBytes() int {
 // matching the existing peer-broadcast path. A slow peer cannot block
 // the broadcast to other peers.
 func (s *Server) BroadcastUpdate(ctx context.Context, room string, update []byte) error {
+	return s.broadcastUpdate(ctx, room, update, true)
+}
+
+// broadcastUpdate is the implementation behind BroadcastUpdate. fireHook
+// controls whether the OnInject policy hook runs: public BroadcastUpdate (and
+// thus all existing callers) passes true, preserving the documented behaviour.
+// The relay Inject path passes false: an inbound relay update has already been
+// applied to the local doc, so letting OnInject veto the fan-out would mutate
+// this node's doc while peers never receive it — silently diverging this node
+// from the cluster (FIX H). OnInject is for LOCALLY-originated server writes
+// (rate limits / content policy), not for replaying remote cluster traffic.
+func (s *Server) broadcastUpdate(ctx context.Context, room string, update []byte, fireHook bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -168,7 +180,7 @@ func (s *Server) BroadcastUpdate(ctx context.Context, room string, update []byte
 	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidUpdate, err)
 	}
-	if s.OnInject != nil {
+	if fireHook && s.OnInject != nil {
 		if err := s.OnInject(ctx, InjectInfo{
 			Room:       room,
 			Op:         OpBroadcastUpdate,
@@ -513,6 +525,7 @@ func (s *Server) CloseRoom(name string, force bool) error {
 	// s.rooms (the early-return above handled the lost-race case), so
 	// firing here is exactly-once vs handleDisconnect — see #93 self-
 	// review B1.
+	s.teardownRelayRoom(rm, name)
 	if hook := s.OnUnloadDocument; hook != nil {
 		s.safeHook("OnUnloadDocument", func() {
 			hook(context.Background(), name)

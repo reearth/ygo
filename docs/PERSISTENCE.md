@@ -5,6 +5,16 @@ store and restore room state across server restarts without modifying any
 server code.  This document explains the contract, shows concrete
 implementations for common backends, and covers multi-node deployment.
 
+> **Two layers.** `PersistenceAdapter` (`LoadDoc` / `StoreUpdate`) is the
+> **low-level primitive**: a head blob plus an append hook, with no notion of
+> history. The `persistence` package builds a **`VersionedPersistence`** layer
+> on top of it — append-only versioned history, point-in-time materialisation,
+> named snapshots, and crash-safe pruning — and ships a `LegacyAdapter` so a
+> versioned store still plugs into `NewServerWithPersistence`. See
+> [Versioned persistence](#versioned-persistence-the-persistence-package) below.
+> For live cross-node fan-out (documents **and** awareness) see
+> [CLUSTERING.md](CLUSTERING.md).
+
 ---
 
 ## The Interface
@@ -198,6 +208,15 @@ A single `websocket.Server` holds documents in process memory.  When you run
 multiple server instances behind a load balancer, peers connected to different
 nodes will not see each other's edits unless you add a cross-node relay.
 
+> **Prefer the `cluster` package for new deployments.** The adapter-based
+> pattern below piggy-backs cross-node fan-out on `StoreUpdate` and carries
+> **document updates only** — awareness/presence is *not* relayed, so each node
+> only sees its own peers' cursors (see the table at the end of this section).
+> The first-class [`cluster.Relay`](CLUSTERING.md) carries **both document
+> updates and awareness**, with a built-in echo guard. The pattern below remains
+> valid for document-only setups and as a reference for wiring fan-out onto a
+> persistence backend.
+
 ### Architecture
 
 ```
@@ -308,7 +327,7 @@ func (a *ClusteredAdapter) subscribe() {
 | Update ordering | CRDTs converge regardless of order — no coordination needed |
 | Snapshot races | Use optimistic locking (Redis `WATCH` or Postgres `FOR UPDATE`) |
 | Room fan-out | Partition rooms by consistent hash if pub/sub throughput is a concern |
-| Awareness state | Awareness is ephemeral — each node stores only its own peers' cursors |
+| Awareness state | This adapter pattern relays document updates only. For cluster-wide presence use [`cluster.Relay`](CLUSTERING.md) (`KindAwareness`) |
 | Reconnect | On connect, server sends full V1 snapshot → client converges immediately |
 
 ---
@@ -350,6 +369,142 @@ func TestAdapter(t *testing.T, adapter PersistenceAdapter) {
     }
 }
 ```
+
+---
+
+## Versioned persistence (the `persistence` package)
+
+The `github.com/reearth/ygo/persistence` package layers an **append-only,
+versioned** store on top of the `PersistenceAdapter` primitive. Where
+`PersistenceAdapter` only knows the current head, `VersionedPersistence` keeps
+the full sequence of updates as numbered versions, can rebuild the document at
+any past version, holds named snapshots, and prunes/compacts the log
+crash-safely.
+
+Everything is stored in lib0 **V1** internally — V1 is the only format ygo can
+merge (`crdt.MergeUpdatesV1`). Convert at the edges with `crdt.UpdateV1ToV2` /
+`UpdateV2ToV1` if you need V2.
+
+### The interface
+
+```go
+// github.com/reearth/ygo/persistence
+
+type Version uint64
+type VersionMeta struct {
+    Version   Version
+    UpdatedAt time.Time
+}
+type LoadResult struct {
+    Update  []byte  // merged V1 head state (nil for an empty room)
+    Version Version // highest version folded into Update, or 0
+}
+
+type VersionedPersistence interface {
+    Load(ctx context.Context, room string) (LoadResult, error)
+    AppendUpdate(ctx context.Context, room string, update []byte) (Version, error)
+    ListVersions(ctx context.Context, room string) ([]VersionMeta, error)        // newest-first; single (non-cumulative) updates
+    GetUpdate(ctx context.Context, room string, v Version) (update []byte, meta VersionMeta, ok bool, err error)
+    MaterializeAt(ctx context.Context, room string, v Version) ([]byte, error)   // rebuild V1 head at v (MergeUpdatesV1)
+    CaptureSnapshot(ctx context.Context, room, name string, state []byte) (Version, error)
+    RestoreSnapshot(ctx context.Context, room, name string) (update []byte, v Version, ok bool, err error)
+    PruneAfter(ctx context.Context, room string, target Version, rolledBack []byte) error
+    Compact(ctx context.Context, room string, keep int) (deleted int, err error)
+    Delete(ctx context.Context, room string) error
+}
+```
+
+Semantics:
+
+- **Versions** are dense, per-room, monotonically increasing sequence numbers
+  assigned by `AppendUpdate`, starting at 1. `0` is the "empty room" sentinel.
+- **`ListVersions`** returns metadata **newest-first**; each entry is a single,
+  *non-cumulative* update. An unknown room yields an empty slice (not an error).
+- **`MaterializeAt(v)`** folds every update with version ≤ `v` into a full V1
+  head via `MergeUpdatesV1`. `v == 0` materialises to empty.
+- **Snapshots** are named V1 blobs you supply — typically
+  `EncodeStateAsUpdateV1` of the materialised doc (a *portable head blob*, **not**
+  a `crdt.Snapshot` state-vector marker). `CaptureSnapshot` returns the head
+  version it is pinned to; `RestoreSnapshot` returns `(blob, version, ok)`.
+- **`PruneAfter(target, rolledBack)`** is **snapshot-before-delete**: it first
+  persists a checkpoint (the `target` ceiling + the `rolledBack` head you pass,
+  usually from `MaterializeAt(target)`), and only then deletes the updates newer
+  than `target`. The checkpoint is a *hard ceiling* on the visible version
+  range, so a crash between the checkpoint write and the deletes can never
+  resurrect a "future" version on reopen — this is the spurious-future-version
+  guard.
+- **`Compact(keep)`** folds the oldest updates into the oldest retained record
+  (preserving materialised state) and returns the count removed. `keep <= 0`
+  keeps everything.
+
+### Reference implementations
+
+| Type | Backing | Notes |
+|------|---------|-------|
+| `persistence.NewMemoryPersistence()` | in-process maps | reference impl; simplest conformance target |
+| `persistence.NewFilePersistence(dir)` | one directory per store | atomic temp+rename writes; `checkpoint` file is the crash-safety pivot; `Reopen()` models a restart |
+
+### Conformance suite
+
+The package exports a reusable, table-driven behavioural suite so external
+adapters (e.g. a GCS-backed store in another repo) verify themselves with one
+call:
+
+```go
+import "github.com/reearth/ygo/persistence"
+
+func TestMyStore(t *testing.T) {
+    persistence.RunConformance(t, func() persistence.VersionedPersistence {
+        return mystore.New(/* fresh, empty */)
+    })
+}
+```
+
+`RunConformance` covers: append → `ListVersions` newest-first; `GetUpdate`;
+`MaterializeAt` rebuilding correct state; `PruneAfter` removing future versions;
+**crash-safe prune** (no spurious future versions after a mid-prune crash);
+`Compact` trimming the oldest; and `CaptureSnapshot`/`RestoreSnapshot`
+round-trip.
+
+Two **optional** interfaces unlock extra coverage; implement them if your store
+can model them, otherwise the relevant subtest is skipped (with a notice):
+
+```go
+// Lets the suite simulate a crash between PruneAfter's checkpoint write and
+// its deletes. Without it, the crash-safety subtest is skipped.
+type CrashInjector interface {
+    SetCrashAfterCheckpoint(fn func() bool)
+}
+
+// Models a process restart by returning a fresh handle over the same backing
+// store (file stores reopen the dir; in-memory stores return themselves).
+type Reopener interface {
+    Reopen() (VersionedPersistence, error)
+}
+```
+
+Both `MemoryPersistence` and `FilePersistence` implement both, so the
+crash-safety regression runs against each.
+
+### Plugging into the WebSocket server (`LegacyAdapter`)
+
+`VersionedPersistence` does not match the provider's `PersistenceAdapter`
+signature directly (`Load`/`AppendUpdate` vs `LoadDoc`/`StoreUpdate`). The
+`LegacyAdapter` shim bridges them:
+
+```go
+store := persistence.NewFilePersistence("/var/lib/ygo")
+srv := websocket.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
+```
+
+The mapping: `LoadDoc` → `Load().Update` (materialised head), `StoreUpdate` →
+`AppendUpdate` (the assigned `Version` is dropped). Because the provider calls
+`StoreUpdate` once per committed transaction, **every transaction becomes one
+version** — you get the full history for free. `LegacyAdapter` also implements
+the optional `StoreUpdateContext` (see below), and `NewLegacyAdapterContext`
+threads a shutdown context through every store call. Reach the versioned API
+(history, snapshots, prune) via `adapter.Store()` or by keeping a reference to
+the underlying store.
 
 ---
 
