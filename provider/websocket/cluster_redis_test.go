@@ -16,6 +16,19 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 )
 
+// waitSubscribed polls miniredis until the channel hits at least n
+// subscribers, or fails the test after 2s. Replaces timing-dependent
+// time.Sleep handshakes (T3 in the v1.21.0 review).
+func waitSubscribed(t *testing.T, mr *miniredis.Miniredis, channel string, n int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		counts := mr.PubSubNumSub(channel)
+		return counts[channel] >= n
+	}, 2*time.Second, 5*time.Millisecond,
+		"channel %s never reached %d subscribers (got %d)",
+		channel, n, mr.PubSubNumSub(channel)[channel])
+}
+
 // Two-server integration via the Redis relay — the canonical acceptance
 // criterion for issue #62. miniredis stands in for a real Redis broker so
 // the test runs in CI without a docker dependency.
@@ -66,8 +79,9 @@ func TestInteg_RedisCluster_TwoServers_SyncPropagates(t *testing.T) {
 	connB := dial(t, tsB, "room")
 	drainHandshake(t, connB, docB)
 
-	// Allow the SUBSCRIBE round trips to register before publishing.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for both servers' SUBSCRIBEs to register at the broker before
+	// publishing — a polled check, NOT a timed sleep (T3 review fix).
+	waitSubscribed(t, mr, ygoredis.DefaultChannelPrefix+"room", 2)
 
 	// Peer-A makes an edit and pushes it to srvA.
 	txtA := docA.GetText("t")

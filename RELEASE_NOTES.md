@@ -19,10 +19,11 @@ srv := ygws.NewServer()
 _ = srv.AttachRelay(relay)
 ```
 
-- **Per-room pub/sub** — a node only receives traffic for rooms it hosts. Reference-counted at the relay layer.
-- **Bounded back-pressure** — `OutboundBuffer` (default 256) decouples `Publish` from the Redis RPC so the CRDT transaction never blocks on network I/O.
-- **Echo prevention** rides the existing provider-side sentinel guard. No special handling in the transport.
-- **Self-describing wire format** — `VarUint(kind) + VarString(room) + VarBytes(data)`.
+- **Per-room pub/sub** — a node only receives traffic for rooms it hosts. Reference-counted at the relay layer; SUBSCRIBE/UNSUBSCRIBE held under the lifecycle mutex so concurrent activations cannot reorder.
+- **Bounded back-pressure** — `OutboundBuffer` (default 256) decouples `Publish` from the Redis RPC so the CRDT transaction never blocks on network I/O. `Publish` surfaces a clean `ErrRelayClosed` if the bound start context is cancelled (e.g. `Server.Shutdown`) — never hangs.
+- **Self-delivery suppression** — every relay carries a 16-byte nodeID on the wire; the subscriber drops self-deliveries before any decode/Inject work. The provider-side sentinel guard remains the authoritative echo defence.
+- **Configurable inbound channel size** (`Config.ChannelSize`, default 1024) — go-redis silently drops messages when this fills, which for CRDT updates is silent divergence.
+- **Self-describing wire format** — `VarBytes(nodeID) + VarUint(kind) + VarString(room) + VarBytes(data)`.
 
 ### Delivery semantics — fire-and-forget
 

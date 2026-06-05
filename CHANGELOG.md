@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.21.0] — 2026-06-03
+## [1.21.0] — 2026-06-05
 
 Production-ready Redis transport for the `cluster.Relay` abstraction shipped in v1.20.0. With this release a multi-process ygo deployment behind a load balancer can share one logical document per room via Redis pub/sub — the canonical Hocuspocus `extension-redis` / y-hub topology, in pure Go.
 
@@ -14,12 +14,13 @@ Production-ready Redis transport for the `cluster.Relay` abstraction shipped in 
 - **`cluster/redis` subpackage — Redis-backed `cluster.Relay`** (#62).
   - `redis.New(client *goredis.Client, redis.Config)` returns a relay that satisfies the `cluster.Relay` contract.
   - Per-room pub/sub: `RoomActivated` SUBSCRIBES, `RoomDeactivated` UNSUBSCRIBES — a node only receives traffic for rooms it actually hosts. Calls are reference-counted at the relay layer.
-  - Wire format: `VarUint(kind) + VarString(room) + VarBytes(data)`. Origin is observer-local and intentionally never serialised, per the `cluster.Relay` package contract.
-  - Bounded back-pressure: a configurable `OutboundBuffer` (default 256) decouples `Publish` from the actual Redis `PUBLISH` RPC so the CRDT transaction path never blocks on the network round trip.
-  - Single dispatcher goroutine pattern; subscriber + publisher goroutines exit cleanly on `Close`.
+  - **Wire format**: `VarBytes(nodeID) + VarUint(kind) + VarString(room) + VarBytes(data)`. The nodeID is a per-relay 16-byte identifier used to suppress self-delivery (Redis pub/sub mirrors every publish back to the publisher's own subscription; the subscriber drops payloads whose nodeID matches its own). Origin is observer-local and intentionally never serialised, per the `cluster.Relay` package contract.
+  - Bounded back-pressure: a configurable `OutboundBuffer` (default 256) decouples `Publish` from the actual Redis `PUBLISH` RPC so the CRDT transaction path never blocks on the network round trip. Publish surfaces a clean `ErrRelayClosed` if the bound start context is cancelled (e.g. `Server.Shutdown`), never hangs.
+  - Configurable inbound channel size (`Config.ChannelSize`, default 1024) — go-redis silently drops messages when its inbound channel fills; for CRDT updates this would manifest as silent inter-node divergence, so size for the busiest expected room.
+  - Single dispatcher goroutine pattern; subscriber + publisher goroutines exit cleanly on `Close`. Lifecycle (Start/Close) and room-membership (RoomActivated/RoomDeactivated) ops are serialised under one mutex so concurrent calls can never reorder the underlying Redis SUBSCRIBE/UNSUBSCRIBE RPCs.
   - **Delivery contract: fire-and-forget** — Redis pub/sub is at-most-once; a node that subscribes *after* a publish does not receive that publish. The intended deployment pattern pairs the relay with `VersionedPersistence` for catch-up state. Documented explicitly in `docs/CLUSTERING.md`.
-  - Echo prevention remains entirely on the provider side (the sentinel pointer-identity guard in `provider/websocket/cluster.go`) — the Redis adapter forwards whatever the provider hands it.
-  - 11 unit tests against `miniredis` (no docker dependency in CI): nil-client rejection, before-Start / after-Close error contracts, idempotent Close, round-trip of both `KindSync` and `KindAwareness`, per-room subscription isolation, RoomDeactivated stops delivery, reference-counted room activation, concurrent-publisher race.
+  - Echo prevention remains entirely on the provider side (the sentinel pointer-identity guard in `provider/websocket/cluster.go`) — the Redis adapter additionally drops self-deliveries at the transport, so the local node never pays the decode + Inject + observer round trip for its own writes.
+  - **Test coverage**: 20+ unit and integration tests against `miniredis` (no docker dependency in CI), exercising nil-client / nil-sink / start-after-close / sink-mismatch error contracts, idempotent Close, cross-node round-trip for both `KindSync` and `KindAwareness`, self-delivery suppression, per-room subscription isolation, RoomDeactivated stops delivery, reference-counted room activation, wire-format encode/decode round-trip with truncated-input safety, deterministic `Publish` back-pressure under buffer-full + ctx-deadline + done-close + startCtx-cancel arms, concurrent-publisher stress, concurrent Activate/Deactivate convergence, and Start/Close/Publish lifecycle stress.
   - **Two-server integration tests** (the issue's acceptance criterion): peer-A connected to `srvA` and peer-B connected to `srvB`, both servers sharing one Redis. Edits on A propagate to B (and vice versa) for both document sync and awareness.
 
 ### Dependencies

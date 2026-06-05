@@ -267,19 +267,33 @@ _ = srv.AttachRelay(relay)
 UNSUBSCRIBES. A node only receives traffic for rooms it actually hosts,
 which scales cleanly when only a subset of rooms are hot on each node.
 
-**Wire format.** `VarUint(kind) + VarString(room) + VarBytes(data)` —
-self-describing and stable across go-redis versions. `Origin` is
+**Wire format.** `VarBytes(nodeID) + VarUint(kind) + VarString(room) +
+VarBytes(data)` — self-describing and stable across go-redis versions.
+The `nodeID` is a per-relay 16-byte identifier (auto-generated in `New`,
+or supply via `Config.NodeID`) used to suppress self-delivery: Redis
+pub/sub mirrors every publish back to the publisher's own subscription,
+and the subscriber drops payloads whose nodeID matches its own before
+calling `Sink.Inject`. The provider-side sentinel guard remains the
+authoritative echo defence; the self-skip is a perf optimisation that
+avoids the local decode + apply + observer round trip. `Origin` is
 observer-local and intentionally never serialised (per the
 `cluster.Relay` package contract).
 
 **Bounded back-pressure.** Internally, `Publish` enqueues to a bounded
 channel (default 256) drained by a dedicated publisher goroutine. When
-the queue is full, `Publish` blocks until a slot frees, ctx cancels, or
-the relay closes — the same contract `MemRelay` exposes.
+the queue is full, `Publish` blocks until a slot frees, the caller's
+ctx cancels, the relay closes, or the bound start context (the one
+passed to `AttachRelay`/`Start`) is cancelled — surfacing as a clean
+`ErrRelayClosed` rather than hanging. The inbound side has its own
+buffer too (`Config.ChannelSize`, default 1024); size it for the
+busiest expected room since go-redis silently drops messages when this
+fills.
 
 **Reference-counted activation.** `RoomActivated` / `RoomDeactivated`
 are reference-counted at the relay layer, so duplicate calls collapse
-into a single SUBSCRIBE / UNSUBSCRIBE round trip.
+into a single SUBSCRIBE / UNSUBSCRIBE round trip. The underlying Redis
+RPCs are held under the relay's lifecycle mutex so concurrent calls for
+the same room can never reorder the pub/sub state.
 
 ### Delivery semantics — fire-and-forget
 
