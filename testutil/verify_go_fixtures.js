@@ -155,6 +155,33 @@ check('GoToJS_SubDoc_Reencode_V2', () => {
   if (!subs.has('child')) throw new Error("re-encoded subdoc lost the 'child' key")
 })
 
+// ── Mirror loop (yjs → ygo → yjs): ygo re-encoded genuine Yjs data; Yjs must
+// read it back with the right content. ──────────────────────────────────────
+check('Mirror_YMap_DupKey_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('ymap_dupkey_reencode_v1'))
+  assertEqual(doc.getMap('m').get('k'), 2, 'dupkey reencode v1: k')
+})
+check('Mirror_YMap_DupKey_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('ymap_dupkey_reencode_v2'))
+  assertEqual(doc.getMap('m').get('k'), 2, 'dupkey reencode v2: k')
+})
+check('Mirror_Embed_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('embed_reencode_v1'))
+  const embed = doc.getText('t').toDelta().map(o => o.insert).find(i => i && typeof i === 'object')
+  if (!embed) throw new Error('no embed after reencode v1')
+  assertEqual(embed.image, 'http://x/y.png', 'embed reencode v1')
+})
+check('Mirror_Embed_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('embed_reencode_v2'))
+  const embed = doc.getText('t').toDelta().map(o => o.insert).find(i => i && typeof i === 'object')
+  if (!embed) throw new Error('no embed after reencode v2')
+  assertEqual(embed.image, 'http://x/y.png', 'embed reencode v2')
+})
+
 // ── Concurrent merge ──────────────────────────────────────────────────────────
 check('GoToJS_ConcurrentMerge_V1', () => {
   const doc = new Y.Doc()

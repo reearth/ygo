@@ -133,6 +133,22 @@ func TestCompat_GoToJS(t *testing.T) {
 		write("subdoc_reencode_v2", crdt.EncodeStateAsUpdateV2(d, nil))
 	}
 
+	// ── Mirror loop (yjs → ygo → yjs): ygo decodes genuine Yjs bytes, then
+	// re-encodes; real Yjs must read the result back with the right content.
+	// Proves ygo's encode of YJS-ORIGINATED structs (a different path than
+	// encoding a Go-built doc) stays conformant. ────────────────────────────
+	reencode := func(label, yjsV1Hex string) {
+		raw, herr := hex.DecodeString(yjsV1Hex)
+		require.NoError(t, herr)
+		d := crdt.New(crdt.WithClientID(1))
+		require.NoError(t, crdt.ApplyUpdateV1(d, raw, nil))
+		write(label+"_v1", crdt.EncodeStateAsUpdateV1(d, nil))
+		write(label+"_v2", crdt.EncodeStateAsUpdateV2(d, nil))
+	}
+	// dup-key {k:2} and an embed — genuine yjs@13.6.30 V1 bytes.
+	reencode("ymap_dupkey_reencode", "0102a0dcabf704002101016d016b01a8a0dcabf70400017d0201a0dcabf704010001")
+	reencode("embed_reencode", "0103bbab84b70d0004010174016184bbab84b70d000162c5bbab84b70d00bbab84b70d01207b22696d616765223a22687474703a2f2f782f792e706e67222c2277223a337d00")
+
 	// ── Concurrent merge (two Go clients) ────────────────────────────────────
 	{
 		docA := crdt.New(crdt.WithClientID(10))
