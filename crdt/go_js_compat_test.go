@@ -120,6 +120,19 @@ func TestCompat_GoToJS(t *testing.T) {
 		write("ytext_embed_v2", crdt.EncodeStateAsUpdateV2(doc, nil))
 	}
 
+	// ── YText mid-surrogate split: encode-side wire conformance ──────────────
+	// Inserting at an index that bisects a surrogate pair must split the emoji
+	// into U+FFFD halves exactly like Yjs, so real Yjs reads back "a�X�c"
+	// (verified against yjs@13.6.30). Guards splitUTF16 on the encode path.
+	{
+		doc := crdt.New(crdt.WithClientID(1))
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "a😀c", nil) })
+		doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 2, "X", nil) }) // index 2 = mid-😀
+		write("ytext_midsurrogate_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
+		write("ytext_midsurrogate_v2", crdt.EncodeStateAsUpdateV2(doc, nil))
+	}
+
 	// ── Subdoc re-encode: decode genuine Yjs subdoc bytes, re-encode with ygo,
 	// and confirm real Yjs can still decode the result. Guards the ContentDoc
 	// opts fix (Yjs crashes on a null/absent opts). ──────────────────────────

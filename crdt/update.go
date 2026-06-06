@@ -330,8 +330,10 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 	case *ContentBinary:
 		enc.WriteVarBytes(ct.Data)
 	case *ContentString:
-		byteOff := utf16ByteOffset(ct.Str, offset)
-		enc.WriteVarString(ct.Str[byteOff:])
+		// Emit only the tail from `offset`. splitUTF16 emits a leading U+FFFD
+		// when offset bisects a surrogate pair, matching Yjs's mid-surrogate slice.
+		_, tail := splitUTF16(ct.Str, offset)
+		enc.WriteVarString(tail)
 	case *ContentEmbed:
 		// Yjs V1 encodes the embed via writeJSON = writeVarString(JSON.stringify).
 		// (V2 uses writeAny — see encodeContentV2.) Using WriteAny here put a

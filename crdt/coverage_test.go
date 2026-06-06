@@ -1418,11 +1418,11 @@ func TestUnit_ApplyUpdateV2_TruncatedMidway(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// ── utf16ByteOffset: splice at exactly len(s) ─────────────────────────────────
+// ── splitUTF16: splice at exactly len(s) ──────────────────────────────────────
 
 func TestUnit_ContentString_Splice_AtEnd(t *testing.T) {
-	// Splice at offset == utf16Len(s) — utf16ByteOffset returns len(s).
-	// This hits the "return len(s)" path at the end of the loop.
+	// Splice at offset == utf16Len(s) — splitUTF16 returns (s, "").
+	// This hits the "return s, \"\"" path at the end of the loop.
 	c := NewContentString("hello")
 	right := c.Splice(5) // split at the very end
 	assert.Equal(t, 5, c.Len())

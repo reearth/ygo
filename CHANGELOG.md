@@ -57,6 +57,17 @@ bytes and fixed:
   has no hook type, but Yjs writes a `hookName` string after the ref; the V1
   decoder left it unconsumed, corrupting the rest of the update. It now consumes
   the name and degrades to a placeholder (as the V2 decoder already did).
+- **Splitting `YText` inside a surrogate pair diverged from Yjs**
+  (#wire-conformance). When an index/length lands in the middle of a
+  supplementary character (e.g. an emoji, which occupies 2 UTF-16 code units),
+  Yjs slices the surrogate pair and replaces each lone half with U+FFFD
+  (`"a😀c"`, insert `"X"` @2 → `"a�X�c"`). ygo instead rounded the boundary
+  forward to the next whole rune, producing different content and item-clock
+  boundaries than a JS peer. A shared `splitUTF16` helper now emits U+FFFD on
+  both halves for the split and both encoder tail-slice paths (V1 + V2),
+  matching Yjs (verified against `yjs@13.6.30`). Clean (between-character) splits
+  are unchanged. Reachable only by indices interior to a surrogate pair, which
+  conformant editors never emit — but now exact for fuzzers and hand-built indices.
 
 The audit confirmed **no** divergence in the V1 struct header/framing, info-byte
 layout, GC/Skip structs, delete-set body, content ref numbers,

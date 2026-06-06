@@ -140,6 +140,19 @@ check('GoToJS_YText_Embed_V2', () => {
   assertEqual(embed.image, 'http://x/y.png', 'embed.image')
 })
 
+// ── YText mid-surrogate split: ygo must split a surrogate pair into U+FFFD
+// halves exactly like Yjs, so real Yjs reads back "a�X�c". ──────────
+check('GoToJS_YText_MidSurrogate_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('ytext_midsurrogate_v1'))
+  assertEqual(doc.getText('t').toString(), 'a�X�c', 'mid-surrogate v1')
+})
+check('GoToJS_YText_MidSurrogate_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('ytext_midsurrogate_v2'))
+  assertEqual(doc.getText('t').toString(), 'a�X�c', 'mid-surrogate v2')
+})
+
 // ── Subdoc re-encode: ygo decoded a genuine Yjs subdoc and re-encoded it;
 // real Yjs must apply the result WITHOUT crashing on opts. ───────────────────
 check('GoToJS_SubDoc_Reencode_V1', () => {

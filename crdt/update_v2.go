@@ -497,8 +497,10 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 	case *ContentBinary:
 		enc.restEnc.WriteVarBytes(ct.Data)
 	case *ContentString:
-		byteOff := utf16ByteOffset(ct.Str, offset)
-		enc.writeString(ct.Str[byteOff:])
+		// Emit only the tail from `offset`. splitUTF16 emits a leading U+FFFD
+		// when offset bisects a surrogate pair, matching Yjs's mid-surrogate slice.
+		_, tail := splitUTF16(ct.Str, offset)
+		enc.writeString(tail)
 	case *ContentEmbed:
 		enc.restEnc.WriteAny(ct.Val)
 	case *ContentFormat:

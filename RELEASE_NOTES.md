@@ -49,6 +49,17 @@ breaks, all reproduced with genuine `yjs@13.6.30` bytes:
   Yjs document containing a hook corrupted the rest of the update. It now
   degrades gracefully like the V2 decoder.
 
+### Fixed — UTF-16 mid-surrogate splitting
+
+`Y.Text` is indexed in UTF-16 code units, so an emoji (supplementary character)
+occupies 2 units. When an index bisects a surrogate pair, Yjs slices the pair
+and replaces each lone half with U+FFFD — e.g. `"a😀c"`, insert `"X"` at 2 →
+`"a�X�c"`. ygo previously rounded the split forward to the next whole rune,
+yielding different content and item-clock boundaries than a JS peer. A shared
+`splitUTF16` helper now matches Yjs on the split and both encoder tail-slice
+paths (V1 + V2), verified against `yjs@13.6.30`. Clean (between-character) splits
+are unaffected; this only ever triggered on indices interior to a surrogate pair.
+
 ### Conformance coverage
 
 - 10 YMap + 3 content-type scenarios captured from `yjs@13.6.30`, decoded as
