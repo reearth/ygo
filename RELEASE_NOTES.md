@@ -1,48 +1,46 @@
 ## What's new
 
-Second Hocuspocus-compatibility release. Closes out the server-side parity story started in v1.18.0: lifecycle hooks for the WebSocket server, and a new optional `provider/webhook` subpackage for forwarding events to external HTTP endpoints.
+Production-ready Redis transport for the `cluster.Relay` abstraction. With this release a multi-process ygo deployment behind a load balancer can share one logical document per room via Redis pub/sub — the canonical Hocuspocus `extension-redis` / y-hub topology, in pure Go.
 
-### `provider/websocket` lifecycle hooks (#60)
-
-Four new optional hook fields on `Server`:
-
-| Hook | Fires when | Locking |
-|---|---|---|
-| `OnLoadDocument(ctx, room, doc) error` | After the persistence adapter has bootstrapped the doc, before any peer can interact. Returning an error fails room creation. | **Under the server room-map lock** (same as `PersistenceAdapter.LoadDoc`). Return promptly; defer heavy I/O to a goroutine. |
-| `OnUnloadDocument(ctx, room)` | Room is evicted from the server map (last-peer-leaves or `CloseRoom`). | After locks released; safe to block on I/O. |
-| `OnFirstPeer(ctx, room)` | 0→1 peer transition (warm-up tasks). | After locks released. |
-| `OnLastPeer(ctx, room)` | 1→0 peer transition (cool-down tasks). Fires before `OnUnloadDocument`. | After locks released. |
-
-All four hooks are panic-safe: a `recover()` wraps each invocation and logs the panic + stack via the server logger.
-
-### `provider/webhook` subpackage (#61)
-
-POSTs ygo document events to a configurable HTTP endpoint. Mirrors Hocuspocus's `extension-webhook`:
-
-- **`webhook.AttachTo(srv, wh)`** wires every relevant Server hook + per-doc `OnUpdate` in one call. Returns an idempotent detach func.
-- **HMAC-SHA256 signing** — every request carries `X-YGo-Signature-256: sha256=<hex>`. `webhook.VerifySignature` for receivers; constant-time comparison.
-- **Debounce / coalescing** — events with the same `(Room, Type)` pair collapse into a single POST. Different event types for the same room never collapse into each other.
-- **Retry with exponential backoff and jitter** — 5 attempts × 250ms base by default on 5xx and transport errors, capped at `MaxBackoff` (default 30s) with ±20% jitter to defeat thundering-herd retry alignment. 4xx drops immediately.
-- **Bounded delivery concurrency** — `MaxConcurrentDeliveries` (default 8) keeps a slow receiver from spawning unbounded goroutines under burst.
-- **Drain on Close** — `webhook.Close(ctx)` flushes pending events before returning; events enqueued after Close are silently dropped.
+### `cluster/redis` subpackage (#62)
 
 ```go
-wh, _ := webhook.New(webhook.Config{
-    URL:      "https://hooks.example.com/ygo",
-    Secret:   []byte("shared-secret"),
-    Debounce: time.Second,
-})
-defer wh.Close(context.Background())
+import (
+    "github.com/redis/go-redis/v9"
+    ygoredis "github.com/reearth/ygo/cluster/redis"
+    ygws "github.com/reearth/ygo/provider/websocket"
+)
+
+rdb := redis.NewClient(&redis.Options{Addr: "redis:6379"})
+relay, _ := ygoredis.New(rdb, ygoredis.Config{ChannelPrefix: "ygo:prod:"})
+defer relay.Close()
 
 srv := ygws.NewServer()
-detach := webhook.AttachTo(srv, wh) // wires Load/Update/Unload/Connect/Disconnect
-defer detach()
+_ = srv.AttachRelay(relay)
 ```
+
+- **Per-room pub/sub** — a node only receives traffic for rooms it hosts. Reference-counted at the relay layer; SUBSCRIBE/UNSUBSCRIBE held under the lifecycle mutex so concurrent activations cannot reorder.
+- **Bounded back-pressure** — `OutboundBuffer` (default 256) decouples `Publish` from the Redis RPC so the CRDT transaction never blocks on network I/O. `Publish` surfaces a clean `ErrRelayClosed` if the bound start context is cancelled (e.g. `Server.Shutdown`) — never hangs.
+- **Self-delivery suppression** — every relay carries a 16-byte nodeID on the wire; the subscriber drops self-deliveries before any decode/Inject work. The provider-side sentinel guard remains the authoritative echo defence.
+- **Configurable inbound channel size** (`Config.ChannelSize`, default 1024) — go-redis silently drops messages when this fills, which for CRDT updates is silent divergence.
+- **Self-describing wire format** — `VarBytes(nodeID) + VarUint(kind) + VarString(room) + VarBytes(data)`.
+
+### Delivery semantics — fire-and-forget
+
+Redis pub/sub is at-most-once. **A node that subscribes after a publish does not receive that publish.** The intended pattern pairs the relay with `VersionedPersistence` for catch-up state: on room activation, load the head state from persistence; from there the relay carries every subsequent edit. This is the same split Hocuspocus's `extension-redis` is conventionally deployed with.
+
+For at-least-once delivery, Redis Streams would replace this adapter — tracked separately.
+
+### Not in this release (intentional)
+
+- **Distributed lock / writer election** (Redlock pattern). Persistence write coordination is a different concern from doc-update fan-out and belongs in the persistence layer on top of `VersionedPersistence`.
+- **Redis Streams** as an at-least-once alternative — meaningful architectural shift, own design pass.
+- **Redis cluster mode** (multi-shard pub/sub). Targets single-node / Sentinel deployments.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.19.0
+go get github.com/reearth/ygo@v1.21.0
 ```
 
-See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
+See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for the full entry and [docs/CLUSTERING.md](https://github.com/reearth/ygo/blob/main/docs/CLUSTERING.md) for setup and the catch-up-via-persistence pattern.

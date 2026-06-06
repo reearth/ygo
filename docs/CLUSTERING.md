@@ -235,6 +235,100 @@ Notes:
 
 ---
 
+## Redis adapter (`cluster/redis`)
+
+`cluster/redis` is a turnkey production relay backed by Redis pub/sub.
+It's the recommended starting point for multi-process deployments behind
+a load balancer — drop it in front of `AttachRelay` and your existing
+single-server code becomes horizontally scalable.
+
+```go
+import (
+    "github.com/redis/go-redis/v9"
+    ygoredis "github.com/reearth/ygo/cluster/redis"
+    ygws "github.com/reearth/ygo/provider/websocket"
+)
+
+rdb := redis.NewClient(&redis.Options{Addr: "redis:6379"})
+relay, err := ygoredis.New(rdb, ygoredis.Config{
+    // ChannelPrefix isolates this deployment from any other ygo
+    // clusters sharing the same Redis. Defaults to "ygo:cluster:".
+    ChannelPrefix: "ygo:prod:",
+})
+if err != nil { /* ... */ }
+defer relay.Close()
+
+srv := ygws.NewServer()
+_ = srv.AttachRelay(relay)
+```
+
+**Per-room channels.** Each room subscribes to its own Redis channel —
+`<prefix><room>`. `RoomActivated` SUBSCRIBES; `RoomDeactivated`
+UNSUBSCRIBES. A node only receives traffic for rooms it actually hosts,
+which scales cleanly when only a subset of rooms are hot on each node.
+
+**Wire format.** `VarBytes(nodeID) + VarUint(kind) + VarString(room) +
+VarBytes(data)` — self-describing and stable across go-redis versions.
+The `nodeID` is a per-relay 16-byte identifier (auto-generated in `New`,
+or supply via `Config.NodeID`) used to suppress self-delivery: Redis
+pub/sub mirrors every publish back to the publisher's own subscription,
+and the subscriber drops payloads whose nodeID matches its own before
+calling `Sink.Inject`. The provider-side sentinel guard remains the
+authoritative echo defence; the self-skip is a perf optimisation that
+avoids the local decode + apply + observer round trip. `Origin` is
+observer-local and intentionally never serialised (per the
+`cluster.Relay` package contract).
+
+**Bounded back-pressure.** Internally, `Publish` enqueues to a bounded
+channel (default 256) drained by a dedicated publisher goroutine. When
+the queue is full, `Publish` blocks until a slot frees, the caller's
+ctx cancels, the relay closes, or the bound start context (the one
+passed to `AttachRelay`/`Start`) is cancelled — surfacing as a clean
+`ErrRelayClosed` rather than hanging. The inbound side has its own
+buffer too (`Config.ChannelSize`, default 1024); size it for the
+busiest expected room since go-redis silently drops messages when this
+fills.
+
+**Reference-counted activation.** `RoomActivated` / `RoomDeactivated`
+are reference-counted at the relay layer, so duplicate calls collapse
+into a single SUBSCRIBE / UNSUBSCRIBE round trip. The underlying Redis
+RPCs are held under the relay's lifecycle mutex so concurrent calls for
+the same room can never reorder the pub/sub state.
+
+### Delivery semantics — fire-and-forget
+
+Redis pub/sub is at-most-once. **A node that subscribes *after* a
+publish does not receive that publish — there is no replay.** The
+practical implication: if a server starts (or activates a room) while
+edits are flowing, those edits are lost on the new server unless it
+catches up through a different path.
+
+The intended pattern is to pair the relay with a persistence layer:
+
+1. On room activation, load the head state from
+   [`VersionedPersistence`](PERSISTENCE.md) (or the legacy
+   `PersistenceAdapter`).
+2. Once loaded, the relay carries every subsequent edit.
+
+This split — relay for live fan-out, persistence for catch-up — is also
+how Hocuspocus's `extension-redis` is conventionally deployed.
+
+If a deployment needs at-least-once delivery (no catch-up dependency on
+persistence), a Redis Streams-based adapter (`XADD` + last-read-id
+tracking) would replace this one. Tracked separately; not in v1.21.0.
+
+### What's *not* in this adapter
+
+- **Distributed lock / writer election** (Redlock pattern). Persistence
+  write coordination is a different concern from doc-update fan-out and
+  is the right place to add Redlock on top of the existing
+  `VersionedPersistence` interface — not in the relay.
+- **Redis cluster mode** — go-redis supports it but pub/sub semantics
+  differ; this adapter targets single-node Redis (or Sentinel). Filed
+  separately if needed.
+
+---
+
 ## Relay vs. persistence
 
 | Concern                       | Cluster relay                              | Persistence adapter                         |
