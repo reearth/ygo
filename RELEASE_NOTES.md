@@ -1,10 +1,10 @@
 ## What's new
 
-YMap wire-format conformance with the Yjs reference implementation. A
-cross-reference run of a yjs-generated fixture suite against ygo surfaced three
-YMap interop bugs that round-tripped fine ygo↔ygo but diverged from genuine
-`yjs` bytes. All three are fixed and verified in **both** directions against
-`yjs@13.6.30`.
+Yjs wire-format conformance. A cross-reference run of a yjs-generated fixture
+suite — and a follow-on source-level diff of ygo's wire codec against the Yjs
+reference — surfaced a cluster of interop bugs (YMap entries and several content
+types) that round-tripped fine ygo↔ygo but diverged from genuine `yjs` bytes.
+All are fixed and verified in **both** directions against `yjs@13.6.30`.
 
 > Independent of the in-flight v1.21.0 (`cluster/redis`) release — v1.22.0
 > touches only the `crdt` package.
@@ -32,12 +32,30 @@ mirror-image bug — self-consistent, but non-conformant.
 The internal key representation is now `*string` (`nil` = sequence element,
 `&""` = genuine empty key), and empty keys survive encode/decode.
 
+### Fixed — content types (embed, subdoc, XML hook)
+
+A source-level diff of ygo's whole wire codec against the canonical Yjs source
+(the method the YMap bugs were found with) surfaced three more cross-library
+breaks, all reproduced with genuine `yjs@13.6.30` bytes:
+
+- **`YText` embeds** — Yjs's `writeJSON` is a JSON-text varstring in V1 but a
+  structured `writeAny` in V2. ygo used `WriteAny` for both, so V1 embeds
+  (`InsertEmbed`) neither decoded from nor encoded to real Yjs. V1 now uses
+  JSON text.
+- **Subdocument `opts`** — Yjs writes `guid` + `writeAny(opts)`. ygo's V1
+  omitted `opts` (stream desync); V2 wrote `null` (genuine Yjs crashes on
+  `opts.shouldLoad`). V1 now reads/writes `opts`; V2 writes `{}`.
+- **`YXmlHook`** — the V1 decoder didn't consume the hook's name string, so a
+  Yjs document containing a hook corrupted the rest of the update. It now
+  degrades gracefully like the V2 decoder.
+
 ### Conformance coverage
 
-- 10 YMap scenarios captured from `yjs@13.6.30` decoded as genuine reference
-  bytes, plus ygo→ygo round-trip stability — 30 new conformance subtests.
-- Go→JS interop fixtures (`ymap_lww`, `ymap_empty_key`) prove ygo's encoder
-  output decodes correctly in real Yjs.
+- 10 YMap + 3 content-type scenarios captured from `yjs@13.6.30`, decoded as
+  genuine reference bytes with ygo→ygo round-trip stability.
+- Go→JS interop fixtures (`ymap_lww`, `ymap_empty_key`, `ytext_embed`, and a
+  `subdoc` re-encode that proves Yjs no longer crashes on ygo's output) confirm
+  the encoder is conformant in both directions.
 
 ## ⚠️ Upgrade note (no code change required)
 

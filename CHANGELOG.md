@@ -7,11 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.22.0] — 2026-06-06
 
-YMap wire-format conformance with the Yjs reference implementation. Fixes three
-cross-language interop bugs in which ygo decoded — and encoded — duplicate-key
-and empty-string-key YMap entries in a way that round-tripped ygo↔ygo but
-diverged from genuine `yjs` bytes. Verified in **both** directions against
-`yjs@13.6.30` (ygo decodes real Yjs output; real Yjs decodes ygo output).
+Yjs wire-format conformance. Fixes a cluster of cross-language interop bugs in
+which ygo decoded — and encoded — certain YMap entries and content types in a
+way that round-tripped ygo↔ygo but diverged from genuine `yjs` bytes. Found by
+diffing ygo's wire codec against the canonical Yjs source and reproducing each
+with genuine `yjs@13.6.30` bytes; verified in **both** directions (ygo decodes
+real Yjs output; real Yjs decodes ygo output).
 
 > Released alongside the in-flight v1.21.0 (`cluster/redis`); this entry assumes
 > v1.21.0 lands first. The two are independent — v1.22.0 touches only `crdt`.
@@ -36,6 +37,35 @@ diverged from genuine `yjs` bytes. Verified in **both** directions against
   in Yjs but ygo used `""` to mean "no key" (a sequence element). `ParentSub`
   is now `*string` (`nil` = sequence element, `&""` = genuine empty key), so
   empty-keyed entries survive encode/decode in both wire versions.
+
+A follow-on source-level diff of the whole wire encode/decode surface against
+the canonical Yjs reference (the same method used to find the YMap bugs) turned
+up three more cross-library breaks, all reproduced with genuine `yjs@13.6.30`
+bytes and fixed:
+
+- **`YText` embeds didn't interop** (#wire-conformance). Yjs's `writeJSON`
+  differs by wire version — V1 writes a JSON-text varstring, V2 writes a
+  structured `writeAny`. ygo used `WriteAny` for both, so a Yjs **V1** embed
+  (`InsertEmbed`) failed to decode (`unknown Any tag`) and ygo-encoded V1
+  embeds were unreadable by Yjs. V1 now uses JSON text (V2 was already correct).
+- **Subdocument (`ContentDoc`) `opts` field** (#wire-conformance). Yjs writes
+  `guid` then `writeAny(opts)` (always an object). ygo's V1 omitted `opts`
+  entirely (decode desynced the struct stream); its V2 wrote `null`, which
+  makes genuine Yjs crash on `opts.shouldLoad`. V1 now reads/writes `opts`; V2
+  writes `{}`.
+- **`YXmlHook` (typeRef 5) desynced the V1 decoder** (#wire-conformance). ygo
+  has no hook type, but Yjs writes a `hookName` string after the ref; the V1
+  decoder left it unconsumed, corrupting the rest of the update. It now consumes
+  the name and degrades to a placeholder (as the V2 decoder already did).
+
+The audit confirmed **no** divergence in the V1 struct header/framing, info-byte
+layout, GC/Skip structs, delete-set body, content ref numbers,
+String/Binary/Deleted/Format content, the shared-type ref table (0–6), or the
+V2 multi-stream RLE format. Intentionally left as-is (decode-tolerant /
+non-issues): ascending-vs-descending client ordering, the `ContentMove` (tag
+11) ygo extension, the large-integer float32-vs-float64 `Any` tag (numerically
+lossless), and the legacy `ContentJSON` (ref 2) per-value format that modern
+Yjs never emits.
 
 ### Tests
 
