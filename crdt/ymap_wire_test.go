@@ -26,17 +26,24 @@ func TestYjsCompat_GCdYMapOrigin_SingleClient_NoError(t *testing.T) {
 		enc.WriteVarUint(1) // length=1
 	}
 
+	// Live item whose origin (42,3) is a GC struct. CONFORMANT shape: Yjs sets
+	// BIT6 (parentSub present) AND BIT8 (origin present) in the info byte, but
+	// writes NO parentSub string — when an origin is present the key is
+	// inherited from the left/origin item. Here that origin is GC'd, so the key
+	// is permanently lost (same limitation as the y-websocket JS server). The
+	// earlier hand-crafted version of this test wrote a "title" string after
+	// the origin, which real Yjs never emits — that baked the wire bug into the
+	// fixture. (#YMap-wire)
 	info := wireAny | flagHasOrigin | flagHasParentSub
 	enc.WriteUint8(info)
 	enc.WriteVarUint(42) // origin client
 	enc.WriteVarUint(3)  // origin clock
-	enc.WriteVarString("title")
-	enc.WriteVarUint(1)
+	enc.WriteVarUint(1)  // ContentAny count
 	enc.WriteAny("Hello")
 
 	enc.WriteVarUint(0) // empty delete set
 
-	// Must not error — matching Yjs behavior.
+	// Must not error — matching Yjs behavior. The keyless orphan is dropped.
 	doc := New(WithClientID(99))
 	require.NoError(t, ApplyUpdateV1(doc, enc.Bytes(), nil))
 
@@ -60,15 +67,19 @@ func TestYjsCompat_GCdYMapOrigin_MultiClient_Resolved(t *testing.T) {
 		enc.WriteUint8(0)
 		enc.WriteVarUint(1)
 	}
+	// CONFORMANT shape: origin present → BIT6 set but NO parentSub string on
+	// the wire (key inherited from the GC'd origin, hence lost). See the
+	// single-client test above.
 	info := wireAny | flagHasOrigin | flagHasParentSub
 	enc.WriteUint8(info)
 	enc.WriteVarUint(42)
 	enc.WriteVarUint(3)
-	enc.WriteVarString("title")
-	enc.WriteVarUint(1)
+	enc.WriteVarUint(1) // ContentAny count
 	enc.WriteAny("Hello")
 
-	// Client 100: item in the SAME map type with explicit parent
+	// Client 100: item in the SAME map type with explicit parent (no origin →
+	// parent info AND parentSub string ARE on the wire, the conformant shape
+	// for a key's first/anchor write).
 	enc.WriteVarUint(1)
 	enc.WriteVarUint(100)
 	enc.WriteVarUint(0)
@@ -90,9 +101,13 @@ func TestYjsCompat_GCdYMapOrigin_MultiClient_Resolved(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Alice", val)
 
-	val2, ok2 := m.Get("title")
-	require.True(t, ok2, "multi-client case should resolve title via parent heuristic")
-	assert.Equal(t, "Hello", val2)
+	// "title" is NOT recoverable: its only carrier was an origin-bearing item
+	// whose origin is GC'd, so the key is permanently lost — exactly the Yjs /
+	// y-websocket limitation. The previous version of this test "recovered" it
+	// only because the fixture (non-conformantly) wrote the key string on the
+	// wire next to the origin. (#YMap-wire)
+	_, ok2 := m.Get("title")
+	assert.False(t, ok2, "title is unrecoverable once its origin is GC'd (Yjs parity)")
 }
 
 // Incremental sync scenario: updates arrive one at a time BEFORE GC.

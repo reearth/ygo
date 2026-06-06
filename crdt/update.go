@@ -286,7 +286,13 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 		enc.WriteVarUint(originRight.Clock)
 	}
 
-	// Parent info — only when neither origin is present.
+	// Parent info + parentSub — only when neither origin is present. This
+	// mirrors Yjs's Item.write exactly: the BIT6 "hasParentSub" flag is set
+	// in the info byte whenever ParentSub is present (see above), but the
+	// parentSub STRING is written only inside the no-origin block. When an
+	// origin IS present the receiver inherits parentSub from the left/origin
+	// item at integration time, so writing it here would put bytes on the
+	// wire that a conformant (Yjs) decoder does not expect. (#YMap-wire)
 	if origin == nil && originRight == nil {
 		if item.Parent != nil && item.Parent.item != nil {
 			// Nested type: identify by container item's ID.
@@ -302,10 +308,10 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 			}
 			enc.WriteVarString(name)
 		}
-	}
 
-	if item.ParentSub != "" {
-		enc.WriteVarString(item.ParentSub)
+		if item.ParentSub != "" {
+			enc.WriteVarString(item.ParentSub)
+		}
 	}
 
 	encodeContent(enc, item.Content, offset)
@@ -849,7 +855,14 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 		}
 	}
 
-	if hasParentSub {
+	// parentSub is on the wire ONLY when neither origin is present (Yjs writes
+	// it inside the `origin==null && rightOrigin==null` block). When an origin
+	// IS present the BIT6 flag may still be set, but no string follows —
+	// parentSub is inherited from the left/origin item below. Reading a string
+	// here unconditionally (on BIT6 alone) consumes content bytes and
+	// misaligns the decoder → "unknown Any tag" / EOF on V1, silent data loss
+	// on the keyed item. (#YMap-wire)
+	if hasParentSub && !hasOrigin && !hasRightOrigin {
 		parentSub, err = dec.ReadVarString()
 		if err != nil {
 			return nil, err
@@ -870,15 +883,26 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 		Content:     content,
 	}
 
-	// Infer parent from origin items when not set by explicit parent info.
+	// Infer parent (and parentSub) from origin items when not set by explicit
+	// parent info. A keyed item written after the same key (LWW) carries an
+	// origin and therefore no on-wire parentSub; it inherits the key from its
+	// left/origin neighbour, exactly as Yjs resolves it during integration.
+	// Without inheriting ParentSub here the item would integrate with an empty
+	// key and never land in the parent's itemMap → silent loss. (#YMap-wire)
 	if item.Parent == nil {
 		if origin != nil {
 			if oi := doc.store.Find(*origin); oi != nil {
 				item.Parent = oi.Parent
+				if item.ParentSub == "" {
+					item.ParentSub = oi.ParentSub
+				}
 			}
 		} else if originRight != nil {
 			if ori := doc.store.Find(*originRight); ori != nil {
 				item.Parent = ori.Parent
+				if item.ParentSub == "" {
+					item.ParentSub = ori.ParentSub
+				}
 			}
 		}
 	}
@@ -1177,10 +1201,17 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	}
 
 	// Try to resolve parent via Origin / OriginRight / ParentSub fallback.
+	// As in the first-pass decode, a keyed item that arrived with an origin
+	// has no on-wire parentSub and must inherit the key from its origin
+	// neighbour here too, or it integrates keyless and is dropped from the
+	// parent's itemMap. (#YMap-wire)
 	if item.Parent == nil {
 		if item.Origin != nil {
 			if oi := store.Find(*item.Origin); oi != nil {
 				item.Parent = oi.Parent
+				if item.ParentSub == "" {
+					item.ParentSub = oi.ParentSub
+				}
 			} else if item.Origin.Clock >= store.NextClock(item.Origin.Client) {
 				return false // future clock — still blocked
 			}
@@ -1188,6 +1219,9 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 		if item.Parent == nil && item.OriginRight != nil {
 			if ori := store.Find(*item.OriginRight); ori != nil {
 				item.Parent = ori.Parent
+				if item.ParentSub == "" {
+					item.ParentSub = ori.ParentSub
+				}
 			} else if item.OriginRight.Clock >= store.NextClock(item.OriginRight.Client) {
 				return false
 			}
