@@ -419,7 +419,7 @@ func NewYXmlText() *YXmlText {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 // leftChildAt is like abstractType.leftNeighbourAt but skips attribute items
-// (ParentSub != ""), counting only child nodes.
+// (ParentSub != nil), counting only child nodes (ParentSub == nil).
 func leftChildAt(t *abstractType, index int) (*Item, int) {
 	if index == 0 {
 		return nil, 0
@@ -443,7 +443,7 @@ func leftChildAt(t *abstractType, index int) (*Item, int) {
 	return lastItem, 0
 }
 
-// deleteChildRange deletes length child nodes (ParentSub == "") starting at
+// deleteChildRange deletes length child nodes (ParentSub == nil) starting at
 // child position index. Mirrors deleteRange from yarray.go.
 func deleteChildRange(t *abstractType, txn *Transaction, index, length int) {
 	if length <= 0 {

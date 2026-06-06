@@ -25,11 +25,16 @@ type Item struct {
 	MovedBy *Item
 }
 
-// parentSubKey collapses a *string parentSub to a plain string for keyed maps
-// (changed-set tracking, addChanged). nil and a pointer-to-"" both yield ""
-// — safe because a given abstractType is exclusively a keyed map (entries
-// always carry a non-nil ParentSub) or a sequence (entries always nil), never
-// a mix, so "" never conflates an array element with a map key.
+// parentSubKey collapses a *string parentSub to a plain string bucket label for
+// changed-set tracking (addChanged). Both nil (a sequence element) and a
+// pointer-to-"" (a genuine empty-string map key) collapse to "". This is safe
+// because the result is only ever a label identifying which observer-event
+// bucket is dirty — never an identity. Consumers that resolve a bucket back to
+// items (e.g. YMap.computeKeys) re-filter on the actual ParentSub pointer
+// (nil vs non-nil and its value), so a nil-keyed sequence element is never
+// mistaken for an empty-string-keyed map entry. This holds even on XML
+// elements, which legitimately mix keyed attributes (non-nil ParentSub) and
+// nil-keyed children in the same type.
 func parentSubKey(s *string) string {
 	if s == nil {
 		return ""
