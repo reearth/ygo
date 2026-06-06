@@ -420,7 +420,10 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 		info |= flagHasRightOrigin
 	}
 	cantCopyParentInfo := origin == nil && originRight == nil
-	if cantCopyParentInfo && item.ParentSub != "" {
+	// BIT6 reflects "has a key" whenever ParentSub is present — matching Yjs,
+	// which sets it regardless of origin presence. The string itself is still
+	// written only inside the no-origin block below. (#YMap-wire)
+	if item.ParentSub != nil {
 		info |= flagHasParentSub
 	}
 	enc.writeInfo(info)
@@ -446,8 +449,8 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 			}
 			enc.writeString(name)
 		}
-		if item.ParentSub != "" {
-			enc.writeString(item.ParentSub)
+		if item.ParentSub != nil {
+			enc.writeString(*item.ParentSub)
 		}
 	}
 
@@ -711,7 +714,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			if item.Origin != nil {
 				if oi := txn.doc.store.Find(*item.Origin); oi != nil {
 					item.Parent = oi.Parent
-					if item.ParentSub == "" {
+					if item.ParentSub == nil {
 						item.ParentSub = oi.ParentSub
 					}
 				}
@@ -719,12 +722,12 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			if item.Parent == nil && item.OriginRight != nil {
 				if ori := txn.doc.store.Find(*item.OriginRight); ori != nil {
 					item.Parent = ori.Parent
-					if item.ParentSub == "" {
+					if item.ParentSub == nil {
 						item.ParentSub = ori.ParentSub
 					}
 				}
 			}
-			if item.Parent == nil && item.ParentSub != "" {
+			if item.Parent == nil && item.ParentSub != nil {
 				item.Parent = findParentForMapEntry(txn.doc.store)
 			}
 			if item.Parent != nil {
@@ -877,7 +880,7 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 	}
 
 	var parent *abstractType
-	var parentSub string
+	var parentSub *string
 
 	cantCopyParentInfo := !hasOrigin && !hasRightOrigin
 	if cantCopyParentInfo {
@@ -914,7 +917,7 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 			if err != nil {
 				return nil, 0, err
 			}
-			parentSub = sub
+			parentSub = &sub
 		}
 	}
 
@@ -941,14 +944,14 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 		if origin != nil {
 			if oi := doc.store.Find(*origin); oi != nil {
 				item.Parent = oi.Parent
-				if item.ParentSub == "" {
+				if item.ParentSub == nil {
 					item.ParentSub = oi.ParentSub
 				}
 			}
 		} else if originRight != nil {
 			if ori := doc.store.Find(*originRight); ori != nil {
 				item.Parent = ori.Parent
-				if item.ParentSub == "" {
+				if item.ParentSub == nil {
 					item.ParentSub = ori.ParentSub
 				}
 			}

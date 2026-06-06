@@ -243,7 +243,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if left.Deleted != item.Deleted {
 		return false
 	}
-	if left.ParentSub != item.ParentSub {
+	if !parentSubEqual(left.ParentSub, item.ParentSub) {
 		return false
 	}
 	if left.Parent != item.Parent {

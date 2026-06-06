@@ -83,6 +83,28 @@ func TestCompat_GoToJS(t *testing.T) {
 		write("ymap_basic_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
 	}
 
+	// ── YMap: last-write-wins (key overwritten) ──────────────────────────────
+	// Encode-side conformance for the duplicate-key wire bug: the second Set
+	// produces an origin-bearing item whose parentSub must NOT be written to
+	// the wire. If ygo regresses to writing it, real Yjs decode misaligns.
+	{
+		doc := crdt.New(crdt.WithClientID(1))
+		m := doc.GetMap("m")
+		doc.Transact(func(txn *crdt.Transaction) { m.Set(txn, "k", 1) })
+		doc.Transact(func(txn *crdt.Transaction) { m.Set(txn, "k", 2) })
+		write("ymap_lww_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
+		write("ymap_lww_v2", crdt.EncodeStateAsUpdateV2(doc, nil))
+	}
+
+	// ── YMap: empty-string key ────────────────────────────────────────────────
+	{
+		doc := crdt.New(crdt.WithClientID(1))
+		m := doc.GetMap("m")
+		doc.Transact(func(txn *crdt.Transaction) { m.Set(txn, "", "value") })
+		write("ymap_empty_key_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
+		write("ymap_empty_key_v2", crdt.EncodeStateAsUpdateV2(doc, nil))
+	}
+
 	// ── Concurrent merge (two Go clients) ────────────────────────────────────
 	{
 		docA := crdt.New(crdt.WithClientID(10))

@@ -74,7 +74,7 @@ func (a *YArray) computeDelta(txn *Transaction) []Delta {
 
 	t := &a.abstractType
 	for item := t.start; item != nil; item = item.Right {
-		if item.ParentSub != "" {
+		if item.ParentSub != nil {
 			// Map-keyed entries don't belong to the array's sequence; skip.
 			continue
 		}

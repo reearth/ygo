@@ -331,7 +331,7 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 						storeItem.Parent.length += storeItem.Content.Len()
 						storeItem.Parent.invalidatePosCache()
 					}
-					txn.addChanged(storeItem.Parent, storeItem.ParentSub)
+					txn.addChanged(storeItem.Parent, parentSubKey(storeItem.ParentSub))
 				}
 			}
 		}

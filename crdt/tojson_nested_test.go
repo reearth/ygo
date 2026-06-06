@@ -92,7 +92,7 @@ func TestUnit_YMap_ToJSON_RecursesIntoNestedYArray(t *testing.T) {
 		item := &Item{
 			ID:        ID{Client: doc.clientID, Clock: doc.store.NextClock(doc.clientID)},
 			Parent:    at,
-			ParentSub: "list",
+			ParentSub: strPtr("list"),
 			Content:   NewContentType(&nested.abstractType),
 		}
 		item.integrate(txn, 0)
@@ -167,7 +167,7 @@ func TestUnit_YMap_Entries_HandlesContentJSON(t *testing.T) {
 		item := &Item{
 			ID:        ID{Client: doc.clientID, Clock: doc.store.NextClock(doc.clientID)},
 			Parent:    at,
-			ParentSub: "legacy",
+			ParentSub: strPtr("legacy"),
 			Content:   NewContentJSON("legacy-value"),
 		}
 		item.integrate(txn, 0)
@@ -254,7 +254,7 @@ func TestUnit_YArray_ToJSON_DeepNesting(t *testing.T) {
 		innerItem := &Item{
 			ID:        ID{Client: doc.clientID, Clock: doc.store.NextClock(doc.clientID)},
 			Parent:    atMid,
-			ParentSub: "inner",
+			ParentSub: strPtr("inner"),
 			Content:   NewContentType(&inner.abstractType),
 		}
 		innerItem.integrate(txn, 0)

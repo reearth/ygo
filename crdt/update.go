@@ -272,7 +272,7 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 	if originRight != nil {
 		info |= flagHasRightOrigin
 	}
-	if item.ParentSub != "" {
+	if item.ParentSub != nil {
 		info |= flagHasParentSub
 	}
 	enc.WriteUint8(info)
@@ -309,8 +309,8 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 			enc.WriteVarString(name)
 		}
 
-		if item.ParentSub != "" {
-			enc.WriteVarString(item.ParentSub)
+		if item.ParentSub != nil {
+			enc.WriteVarString(*item.ParentSub)
 		}
 	}
 
@@ -625,7 +625,7 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			// have a parent. This handles the Yjs wire-format case where
 			// deleted YMap entries become GC structs and the parent type
 			// name is lost.
-			if item.Parent == nil && item.ParentSub != "" {
+			if item.Parent == nil && item.ParentSub != nil {
 				item.Parent = findParentForMapEntry(txn.doc.store)
 			}
 			if item.Parent != nil {
@@ -818,7 +818,7 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 	}
 
 	var parent *abstractType
-	var parentSub string
+	var parentSub *string
 
 	if !hasOrigin && !hasRightOrigin {
 		// Explicit parent info.
@@ -863,10 +863,11 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 	// misaligns the decoder → "unknown Any tag" / EOF on V1, silent data loss
 	// on the keyed item. (#YMap-wire)
 	if hasParentSub && !hasOrigin && !hasRightOrigin {
-		parentSub, err = dec.ReadVarString()
-		if err != nil {
-			return nil, err
+		sub, serr := dec.ReadVarString()
+		if serr != nil {
+			return nil, serr
 		}
+		parentSub = &sub
 	}
 
 	content, err := decodeContent(dec, doc, tag)
@@ -893,14 +894,14 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 		if origin != nil {
 			if oi := doc.store.Find(*origin); oi != nil {
 				item.Parent = oi.Parent
-				if item.ParentSub == "" {
+				if item.ParentSub == nil {
 					item.ParentSub = oi.ParentSub
 				}
 			}
 		} else if originRight != nil {
 			if ori := doc.store.Find(*originRight); ori != nil {
 				item.Parent = ori.Parent
-				if item.ParentSub == "" {
+				if item.ParentSub == nil {
 					item.ParentSub = ori.ParentSub
 				}
 			}
@@ -1209,7 +1210,7 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 		if item.Origin != nil {
 			if oi := store.Find(*item.Origin); oi != nil {
 				item.Parent = oi.Parent
-				if item.ParentSub == "" {
+				if item.ParentSub == nil {
 					item.ParentSub = oi.ParentSub
 				}
 			} else if item.Origin.Clock >= store.NextClock(item.Origin.Client) {
@@ -1219,14 +1220,14 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 		if item.Parent == nil && item.OriginRight != nil {
 			if ori := store.Find(*item.OriginRight); ori != nil {
 				item.Parent = ori.Parent
-				if item.ParentSub == "" {
+				if item.ParentSub == nil {
 					item.ParentSub = ori.ParentSub
 				}
 			} else if item.OriginRight.Clock >= store.NextClock(item.OriginRight.Client) {
 				return false
 			}
 		}
-		if item.Parent == nil && item.ParentSub != "" {
+		if item.Parent == nil && item.ParentSub != nil {
 			item.Parent = findParentForMapEntry(store)
 		}
 		if item.Parent == nil {

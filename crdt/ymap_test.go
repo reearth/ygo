@@ -212,11 +212,11 @@ func TestInteg_YMap_ConcurrentSet_Convergent(t *testing.T) {
 		m := doc.GetMap("data")
 
 		item1 := &Item{
-			ID: ID{Client: 1, Clock: 0}, ParentSub: "k",
+			ID: ID{Client: 1, Clock: 0}, ParentSub: strPtr("k"),
 			Content: NewContentAny("v1"), Parent: &m.abstractType,
 		}
 		item2 := &Item{
-			ID: ID{Client: 2, Clock: 0}, ParentSub: "k",
+			ID: ID{Client: 2, Clock: 0}, ParentSub: strPtr("k"),
 			Content: NewContentAny("v2"), Parent: &m.abstractType,
 		}
 

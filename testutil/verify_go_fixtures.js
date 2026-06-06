@@ -97,6 +97,30 @@ check('GoToJS_YMap_Basic_V1', () => {
   assertEqual(m.get('active'), true,    'active')
 })
 
+// ── YMap: last-write-wins (key overwritten) — encode-side wire conformance ────
+check('GoToJS_YMap_LWW_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('ymap_lww_v1'))
+  assertEqual(doc.getMap('m').get('k'), 2, 'lww v1: k')
+})
+check('GoToJS_YMap_LWW_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('ymap_lww_v2'))
+  assertEqual(doc.getMap('m').get('k'), 2, 'lww v2: k')
+})
+
+// ── YMap: empty-string key ────────────────────────────────────────────────────
+check('GoToJS_YMap_EmptyKey_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('ymap_empty_key_v1'))
+  assertEqual(doc.getMap('m').get(''), 'value', 'empty key v1')
+})
+check('GoToJS_YMap_EmptyKey_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('ymap_empty_key_v2'))
+  assertEqual(doc.getMap('m').get(''), 'value', 'empty key v2')
+})
+
 // ── Concurrent merge ──────────────────────────────────────────────────────────
 check('GoToJS_ConcurrentMerge_V1', () => {
   const doc = new Y.Doc()
