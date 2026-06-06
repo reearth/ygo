@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] — 2026-06-06
+
+YMap wire-format conformance with the Yjs reference implementation. Fixes three
+cross-language interop bugs in which ygo decoded — and encoded — duplicate-key
+and empty-string-key YMap entries in a way that round-tripped ygo↔ygo but
+diverged from genuine `yjs` bytes. Verified in **both** directions against
+`yjs@13.6.30` (ygo decodes real Yjs output; real Yjs decodes ygo output).
+
+> Released alongside the in-flight v1.21.0 (`cluster/redis`); this entry assumes
+> v1.21.0 lands first. The two are independent — v1.22.0 touches only `crdt`.
+
+### Fixed
+
+- **Duplicate map keys (last-write-wins) corrupted updates** (#YMap-wire).
+  Setting the same key more than once — i.e. overwriting any value, the most
+  common map operation — produces a second item that carries an *origin* and so
+  no `parentSub` on the wire (Yjs sets the BIT6 "has key" flag but writes no
+  string in that case). ygo's decoder read a `parentSub` string on the BIT6
+  flag regardless of origin, consuming content bytes and misaligning the stream:
+  - **V1**: aborted with `unknown Any tag` / `unexpected end of input` and
+    **rejected the whole update** (total data loss).
+  - **V2**: silently dropped the overwritten key.
+  The decoder now reads `parentSub` only when no origin is present, and inherits
+  the key from the origin/left item during integration (first-pass decode *and*
+  the within-update pending retry) so the item lands in the parent's key map.
+  The encoder is fixed symmetrically: it writes the `parentSub` string only in
+  the no-origin case, matching Yjs `Item.write`.
+- **Empty-string map keys were dropped** (#YMap-wire). `m.Set("", v)` is valid
+  in Yjs but ygo used `""` to mean "no key" (a sequence element). `ParentSub`
+  is now `*string` (`nil` = sequence element, `&""` = genuine empty key), so
+  empty-keyed entries survive encode/decode in both wire versions.
+
+### Tests
+
+- `crdt/testdata/ymap_yjs_fixtures.json` — 10 YMap scenarios captured from
+  `yjs@13.6.30`, decoded as genuine reference bytes (JS→Go) with ygo→ygo
+  re-encode stability checks (30 subtests).
+- Go→JS interop (`testutil/verify_go_fixtures.js`) gains `ymap_lww` and
+  `ymap_empty_key` fixtures, proving ygo's encoder output decodes correctly in
+  real Yjs.
+- Two `TestYjsCompat_GCdYMapOrigin` fixtures that had hand-crafted
+  *non-conformant* bytes (a `parentSub` string written next to an origin —
+  which real Yjs never emits) were rewritten to conformant byte shapes.
+
+### ⚠️ Wire-format / persisted-data note (no code change required)
+
+The public API is unchanged — no recompile or code change is needed. However,
+the on-wire encoding of overwritten and empty-keyed map entries changed to match
+Yjs. **V1/V2 snapshots persisted by ygo ≤ v1.20.0 that contain an overwritten or
+empty map key will not decode correctly on this version.** Live-sync deployments
+(peers upgrade together) are unaffected; only stored snapshots with those
+specific patterns are. Such data was never readable by real Yjs anyway. If you
+have affected snapshots, re-encode them once from a running ≤ v1.20.0 instance
+(or simply re-sync). No opt-in legacy decoder is shipped given ygo's small
+install base; one can be added later if needed.
+
 ## [1.20.0] — 2026-06-01
 
 Horizontal-scale release. Adds two independent building blocks for running ygo
