@@ -522,7 +522,10 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 			guid = ct.Doc.GUID()
 		}
 		enc.writeString(guid)
-		enc.restEnc.WriteAny(nil)
+		// opts must be an object, not null — genuine Yjs reads opts.shouldLoad
+		// and crashes on null. ygo doesn't track subdoc opts; emit {}.
+		// (#wire-conformance)
+		enc.restEnc.WriteAny(map[string]any{})
 	case *ContentMove:
 		enc.restEnc.WriteVarUint(uint64(ct.Target.Client))
 		enc.restEnc.WriteVarUint(ct.Target.Clock)

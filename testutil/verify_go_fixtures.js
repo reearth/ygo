@@ -121,6 +121,40 @@ check('GoToJS_YMap_EmptyKey_V2', () => {
   assertEqual(doc.getMap('m').get(''), 'value', 'empty key v2')
 })
 
+// ── YText embed: ygo encoder output must decode in real Yjs ──────────────────
+check('GoToJS_YText_Embed_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('ytext_embed_v1'))
+  const delta = doc.getText('t').toDelta()
+  const embed = delta.map(o => o.insert).find(i => i && typeof i === 'object')
+  if (!embed) throw new Error('no embed op in delta')
+  assertEqual(embed.image, 'http://x/y.png', 'embed.image')
+  assertEqual(embed.w, 3, 'embed.w')
+})
+check('GoToJS_YText_Embed_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('ytext_embed_v2'))
+  const delta = doc.getText('t').toDelta()
+  const embed = delta.map(o => o.insert).find(i => i && typeof i === 'object')
+  if (!embed) throw new Error('no embed op in delta')
+  assertEqual(embed.image, 'http://x/y.png', 'embed.image')
+})
+
+// ── Subdoc re-encode: ygo decoded a genuine Yjs subdoc and re-encoded it;
+// real Yjs must apply the result WITHOUT crashing on opts. ───────────────────
+check('GoToJS_SubDoc_Reencode_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('subdoc_reencode_v1')) // must not throw on opts.shouldLoad
+  const subs = doc.getMap('m')
+  if (!subs.has('child')) throw new Error("re-encoded subdoc lost the 'child' key")
+})
+check('GoToJS_SubDoc_Reencode_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('subdoc_reencode_v2')) // must not throw on opts.shouldLoad
+  const subs = doc.getMap('m')
+  if (!subs.has('child')) throw new Error("re-encoded subdoc lost the 'child' key")
+})
+
 // ── Concurrent merge ──────────────────────────────────────────────────────────
 check('GoToJS_ConcurrentMerge_V1', () => {
   const doc = new Y.Doc()

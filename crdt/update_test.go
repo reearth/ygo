@@ -561,6 +561,7 @@ func TestUnit_ContentDoc_GUID_V1RoundTrip(t *testing.T) {
 	enc.WriteUint8(1)       // parentInfo=1 → named root
 	enc.WriteVarString("subdocs")
 	enc.WriteVarBytes([]byte("my-subdoc-id")) // guid
+	enc.WriteAny(map[string]any{})            // opts object — Yjs ContentDoc.write emits writeAny(opts) after the guid (#wire-conformance)
 
 	enc.WriteVarUint(0) // empty delete set
 

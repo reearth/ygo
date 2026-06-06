@@ -1,6 +1,7 @@
 package crdt_test
 
 import (
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,6 +104,33 @@ func TestCompat_GoToJS(t *testing.T) {
 		doc.Transact(func(txn *crdt.Transaction) { m.Set(txn, "", "value") })
 		write("ymap_empty_key_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
 		write("ymap_empty_key_v2", crdt.EncodeStateAsUpdateV2(doc, nil))
+	}
+
+	// ── YText embed: encode-side wire conformance ────────────────────────────
+	// Yjs V1 decodes the embed value as a JSON-text varstring; if ygo regresses
+	// to WriteAny, real Yjs fails. Verifies both V1 and V2 embed output.
+	{
+		doc := crdt.New(crdt.WithClientID(1))
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *crdt.Transaction) {
+			txt.Insert(txn, 0, "ab", nil)
+			txt.InsertEmbed(txn, 1, map[string]any{"image": "http://x/y.png", "w": 3}, nil)
+		})
+		write("ytext_embed_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
+		write("ytext_embed_v2", crdt.EncodeStateAsUpdateV2(doc, nil))
+	}
+
+	// ── Subdoc re-encode: decode genuine Yjs subdoc bytes, re-encode with ygo,
+	// and confirm real Yjs can still decode the result. Guards the ContentDoc
+	// opts fix (Yjs crashes on a null/absent opts). ──────────────────────────
+	{
+		// Genuine yjs@13.6.30: m.set('child', new Y.Doc()) — V2 bytes.
+		raw, herr := hex.DecodeString("0000059fc9ce8f02000001292e2a6d6368696c6435356566333938332d613238352d343139302d623234312d64643564306233663034386101052401010000010100760000")
+		require.NoError(t, herr)
+		d := crdt.New(crdt.WithClientID(1))
+		require.NoError(t, crdt.ApplyUpdateV2(d, raw, nil))
+		write("subdoc_reencode_v1", crdt.EncodeStateAsUpdateV1(d, nil))
+		write("subdoc_reencode_v2", crdt.EncodeStateAsUpdateV2(d, nil))
 	}
 
 	// ── Concurrent merge (two Go clients) ────────────────────────────────────

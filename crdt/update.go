@@ -333,7 +333,11 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 		byteOff := utf16ByteOffset(ct.Str, offset)
 		enc.WriteVarString(ct.Str[byteOff:])
 	case *ContentEmbed:
-		enc.WriteAny(ct.Val)
+		// Yjs V1 encodes the embed via writeJSON = writeVarString(JSON.stringify).
+		// (V2 uses writeAny — see encodeContentV2.) Using WriteAny here put a
+		// lib0-tagged value on the wire that genuine Yjs decodes as a JSON
+		// string → failure. (#wire-conformance)
+		enc.WriteVarString(fmtValToJSON(ct.Val))
 	case *ContentFormat:
 		enc.WriteVarString(ct.Key)
 		enc.WriteVarString(fmtValToJSON(ct.Val))
@@ -354,7 +358,12 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 		if ct.Doc != nil {
 			guid = ct.Doc.GUID()
 		}
-		enc.WriteVarBytes([]byte(guid))
+		enc.WriteVarString(guid)
+		// Yjs ContentDoc.write emits guid THEN writeAny(opts). opts is always
+		// an object (defaults to {}); omitting it desyncs a Yjs decoder, and a
+		// `null` makes Yjs crash on opts.shouldLoad. ygo doesn't track subdoc
+		// opts, so emit an empty object. (#wire-conformance)
+		enc.WriteAny(map[string]any{})
 	case *ContentMove:
 		enc.WriteVarUint(uint64(ct.Target.Client))
 		enc.WriteVarUint(ct.Target.Clock)
@@ -955,7 +964,12 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentString(s), nil
 
 	case wireEmbed:
-		v, err := dec.ReadAny()
+		// V1: embed is a JSON-text varstring (Yjs writeJSON), not a lib0 Any.
+		js, err := dec.ReadVarString()
+		if err != nil {
+			return nil, err
+		}
+		v, err := fmtValFromJSON(js)
 		if err != nil {
 			return nil, err
 		}
@@ -1009,6 +1023,12 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 			return nil, err
 		}
 		guid := string(guidBytes)
+		// Consume the opts object Yjs writes after the guid (writeAny). ygo
+		// doesn't use subdoc opts yet, but the bytes MUST be read or the
+		// struct stream desyncs. (#wire-conformance)
+		if _, err := dec.ReadAny(); err != nil {
+			return nil, err
+		}
 		return NewContentDoc(New(WithGUID(guid))), nil
 
 	case wireMove:
@@ -1070,6 +1090,19 @@ func decodeTypeContent(dec *encoding.Decoder, doc *Doc, typeClass byte) (*abstra
 		frag.itemMap = make(map[string]*Item)
 		frag.owner = frag
 		return &frag.abstractType, nil
+
+	case 5: // YXmlHook — ygo has no hook type, but Yjs writes a hookName
+		// string after the ref. We MUST consume it (mirroring decodeTypeContentV2)
+		// or the rest of the update stream desyncs. Degrade to a rawType
+		// placeholder. (#wire-conformance)
+		if _, err := dec.ReadVarString(); err != nil {
+			return nil, err
+		}
+		r := &rawType{}
+		r.doc = doc
+		r.itemMap = make(map[string]*Item)
+		r.owner = r
+		return &r.abstractType, nil
 
 	case 6: // YXmlText
 		xt := NewYXmlText()
