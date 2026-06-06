@@ -14,8 +14,8 @@ diffing ygo's wire codec against the canonical Yjs source and reproducing each
 with genuine `yjs@13.6.30` bytes; verified in **both** directions (ygo decodes
 real Yjs output; real Yjs decodes ygo output).
 
-> Released alongside the in-flight v1.21.0 (`cluster/redis`); this entry assumes
-> v1.21.0 lands first. The two are independent — v1.22.0 touches only `crdt`.
+> Released on top of v1.21.0 (`cluster/redis`). The two are independent —
+> v1.22.0 touches only `crdt`.
 
 ### Fixed
 
@@ -90,6 +90,39 @@ specific patterns are. Such data was never readable by real Yjs anyway. If you
 have affected snapshots, re-encode them once from a running ≤ v1.20.0 instance
 (or simply re-sync). No opt-in legacy decoder is shipped given ygo's small
 install base; one can be added later if needed.
+
+## [1.21.0] — 2026-06-06
+
+Production-ready Redis transport for the `cluster.Relay` abstraction shipped in v1.20.0. With this release a multi-process ygo deployment behind a load balancer can share one logical document per room via Redis pub/sub — the canonical Hocuspocus `extension-redis` / y-hub topology, in pure Go.
+
+### Added
+
+- **`cluster/redis` subpackage — Redis-backed `cluster.Relay`** (#62).
+  - `redis.New(client *goredis.Client, redis.Config)` returns a relay that satisfies the `cluster.Relay` contract.
+  - Per-room pub/sub: `RoomActivated` SUBSCRIBES, `RoomDeactivated` UNSUBSCRIBES — a node only receives traffic for rooms it actually hosts. Calls are reference-counted at the relay layer.
+  - **Wire format**: `VarBytes(nodeID) + VarUint(kind) + VarString(room) + VarBytes(data)`. The nodeID is a per-relay 16-byte identifier used to suppress self-delivery (Redis pub/sub mirrors every publish back to the publisher's own subscription; the subscriber drops payloads whose nodeID matches its own). Origin is observer-local and intentionally never serialised, per the `cluster.Relay` package contract.
+  - Bounded back-pressure: a configurable `OutboundBuffer` (default 256) decouples `Publish` from the actual Redis `PUBLISH` RPC so the CRDT transaction path never blocks on the network round trip. Publish surfaces a clean `ErrRelayClosed` if the bound start context is cancelled (e.g. `Server.Shutdown`), never hangs.
+  - Configurable inbound channel size (`Config.ChannelSize`, default 1024) — go-redis silently drops messages when its inbound channel fills; for CRDT updates this would manifest as silent inter-node divergence, so size for the busiest expected room.
+  - Single dispatcher goroutine pattern; subscriber + publisher goroutines exit cleanly on `Close`. Lifecycle (Start/Close) and room-membership (RoomActivated/RoomDeactivated) ops are serialised under one mutex so concurrent calls can never reorder the underlying Redis SUBSCRIBE/UNSUBSCRIBE RPCs.
+  - **Delivery contract: fire-and-forget** — Redis pub/sub is at-most-once; a node that subscribes *after* a publish does not receive that publish. The intended deployment pattern pairs the relay with `VersionedPersistence` for catch-up state. Documented explicitly in `docs/CLUSTERING.md`.
+  - Echo prevention remains entirely on the provider side (the sentinel pointer-identity guard in `provider/websocket/cluster.go`) — the Redis adapter additionally drops self-deliveries at the transport, so the local node never pays the decode + Inject + observer round trip for its own writes.
+  - **Test coverage**: 20+ unit and integration tests against `miniredis` (no docker dependency in CI), exercising nil-client / nil-sink / start-after-close / sink-mismatch error contracts, idempotent Close, cross-node round-trip for both `KindSync` and `KindAwareness`, self-delivery suppression, per-room subscription isolation, RoomDeactivated stops delivery, reference-counted room activation, wire-format encode/decode round-trip with truncated-input safety, deterministic `Publish` back-pressure under buffer-full + ctx-deadline + done-close + startCtx-cancel arms, concurrent-publisher stress, concurrent Activate/Deactivate convergence, and Start/Close/Publish lifecycle stress.
+  - **Two-server integration tests** (the issue's acceptance criterion): peer-A connected to `srvA` and peer-B connected to `srvB`, both servers sharing one Redis. Edits on A propagate to B (and vice versa) for both document sync and awareness.
+
+### Dependencies
+
+- `github.com/redis/go-redis/v9` — first-party Redis client.
+- `github.com/alicebob/miniredis/v2` (test-only) — in-process Redis for `cluster/redis` tests so CI doesn't need a docker side-car.
+
+### Documentation
+
+- `docs/CLUSTERING.md` gains a dedicated "Redis adapter" section covering setup, config, the fire-and-forget delivery contract, the catch-up-via-persistence pattern for late joiners, and what is intentionally NOT in this adapter (distributed locking / writer election, Redis Streams).
+
+### What's not in this release (tracked separately)
+
+- **Redlock / distributed writer election** for persistence write coordination. Belongs in the persistence layer, not the relay.
+- **Redis Streams** as an at-least-once alternative to pub/sub. Worth its own design pass given the consumer-group + last-read-id model is a meaningful architectural shift.
+- **Redis cluster mode** (multi-shard pub/sub). go-redis supports it but pub/sub semantics differ; this adapter targets single-node / Sentinel deployments.
 
 ## [1.20.0] — 2026-06-01
 

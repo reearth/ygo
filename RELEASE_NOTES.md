@@ -6,8 +6,8 @@ reference — surfaced a cluster of interop bugs (YMap entries and several conte
 types) that round-tripped fine ygo↔ygo but diverged from genuine `yjs` bytes.
 All are fixed and verified in **both** directions against `yjs@13.6.30`.
 
-> Independent of the in-flight v1.21.0 (`cluster/redis`) release — v1.22.0
-> touches only the `crdt` package.
+> Independent of v1.21.0 (`cluster/redis`) — v1.22.0 touches only the `crdt`
+> package.
 
 ### Fixed — duplicate map keys (last-write-wins)
 
