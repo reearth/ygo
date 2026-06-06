@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -149,4 +150,78 @@ func TestCompat_RoundTrip_GoJSGo(t *testing.T) {
 				"%s/%s: content changed across the ygo→yjs→ygo round-trip", sc.name, ver.tag)
 		}
 	}
+}
+
+// TestCompat_RoundTrip_JSGoJS is the mirror loop, driven entirely from JS so it
+// can include structures ygo cannot build via its public API — nested types,
+// XML elements, XML attributes (incl. attribute overwrite, the parentSub LWW
+// path through XML), and deep nesting:
+//
+//	Yjs builds + encodes → ygo decodes AND re-encodes → Yjs applies the
+//	re-encoding and asserts the content is unchanged.
+//
+// This exercises ygo's decode + ENCODE of yjs-originated structs for shapes the
+// Go-origin round-trip can't reach. node does the gen + verify hops; ygo is the
+// middle hop here in Go. Requires node; skipped when absent.
+func TestCompat_RoundTrip_JSGoJS(t *testing.T) {
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not found on PATH — skipping yjs→ygo→yjs round-trip")
+	}
+
+	dir := t.TempDir()
+	scriptDir := filepath.Join("..", "testutil")
+	script := filepath.Join(scriptDir, "js_roundtrip.js")
+
+	// Hop 1: Yjs builds scenarios + writes .in files + manifest.
+	gen := exec.Command(nodePath, script, "gen", dir)
+	gen.Dir = scriptDir
+	genOut, genErr := gen.CombinedOutput()
+	t.Logf("node gen: %s", genOut)
+	require.NoError(t, genErr, "Yjs gen hop failed")
+
+	// Hop 2 (ygo): decode every .in and re-encode to a matching .out, version-
+	// for-version. This is the only ygo step — decode + encode of Yjs-built
+	// structures.
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	processed := 0
+	for _, e := range entries {
+		name := e.Name()
+		var v2 bool
+		switch {
+		case strings.HasSuffix(name, ".v1.in"):
+			v2 = false
+		case strings.HasSuffix(name, ".v2.in"):
+			v2 = true
+		default:
+			continue
+		}
+		raw, rerr := os.ReadFile(filepath.Join(dir, name))
+		require.NoError(t, rerr)
+
+		d := crdt.New(crdt.WithClientID(2))
+		if v2 {
+			require.NoError(t, crdt.ApplyUpdateV2(d, raw, nil), "ygo decode %s", name)
+		} else {
+			require.NoError(t, crdt.ApplyUpdateV1(d, raw, nil), "ygo decode %s", name)
+		}
+		var out []byte
+		if v2 {
+			out = crdt.EncodeStateAsUpdateV2(d, nil)
+		} else {
+			out = crdt.EncodeStateAsUpdateV1(d, nil)
+		}
+		outName := strings.TrimSuffix(name, ".in") + ".out"
+		require.NoError(t, os.WriteFile(filepath.Join(dir, outName), out, 0o644))
+		processed++
+	}
+	require.Positive(t, processed, "no .in fixtures found — gen hop produced nothing")
+
+	// Hop 3: Yjs applies ygo's re-encodings and asserts content == manifest.
+	verify := exec.Command(nodePath, script, "verify", dir)
+	verify.Dir = scriptDir
+	verifyOut, verifyErr := verify.CombinedOutput()
+	t.Logf("node verify: %s", verifyOut)
+	require.NoError(t, verifyErr, "yjs→ygo→yjs round-trip mismatch (see node verify output)")
 }
