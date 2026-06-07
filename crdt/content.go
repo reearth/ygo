@@ -1,5 +1,7 @@
 package crdt
 
+import "unicode/utf8"
+
 // Content is the payload carried by an Item.
 // Every concrete content type must implement this interface.
 type Content interface {
@@ -33,21 +35,39 @@ func utf16Len(s string) int {
 	return n
 }
 
-// utf16ByteOffset returns the byte index in s that corresponds to utf16Units
-// UTF-16 code units from the start of s.
-func utf16ByteOffset(s string, utf16Units int) int {
+// replacementChar is U+FFFD, emitted when a split lands inside a surrogate pair.
+const replacementChar = "�"
+
+// splitUTF16 splits s at the given UTF-16 code-unit offset and returns the
+// (left, right) substrings. Total UTF-16 length is preserved.
+//
+// If offset falls in the middle of a surrogate pair — i.e. it bisects a
+// supplementary character (U+10000 and above), which occupies 2 UTF-16 code
+// units — the straddled character is replaced by U+FFFD on BOTH halves. This
+// matches how JavaScript (and therefore Yjs) slices a string mid-surrogate:
+// String.prototype.slice yields a lone surrogate on each side, which normalises
+// to the replacement character. The 2-unit character becomes two 1-unit
+// replacement chars, so left has exactly `offset` units and right the rest.
+// Verified against yjs@13.6.30; see TestUnit_YText_Insert_MidSurrogate_MatchesYjs.
+func splitUTF16(s string, offset int) (left, right string) {
 	u16 := 0
 	for i, r := range s {
-		if u16 >= utf16Units {
-			return i
+		if u16 == offset {
+			return s[:i], s[i:]
 		}
+		w := 1
 		if r > 0xFFFF {
-			u16 += 2
-		} else {
-			u16++
+			w = 2
 		}
+		if u16+w > offset {
+			// offset bisects this supplementary rune (w == 2, u16 == offset-1).
+			runeBytes := utf8.RuneLen(r)
+			return s[:i] + replacementChar, replacementChar + s[i+runeBytes:]
+		}
+		u16 += w
 	}
-	return len(s)
+	// offset >= utf16Len(s): everything is on the left.
+	return s, ""
 }
 
 // ContentDeleted is a tombstone. It replaces real content when an item is
@@ -92,12 +112,11 @@ func (c *ContentString) Copy() Content {
 	return &ContentString{Str: c.Str, utf16Len: c.utf16Len}
 }
 func (c *ContentString) Splice(offset int) Content {
-	splitByte := utf16ByteOffset(c.Str, offset)
-	rightStr := c.Str[splitByte:]
+	left, right := splitUTF16(c.Str, offset)
 	rightLen := c.utf16Len - offset
-	c.Str = c.Str[:splitByte]
+	c.Str = left
 	c.utf16Len = offset
-	return &ContentString{Str: rightStr, utf16Len: rightLen}
+	return &ContentString{Str: right, utf16Len: rightLen}
 }
 
 // ContentBinary holds raw bytes (e.g. binary file attachments).

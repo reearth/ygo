@@ -97,6 +97,104 @@ check('GoToJS_YMap_Basic_V1', () => {
   assertEqual(m.get('active'), true,    'active')
 })
 
+// ── YMap: last-write-wins (key overwritten) — encode-side wire conformance ────
+check('GoToJS_YMap_LWW_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('ymap_lww_v1'))
+  assertEqual(doc.getMap('m').get('k'), 2, 'lww v1: k')
+})
+check('GoToJS_YMap_LWW_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('ymap_lww_v2'))
+  assertEqual(doc.getMap('m').get('k'), 2, 'lww v2: k')
+})
+
+// ── YMap: empty-string key ────────────────────────────────────────────────────
+check('GoToJS_YMap_EmptyKey_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('ymap_empty_key_v1'))
+  assertEqual(doc.getMap('m').get(''), 'value', 'empty key v1')
+})
+check('GoToJS_YMap_EmptyKey_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('ymap_empty_key_v2'))
+  assertEqual(doc.getMap('m').get(''), 'value', 'empty key v2')
+})
+
+// ── YText embed: ygo encoder output must decode in real Yjs ──────────────────
+check('GoToJS_YText_Embed_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('ytext_embed_v1'))
+  const delta = doc.getText('t').toDelta()
+  const embed = delta.map(o => o.insert).find(i => i && typeof i === 'object')
+  if (!embed) throw new Error('no embed op in delta')
+  assertEqual(embed.image, 'http://x/y.png', 'embed.image')
+  assertEqual(embed.w, 3, 'embed.w')
+})
+check('GoToJS_YText_Embed_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('ytext_embed_v2'))
+  const delta = doc.getText('t').toDelta()
+  const embed = delta.map(o => o.insert).find(i => i && typeof i === 'object')
+  if (!embed) throw new Error('no embed op in delta')
+  assertEqual(embed.image, 'http://x/y.png', 'embed.image')
+})
+
+// ── YText mid-surrogate split: ygo must split a surrogate pair into U+FFFD
+// halves exactly like Yjs, so real Yjs reads back "a�X�c". ──────────
+check('GoToJS_YText_MidSurrogate_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('ytext_midsurrogate_v1'))
+  assertEqual(doc.getText('t').toString(), 'a�X�c', 'mid-surrogate v1')
+})
+check('GoToJS_YText_MidSurrogate_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('ytext_midsurrogate_v2'))
+  assertEqual(doc.getText('t').toString(), 'a�X�c', 'mid-surrogate v2')
+})
+
+// ── Subdoc re-encode: ygo decoded a genuine Yjs subdoc and re-encoded it;
+// real Yjs must apply the result WITHOUT crashing on opts. ───────────────────
+check('GoToJS_SubDoc_Reencode_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('subdoc_reencode_v1')) // must not throw on opts.shouldLoad
+  const subs = doc.getMap('m')
+  if (!subs.has('child')) throw new Error("re-encoded subdoc lost the 'child' key")
+})
+check('GoToJS_SubDoc_Reencode_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('subdoc_reencode_v2')) // must not throw on opts.shouldLoad
+  const subs = doc.getMap('m')
+  if (!subs.has('child')) throw new Error("re-encoded subdoc lost the 'child' key")
+})
+
+// ── Mirror loop (yjs → ygo → yjs): ygo re-encoded genuine Yjs data; Yjs must
+// read it back with the right content. ──────────────────────────────────────
+check('Mirror_YMap_DupKey_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('ymap_dupkey_reencode_v1'))
+  assertEqual(doc.getMap('m').get('k'), 2, 'dupkey reencode v1: k')
+})
+check('Mirror_YMap_DupKey_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('ymap_dupkey_reencode_v2'))
+  assertEqual(doc.getMap('m').get('k'), 2, 'dupkey reencode v2: k')
+})
+check('Mirror_Embed_V1', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, load('embed_reencode_v1'))
+  const embed = doc.getText('t').toDelta().map(o => o.insert).find(i => i && typeof i === 'object')
+  if (!embed) throw new Error('no embed after reencode v1')
+  assertEqual(embed.image, 'http://x/y.png', 'embed reencode v1')
+})
+check('Mirror_Embed_V2', () => {
+  const doc = new Y.Doc()
+  Y.applyUpdateV2(doc, load('embed_reencode_v2'))
+  const embed = doc.getText('t').toDelta().map(o => o.insert).find(i => i && typeof i === 'object')
+  if (!embed) throw new Error('no embed after reencode v2')
+  assertEqual(embed.image, 'http://x/y.png', 'embed reencode v2')
+})
+
 // ── Concurrent merge ──────────────────────────────────────────────────────────
 check('GoToJS_ConcurrentMerge_V1', () => {
   const doc = new Y.Doc()

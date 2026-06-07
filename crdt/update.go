@@ -272,7 +272,7 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 	if originRight != nil {
 		info |= flagHasRightOrigin
 	}
-	if item.ParentSub != "" {
+	if item.ParentSub != nil {
 		info |= flagHasParentSub
 	}
 	enc.WriteUint8(info)
@@ -286,7 +286,13 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 		enc.WriteVarUint(originRight.Clock)
 	}
 
-	// Parent info — only when neither origin is present.
+	// Parent info + parentSub — only when neither origin is present. This
+	// mirrors Yjs's Item.write exactly: the BIT6 "hasParentSub" flag is set
+	// in the info byte whenever ParentSub is present (see above), but the
+	// parentSub STRING is written only inside the no-origin block. When an
+	// origin IS present the receiver inherits parentSub from the left/origin
+	// item at integration time, so writing it here would put bytes on the
+	// wire that a conformant (Yjs) decoder does not expect. (#YMap-wire)
 	if origin == nil && originRight == nil {
 		if item.Parent != nil && item.Parent.item != nil {
 			// Nested type: identify by container item's ID.
@@ -302,10 +308,10 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 			}
 			enc.WriteVarString(name)
 		}
-	}
 
-	if item.ParentSub != "" {
-		enc.WriteVarString(item.ParentSub)
+		if item.ParentSub != nil {
+			enc.WriteVarString(*item.ParentSub)
+		}
 	}
 
 	encodeContent(enc, item.Content, offset)
@@ -324,10 +330,16 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 	case *ContentBinary:
 		enc.WriteVarBytes(ct.Data)
 	case *ContentString:
-		byteOff := utf16ByteOffset(ct.Str, offset)
-		enc.WriteVarString(ct.Str[byteOff:])
+		// Emit only the tail from `offset`. splitUTF16 emits a leading U+FFFD
+		// when offset bisects a surrogate pair, matching Yjs's mid-surrogate slice.
+		_, tail := splitUTF16(ct.Str, offset)
+		enc.WriteVarString(tail)
 	case *ContentEmbed:
-		enc.WriteAny(ct.Val)
+		// Yjs V1 encodes the embed via writeJSON = writeVarString(JSON.stringify).
+		// (V2 uses writeAny — see encodeContentV2.) Using WriteAny here put a
+		// lib0-tagged value on the wire that genuine Yjs decodes as a JSON
+		// string → failure. (#wire-conformance)
+		enc.WriteVarString(fmtValToJSON(ct.Val))
 	case *ContentFormat:
 		enc.WriteVarString(ct.Key)
 		enc.WriteVarString(fmtValToJSON(ct.Val))
@@ -348,7 +360,12 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 		if ct.Doc != nil {
 			guid = ct.Doc.GUID()
 		}
-		enc.WriteVarBytes([]byte(guid))
+		enc.WriteVarString(guid)
+		// Yjs ContentDoc.write emits guid THEN writeAny(opts). opts is always
+		// an object (defaults to {}); omitting it desyncs a Yjs decoder, and a
+		// `null` makes Yjs crash on opts.shouldLoad. ygo doesn't track subdoc
+		// opts, so emit an empty object. (#wire-conformance)
+		enc.WriteAny(map[string]any{})
 	case *ContentMove:
 		enc.WriteVarUint(uint64(ct.Target.Client))
 		enc.WriteVarUint(ct.Target.Clock)
@@ -619,7 +636,7 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			// have a parent. This handles the Yjs wire-format case where
 			// deleted YMap entries become GC structs and the parent type
 			// name is lost.
-			if item.Parent == nil && item.ParentSub != "" {
+			if item.Parent == nil && item.ParentSub != nil {
 				item.Parent = findParentForMapEntry(txn.doc.store)
 			}
 			if item.Parent != nil {
@@ -812,7 +829,7 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 	}
 
 	var parent *abstractType
-	var parentSub string
+	var parentSub *string
 
 	if !hasOrigin && !hasRightOrigin {
 		// Explicit parent info.
@@ -849,11 +866,19 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 		}
 	}
 
-	if hasParentSub {
-		parentSub, err = dec.ReadVarString()
-		if err != nil {
-			return nil, err
+	// parentSub is on the wire ONLY when neither origin is present (Yjs writes
+	// it inside the `origin==null && rightOrigin==null` block). When an origin
+	// IS present the BIT6 flag may still be set, but no string follows —
+	// parentSub is inherited from the left/origin item below. Reading a string
+	// here unconditionally (on BIT6 alone) consumes content bytes and
+	// misaligns the decoder → "unknown Any tag" / EOF on V1, silent data loss
+	// on the keyed item. (#YMap-wire)
+	if hasParentSub && !hasOrigin && !hasRightOrigin {
+		sub, serr := dec.ReadVarString()
+		if serr != nil {
+			return nil, serr
 		}
+		parentSub = &sub
 	}
 
 	content, err := decodeContent(dec, doc, tag)
@@ -870,15 +895,26 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 		Content:     content,
 	}
 
-	// Infer parent from origin items when not set by explicit parent info.
+	// Infer parent (and parentSub) from origin items when not set by explicit
+	// parent info. A keyed item written after the same key (LWW) carries an
+	// origin and therefore no on-wire parentSub; it inherits the key from its
+	// left/origin neighbour, exactly as Yjs resolves it during integration.
+	// Without inheriting ParentSub here the item would integrate with an empty
+	// key and never land in the parent's itemMap → silent loss. (#YMap-wire)
 	if item.Parent == nil {
 		if origin != nil {
 			if oi := doc.store.Find(*origin); oi != nil {
 				item.Parent = oi.Parent
+				if item.ParentSub == nil {
+					item.ParentSub = oi.ParentSub
+				}
 			}
 		} else if originRight != nil {
 			if ori := doc.store.Find(*originRight); ori != nil {
 				item.Parent = ori.Parent
+				if item.ParentSub == nil {
+					item.ParentSub = ori.ParentSub
+				}
 			}
 		}
 	}
@@ -930,7 +966,12 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentString(s), nil
 
 	case wireEmbed:
-		v, err := dec.ReadAny()
+		// V1: embed is a JSON-text varstring (Yjs writeJSON), not a lib0 Any.
+		js, err := dec.ReadVarString()
+		if err != nil {
+			return nil, err
+		}
+		v, err := fmtValFromJSON(js)
 		if err != nil {
 			return nil, err
 		}
@@ -984,6 +1025,12 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 			return nil, err
 		}
 		guid := string(guidBytes)
+		// Consume the opts object Yjs writes after the guid (writeAny). ygo
+		// doesn't use subdoc opts yet, but the bytes MUST be read or the
+		// struct stream desyncs. (#wire-conformance)
+		if _, err := dec.ReadAny(); err != nil {
+			return nil, err
+		}
 		return NewContentDoc(New(WithGUID(guid))), nil
 
 	case wireMove:
@@ -1045,6 +1092,19 @@ func decodeTypeContent(dec *encoding.Decoder, doc *Doc, typeClass byte) (*abstra
 		frag.itemMap = make(map[string]*Item)
 		frag.owner = frag
 		return &frag.abstractType, nil
+
+	case 5: // YXmlHook — ygo has no hook type, but Yjs writes a hookName
+		// string after the ref. We MUST consume it (mirroring decodeTypeContentV2)
+		// or the rest of the update stream desyncs. Degrade to a rawType
+		// placeholder. (#wire-conformance)
+		if _, err := dec.ReadVarString(); err != nil {
+			return nil, err
+		}
+		r := &rawType{}
+		r.doc = doc
+		r.itemMap = make(map[string]*Item)
+		r.owner = r
+		return &r.abstractType, nil
 
 	case 6: // YXmlText
 		xt := NewYXmlText()
@@ -1177,10 +1237,17 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	}
 
 	// Try to resolve parent via Origin / OriginRight / ParentSub fallback.
+	// As in the first-pass decode, a keyed item that arrived with an origin
+	// has no on-wire parentSub and must inherit the key from its origin
+	// neighbour here too, or it integrates keyless and is dropped from the
+	// parent's itemMap. (#YMap-wire)
 	if item.Parent == nil {
 		if item.Origin != nil {
 			if oi := store.Find(*item.Origin); oi != nil {
 				item.Parent = oi.Parent
+				if item.ParentSub == nil {
+					item.ParentSub = oi.ParentSub
+				}
 			} else if item.Origin.Clock >= store.NextClock(item.Origin.Client) {
 				return false // future clock — still blocked
 			}
@@ -1188,11 +1255,14 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 		if item.Parent == nil && item.OriginRight != nil {
 			if ori := store.Find(*item.OriginRight); ori != nil {
 				item.Parent = ori.Parent
+				if item.ParentSub == nil {
+					item.ParentSub = ori.ParentSub
+				}
 			} else if item.OriginRight.Clock >= store.NextClock(item.OriginRight.Client) {
 				return false
 			}
 		}
-		if item.Parent == nil && item.ParentSub != "" {
+		if item.Parent == nil && item.ParentSub != nil {
 			item.Parent = findParentForMapEntry(store)
 		}
 		if item.Parent == nil {

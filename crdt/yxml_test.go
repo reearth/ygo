@@ -417,7 +417,7 @@ func TestInteg_YXml_ConcurrentEdit_Convergence(t *testing.T) {
 	applyXmlItems := func(src *Doc, dst *Doc, dstFrag *YXmlFragment) {
 		dst.Transact(func(txn *Transaction) {
 			src.store.IterateFrom(dst.store.StateVector(), func(item *Item) {
-				if item.ParentSub != "" {
+				if item.ParentSub != nil {
 					return // skip attribute items for this test
 				}
 				var cloneContent Content

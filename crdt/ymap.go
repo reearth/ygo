@@ -68,7 +68,7 @@ func (m *YMap) computeKeys(txn *Transaction, keysChanged map[string]struct{}) ma
 		// item we encounter is the winning candidate — exactly what the
 		// `if preLive` / `if !item.Deleted` reassignments below rely on.
 		for item := t.start; item != nil; item = item.Right {
-			if item.ParentSub != key {
+			if item.ParentSub == nil || *item.ParentSub != key {
 				continue
 			}
 			beforeClock := txn.beforeState.Clock(item.ID.Client)
@@ -145,7 +145,7 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 		Origin:    origin,
 		Left:      left,
 		Parent:    t,
-		ParentSub: key,
+		ParentSub: strPtr(key),
 		Content:   NewContentAny(value),
 	}
 	item.integrate(txn, 0)

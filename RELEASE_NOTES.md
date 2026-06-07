@@ -1,46 +1,87 @@
 ## What's new
 
-Production-ready Redis transport for the `cluster.Relay` abstraction. With this release a multi-process ygo deployment behind a load balancer can share one logical document per room via Redis pub/sub — the canonical Hocuspocus `extension-redis` / y-hub topology, in pure Go.
+Yjs wire-format conformance. A cross-reference run of a yjs-generated fixture
+suite — and a follow-on source-level diff of ygo's wire codec against the Yjs
+reference — surfaced a cluster of interop bugs (YMap entries and several content
+types) that round-tripped fine ygo↔ygo but diverged from genuine `yjs` bytes.
+All are fixed and verified in **both** directions against `yjs@13.6.30`.
 
-### `cluster/redis` subpackage (#62)
+> Independent of v1.21.0 (`cluster/redis`) — v1.22.0 touches only the `crdt`
+> package.
 
-```go
-import (
-    "github.com/redis/go-redis/v9"
-    ygoredis "github.com/reearth/ygo/cluster/redis"
-    ygws "github.com/reearth/ygo/provider/websocket"
-)
+### Fixed — duplicate map keys (last-write-wins)
 
-rdb := redis.NewClient(&redis.Options{Addr: "redis:6379"})
-relay, _ := ygoredis.New(rdb, ygoredis.Config{ChannelPrefix: "ygo:prod:"})
-defer relay.Close()
+Overwriting a map value (`m.Set("k", 1)` then `m.Set("k", 2)` — the most common
+map operation) creates a second item that carries an *origin*, and Yjs therefore
+writes **no `parentSub` string** for it on the wire, even though the "has key"
+flag is set. ygo read the key string anyway, misaligning the byte stream:
 
-srv := ygws.NewServer()
-_ = srv.AttachRelay(relay)
-```
+- **V1** decode aborted (`unknown Any tag` / `unexpected end of input`) and
+  rejected the entire update — total data loss.
+- **V2** decode silently dropped the overwritten key.
 
-- **Per-room pub/sub** — a node only receives traffic for rooms it hosts. Reference-counted at the relay layer; SUBSCRIBE/UNSUBSCRIBE held under the lifecycle mutex so concurrent activations cannot reorder.
-- **Bounded back-pressure** — `OutboundBuffer` (default 256) decouples `Publish` from the Redis RPC so the CRDT transaction never blocks on network I/O. `Publish` surfaces a clean `ErrRelayClosed` if the bound start context is cancelled (e.g. `Server.Shutdown`) — never hangs.
-- **Self-delivery suppression** — every relay carries a 16-byte nodeID on the wire; the subscriber drops self-deliveries before any decode/Inject work. The provider-side sentinel guard remains the authoritative echo defence.
-- **Configurable inbound channel size** (`Config.ChannelSize`, default 1024) — go-redis silently drops messages when this fills, which for CRDT updates is silent divergence.
-- **Self-describing wire format** — `VarBytes(nodeID) + VarUint(kind) + VarString(room) + VarBytes(data)`.
+The decoder now reads the key only when no origin is present and inherits it
+from the origin item during integration; the encoder is fixed symmetrically.
+ygo↔ygo round-trips were green before only because the encoder had the
+mirror-image bug — self-consistent, but non-conformant.
 
-### Delivery semantics — fire-and-forget
+### Fixed — empty-string map keys
 
-Redis pub/sub is at-most-once. **A node that subscribes after a publish does not receive that publish.** The intended pattern pairs the relay with `VersionedPersistence` for catch-up state: on room activation, load the head state from persistence; from there the relay carries every subsequent edit. This is the same split Hocuspocus's `extension-redis` is conventionally deployed with.
+`m.Set("", v)` is valid in Yjs, but ygo used `""` internally to mean "no key"
+(a sequence element), so empty-keyed entries were dropped in both wire versions.
+The internal key representation is now `*string` (`nil` = sequence element,
+`&""` = genuine empty key), and empty keys survive encode/decode.
 
-For at-least-once delivery, Redis Streams would replace this adapter — tracked separately.
+### Fixed — content types (embed, subdoc, XML hook)
 
-### Not in this release (intentional)
+A source-level diff of ygo's whole wire codec against the canonical Yjs source
+(the method the YMap bugs were found with) surfaced three more cross-library
+breaks, all reproduced with genuine `yjs@13.6.30` bytes:
 
-- **Distributed lock / writer election** (Redlock pattern). Persistence write coordination is a different concern from doc-update fan-out and belongs in the persistence layer on top of `VersionedPersistence`.
-- **Redis Streams** as an at-least-once alternative — meaningful architectural shift, own design pass.
-- **Redis cluster mode** (multi-shard pub/sub). Targets single-node / Sentinel deployments.
+- **`YText` embeds** — Yjs's `writeJSON` is a JSON-text varstring in V1 but a
+  structured `writeAny` in V2. ygo used `WriteAny` for both, so V1 embeds
+  (`InsertEmbed`) neither decoded from nor encoded to real Yjs. V1 now uses
+  JSON text.
+- **Subdocument `opts`** — Yjs writes `guid` + `writeAny(opts)`. ygo's V1
+  omitted `opts` (stream desync); V2 wrote `null` (genuine Yjs crashes on
+  `opts.shouldLoad`). V1 now reads/writes `opts`; V2 writes `{}`.
+- **`YXmlHook`** — the V1 decoder didn't consume the hook's name string, so a
+  Yjs document containing a hook corrupted the rest of the update. It now
+  degrades gracefully like the V2 decoder.
+
+### Fixed — UTF-16 mid-surrogate splitting
+
+`Y.Text` is indexed in UTF-16 code units, so an emoji (supplementary character)
+occupies 2 units. When an index bisects a surrogate pair, Yjs slices the pair
+and replaces each lone half with U+FFFD — e.g. `"a😀c"`, insert `"X"` at 2 →
+`"a�X�c"`. ygo previously rounded the split forward to the next whole rune,
+yielding different content and item-clock boundaries than a JS peer. A shared
+`splitUTF16` helper now matches Yjs on the split and both encoder tail-slice
+paths (V1 + V2), verified against `yjs@13.6.30`. Clean (between-character) splits
+are unaffected; this only ever triggered on indices interior to a surrogate pair.
+
+### Conformance coverage
+
+- 10 YMap + 3 content-type scenarios captured from `yjs@13.6.30`, decoded as
+  genuine reference bytes with ygo→ygo round-trip stability.
+- Go→JS interop fixtures (`ymap_lww`, `ymap_empty_key`, `ytext_embed`, and a
+  `subdoc` re-encode that proves Yjs no longer crashes on ygo's output) confirm
+  the encoder is conformant in both directions.
+
+## ⚠️ Upgrade note (no code change required)
+
+The public API is unchanged. The **on-wire encoding** of overwritten and
+empty-keyed map entries changed to match Yjs, so **V1/V2 snapshots persisted by
+ygo ≤ v1.20.0 that contain those patterns will not decode correctly on this
+version**. Live-sync deployments are unaffected (peers upgrade together); only
+stored snapshots with overwritten/empty map keys are. That data was never
+readable by real Yjs anyway — re-encode affected snapshots once from a ≤ v1.20.0
+instance, or re-sync.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.21.0
+go get github.com/reearth/ygo@v1.22.0
 ```
 
-See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for the full entry and [docs/CLUSTERING.md](https://github.com/reearth/ygo/blob/main/docs/CLUSTERING.md) for setup and the catch-up-via-persistence pattern.
+See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.

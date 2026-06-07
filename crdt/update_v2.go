@@ -420,7 +420,10 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 		info |= flagHasRightOrigin
 	}
 	cantCopyParentInfo := origin == nil && originRight == nil
-	if cantCopyParentInfo && item.ParentSub != "" {
+	// BIT6 reflects "has a key" whenever ParentSub is present — matching Yjs,
+	// which sets it regardless of origin presence. The string itself is still
+	// written only inside the no-origin block below. (#YMap-wire)
+	if item.ParentSub != nil {
 		info |= flagHasParentSub
 	}
 	enc.writeInfo(info)
@@ -446,8 +449,8 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 			}
 			enc.writeString(name)
 		}
-		if item.ParentSub != "" {
-			enc.writeString(item.ParentSub)
+		if item.ParentSub != nil {
+			enc.writeString(*item.ParentSub)
 		}
 	}
 
@@ -494,8 +497,10 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 	case *ContentBinary:
 		enc.restEnc.WriteVarBytes(ct.Data)
 	case *ContentString:
-		byteOff := utf16ByteOffset(ct.Str, offset)
-		enc.writeString(ct.Str[byteOff:])
+		// Emit only the tail from `offset`. splitUTF16 emits a leading U+FFFD
+		// when offset bisects a surrogate pair, matching Yjs's mid-surrogate slice.
+		_, tail := splitUTF16(ct.Str, offset)
+		enc.writeString(tail)
 	case *ContentEmbed:
 		enc.restEnc.WriteAny(ct.Val)
 	case *ContentFormat:
@@ -519,7 +524,10 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 			guid = ct.Doc.GUID()
 		}
 		enc.writeString(guid)
-		enc.restEnc.WriteAny(nil)
+		// opts must be an object, not null — genuine Yjs reads opts.shouldLoad
+		// and crashes on null. ygo doesn't track subdoc opts; emit {}.
+		// (#wire-conformance)
+		enc.restEnc.WriteAny(map[string]any{})
 	case *ContentMove:
 		enc.restEnc.WriteVarUint(uint64(ct.Target.Client))
 		enc.restEnc.WriteVarUint(ct.Target.Clock)
@@ -706,17 +714,25 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	for len(pending) > 0 {
 		var remaining []*Item
 		for _, item := range pending {
+			// Inherit parentSub alongside parent from the origin neighbour:
+			// a keyed item with an origin has no on-wire parentSub. (#YMap-wire)
 			if item.Origin != nil {
 				if oi := txn.doc.store.Find(*item.Origin); oi != nil {
 					item.Parent = oi.Parent
+					if item.ParentSub == nil {
+						item.ParentSub = oi.ParentSub
+					}
 				}
 			}
 			if item.Parent == nil && item.OriginRight != nil {
 				if ori := txn.doc.store.Find(*item.OriginRight); ori != nil {
 					item.Parent = ori.Parent
+					if item.ParentSub == nil {
+						item.ParentSub = ori.ParentSub
+					}
 				}
 			}
-			if item.Parent == nil && item.ParentSub != "" {
+			if item.Parent == nil && item.ParentSub != nil {
 				item.Parent = findParentForMapEntry(txn.doc.store)
 			}
 			if item.Parent != nil {
@@ -869,7 +885,7 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 	}
 
 	var parent *abstractType
-	var parentSub string
+	var parentSub *string
 
 	cantCopyParentInfo := !hasOrigin && !hasRightOrigin
 	if cantCopyParentInfo {
@@ -906,7 +922,7 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 			if err != nil {
 				return nil, 0, err
 			}
-			parentSub = sub
+			parentSub = &sub
 		}
 	}
 
@@ -924,15 +940,25 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 		Content:     content,
 	}
 
-	// Infer parent from origin when not explicitly encoded.
+	// Infer parent (and parentSub) from origin when not explicitly encoded.
+	// A keyed item written after the same key (LWW) has an origin and so no
+	// on-wire parentSub; it inherits the key from its left/origin neighbour.
+	// Without this the item integrates with an empty key and is dropped from
+	// the parent's itemMap → silent loss on V2. (#YMap-wire)
 	if item.Parent == nil {
 		if origin != nil {
 			if oi := doc.store.Find(*origin); oi != nil {
 				item.Parent = oi.Parent
+				if item.ParentSub == nil {
+					item.ParentSub = oi.ParentSub
+				}
 			}
 		} else if originRight != nil {
 			if ori := doc.store.Find(*originRight); ori != nil {
 				item.Parent = ori.Parent
+				if item.ParentSub == nil {
+					item.ParentSub = ori.ParentSub
+				}
 			}
 		}
 	}

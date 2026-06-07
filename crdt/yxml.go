@@ -58,7 +58,7 @@ func (f *YXmlFragment) prepareFire(txn *Transaction, keysChanged map[string]stru
 func (f *YXmlFragment) Len() int {
 	count := 0
 	for item := f.start; item != nil; item = item.Right {
-		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == "" {
+		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == nil {
 			count += item.Content.Len()
 		}
 	}
@@ -86,7 +86,7 @@ func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 			origin = &ID{Client: left.ID.Client, Clock: end}
 			// originRight is the next child item (skip attribute items).
 			for r := left.Right; r != nil; r = r.Right {
-				if r.ParentSub == "" {
+				if r.ParentSub == nil {
 					id := r.ID
 					originRight = &id
 					break
@@ -95,7 +95,7 @@ func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 		} else {
 			// Inserting at start: find first existing child as originRight.
 			for it := t.start; it != nil; it = it.Right {
-				if it.ParentSub == "" {
+				if it.ParentSub == nil {
 					id := it.ID
 					originRight = &id
 					break
@@ -140,7 +140,7 @@ func (f *YXmlFragment) Delete(txn *Transaction, index, length int) {
 func (f *YXmlFragment) Children() []xmlNode {
 	var result []xmlNode
 	for item := f.start; item != nil; item = item.Right {
-		if item.Deleted || item.ParentSub != "" {
+		if item.Deleted || item.ParentSub != nil {
 			continue
 		}
 		if ct, ok := item.Content.(*ContentType); ok {
@@ -260,7 +260,7 @@ func (e *YXmlElement) SetAttribute(txn *Transaction, key, value string) {
 		Origin:    origin,
 		Left:      left,
 		Parent:    t,
-		ParentSub: key,
+		ParentSub: strPtr(key),
 		Content:   NewContentAny(value),
 	}
 	item.integrate(txn, 0)
@@ -419,7 +419,7 @@ func NewYXmlText() *YXmlText {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 // leftChildAt is like abstractType.leftNeighbourAt but skips attribute items
-// (ParentSub != ""), counting only child nodes.
+// (ParentSub != nil), counting only child nodes (ParentSub == nil).
 func leftChildAt(t *abstractType, index int) (*Item, int) {
 	if index == 0 {
 		return nil, 0
@@ -427,7 +427,7 @@ func leftChildAt(t *abstractType, index int) (*Item, int) {
 	counted := 0
 	var lastItem *Item
 	for item := t.start; item != nil; item = item.Right {
-		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == "" {
+		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == nil {
 			n := item.Content.Len()
 			if counted+n >= index {
 				offset := index - counted
@@ -443,7 +443,7 @@ func leftChildAt(t *abstractType, index int) (*Item, int) {
 	return lastItem, 0
 }
 
-// deleteChildRange deletes length child nodes (ParentSub == "") starting at
+// deleteChildRange deletes length child nodes (ParentSub == nil) starting at
 // child position index. Mirrors deleteRange from yarray.go.
 func deleteChildRange(t *abstractType, txn *Transaction, index, length int) {
 	if length <= 0 {
@@ -452,7 +452,7 @@ func deleteChildRange(t *abstractType, txn *Transaction, index, length int) {
 	counted := 0
 	item := t.start
 	for item != nil && length > 0 {
-		if item.Deleted || !item.Content.IsCountable() || item.ParentSub != "" {
+		if item.Deleted || !item.Content.IsCountable() || item.ParentSub != nil {
 			item = item.Right
 			continue
 		}

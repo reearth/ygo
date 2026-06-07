@@ -453,6 +453,47 @@ func TestUnit_YText_Delete_SupplementaryUnicode(t *testing.T) {
 	assert.Equal(t, 2, txt.Len())
 }
 
+// TestUnit_YText_Insert_MidSurrogate_MatchesYjs pins ygo to genuine Yjs
+// behaviour when an index bisects a surrogate pair (an offset interior to a
+// supplementary character, which occupies 2 UTF-16 code units). Yjs (verified
+// against yjs@13.6.30) slices the string mid-surrogate and replaces each lone
+// surrogate half with U+FFFD, preserving total UTF-16 length.
+//
+//	"a😀c" (len 4), insert "X" @2  →  "a�X�c" (len 5)
+func TestUnit_YText_Insert_MidSurrogate_MatchesYjs(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "a😀c", nil) // a(1) + 😀(2) + c(1) = 4 UTF-16 units
+	})
+	assert.Equal(t, 4, txt.Len())
+
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 2, "X", nil) // index 2 = between the surrogate halves of 😀
+	})
+	assert.Equal(t, "a�X�c", txt.ToString(),
+		"mid-surrogate split must emit U+FFFD on both halves like Yjs")
+	assert.Equal(t, 5, txt.Len(), "U+FFFD replacement preserves UTF-16 length")
+}
+
+// TestUnit_YText_Delete_MidSurrogate_MatchesYjs: deleting one UTF-16 unit that
+// is the second half of a surrogate pair leaves a single U+FFFD where the
+// supplementary char was.
+//
+//	"a😀c" (len 4), delete 1 @2  →  "a�c" (len 3)
+func TestUnit_YText_Delete_MidSurrogate_MatchesYjs(t *testing.T) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "a😀c", nil)
+	})
+	doc.Transact(func(txn *Transaction) {
+		txt.Delete(txn, 2, 1) // delete the low-surrogate unit of 😀
+	})
+	assert.Equal(t, "a�c", txt.ToString())
+	assert.Equal(t, 3, txt.Len())
+}
+
 // ── ApplyDelta tests ──────────────────────────────────────────────────────────
 
 func TestUnit_YText_ApplyDelta_InsertOnly(t *testing.T) {

@@ -5,6 +5,103 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] — 2026-06-06
+
+Yjs wire-format conformance. Fixes a cluster of cross-language interop bugs in
+which ygo decoded — and encoded — certain YMap entries and content types in a
+way that round-tripped ygo↔ygo but diverged from genuine `yjs` bytes. Found by
+diffing ygo's wire codec against the canonical Yjs source and reproducing each
+with genuine `yjs@13.6.30` bytes; verified in **both** directions (ygo decodes
+real Yjs output; real Yjs decodes ygo output).
+
+> Released on top of v1.21.0 (`cluster/redis`). The two are independent —
+> v1.22.0 touches only `crdt`.
+
+### Fixed
+
+- **Duplicate map keys (last-write-wins) corrupted updates** (#YMap-wire).
+  Setting the same key more than once — i.e. overwriting any value, the most
+  common map operation — produces a second item that carries an *origin* and so
+  no `parentSub` on the wire (Yjs sets the BIT6 "has key" flag but writes no
+  string in that case). ygo's decoder read a `parentSub` string on the BIT6
+  flag regardless of origin, consuming content bytes and misaligning the stream:
+  - **V1**: aborted with `unknown Any tag` / `unexpected end of input` and
+    **rejected the whole update** (total data loss).
+  - **V2**: silently dropped the overwritten key.
+  The decoder now reads `parentSub` only when no origin is present, and inherits
+  the key from the origin/left item during integration (first-pass decode *and*
+  the within-update pending retry) so the item lands in the parent's key map.
+  The encoder is fixed symmetrically: it writes the `parentSub` string only in
+  the no-origin case, matching Yjs `Item.write`.
+- **Empty-string map keys were dropped** (#YMap-wire). `m.Set("", v)` is valid
+  in Yjs but ygo used `""` to mean "no key" (a sequence element). `ParentSub`
+  is now `*string` (`nil` = sequence element, `&""` = genuine empty key), so
+  empty-keyed entries survive encode/decode in both wire versions.
+
+A follow-on source-level diff of the whole wire encode/decode surface against
+the canonical Yjs reference (the same method used to find the YMap bugs) turned
+up three more cross-library breaks, all reproduced with genuine `yjs@13.6.30`
+bytes and fixed:
+
+- **`YText` embeds didn't interop** (#wire-conformance). Yjs's `writeJSON`
+  differs by wire version — V1 writes a JSON-text varstring, V2 writes a
+  structured `writeAny`. ygo used `WriteAny` for both, so a Yjs **V1** embed
+  (`InsertEmbed`) failed to decode (`unknown Any tag`) and ygo-encoded V1
+  embeds were unreadable by Yjs. V1 now uses JSON text (V2 was already correct).
+- **Subdocument (`ContentDoc`) `opts` field** (#wire-conformance). Yjs writes
+  `guid` then `writeAny(opts)` (always an object). ygo's V1 omitted `opts`
+  entirely (decode desynced the struct stream); its V2 wrote `null`, which
+  makes genuine Yjs crash on `opts.shouldLoad`. V1 now reads/writes `opts`; V2
+  writes `{}`.
+- **`YXmlHook` (typeRef 5) desynced the V1 decoder** (#wire-conformance). ygo
+  has no hook type, but Yjs writes a `hookName` string after the ref; the V1
+  decoder left it unconsumed, corrupting the rest of the update. It now consumes
+  the name and degrades to a placeholder (as the V2 decoder already did).
+- **Splitting `YText` inside a surrogate pair diverged from Yjs**
+  (#wire-conformance). When an index/length lands in the middle of a
+  supplementary character (e.g. an emoji, which occupies 2 UTF-16 code units),
+  Yjs slices the surrogate pair and replaces each lone half with U+FFFD
+  (`"a😀c"`, insert `"X"` @2 → `"a�X�c"`). ygo instead rounded the boundary
+  forward to the next whole rune, producing different content and item-clock
+  boundaries than a JS peer. A shared `splitUTF16` helper now emits U+FFFD on
+  both halves for the split and both encoder tail-slice paths (V1 + V2),
+  matching Yjs (verified against `yjs@13.6.30`). Clean (between-character) splits
+  are unchanged. Reachable only by indices interior to a surrogate pair, which
+  conformant editors never emit — but now exact for fuzzers and hand-built indices.
+
+The audit confirmed **no** divergence in the V1 struct header/framing, info-byte
+layout, GC/Skip structs, delete-set body, content ref numbers,
+String/Binary/Deleted/Format content, the shared-type ref table (0–6), or the
+V2 multi-stream RLE format. Intentionally left as-is (decode-tolerant /
+non-issues): ascending-vs-descending client ordering, the `ContentMove` (tag
+11) ygo extension, the large-integer float32-vs-float64 `Any` tag (numerically
+lossless), and the legacy `ContentJSON` (ref 2) per-value format that modern
+Yjs never emits.
+
+### Tests
+
+- `crdt/testdata/ymap_yjs_fixtures.json` — 10 YMap scenarios captured from
+  `yjs@13.6.30`, decoded as genuine reference bytes (JS→Go) with ygo→ygo
+  re-encode stability checks (30 subtests).
+- Go→JS interop (`testutil/verify_go_fixtures.js`) gains `ymap_lww` and
+  `ymap_empty_key` fixtures, proving ygo's encoder output decodes correctly in
+  real Yjs.
+- Two `TestYjsCompat_GCdYMapOrigin` fixtures that had hand-crafted
+  *non-conformant* bytes (a `parentSub` string written next to an origin —
+  which real Yjs never emits) were rewritten to conformant byte shapes.
+
+### ⚠️ Wire-format / persisted-data note (no code change required)
+
+The public API is unchanged — no recompile or code change is needed. However,
+the on-wire encoding of overwritten and empty-keyed map entries changed to match
+Yjs. **V1/V2 snapshots persisted by ygo ≤ v1.20.0 that contain an overwritten or
+empty map key will not decode correctly on this version.** Live-sync deployments
+(peers upgrade together) are unaffected; only stored snapshots with those
+specific patterns are. Such data was never readable by real Yjs anyway. If you
+have affected snapshots, re-encode them once from a running ≤ v1.20.0 instance
+(or simply re-sync). No opt-in legacy decoder is shipped given ygo's small
+install base; one can be added later if needed.
+
 ## [1.21.0] — 2026-06-06
 
 Production-ready Redis transport for the `cluster.Relay` abstraction shipped in v1.20.0. With this release a multi-process ygo deployment behind a load balancer can share one logical document per room via Redis pub/sub — the canonical Hocuspocus `extension-redis` / y-hub topology, in pure Go.

@@ -171,7 +171,7 @@ func (s *StructStore) insertItem(item *Item) {
 func findParentForMapEntry(s *StructStore) *abstractType {
 	for _, items := range s.clients {
 		for _, item := range items {
-			if item.ParentSub != "" && item.Parent != nil {
+			if item.ParentSub != nil && item.Parent != nil {
 				return item.Parent
 			}
 		}

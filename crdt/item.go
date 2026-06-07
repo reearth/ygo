@@ -11,15 +11,49 @@ type Item struct {
 	Left        *Item // current left neighbour in the linked list
 	Right       *Item // current right neighbour
 	Parent      *abstractType
-	ParentSub   string // non-empty for YMap entries (the map key)
-	Content     Content
-	Deleted     bool
+	// ParentSub is the map key for YMap entries (and XML/Map-typed attributes).
+	// nil means "no key" — a sequence element (YArray / YText / XML child).
+	// A non-nil pointer to "" is a genuine empty-string key (m.Set("", v)),
+	// which Yjs supports and which must be distinguished from nil. (#YMap-wire)
+	ParentSub *string
+	Content   Content
+	Deleted   bool
 	// MovedBy points to the winning ContentMove item that has claimed this item
 	// as its target. When non-nil, this item is rendered at the ContentMove's
 	// position instead of its original linked-list position. Set by integrate()
 	// during ContentMove priority arbitration.
 	MovedBy *Item
 }
+
+// parentSubKey collapses a *string parentSub to a plain string bucket label for
+// changed-set tracking (addChanged). Both nil (a sequence element) and a
+// pointer-to-"" (a genuine empty-string map key) collapse to "". This is safe
+// because the result is only ever a label identifying which observer-event
+// bucket is dirty — never an identity. Consumers that resolve a bucket back to
+// items (e.g. YMap.computeKeys) re-filter on the actual ParentSub pointer
+// (nil vs non-nil and its value), so a nil-keyed sequence element is never
+// mistaken for an empty-string-keyed map entry. This holds even on XML
+// elements, which legitimately mix keyed attributes (non-nil ParentSub) and
+// nil-keyed children in the same type.
+func parentSubKey(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// parentSubEqual reports whether two parentSub pointers denote the same key:
+// both nil, or both non-nil with equal value.
+func parentSubEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// strPtr returns a pointer to a copy of s — used when setting a map key so the
+// stored pointer is stable and independent of the caller's variable.
+func strPtr(s string) *string { return &s }
 
 // integrate inserts this item into its parent's linked list using the YATA
 // conflict-resolution algorithm. After integrate returns, Left and Right
@@ -194,21 +228,22 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	}
 
 	// For map-keyed items, maintain last-write-wins semantics.
-	if item.ParentSub != "" {
-		if item.Right != nil && item.Right.ParentSub == item.ParentSub {
+	if item.ParentSub != nil {
+		key := *item.ParentSub
+		if item.Right != nil && parentSubEqual(item.Right.ParentSub, item.ParentSub) {
 			// A same-key item to our right won the concurrent write race — delete ourselves.
 			item.delete(txn)
 		} else {
 			// We are the rightmost item for this key; delete the previous winner.
-			if existing, ok := item.Parent.itemMap[item.ParentSub]; ok && !existing.Deleted {
+			if existing, ok := item.Parent.itemMap[key]; ok && !existing.Deleted {
 				existing.delete(txn)
 			}
-			item.Parent.itemMap[item.ParentSub] = item
+			item.Parent.itemMap[key] = item
 		}
 	}
 
 	if item.Parent != nil {
-		txn.addChanged(item.Parent, item.ParentSub)
+		txn.addChanged(item.Parent, parentSubKey(item.ParentSub))
 	}
 }
 
@@ -240,7 +275,7 @@ func (item *Item) delete(txn *Transaction) {
 	}
 	txn.deleteSet.add(item.ID, item.Content.Len())
 	if item.Parent != nil {
-		txn.addChanged(item.Parent, item.ParentSub)
+		txn.addChanged(item.Parent, parentSubKey(item.ParentSub))
 	}
 
 	// Recurse into nested-type children so their clocks land in the

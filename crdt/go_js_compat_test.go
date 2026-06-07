@@ -1,6 +1,7 @@
 package crdt_test
 
 import (
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,6 +83,84 @@ func TestCompat_GoToJS(t *testing.T) {
 		})
 		write("ymap_basic_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
 	}
+
+	// ── YMap: last-write-wins (key overwritten) ──────────────────────────────
+	// Encode-side conformance for the duplicate-key wire bug: the second Set
+	// produces an origin-bearing item whose parentSub must NOT be written to
+	// the wire. If ygo regresses to writing it, real Yjs decode misaligns.
+	{
+		doc := crdt.New(crdt.WithClientID(1))
+		m := doc.GetMap("m")
+		doc.Transact(func(txn *crdt.Transaction) { m.Set(txn, "k", 1) })
+		doc.Transact(func(txn *crdt.Transaction) { m.Set(txn, "k", 2) })
+		write("ymap_lww_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
+		write("ymap_lww_v2", crdt.EncodeStateAsUpdateV2(doc, nil))
+	}
+
+	// ── YMap: empty-string key ────────────────────────────────────────────────
+	{
+		doc := crdt.New(crdt.WithClientID(1))
+		m := doc.GetMap("m")
+		doc.Transact(func(txn *crdt.Transaction) { m.Set(txn, "", "value") })
+		write("ymap_empty_key_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
+		write("ymap_empty_key_v2", crdt.EncodeStateAsUpdateV2(doc, nil))
+	}
+
+	// ── YText embed: encode-side wire conformance ────────────────────────────
+	// Yjs V1 decodes the embed value as a JSON-text varstring; if ygo regresses
+	// to WriteAny, real Yjs fails. Verifies both V1 and V2 embed output.
+	{
+		doc := crdt.New(crdt.WithClientID(1))
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *crdt.Transaction) {
+			txt.Insert(txn, 0, "ab", nil)
+			txt.InsertEmbed(txn, 1, map[string]any{"image": "http://x/y.png", "w": 3}, nil)
+		})
+		write("ytext_embed_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
+		write("ytext_embed_v2", crdt.EncodeStateAsUpdateV2(doc, nil))
+	}
+
+	// ── YText mid-surrogate split: encode-side wire conformance ──────────────
+	// Inserting at an index that bisects a surrogate pair must split the emoji
+	// into U+FFFD halves exactly like Yjs, so real Yjs reads back "a�X�c"
+	// (verified against yjs@13.6.30). Guards splitUTF16 on the encode path.
+	{
+		doc := crdt.New(crdt.WithClientID(1))
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "a😀c", nil) })
+		doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 2, "X", nil) }) // index 2 = mid-😀
+		write("ytext_midsurrogate_v1", crdt.EncodeStateAsUpdateV1(doc, nil))
+		write("ytext_midsurrogate_v2", crdt.EncodeStateAsUpdateV2(doc, nil))
+	}
+
+	// ── Subdoc re-encode: decode genuine Yjs subdoc bytes, re-encode with ygo,
+	// and confirm real Yjs can still decode the result. Guards the ContentDoc
+	// opts fix (Yjs crashes on a null/absent opts). ──────────────────────────
+	{
+		// Genuine yjs@13.6.30: m.set('child', new Y.Doc()) — V2 bytes.
+		raw, herr := hex.DecodeString("0000059fc9ce8f02000001292e2a6d6368696c6435356566333938332d613238352d343139302d623234312d64643564306233663034386101052401010000010100760000")
+		require.NoError(t, herr)
+		d := crdt.New(crdt.WithClientID(1))
+		require.NoError(t, crdt.ApplyUpdateV2(d, raw, nil))
+		write("subdoc_reencode_v1", crdt.EncodeStateAsUpdateV1(d, nil))
+		write("subdoc_reencode_v2", crdt.EncodeStateAsUpdateV2(d, nil))
+	}
+
+	// ── Mirror loop (yjs → ygo → yjs): ygo decodes genuine Yjs bytes, then
+	// re-encodes; real Yjs must read the result back with the right content.
+	// Proves ygo's encode of YJS-ORIGINATED structs (a different path than
+	// encoding a Go-built doc) stays conformant. ────────────────────────────
+	reencode := func(label, yjsV1Hex string) {
+		raw, herr := hex.DecodeString(yjsV1Hex)
+		require.NoError(t, herr)
+		d := crdt.New(crdt.WithClientID(1))
+		require.NoError(t, crdt.ApplyUpdateV1(d, raw, nil))
+		write(label+"_v1", crdt.EncodeStateAsUpdateV1(d, nil))
+		write(label+"_v2", crdt.EncodeStateAsUpdateV2(d, nil))
+	}
+	// dup-key {k:2} and an embed — genuine yjs@13.6.30 V1 bytes.
+	reencode("ymap_dupkey_reencode", "0102a0dcabf704002101016d016b01a8a0dcabf70400017d0201a0dcabf704010001")
+	reencode("embed_reencode", "0103bbab84b70d0004010174016184bbab84b70d000162c5bbab84b70d00bbab84b70d01207b22696d616765223a22687474703a2f2f782f792e706e67222c2277223a337d00")
 
 	// ── Concurrent merge (two Go clients) ────────────────────────────────────
 	{
