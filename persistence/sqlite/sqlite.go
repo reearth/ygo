@@ -7,8 +7,12 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"sync"
+
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 
 	_ "modernc.org/sqlite"
 )
@@ -71,3 +75,62 @@ func Open(path string) (*Store, error) {
 
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
+
+// clampSQL is the version ceiling for reads: the room's checkpoint target if
+// present, else max int64. Used as a correlated subquery so a concurrent
+// mid-prune cannot race the checkpoint-vs-rows lookup.
+const clampSQL = `COALESCE((SELECT target FROM checkpoints WHERE room = ?), 9223372036854775807)`
+
+func (s *Store) clampedHead(ctx context.Context, room string) (persistence.Version, error) {
+	var v sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(version) FROM updates WHERE room = ? AND version <= `+clampSQL,
+		room, room).Scan(&v)
+	if err != nil {
+		return 0, err
+	}
+	if !v.Valid {
+		return 0, nil
+	}
+	return persistence.Version(v.Int64), nil
+}
+
+func (s *Store) mergedUpTo(ctx context.Context, room string, upTo persistence.Version) ([]byte, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT data FROM updates WHERE room = ? AND version <= ? ORDER BY version ASC`,
+		room, int64(upTo))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var blobs [][]byte
+	for rows.Next() {
+		var b []byte
+		if err := rows.Scan(&b); err != nil {
+			return nil, err
+		}
+		blobs = append(blobs, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(blobs) == 0 {
+		return nil, nil
+	}
+	return crdt.MergeUpdatesV1(blobs...)
+}
+
+// recoverInterruptedPrune finishes a prune that crashed after writing the
+// checkpoint but before deleting future rows. Full body in Task 5; the
+// no-checkpoint fast path is correct now.
+func (s *Store) recoverInterruptedPrune(ctx context.Context, room string) error {
+	var target sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT target FROM checkpoints WHERE room = ?`, room).Scan(&target); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	return nil // completed in Task 5
+}
