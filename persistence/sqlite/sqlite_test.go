@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -263,5 +264,34 @@ func TestCompact(t *testing.T) {
 	}
 	if n, _ := s.Compact(ctx, "room", 0); n != 0 {
 		t.Fatalf("Compact keep=0 deleted=%d want 0", n)
+	}
+}
+
+func TestConformance_SQLite(t *testing.T) {
+	dir := t.TempDir()
+	n := 0
+	persistence.RunConformance(t, func() persistence.VersionedPersistence {
+		n++
+		s, err := sqlite.Open(filepath.Join(dir, fmt.Sprintf("conf-%d.db", n)))
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		return s
+	})
+}
+
+func TestInMemoryMode(t *testing.T) {
+	s, err := sqlite.Open("") // ephemeral
+	if err != nil {
+		t.Fatalf("Open in-memory: %v", err)
+	}
+	defer s.Close()
+	a, _ := twoUpdates(t)
+	if _, err := s.AppendUpdate(context.Background(), "r", a); err != nil {
+		t.Fatalf("append in-memory: %v", err)
+	}
+	lr, _ := s.Load(context.Background(), "r")
+	if lr.Version != 1 {
+		t.Fatalf("in-memory load v=%d want 1", lr.Version)
 	}
 }

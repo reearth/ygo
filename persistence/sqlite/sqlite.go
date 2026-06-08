@@ -35,15 +35,17 @@ CREATE TABLE IF NOT EXISTS snapshots (
 CREATE TABLE IF NOT EXISTS checkpoints (
   room             TEXT    NOT NULL PRIMARY KEY,
   target           INTEGER NOT NULL,
-  rolled_back_head BLOB    NOT NULL
+  rolled_back_head BLOB
 );`
 
 // rolled_back_head is persisted for parity with FilePersistence and for
 // forensics; this backend never reads it back. Head is reconstructed purely by
 // merging surviving updates (rows <= target are never deleted by prune), so the
-// column is intentionally write-only here. Compact preserves this invariant: it
-// FOLDS a trimmed prefix into the oldest retained row (never dropping state),
-// so head stays reconstructable from surviving rows.
+// column is intentionally write-only here. It is nullable on purpose: pruning to
+// the empty head (target=0) materializes a nil rolled-back head, which is stored
+// as SQL NULL. Compact preserves this invariant: it FOLDS a trimmed prefix into
+// the oldest retained row (never dropping state), so head stays reconstructable
+// from surviving rows.
 
 // Store is a VersionedPersistence backed by a single SQLite database.
 // The zero value is not usable; call Open.
@@ -182,3 +184,11 @@ func (s *Store) Reopen() (persistence.VersionedPersistence, error) {
 	}
 	return Open(s.path)
 }
+
+// Compile-time assertions that *Store satisfies the persistence contract and the
+// optional crash-safety hooks the conformance suite exercises.
+var (
+	_ persistence.VersionedPersistence = (*Store)(nil)
+	_ persistence.CrashInjector        = (*Store)(nil)
+	_ persistence.Reopener             = (*Store)(nil)
+)
