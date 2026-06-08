@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
@@ -70,13 +71,16 @@ func (s *Store) AppendUpdate(ctx context.Context, room string, update []byte) (p
 // ListVersions returns metadata for every stored update in room with version
 // <= the clamped head, newest first. An empty (or unknown) room yields nil.
 func (s *Store) ListVersions(ctx context.Context, room string) ([]persistence.VersionMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT version, created_at FROM updates WHERE room = ? AND version <= `+clampSQL+
 			` ORDER BY version DESC`, room, room)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []persistence.VersionMeta
 	for rows.Next() {
 		var v, ns int64
@@ -95,6 +99,9 @@ func (s *Store) ListVersions(ctx context.Context, room string) ([]persistence.Ve
 // its metadata, with ok=true when present. Versions above the clamped head are
 // invisible (ok=false, nil error), as are unknown rooms/versions.
 func (s *Store) GetUpdate(ctx context.Context, room string, v persistence.Version) ([]byte, persistence.VersionMeta, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, persistence.VersionMeta{}, false, err
+	}
 	var data []byte
 	var ns int64
 	err := s.db.QueryRowContext(ctx,
@@ -134,6 +141,9 @@ func (s *Store) MaterializeAt(ctx context.Context, room string, v persistence.Ve
 // current clamped head version (0 for an empty room). An existing snapshot with
 // the same (room, name) is overwritten.
 func (s *Store) CaptureSnapshot(ctx context.Context, room, name string, state []byte) (persistence.Version, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	head, err := s.clampedHead(ctx, room)
@@ -166,9 +176,20 @@ func (s *Store) RestoreSnapshot(ctx context.Context, room, name string) ([]byte,
 	return state, persistence.Version(v), true, nil
 }
 
+// Compact is not yet implemented (Task 6). It exists so *Store satisfies
+// persistence.VersionedPersistence (required by Reopen's return type); the
+// real history-folding implementation lands in a follow-up. Callers get an
+// explicit error rather than a silent no-op.
+func (s *Store) Compact(ctx context.Context, room string, keep int) (int, error) {
+	return 0, errors.ErrUnsupported
+}
+
 // Delete removes all data for room: its updates, named snapshots, and any
 // crash-safety checkpoint, atomically in one transaction.
 func (s *Store) Delete(ctx context.Context, room string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -186,4 +207,35 @@ func (s *Store) Delete(ctx context.Context, room string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// PruneAfter removes every update with version > target, crash-safely. It is
+// two-phase: Phase 1 durably records a checkpoint (the prune ceiling plus the
+// rolled-back head) so reads clamp to target the instant it commits; Phase 2
+// deletes the future updates and clears the checkpoint. A crash between the two
+// phases leaves stale future rows on disk, but the checkpoint keeps them
+// invisible, and the next AppendUpdate finishes the interrupted prune. Mirrors
+// persistence.FilePersistence.PruneAfter.
+func (s *Store) PruneAfter(ctx context.Context, room string, target persistence.Version, rolledBack []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Phase 1: durably record the checkpoint (prune ceiling + rolled-back head).
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO checkpoints (room, target, rolled_back_head) VALUES (?, ?, ?)
+		 ON CONFLICT(room) DO UPDATE SET target=excluded.target, rolled_back_head=excluded.rolled_back_head`,
+		room, int64(target), rolledBack); err != nil {
+		return err
+	}
+
+	// Simulated crash between checkpoint write and deletes (test-only).
+	if s.crashAfterCheckpoint != nil && s.crashAfterCheckpoint() {
+		return nil
+	}
+
+	// Phase 2: delete future updates, then clear the checkpoint.
+	return s.finishPrune(ctx, room, target)
 }

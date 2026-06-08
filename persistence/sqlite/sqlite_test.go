@@ -142,6 +142,16 @@ func TestSnapshotsAndDelete(t *testing.T) {
 		t.Fatal("RestoreSnapshot missing: ok=true want false")
 	}
 
+	// Re-capturing the same (room, name) overwrites the prior blob (exercises the
+	// ON CONFLICT DO UPDATE arm).
+	if _, err := s.CaptureSnapshot(ctx, "room", "named", []byte("STATE2")); err != nil {
+		t.Fatalf("CaptureSnapshot overwrite: %v", err)
+	}
+	blob2, _, ok2, err := s.RestoreSnapshot(ctx, "room", "named")
+	if err != nil || !ok2 || string(blob2) != "STATE2" {
+		t.Fatalf("RestoreSnapshot after overwrite: blob=%q ok=%v err=%v want STATE2", blob2, ok2, err)
+	}
+
 	if err := s.Delete(ctx, "room"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -151,5 +161,61 @@ func TestSnapshotsAndDelete(t *testing.T) {
 	}
 	if _, _, ok, _ := s.RestoreSnapshot(ctx, "room", "named"); ok {
 		t.Fatal("after Delete, snapshot still present")
+	}
+}
+
+func TestPruneCrashRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	s, _ := sqlite.Open(path)
+	defer s.Close()
+	ctx := context.Background()
+
+	// Append 3 updates (versions 1..3) for one doc.
+	d := crdt.New(crdt.WithClientID(7))
+	txt := d.GetText("t")
+	var prevSV crdt.StateVector
+	for i := 0; i < 3; i++ {
+		d.Transact(func(tx *crdt.Transaction) { txt.Insert(tx, 0, string(rune('a'+i)), nil) })
+		var upd []byte
+		if i == 0 {
+			upd = crdt.EncodeStateAsUpdateV1(d, nil)
+		} else {
+			upd = crdt.EncodeStateAsUpdateV1(d, prevSV)
+		}
+		if _, err := s.AppendUpdate(ctx, "room", upd); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		prevSV = d.StateVector()
+	}
+
+	rolled, _ := s.MaterializeAt(ctx, "room", 2)
+
+	// Crash right after the checkpoint write, before deletes.
+	s.SetCrashAfterCheckpoint(func() bool { return true })
+	if err := s.PruneAfter(ctx, "room", 2, rolled); err != nil {
+		t.Fatalf("PruneAfter (crashing): %v", err)
+	}
+	s.SetCrashAfterCheckpoint(nil)
+
+	// Reopen and assert no resurrected versions despite stale rows on disk.
+	ro, _ := s.Reopen()
+	r := ro.(*sqlite.Store)
+	defer r.Close()
+	vers, _ := r.ListVersions(ctx, "room")
+	for _, m := range vers {
+		if m.Version > 2 {
+			t.Fatalf("resurrected version %d after mid-prune crash", m.Version)
+		}
+	}
+	lr, _ := r.Load(ctx, "room")
+	if lr.Version != 2 {
+		t.Fatalf("post-crash head = %d, want 2", lr.Version)
+	}
+	// Recovery: next append finishes the prune and lands at 3.
+	d.Transact(func(tx *crdt.Transaction) { txt.Insert(tx, 0, "z", nil) })
+	recoveryUpd := crdt.EncodeStateAsUpdateV1(d, prevSV)
+	nv, err := r.AppendUpdate(ctx, "room", recoveryUpd)
+	if err != nil || nv != 3 {
+		t.Fatalf("recovery append: v=%d err=%v want 3", nv, err)
 	}
 }

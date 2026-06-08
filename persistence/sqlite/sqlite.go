@@ -102,7 +102,7 @@ func (s *Store) mergedUpTo(ctx context.Context, room string, upTo persistence.Ve
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var blobs [][]byte
 	for rows.Next() {
 		var b []byte
@@ -120,17 +120,52 @@ func (s *Store) mergedUpTo(ctx context.Context, room string, upTo persistence.Ve
 	return crdt.MergeUpdatesV1(blobs...)
 }
 
-// recoverInterruptedPrune finishes a prune that crashed after writing the
-// checkpoint but before deleting future rows. Full body in Task 5; the
-// no-checkpoint fast path is correct now.
-func (s *Store) recoverInterruptedPrune(ctx context.Context, room string) error {
-	var target sql.NullInt64
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT target FROM checkpoints WHERE room = ?`, room).Scan(&target); err != nil {
-		if err == sql.ErrNoRows {
-			return nil
-		}
+// finishPrune deletes updates newer than target and clears the checkpoint, in
+// one transaction. Snapshots are intentionally untouched (matches FilePersistence).
+func (s *Store) finishPrune(ctx context.Context, room string, target persistence.Version) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	return nil // completed in Task 5
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM updates WHERE room = ? AND version > ?`, room, int64(target)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM checkpoints WHERE room = ?`, room); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// recoverInterruptedPrune finishes a prune that crashed after the checkpoint
+// write but before the deletes. Called by AppendUpdate (and Compact) under s.mu.
+func (s *Store) recoverInterruptedPrune(ctx context.Context, room string) error {
+	var target sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT target FROM checkpoints WHERE room = ?`, room).Scan(&target)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return s.finishPrune(ctx, room, persistence.Version(target.Int64))
+}
+
+// SetCrashAfterCheckpoint satisfies persistence.CrashInjector (test-only).
+func (s *Store) SetCrashAfterCheckpoint(fn func() bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.crashAfterCheckpoint = fn
+}
+
+// Reopen satisfies persistence.Reopener: a fresh handle over the same backing
+// store. In-memory stores (no durable file) return the same handle.
+func (s *Store) Reopen() (persistence.VersionedPersistence, error) {
+	if s.path == "" || s.path == ":memory:" {
+		return s, nil
+	}
+	return Open(s.path)
 }
