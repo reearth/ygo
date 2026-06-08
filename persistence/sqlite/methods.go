@@ -129,3 +129,61 @@ func (s *Store) MaterializeAt(ctx context.Context, room string, v persistence.Ve
 	}
 	return s.mergedUpTo(ctx, room, upTo)
 }
+
+// CaptureSnapshot stores a named V1 snapshot for room, associated with the
+// current clamped head version (0 for an empty room). An existing snapshot with
+// the same (room, name) is overwritten.
+func (s *Store) CaptureSnapshot(ctx context.Context, room, name string, state []byte) (persistence.Version, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	head, err := s.clampedHead(ctx, room)
+	if err != nil {
+		return 0, err
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO snapshots (room, name, version, state) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(room, name) DO UPDATE SET version=excluded.version, state=excluded.state`,
+		room, name, int64(head), state)
+	if err != nil {
+		return 0, err
+	}
+	return head, nil
+}
+
+// RestoreSnapshot returns the V1 blob stored under (room, name), the version it
+// was captured at, and ok=true when present. ok=false (nil error) when absent.
+func (s *Store) RestoreSnapshot(ctx context.Context, room, name string) ([]byte, persistence.Version, bool, error) {
+	var state []byte
+	var v int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT state, version FROM snapshots WHERE room = ? AND name = ?`, room, name).Scan(&state, &v)
+	if err == sql.ErrNoRows {
+		return nil, 0, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return state, persistence.Version(v), true, nil
+}
+
+// Delete removes all data for room: its updates, named snapshots, and any
+// crash-safety checkpoint, atomically in one transaction.
+func (s *Store) Delete(ctx context.Context, room string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for _, q := range []string{
+		`DELETE FROM updates WHERE room = ?`,
+		`DELETE FROM snapshots WHERE room = ?`,
+		`DELETE FROM checkpoints WHERE room = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, q, room); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

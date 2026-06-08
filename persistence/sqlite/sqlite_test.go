@@ -122,3 +122,34 @@ func TestListAndMaterialize(t *testing.T) {
 		t.Fatalf("MaterializeAt missing room: err=%v want ErrRoomNotFound", err)
 	}
 }
+
+func TestSnapshotsAndDelete(t *testing.T) {
+	s, _ := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
+	defer s.Close()
+	ctx := context.Background()
+	a, _ := twoUpdates(t)
+	_, _ = s.AppendUpdate(ctx, "room", a)
+
+	v, err := s.CaptureSnapshot(ctx, "room", "named", []byte("STATE"))
+	if err != nil || v != 1 {
+		t.Fatalf("CaptureSnapshot: v=%d err=%v want 1", v, err)
+	}
+	blob, sv, ok, err := s.RestoreSnapshot(ctx, "room", "named")
+	if err != nil || !ok || sv != 1 || string(blob) != "STATE" {
+		t.Fatalf("RestoreSnapshot: blob=%q v=%d ok=%v err=%v", blob, sv, ok, err)
+	}
+	if _, _, ok, _ := s.RestoreSnapshot(ctx, "room", "missing"); ok {
+		t.Fatal("RestoreSnapshot missing: ok=true want false")
+	}
+
+	if err := s.Delete(ctx, "room"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	lr, _ := s.Load(ctx, "room")
+	if lr.Version != 0 {
+		t.Fatalf("after Delete, Load v=%d want 0", lr.Version)
+	}
+	if _, _, ok, _ := s.RestoreSnapshot(ctx, "room", "named"); ok {
+		t.Fatal("after Delete, snapshot still present")
+	}
+}
