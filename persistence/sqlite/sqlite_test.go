@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/persistence/sqlite"
 )
 
@@ -87,5 +88,37 @@ func TestAppendUpdate_RejectsInvalid(t *testing.T) {
 	defer s.Close()
 	if _, err := s.AppendUpdate(context.Background(), "room", []byte{0xff, 0xff, 0xff}); err == nil {
 		t.Fatal("expected error for invalid update, got nil")
+	}
+}
+
+func TestListAndMaterialize(t *testing.T) {
+	s, _ := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
+	defer s.Close()
+	ctx := context.Background()
+	a, b := twoUpdates(t)
+	_, _ = s.AppendUpdate(ctx, "room", a)
+	_, _ = s.AppendUpdate(ctx, "room", b)
+
+	vers, err := s.ListVersions(ctx, "room")
+	if err != nil || len(vers) != 2 || vers[0].Version != 2 || vers[1].Version != 1 {
+		t.Fatalf("ListVersions newest-first: %+v err=%v", vers, err)
+	}
+	if vers[0].UpdatedAt.IsZero() {
+		t.Fatal("VersionMeta.UpdatedAt must be set")
+	}
+
+	if _, _, ok, _ := s.GetUpdate(ctx, "room", 2); !ok {
+		t.Fatal("GetUpdate v2 ok=false")
+	}
+	if _, _, ok, _ := s.GetUpdate(ctx, "room", 9); ok {
+		t.Fatal("GetUpdate v9 ok=true, want false")
+	}
+
+	empty, err := s.MaterializeAt(ctx, "room", 0)
+	if err != nil || empty != nil {
+		t.Fatalf("MaterializeAt v0: got %v err=%v, want nil/nil", empty, err)
+	}
+	if _, err := s.MaterializeAt(ctx, "missing", 5); err != persistence.ErrRoomNotFound {
+		t.Fatalf("MaterializeAt missing room: err=%v want ErrRoomNotFound", err)
 	}
 }
