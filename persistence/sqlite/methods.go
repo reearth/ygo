@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
@@ -176,12 +175,72 @@ func (s *Store) RestoreSnapshot(ctx context.Context, room, name string) ([]byte,
 	return state, persistence.Version(v), true, nil
 }
 
-// Compact is not yet implemented (Task 6). It exists so *Store satisfies
-// persistence.VersionedPersistence (required by Reopen's return type); the
-// real history-folding implementation lands in a follow-up. Callers get an
-// explicit error rather than a silent no-op.
+// Compact bounds a room's history to the newest keep updates, returning the
+// number of rows removed. It never drops materialized state: the trimmed prefix
+// is FOLDED into the oldest retained row (merged into one V1 blob), then the
+// now-redundant older rows are deleted. Retained version numbers are unchanged,
+// so reads still reconstruct the same head. keep <= 0 is a no-op (returns 0).
 func (s *Store) Compact(ctx context.Context, room string, keep int) (int, error) {
-	return 0, errors.ErrUnsupported
+	if keep <= 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.recoverInterruptedPrune(ctx, room); err != nil {
+		return 0, err
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT version, data FROM updates WHERE room = ? AND version <= `+clampSQL+` ORDER BY version ASC`,
+		room, room)
+	if err != nil {
+		return 0, err
+	}
+	var versions []int64
+	var blobs [][]byte
+	for rows.Next() {
+		var v int64
+		var b []byte
+		if err := rows.Scan(&v, &b); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		versions = append(versions, v)
+		blobs = append(blobs, b)
+	}
+	if cerr := rows.Close(); cerr != nil {
+		return 0, cerr
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(versions) <= keep {
+		return 0, nil
+	}
+	trimEnd := len(versions) - keep // fold [0:trimEnd] into versions[trimEnd]
+	merged, err := crdt.MergeUpdatesV1(blobs[:trimEnd+1]...)
+	if err != nil {
+		return 0, err
+	}
+	foldVersion := versions[trimEnd]
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE updates SET data = ? WHERE room = ? AND version = ?`, merged, room, foldVersion); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM updates WHERE room = ? AND version < ?`, room, foldVersion); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return trimEnd, nil
 }
 
 // Delete removes all data for room: its updates, named snapshots, and any
@@ -224,6 +283,9 @@ func (s *Store) PruneAfter(ctx context.Context, room string, target persistence.
 	defer s.mu.Unlock()
 
 	// Phase 1: durably record the checkpoint (prune ceiling + rolled-back head).
+	// rolledBack is stored for parity/forensics only; this backend reconstructs
+	// head from surviving rows (<= target are never deleted) and never reads it
+	// back. See the checkpoints schema comment in sqlite.go.
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO checkpoints (room, target, rolled_back_head) VALUES (?, ?, ?)
 		 ON CONFLICT(room) DO UPDATE SET target=excluded.target, rolled_back_head=excluded.rolled_back_head`,

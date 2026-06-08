@@ -38,6 +38,13 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   rolled_back_head BLOB    NOT NULL
 );`
 
+// rolled_back_head is persisted for parity with FilePersistence and for
+// forensics; this backend never reads it back. Head is reconstructed purely by
+// merging surviving updates (rows <= target are never deleted by prune), so the
+// column is intentionally write-only here. Compact preserves this invariant: it
+// FOLDS a trimmed prefix into the oldest retained row (never dropping state),
+// so head stays reconstructable from surviving rows.
+
 // Store is a VersionedPersistence backed by a single SQLite database.
 // The zero value is not usable; call Open.
 type Store struct {
@@ -57,6 +64,10 @@ func Open(path string) (*Store, error) {
 	if inMem {
 		dsn = ":memory:"
 	}
+	// synchronous=NORMAL + WAL: a committed checkpoint survives an app-level
+	// crash (process kill), but a power/OS crash can lose the most recently
+	// committed transaction. This is the accepted WAL durability tradeoff —
+	// chosen for throughput; FULL would fsync on every commit.
 	dsn += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(on)"
 
 	db, err := sql.Open("sqlite", dsn)
@@ -140,7 +151,9 @@ func (s *Store) finishPrune(ctx context.Context, room string, target persistence
 }
 
 // recoverInterruptedPrune finishes a prune that crashed after the checkpoint
-// write but before the deletes. Called by AppendUpdate (and Compact) under s.mu.
+// write but before the deletes. Called under s.mu by both AppendUpdate and
+// Compact before they touch the updates table, so neither operates on rows a
+// pending prune is about to remove.
 func (s *Store) recoverInterruptedPrune(ctx context.Context, room string) error {
 	var target sql.NullInt64
 	err := s.db.QueryRowContext(ctx,

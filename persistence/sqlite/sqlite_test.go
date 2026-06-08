@@ -219,3 +219,49 @@ func TestPruneCrashRecovery(t *testing.T) {
 		t.Fatalf("recovery append: v=%d err=%v want 3", nv, err)
 	}
 }
+
+func TestCompact(t *testing.T) {
+	s, _ := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
+	defer s.Close()
+	ctx := context.Background()
+	d := crdt.New(crdt.WithClientID(7))
+	txt := d.GetText("t")
+	var prevSV crdt.StateVector
+	for i := 0; i < 4; i++ {
+		d.Transact(func(tx *crdt.Transaction) { txt.Insert(tx, 0, string(rune('a'+i)), nil) })
+		var upd []byte
+		if i == 0 {
+			upd = crdt.EncodeStateAsUpdateV1(d, nil)
+		} else {
+			upd = crdt.EncodeStateAsUpdateV1(d, prevSV)
+		}
+		if _, err := s.AppendUpdate(ctx, "room", upd); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		prevSV = d.StateVector()
+	}
+	textOf := func() string {
+		lr, _ := s.Load(ctx, "room")
+		dd := crdt.New()
+		if err := crdt.ApplyUpdateV1(dd, lr.Update, nil); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+		return dd.GetText("t").ToString()
+	}
+	want := textOf()
+
+	deleted, err := s.Compact(ctx, "room", 2) // keep newest 2 (versions 3,4)
+	if err != nil || deleted != 2 {
+		t.Fatalf("Compact: deleted=%d err=%v want 2", deleted, err)
+	}
+	vers, _ := s.ListVersions(ctx, "room")
+	if len(vers) != 2 || vers[0].Version != 4 || vers[1].Version != 3 {
+		t.Fatalf("after compact versions = %+v, want [4,3]", vers)
+	}
+	if got := textOf(); got != want {
+		t.Fatalf("compact changed materialized text: got %q want %q", got, want)
+	}
+	if n, _ := s.Compact(ctx, "room", 0); n != 0 {
+		t.Fatalf("Compact keep=0 deleted=%d want 0", n)
+	}
+}
