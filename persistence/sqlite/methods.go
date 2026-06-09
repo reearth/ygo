@@ -119,6 +119,9 @@ func (s *Store) GetUpdate(ctx context.Context, room string, v persistence.Versio
 // updates with version <= min(v, clamped head). It returns a nil slice for
 // v == 0, and ErrRoomNotFound if the room has no visible updates and v > 0.
 func (s *Store) MaterializeAt(ctx context.Context, room string, v persistence.Version) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if v == 0 {
 		return nil, nil
 	}
@@ -162,6 +165,9 @@ func (s *Store) CaptureSnapshot(ctx context.Context, room, name string, state []
 // RestoreSnapshot returns the V1 blob stored under (room, name), the version it
 // was captured at, and ok=true when present. ok=false (nil error) when absent.
 func (s *Store) RestoreSnapshot(ctx context.Context, room, name string) ([]byte, persistence.Version, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, false, err
+	}
 	var state []byte
 	var v int64
 	err := s.db.QueryRowContext(ctx,
