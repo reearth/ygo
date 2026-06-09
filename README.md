@@ -140,6 +140,14 @@ func main() {
 }
 ```
 
+### Run a server
+
+For a ready-to-run binary — with flags for origins, connection/room limits, an optional Redis cluster relay (`-redis`), and SQLite persistence (`-store`) — use [`cmd/ygo-server`](cmd/ygo-server/):
+
+```bash
+go run github.com/reearth/ygo/cmd/ygo-server -addr :1234 -store data.db
+```
+
 ## Server-side document injection
 
 Backend services — AI agents, HTTP handlers, content pipelines — can push
@@ -264,6 +272,8 @@ type PersistenceAdapter interface {
 ```
 
 `LoadDoc` is called once when the first peer connects to a room; the result seeds the in-memory doc. `StoreUpdate` is called on every committed transaction. Writes run on a per-room worker goroutine — slow storage doesn't block peers. Wire an adapter in via `NewServerWithPersistence(adapter)`.
+
+For a ready-made durable backend, [`persistence/sqlite`](persistence/sqlite/) provides a pure-Go (CGO-free, `modernc.org/sqlite`) `VersionedPersistence` store with WAL mode, full versioned history, and a crash-safe two-phase prune. Open it with `sqlite.Open("data.db")`.
 
 For backend examples (Postgres, Redis, file-system) and the v1.7.0 context-aware extension that lets adapters abort in-flight writes during `Server.Shutdown`, see [docs/PERSISTENCE.md](docs/PERSISTENCE.md).
 

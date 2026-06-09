@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.0] — 2026-06-09
+
+### Added
+
+- **`persistence/sqlite` — pure-Go SQLite `VersionedPersistence` backend** (#98).
+  CGo-free (`modernc.org/sqlite`), WAL-mode, with crash-safe two-phase prune and
+  full `RunConformance` coverage. Drop-in durable store: `sqlite.Open("data.db")`.
+- **`cmd/ygo-server` — ready-to-run WebSocket collaboration server** (#100).
+  Flags for address, allowed origins, connection/room limits, max message size,
+  optional Redis cluster relay (`-redis`), and SQLite persistence (`-store`),
+  with graceful shutdown.
+
 ## [1.22.0] — 2026-06-06
 
 Yjs wire-format conformance. Fixes a cluster of cross-language interop bugs in
