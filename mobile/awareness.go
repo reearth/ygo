@@ -93,6 +93,8 @@ func (w *Awareness) EncodeAll() []byte {
 	if a == nil {
 		return nil
 	}
+	// GetStates returns active clients only, so EncodeAll snapshots live presence
+	// (it does not propagate removal tombstones — that's by design for a full snapshot).
 	states := a.GetStates()
 	ids := make([]uint64, 0, len(states))
 	for id := range states {
