@@ -160,20 +160,31 @@ val doc = Mobile.newDoc()
 // Apply a peer update off the UI thread, then re-read on the main thread.
 suspend fun onPeerUpdate(update: ByteArray) {
     withContext(Dispatchers.IO) {
-        doc.applyUpdate(update)          // throws on a corrupt update
+        try {
+            doc.applyUpdate(update)      // throws on a corrupt update
+        } catch (e: Exception) {
+            Log.w("ygo", "dropping bad update", e)
+            return@withContext
+        }
     }
-    val text = doc.getText("content")     // re-read for the UI
+    val text = doc.getText("content")     // re-read for the UI (does not throw)
     render(text)
 }
 
-// Presence via awareness.
-val awareness = Mobile.newAwareness(doc.clientID())
-awareness.setLocalState("""{"user":"alice"}""".toByteArray())
-val states = String(awareness.statesJSON())  // { "<id>": { "Clock": N, "State": {...} } }
+// Presence via awareness. newAwareness / setLocalState / statesJSON all throw,
+// so wrap them; getText / clientID above are pure-value calls and do not.
+var awareness: Awareness? = null
+try {
+    awareness = Mobile.newAwareness(doc.clientID())
+    awareness.setLocalState("""{"user":"alice"}""".toByteArray())
+    val states = String(awareness.statesJSON())  // { "<id>": { "Clock": N, "State": {...} } }
+} catch (e: Exception) {
+    Log.w("ygo", "awareness setup failed", e)
+}
 
 // Release when the screen goes away.
 override fun onCleared() {
-    awareness.close()
+    awareness?.close()
     doc.close()
 }
 ```
