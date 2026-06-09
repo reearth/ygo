@@ -72,6 +72,11 @@ func TestExportedAPIIsMobileSafe(t *testing.T) {
 		}
 	}
 	// Exported package constructors.
+	//
+	// NOTE: keep this list in sync with every exported package-level func in
+	// mobile/. The method side is reflection-driven and self-maintaining, but new
+	// top-level constructors/funcs must be added here or they escape the safety
+	// check.
 	ctors := map[string]any{
 		"NewDoc":             NewDoc,
 		"NewDocWithClientID": NewDocWithClientID,

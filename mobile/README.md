@@ -145,6 +145,11 @@ These are functional but **not stable/idiomatic**, and idiomatic shapes are a
 long-term**. (`GetText`, `GetMapJSON`, and `GetArrayJSON` return the plain text
 and the natural JSON of the map/array contents and are unaffected.)
 
+- **`LocalStateJSON`** yields JSON `null` when there is no local presence yet
+  (freshly constructed, or after `ClearLocalState`), which is **distinct from
+  `{}`** (a present-but-empty state set via `SetLocalState`). Treat `null` vs
+  `{}` as a meaningful absent/present distinction, not interchangeable.
+
 ## Examples
 
 ### Kotlin (Android)

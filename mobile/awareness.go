@@ -68,7 +68,12 @@ func (w *Awareness) ClearLocalState() {
 	a.SetLocalState(nil)
 }
 
-// LocalStateJSON returns the local state as JSON. Returns ErrClosed after Close.
+// LocalStateJSON returns the local state as JSON. It yields JSON `null` when no
+// local state is set — either freshly constructed or after ClearLocalState — and
+// a JSON object (e.g. `{}` or `{"k":v}`) once a state has been set via
+// SetLocalState. So `null` vs `{}` is a meaningful present/absent distinction
+// consumers can rely on: `{}` is a present-but-empty state, `null` is no presence
+// yet. Returns ErrClosed after Close.
 func (w *Awareness) LocalStateJSON() ([]byte, error) {
 	a := w.inner()
 	if a == nil {
