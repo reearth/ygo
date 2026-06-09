@@ -38,6 +38,41 @@ func TestDoc_CloseIsIdempotentAndZeroAfter(t *testing.T) {
 	}
 }
 
+func TestDoc_ReadAccessors(t *testing.T) {
+	d := NewDoc()
+	txt := d.d.GetText("t")
+	mp := d.d.GetMap("m")
+	arr := d.d.GetArray("a")
+	d.d.Transact(func(tx *crdt.Transaction) {
+		txt.Insert(tx, 0, "hi", nil)
+		mp.Set(tx, "k", "v")
+		arr.Push(tx, []any{int64(1), "two"})
+	})
+
+	if got := d.GetText("t"); got != "hi" {
+		t.Fatalf("GetText = %q, want %q", got, "hi")
+	}
+	mj, err := d.GetMapJSON("m")
+	if err != nil || string(mj) != `{"k":"v"}` {
+		t.Fatalf("GetMapJSON = %q err=%v", mj, err)
+	}
+	aj, err := d.GetArrayJSON("a")
+	if err != nil || string(aj) != `[1,"two"]` {
+		t.Fatalf("GetArrayJSON = %q err=%v", aj, err)
+	}
+	if _, err := d.GetTextJSON("t"); err != nil {
+		t.Fatalf("GetTextJSON err=%v", err)
+	}
+
+	d.Close()
+	if got := d.GetText("t"); got != "" {
+		t.Fatalf("GetText after Close = %q, want empty", got)
+	}
+	if _, err := d.GetMapJSON("m"); err != ErrClosed {
+		t.Fatalf("GetMapJSON after Close = %v, want ErrClosed", err)
+	}
+}
+
 func TestDoc_SyncRoundTrip(t *testing.T) {
 	// Producer doc with text "hi" (driven via the inner crdt.Doc — v1 has no mobile mutators).
 	src := NewDoc()
@@ -53,9 +88,13 @@ func TestDoc_SyncRoundTrip(t *testing.T) {
 	if err := dst.ApplyUpdate(diff); err != nil {
 		t.Fatalf("ApplyUpdate: %v", err)
 	}
-	// Convergence check WITHOUT GetText (GetText arrives in Task 4): state vectors must match.
+	// State vectors must match...
 	if !bytes.Equal(dst.EncodeStateVector(), src.EncodeStateVector()) {
 		t.Fatal("state vectors differ after sync; did not converge")
+	}
+	// ...and the synced content must be readable.
+	if got := dst.GetText("t"); got != "hi" {
+		t.Fatalf("after sync GetText = %q, want hi", got)
 	}
 
 	// Full-state path also works.
@@ -65,6 +104,9 @@ func TestDoc_SyncRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(dst2.EncodeStateVector(), src.EncodeStateVector()) {
 		t.Fatal("full-state sync did not converge")
+	}
+	if got := dst2.GetText("t"); got != "hi" {
+		t.Fatalf("after full-state sync GetText = %q, want hi", got)
 	}
 }
 

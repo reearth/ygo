@@ -78,6 +78,43 @@ func (m *Doc) EncodeStateVector() []byte {
 	return crdt.EncodeStateVectorV1(d)
 }
 
+// GetText returns the plain-text content of the named YText root ("" after Close
+// or for an absent/empty root).
+func (m *Doc) GetText(name string) string {
+	d := m.inner()
+	if d == nil {
+		return ""
+	}
+	return d.GetText(name).ToString()
+}
+
+// GetTextJSON returns the named YText root as a Yjs delta JSON document.
+func (m *Doc) GetTextJSON(name string) ([]byte, error) {
+	d := m.inner()
+	if d == nil {
+		return nil, ErrClosed
+	}
+	return d.GetText(name).ToJSON()
+}
+
+// GetMapJSON returns the named YMap root as JSON.
+func (m *Doc) GetMapJSON(name string) ([]byte, error) {
+	d := m.inner()
+	if d == nil {
+		return nil, ErrClosed
+	}
+	return d.GetMap(name).ToJSON()
+}
+
+// GetArrayJSON returns the named YArray root as JSON.
+func (m *Doc) GetArrayJSON(name string) ([]byte, error) {
+	d := m.inner()
+	if d == nil {
+		return nil, ErrClosed
+	}
+	return d.GetArray(name).ToJSON()
+}
+
 // EncodeDiff returns the updates this document has that the remote (described by
 // its encoded state vector) is missing. Returns ErrClosed after Close.
 func (m *Doc) EncodeDiff(remoteStateVector []byte) ([]byte, error) {
