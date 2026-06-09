@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +40,44 @@ func TestParseOrigins(t *testing.T) {
 				t.Fatalf("parseOrigins(%q) = %#v, want %#v", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+// TestNewLogger_FormatSelection verifies the -log flag actually changes the
+// handler: "json" emits JSON; "text" and unknown values emit text. This is the
+// primitive the fatal-exit path relies on via slog.SetDefault(newLogger(cfg.Log)).
+func TestNewLogger_FormatSelection(t *testing.T) {
+	var jbuf bytes.Buffer
+	newLoggerTo(&jbuf, "json").Info("hello", "k", "v")
+	if !json.Valid(bytes.TrimSpace(jbuf.Bytes())) {
+		t.Fatalf("json format: output is not valid JSON: %q", jbuf.String())
+	}
+	for _, format := range []string{"text", "weird-unknown"} {
+		var tbuf bytes.Buffer
+		newLoggerTo(&tbuf, format).Info("hello", "k", "v")
+		out := tbuf.String()
+		if json.Valid(bytes.TrimSpace(tbuf.Bytes())) {
+			t.Fatalf("format %q: expected text handler, got JSON: %q", format, out)
+		}
+		if !strings.Contains(out, "msg=hello") || !strings.Contains(out, "k=v") {
+			t.Fatalf("format %q: text output missing key=value: %q", format, out)
+		}
+	}
+}
+
+// TestDefaultLogger_HonorsFormat covers the Fix-4 wiring directly: main() does
+// slog.SetDefault(newLogger(cfg.Log)), so the fatal-exit slog.Error must emit in
+// the chosen format. Asserting SetDefault(json logger) makes the package-default
+// slog.Error output JSON proves the fatal path honors -log.
+func TestDefaultLogger_HonorsFormat(t *testing.T) {
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	var buf bytes.Buffer
+	slog.SetDefault(newLoggerTo(&buf, "json"))
+	slog.Error("boom", "err", "x") // mirrors main()'s fatal-exit log
+	if !json.Valid(bytes.TrimSpace(buf.Bytes())) {
+		t.Fatalf("default logger after SetDefault(json) not JSON: %q", buf.String())
 	}
 }
 

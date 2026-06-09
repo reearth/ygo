@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -103,12 +104,17 @@ func parseFlags(args []string) (Config, error) {
 
 // newLogger builds a slog.Logger writing to stderr in the requested format.
 // Any value other than "json" yields a text handler.
-func newLogger(format string) *slog.Logger {
+func newLogger(format string) *slog.Logger { return newLoggerTo(os.Stderr, format) }
+
+// newLoggerTo builds the logger writing to w. "json" selects a JSON handler;
+// anything else (incl. "text" and unknown values) selects a text handler. The
+// writer seam keeps the format selection unit-testable.
+func newLoggerTo(w io.Writer, format string) *slog.Logger {
 	var h slog.Handler
 	if format == "json" {
-		h = slog.NewJSONHandler(os.Stderr, nil)
+		h = slog.NewJSONHandler(w, nil)
 	} else {
-		h = slog.NewTextHandler(os.Stderr, nil)
+		h = slog.NewTextHandler(w, nil)
 	}
 	return slog.New(h)
 }
