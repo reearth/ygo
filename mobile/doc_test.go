@@ -126,3 +126,10 @@ func TestDoc_EncodeDiff_InvalidStateVector(t *testing.T) {
 		t.Fatal("EncodeDiff with garbage state vector: expected error")
 	}
 }
+
+func TestDoc_GetTextJSON_AbsentRootIsEmptyArray(t *testing.T) {
+	tj, err := NewDoc().GetTextJSON("nope")
+	if err != nil || string(tj) != "[]" {
+		t.Fatalf("GetTextJSON(absent) = %q err=%v, want []", tj, err)
+	}
+}

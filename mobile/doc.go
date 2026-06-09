@@ -97,7 +97,14 @@ func (m *Doc) GetTextJSON(name string) ([]byte, error) {
 	if d == nil {
 		return nil, ErrClosed
 	}
-	return json.Marshal(d.GetText(name).ToDelta())
+	delta := d.GetText(name).ToDelta()
+	if delta == nil {
+		// ToDelta returns a nil slice for an absent/empty text root, which
+		// json.Marshal emits as `null` — a JS consumer doing delta.forEach(...)
+		// on null would crash. Emit `[]` instead.
+		delta = []crdt.Delta{}
+	}
+	return json.Marshal(delta)
 }
 
 // GetMapJSON returns the named YMap root as JSON.
