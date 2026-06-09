@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -10,6 +11,33 @@ import (
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/persistence/sqlite"
 )
+
+// TestParseOrigins locks in the whitespace-trimming + drop-empties behavior of
+// the -origins flag. A naive strings.Split (no TrimSpace) would leave a
+// " https://b.com" entry that never matches an Origin header — the spaced cases
+// below fail against that naive version and pass only with parseOrigins.
+func TestParseOrigins(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty", "", nil},
+		{"whitespace only", "   ", nil},
+		{"single", "https://a.com", []string{"https://a.com"}},
+		{"space after comma", "https://a.com, https://b.com", []string{"https://a.com", "https://b.com"}},
+		{"surrounding spaces and tab", "  https://a.com ,\thttps://b.com  ", []string{"https://a.com", "https://b.com"}},
+		{"empty entries dropped", "https://a.com,,https://b.com,", []string{"https://a.com", "https://b.com"}},
+		{"commas and spaces only", " , , ", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := parseOrigins(c.in); !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("parseOrigins(%q) = %#v, want %#v", c.in, got, c.want)
+			}
+		})
+	}
+}
 
 // Persistence survives a simulated restart: store an update via the same
 // LegacyAdapter+sqlite the binary wires, close, reopen, and load it back.

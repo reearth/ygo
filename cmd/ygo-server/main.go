@@ -113,6 +113,21 @@ func newLogger(format string) *slog.Logger {
 	return slog.New(h)
 }
 
+// parseOrigins splits a comma-separated origins flag into a slice, trimming
+// surrounding whitespace from each entry and dropping empties. This ensures a
+// human-friendly value like "https://a.com, https://b.com" does not yield a
+// " https://b.com" entry that never matches an incoming Origin header. Returns
+// nil for an empty/whitespace-only string (which leaves the same-origin default).
+func parseOrigins(s string) []string {
+	var origins []string
+	for _, o := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(o); t != "" {
+			origins = append(origins, t)
+		}
+	}
+	return origins
+}
+
 // run boots the server and blocks until ctx is cancelled (e.g. by a signal) or
 // the HTTP server fails, then shuts everything down gracefully and returns.
 //
@@ -140,17 +155,7 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 	}
 	srv := ygows.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
 
-	if cfg.Origins != "" {
-		// Trim each element and drop empties so " https://b.com" (a stray space
-		// after a comma) does not become an origin that never matches a header.
-		var origins []string
-		for _, o := range strings.Split(cfg.Origins, ",") {
-			if t := strings.TrimSpace(o); t != "" {
-				origins = append(origins, t)
-			}
-		}
-		srv.AllowedOrigins = origins
-	}
+	srv.AllowedOrigins = parseOrigins(cfg.Origins)
 	srv.MaxConnections = cfg.MaxConns
 	srv.MaxPeersPerRoom = cfg.MaxPeersPerRoom
 	srv.MaxRooms = cfg.MaxRooms
