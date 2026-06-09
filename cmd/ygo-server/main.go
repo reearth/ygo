@@ -253,16 +253,26 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 	return nil
 }
 
-func main() {
-	cfg, err := parseFlags(os.Args[1:])
+func main() { os.Exit(realMain(os.Args[1:])) }
+
+// realMain runs the CLI and returns the process exit code. Split out from main
+// so the argument-parsing exit codes are unit-testable without spawning a
+// process. Exit codes: 0 = clean (incl. -h/--help), 1 = runtime error,
+// 2 = bad command-line usage.
+func realMain(args []string) int {
+	cfg, err := parseFlags(args)
 	if err != nil {
-		// flag already printed the usage/error to stderr; exit code 2 matches
-		// the conventional "bad command-line usage" status.
-		os.Exit(2)
+		// -h/--help is an explicit request, not an error: flag already printed
+		// usage to stderr; exit 0 per CLI convention.
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		// flag already printed the usage/error to stderr; 2 = bad usage.
+		return 2
 	}
 
 	// Align the package default logger with the chosen format so the fatal-exit
-	// slog.Error below (and any other default-logger use) honors -log.
+	// log below (and any other default-logger use) honors -log.
 	slog.SetDefault(newLogger(cfg.Log))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -270,6 +280,7 @@ func main() {
 
 	if err := run(ctx, cfg, nil); err != nil {
 		slog.Error("ygo-server exited with error", "err", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

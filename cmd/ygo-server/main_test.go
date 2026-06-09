@@ -81,6 +81,21 @@ func TestDefaultLogger_HonorsFormat(t *testing.T) {
 	}
 }
 
+// TestRealMain_ExitCodes verifies argument-parsing exit codes: -h/--help is an
+// explicit request (exit 0), an unknown flag is bad usage (exit 2). Both return
+// before run(), so they don't block. (The success path is covered by TestRun_*.)
+func TestRealMain_ExitCodes(t *testing.T) {
+	if code := realMain([]string{"-h"}); code != 0 {
+		t.Fatalf("realMain(-h) = %d, want 0", code)
+	}
+	if code := realMain([]string{"--help"}); code != 0 {
+		t.Fatalf("realMain(--help) = %d, want 0", code)
+	}
+	if code := realMain([]string{"--definitely-not-a-flag"}); code != 2 {
+		t.Fatalf("realMain(bad flag) = %d, want 2", code)
+	}
+}
+
 // Persistence survives a simulated restart: store an update via the same
 // LegacyAdapter+sqlite the binary wires, close, reopen, and load it back.
 func TestServer_PersistenceAcrossRestart(t *testing.T) {

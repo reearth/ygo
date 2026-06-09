@@ -13,6 +13,17 @@ import (
 	"github.com/reearth/ygo/persistence/sqlite"
 )
 
+// mustOpen opens a Store and fails the test immediately if Open errors, so an
+// Open failure surfaces directly instead of as a later nil dereference.
+func mustOpen(t *testing.T, path string) *sqlite.Store {
+	t.Helper()
+	s, err := sqlite.Open(path)
+	if err != nil {
+		t.Fatalf("sqlite.Open(%q): %v", path, err)
+	}
+	return s
+}
+
 func TestOpen_CreatesSchemaAndCloses(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 	s, err := sqlite.Open(path)
@@ -61,7 +72,7 @@ func twoUpdates(t *testing.T) (a, b []byte) {
 }
 
 func TestAppendLoad_RoundTrip(t *testing.T) {
-	s, _ := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
+	s := mustOpen(t, filepath.Join(t.TempDir(), "t.db"))
 	defer s.Close()
 	ctx := context.Background()
 	a, b := twoUpdates(t)
@@ -87,7 +98,7 @@ func TestAppendLoad_RoundTrip(t *testing.T) {
 }
 
 func TestAppendUpdate_RejectsInvalid(t *testing.T) {
-	s, _ := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
+	s := mustOpen(t, filepath.Join(t.TempDir(), "t.db"))
 	defer s.Close()
 	if _, err := s.AppendUpdate(context.Background(), "room", []byte{0xff, 0xff, 0xff}); err == nil {
 		t.Fatal("expected error for invalid update, got nil")
@@ -95,7 +106,7 @@ func TestAppendUpdate_RejectsInvalid(t *testing.T) {
 }
 
 func TestListAndMaterialize(t *testing.T) {
-	s, _ := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
+	s := mustOpen(t, filepath.Join(t.TempDir(), "t.db"))
 	defer s.Close()
 	ctx := context.Background()
 	a, b := twoUpdates(t)
@@ -127,7 +138,7 @@ func TestListAndMaterialize(t *testing.T) {
 }
 
 func TestSnapshotsAndDelete(t *testing.T) {
-	s, _ := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
+	s := mustOpen(t, filepath.Join(t.TempDir(), "t.db"))
 	defer s.Close()
 	ctx := context.Background()
 	a, _ := twoUpdates(t)
@@ -169,7 +180,7 @@ func TestSnapshotsAndDelete(t *testing.T) {
 
 func TestPruneCrashRecovery(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t.db")
-	s, _ := sqlite.Open(path)
+	s := mustOpen(t, path)
 	defer s.Close()
 	ctx := context.Background()
 
@@ -224,7 +235,7 @@ func TestPruneCrashRecovery(t *testing.T) {
 }
 
 func TestCompact(t *testing.T) {
-	s, _ := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
+	s := mustOpen(t, filepath.Join(t.TempDir(), "t.db"))
 	defer s.Close()
 	ctx := context.Background()
 	d := crdt.New(crdt.WithClientID(7))
@@ -331,7 +342,7 @@ func appendN(t *testing.T, s *sqlite.Store, room string, n int) *crdt.Doc {
 // TestCompact_RespectsCanceledContext proves Compact checks ctx at entry, even
 // on the keep<=0 fast path which previously returned (0, nil) unconditionally.
 func TestCompact_RespectsCanceledContext(t *testing.T) {
-	s, _ := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
+	s := mustOpen(t, filepath.Join(t.TempDir(), "t.db"))
 	defer s.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -360,7 +371,7 @@ func textFromUpdate(t *testing.T, update []byte) string {
 // Update} snapshot. Asserts WITHOUT reopening (the live handle must clamp too).
 func TestReadsClampToCheckpoint_AfterCrash(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t.db")
-	s, _ := sqlite.Open(path)
+	s := mustOpen(t, path)
 	defer s.Close()
 	ctx := context.Background()
 
@@ -417,7 +428,7 @@ func TestReadsClampToCheckpoint_AfterCrash(t *testing.T) {
 // decode cleanly. Bounded for speed.
 func TestConcurrentLoadDuringPrune(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t.db")
-	s, _ := sqlite.Open(path)
+	s := mustOpen(t, path)
 	defer s.Close()
 
 	const iters = 200

@@ -39,8 +39,8 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   rolled_back_head BLOB
 );`
 
-// rolled_back_head is persisted for parity with FilePersistence and for
-// forensics; this backend never reads it back. Head is reconstructed purely by
+// rolled_back_head is persisted for FilePersistence parity and forensics;
+// this backend never reads it back. Head is reconstructed purely by
 // merging surviving updates (rows <= target are never deleted by prune), so the
 // column is intentionally write-only here. It is nullable on purpose: pruning to
 // the empty head (target=0) materializes a nil rolled-back head, which is stored
