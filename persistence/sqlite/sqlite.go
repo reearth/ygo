@@ -102,9 +102,17 @@ func (s *Store) Close() error { return s.db.Close() }
 // mid-prune cannot race the checkpoint-vs-rows lookup.
 const clampSQL = `COALESCE((SELECT target FROM checkpoints WHERE room = ?), 9223372036854775807)`
 
-func (s *Store) clampedHead(ctx context.Context, room string) (persistence.Version, error) {
+// querier is the read surface shared by *sql.DB and *sql.Tx, letting the read
+// helpers run against either a bare handle (under s.mu, no concurrent writer) or
+// a single read transaction (lock-free reads needing a consistent snapshot).
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func (s *Store) clampedHead(ctx context.Context, q querier, room string) (persistence.Version, error) {
 	var v sql.NullInt64
-	err := s.db.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT MAX(version) FROM updates WHERE room = ? AND version <= `+clampSQL,
 		room, room).Scan(&v)
 	if err != nil {
@@ -116,10 +124,14 @@ func (s *Store) clampedHead(ctx context.Context, room string) (persistence.Versi
 	return persistence.Version(v.Int64), nil
 }
 
-func (s *Store) mergedUpTo(ctx context.Context, room string, upTo persistence.Version) ([]byte, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT data FROM updates WHERE room = ? AND version <= ? ORDER BY version ASC`,
-		room, int64(upTo))
+func (s *Store) mergedUpTo(ctx context.Context, q querier, room string, upTo persistence.Version) ([]byte, error) {
+	// Apply the checkpoint clamp directly here too (defense-in-depth): callers
+	// pass an already-clamped upTo, but binding clampSQL keeps the SELECT correct
+	// even if a checkpoint is committed between the head lookup and this query.
+	rows, err := q.QueryContext(ctx,
+		`SELECT data FROM updates WHERE room = ? AND version <= ? AND version <= `+clampSQL+
+			` ORDER BY version ASC`,
+		room, int64(upTo), room)
 	if err != nil {
 		return nil, err
 	}

@@ -18,18 +18,31 @@ import (
 // comes from the clampSQL correlated subquery, which resolves the checkpoint
 // ceiling and the row filter within a single statement. Do not add s.mu here —
 // it would needlessly serialize reads against writers.
+//
+// Reads that issue TWO statements (Load, MaterializeAt run clampedHead then
+// mergedUpTo) wrap both in a single read-only transaction: WAL snapshot
+// isolation makes them see one consistent committed state, so a concurrent
+// PruneAfter cannot interleave between the two statements and either expose
+// future versions or return a mismatched {Version, Update}. This is still
+// lock-free (no s.mu); the read tx only pins a snapshot, it does not block
+// writers.
 func (s *Store) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	if err := ctx.Err(); err != nil {
 		return persistence.LoadResult{}, err
 	}
-	head, err := s.clampedHead(ctx, room)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return persistence.LoadResult{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	head, err := s.clampedHead(ctx, tx, room)
 	if err != nil {
 		return persistence.LoadResult{}, err
 	}
 	if head == 0 {
 		return persistence.LoadResult{}, nil
 	}
-	merged, err := s.mergedUpTo(ctx, room, head)
+	merged, err := s.mergedUpTo(ctx, tx, room, head)
 	if err != nil {
 		return persistence.LoadResult{}, err
 	}
@@ -125,7 +138,14 @@ func (s *Store) MaterializeAt(ctx context.Context, room string, v persistence.Ve
 	if v == 0 {
 		return nil, nil
 	}
-	head, err := s.clampedHead(ctx, room)
+	// Single read-only tx wrapping clampedHead + mergedUpTo (snapshot isolation),
+	// for the same consistency reason as Load. See the Load doc comment.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	head, err := s.clampedHead(ctx, tx, room)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +156,7 @@ func (s *Store) MaterializeAt(ctx context.Context, room string, v persistence.Ve
 	if head < upTo {
 		upTo = head
 	}
-	return s.mergedUpTo(ctx, room, upTo)
+	return s.mergedUpTo(ctx, tx, room, upTo)
 }
 
 // CaptureSnapshot stores a named V1 snapshot for room, associated with the
@@ -148,7 +168,9 @@ func (s *Store) CaptureSnapshot(ctx context.Context, room, name string, state []
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	head, err := s.clampedHead(ctx, room)
+	// Under s.mu: no concurrent writer, so the bare handle is a consistent enough
+	// read for the single clampedHead statement (no read tx needed).
+	head, err := s.clampedHead(ctx, s.db, room)
 	if err != nil {
 		return 0, err
 	}
@@ -187,6 +209,9 @@ func (s *Store) RestoreSnapshot(ctx context.Context, room, name string) ([]byte,
 // now-redundant older rows are deleted. Retained version numbers are unchanged,
 // so reads still reconstruct the same head. keep <= 0 is a no-op (returns 0).
 func (s *Store) Compact(ctx context.Context, room string, keep int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if keep <= 0 {
 		return 0, nil
 	}

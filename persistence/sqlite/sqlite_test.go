@@ -2,8 +2,10 @@ package sqlite_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -298,6 +300,190 @@ func TestOpen_URIPathWithExistingQuery(t *testing.T) {
 	lr, err := s.Load(ctx, "room")
 	if err != nil || lr.Version != 1 {
 		t.Fatalf("Load: v=%d err=%v want 1", lr.Version, err)
+	}
+}
+
+// appendN appends n incremental V1 updates ("a","b","c",...) for one document
+// at versions 1..n into room, returning the document so callers can inspect the
+// final state. Mirrors the TestPruneCrashRecovery construction.
+func appendN(t *testing.T, s *sqlite.Store, room string, n int) *crdt.Doc {
+	t.Helper()
+	ctx := context.Background()
+	d := crdt.New(crdt.WithClientID(7))
+	txt := d.GetText("t")
+	var prevSV crdt.StateVector
+	for i := 0; i < n; i++ {
+		d.Transact(func(tx *crdt.Transaction) { txt.Insert(tx, 0, string(rune('a'+i)), nil) })
+		var upd []byte
+		if i == 0 {
+			upd = crdt.EncodeStateAsUpdateV1(d, nil)
+		} else {
+			upd = crdt.EncodeStateAsUpdateV1(d, prevSV)
+		}
+		if _, err := s.AppendUpdate(ctx, room, upd); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		prevSV = d.StateVector()
+	}
+	return d
+}
+
+// TestCompact_RespectsCanceledContext proves Compact checks ctx at entry, even
+// on the keep<=0 fast path which previously returned (0, nil) unconditionally.
+func TestCompact_RespectsCanceledContext(t *testing.T) {
+	s, _ := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.Compact(ctx, "room", 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Compact(keep=0) on canceled ctx: err=%v, want context.Canceled", err)
+	}
+	if _, err := s.Compact(ctx, "room", 5); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Compact(keep=5) on canceled ctx: err=%v, want context.Canceled", err)
+	}
+}
+
+// textFromUpdate applies a V1 update and returns the resulting text of "t".
+func textFromUpdate(t *testing.T, update []byte) string {
+	t.Helper()
+	d := crdt.New()
+	if err := crdt.ApplyUpdateV1(d, update, nil); err != nil {
+		t.Fatalf("apply update: %v", err)
+	}
+	return d.GetText("t").ToString()
+}
+
+// TestReadsClampToCheckpoint_AfterCrash locks the clamp/consistency invariant:
+// with a checkpoint (target=2) committed but the future row (v3) still
+// physically present (mid-prune crash), Load and MaterializeAt must clamp to the
+// checkpoint ceiling — never merging v3 — and return a consistent {Version,
+// Update} snapshot. Asserts WITHOUT reopening (the live handle must clamp too).
+func TestReadsClampToCheckpoint_AfterCrash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	s, _ := sqlite.Open(path)
+	defer s.Close()
+	ctx := context.Background()
+
+	appendN(t, s, "room", 3) // versions 1..3 => text "cba"
+
+	// State of the document at version 2 (the checkpoint ceiling).
+	at2, err := s.MaterializeAt(ctx, "room", 2)
+	if err != nil {
+		t.Fatalf("MaterializeAt v2 (pre-prune): %v", err)
+	}
+	want2 := textFromUpdate(t, at2)
+
+	// Crash right after the checkpoint write: row v3 stays on disk, target=2.
+	s.SetCrashAfterCheckpoint(func() bool { return true })
+	if err := s.PruneAfter(ctx, "room", 2, at2); err != nil {
+		t.Fatalf("PruneAfter (crashing): %v", err)
+	}
+	s.SetCrashAfterCheckpoint(nil)
+
+	// Load must clamp to v2 and return a consistent snapshot for that version.
+	lr, err := s.Load(ctx, "room")
+	if err != nil {
+		t.Fatalf("Load after crash: %v", err)
+	}
+	if lr.Version != 2 {
+		t.Fatalf("Load clamped head = %d, want 2", lr.Version)
+	}
+	if got := textFromUpdate(t, lr.Update); got != want2 {
+		t.Fatalf("Load update = %q, want version-2 state %q (must NOT include v3)", got, want2)
+	}
+
+	// MaterializeAt above the ceiling clamps to v2.
+	at3, err := s.MaterializeAt(ctx, "room", 3)
+	if err != nil {
+		t.Fatalf("MaterializeAt v3 after crash: %v", err)
+	}
+	if got := textFromUpdate(t, at3); got != want2 {
+		t.Fatalf("MaterializeAt v3 = %q, want clamped version-2 state %q", got, want2)
+	}
+
+	// MaterializeAt at the ceiling equals Load's update.
+	at2b, err := s.MaterializeAt(ctx, "room", 2)
+	if err != nil {
+		t.Fatalf("MaterializeAt v2 after crash: %v", err)
+	}
+	if got := textFromUpdate(t, at2b); got != want2 {
+		t.Fatalf("MaterializeAt v2 = %q, want %q", got, want2)
+	}
+}
+
+// TestConcurrentLoadDuringPrune is a -race smoke test: a writer goroutine
+// appends and occasionally prunes room "r" while a reader repeatedly Loads.
+// Load must never error nor return a torn blob — every non-empty result must
+// decode cleanly. Bounded for speed.
+func TestConcurrentLoadDuringPrune(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	s, _ := sqlite.Open(path)
+	defer s.Close()
+
+	const iters = 200
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+
+	// Seed one update so reads have something immediately.
+	appendN(t, s, "r", 1)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ctx := context.Background()
+		d := crdt.New(crdt.WithClientID(99))
+		txt := d.GetText("t")
+		prevSV := crdt.StateVector(nil)
+		for i := 0; i < iters; i++ {
+			d.Transact(func(tx *crdt.Transaction) { txt.Insert(tx, 0, "x", nil) })
+			var upd []byte
+			if prevSV == nil {
+				upd = crdt.EncodeStateAsUpdateV1(d, nil)
+			} else {
+				upd = crdt.EncodeStateAsUpdateV1(d, prevSV)
+			}
+			prevSV = d.StateVector()
+			v, err := s.AppendUpdate(ctx, "r", upd)
+			if err != nil {
+				errCh <- fmt.Errorf("AppendUpdate: %w", err)
+				return
+			}
+			if i%7 == 6 && v > 1 {
+				target := v - 1
+				rolled, err := s.MaterializeAt(ctx, "r", target)
+				if err != nil {
+					errCh <- fmt.Errorf("MaterializeAt: %w", err)
+					return
+				}
+				if err := s.PruneAfter(ctx, "r", target, rolled); err != nil {
+					errCh <- fmt.Errorf("PruneAfter: %w", err)
+					return
+				}
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		ctx := context.Background()
+		for i := 0; i < iters; i++ {
+			lr, err := s.Load(ctx, "r")
+			if err != nil {
+				errCh <- fmt.Errorf("Load: %w", err)
+				return
+			}
+			if lr.Update == nil {
+				continue
+			}
+			if err := crdt.ApplyUpdateV1(crdt.New(), lr.Update, nil); err != nil {
+				errCh <- fmt.Errorf("Load returned undecodable blob at version %d: %w", lr.Version, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
 	}
 }
 
