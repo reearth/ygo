@@ -75,3 +75,28 @@ func TestRun_StartsAndShutsDown(t *testing.T) {
 		t.Fatal("run did not shut down")
 	}
 }
+
+// run() with an empty Store opens the ephemeral in-memory backend (no
+// NewServer/no-persistence branch): it must wire, become ready, and close the
+// store cleanly on cancel.
+func TestRun_InMemoryStore_StartsAndShutsDown(t *testing.T) {
+	cfg := Config{Addr: "127.0.0.1:0", Store: "", MaxMessageBytes: 1 << 20}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	ready := make(chan struct{})
+	go func() { errCh <- run(ctx, cfg, ready) }()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not become ready")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+}

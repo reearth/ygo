@@ -280,6 +280,27 @@ func TestConformance_SQLite(t *testing.T) {
 	})
 }
 
+// TestOpen_URIPathWithExistingQuery proves Open does not emit a double-"?" DSN
+// when the caller passes a URI-form path that already carries a query string.
+// modernc accepts file: URIs; we append a pragma block with "&" rather than "?".
+func TestOpen_URIPathWithExistingQuery(t *testing.T) {
+	path := "file:" + filepath.Join(t.TempDir(), "u.db") + "?cache=shared"
+	s, err := sqlite.Open(path)
+	if err != nil {
+		t.Fatalf("Open URI with existing query: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	a, _ := twoUpdates(t)
+	if _, err := s.AppendUpdate(ctx, "room", a); err != nil {
+		t.Fatalf("AppendUpdate: %v", err)
+	}
+	lr, err := s.Load(ctx, "room")
+	if err != nil || lr.Version != 1 {
+		t.Fatalf("Load: v=%d err=%v want 1", lr.Version, err)
+	}
+}
+
 func TestInMemoryMode(t *testing.T) {
 	s, err := sqlite.Open("") // ephemeral
 	if err != nil {

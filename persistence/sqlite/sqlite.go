@@ -9,6 +9,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"sync"
 
 	"github.com/reearth/ygo/crdt"
@@ -70,7 +71,14 @@ func Open(path string) (*Store, error) {
 	// crash (process kill), but a power/OS crash can lose the most recently
 	// committed transaction. This is the accepted WAL durability tradeoff —
 	// chosen for throughput; FULL would fsync on every commit.
-	dsn += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(on)"
+	// A URI-form path may already carry a query string (e.g.
+	// "file:data.db?cache=shared"); pick the separator accordingly so the DSN
+	// never gets a second "?".
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	dsn += sep + "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(on)"
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

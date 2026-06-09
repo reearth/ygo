@@ -1,15 +1,16 @@
 // Command ygo-server is a runnable, production-grade Yjs-compatible WebSocket
 // collaboration server. It serves the provider/websocket Server over HTTP,
-// optionally persisting every room to a SQLite database (so documents survive
-// restarts) and optionally relaying updates through Redis so multiple server
-// instances behind a load balancer share one logical document per room.
+// persisting every room to a SQLite database (a durable file so documents
+// survive restarts, or an ephemeral in-memory store) and optionally relaying
+// updates through Redis so multiple server instances behind a load balancer
+// share one logical document per room.
 //
 // # Usage
 //
 //	ygo-server [flags]
 //
 //	-addr               TCP listen address (default ":1234")
-//	-store              SQLite database path; empty = in-memory, no persistence
+//	-store              SQLite DB path; empty = ephemeral in-memory (lost on restart)
 //	-origins            comma-separated allowed WebSocket origins; empty = same-origin
 //	-max-conns          server-wide cap on simultaneous peers (0 = unlimited)
 //	-max-peers-per-room per-room peer cap (0 = unlimited)
@@ -51,8 +52,9 @@ import (
 type Config struct {
 	// Addr is the TCP address the HTTP server listens on (e.g. ":1234").
 	Addr string
-	// Store is the SQLite database path. Empty disables persistence (rooms are
-	// in-memory only and lost on restart).
+	// Store is the SQLite database path. Empty opens an ephemeral in-memory
+	// database: rooms persist across room eviction within the process but are
+	// lost on restart.
 	Store string
 	// Origins is the comma-separated list of allowed WebSocket origins. Empty
 	// performs a same-origin check; "*" allows any origin.
@@ -83,7 +85,7 @@ func parseFlags(args []string) (Config, error) {
 
 	var cfg Config
 	fs.StringVar(&cfg.Addr, "addr", ":1234", "TCP listen address")
-	fs.StringVar(&cfg.Store, "store", "", "SQLite database path (empty = no persistence)")
+	fs.StringVar(&cfg.Store, "store", "", "SQLite DB path (empty = ephemeral in-memory; lost on restart)")
 	fs.StringVar(&cfg.Origins, "origins", "", "comma-separated allowed WebSocket origins (empty = same-origin)")
 	fs.IntVar(&cfg.MaxConns, "max-conns", 0, "server-wide cap on simultaneous peers (0 = unlimited)")
 	fs.IntVar(&cfg.MaxPeersPerRoom, "max-peers-per-room", 0, "per-room peer cap (0 = unlimited)")
@@ -127,26 +129,27 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 		cfg.Path = "/yjs/{room}"
 	}
 
-	// Persistence: a non-empty Store wires SQLite via the LegacyAdapter so every
-	// committed transaction becomes a persisted version and rooms reload on
-	// restart. store is owned here and closed on shutdown.
-	var (
-		srv   *ygows.Server
-		store *sqlite.Store
-	)
-	if cfg.Store != "" {
-		s, err := sqlite.Open(cfg.Store)
-		if err != nil {
-			return err
-		}
-		store = s
-		srv = ygows.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
-	} else {
-		srv = ygows.NewServer()
+	// Persistence: always wire SQLite via the LegacyAdapter so every committed
+	// transaction becomes a persisted version. An empty Store opens an ephemeral
+	// in-memory database (room state survives room eviction within the process but
+	// is lost on restart); a non-empty Store reloads rooms across restarts. store
+	// is owned here and closed on shutdown.
+	store, err := sqlite.Open(cfg.Store) // "" => ephemeral in-memory
+	if err != nil {
+		return err
 	}
+	srv := ygows.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
 
 	if cfg.Origins != "" {
-		srv.AllowedOrigins = strings.Split(cfg.Origins, ",")
+		// Trim each element and drop empties so " https://b.com" (a stray space
+		// after a comma) does not become an origin that never matches a header.
+		var origins []string
+		for _, o := range strings.Split(cfg.Origins, ",") {
+			if t := strings.TrimSpace(o); t != "" {
+				origins = append(origins, t)
+			}
+		}
+		srv.AllowedOrigins = origins
 	}
 	srv.MaxConnections = cfg.MaxConns
 	srv.MaxPeersPerRoom = cfg.MaxPeersPerRoom
@@ -167,16 +170,12 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 		defer func() { _ = client.Close() }()
 		r, err := redis.New(client, redis.Config{})
 		if err != nil {
-			if store != nil {
-				_ = store.Close()
-			}
+			_ = store.Close()
 			return err
 		}
 		if err := srv.AttachRelay(r); err != nil {
 			_ = r.Close()
-			if store != nil {
-				_ = store.Close()
-			}
+			_ = store.Close()
 			return err
 		}
 		relay = r
@@ -194,9 +193,7 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 		if relay != nil {
 			_ = relay.Close()
 		}
-		if store != nil {
-			_ = store.Close()
-		}
+		_ = store.Close()
 		return err
 	}
 
@@ -219,9 +216,7 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 			if relay != nil {
 				_ = relay.Close()
 			}
-			if store != nil {
-				_ = store.Close()
-			}
+			_ = store.Close()
 			return err
 		}
 	}
@@ -241,10 +236,8 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 			log.Warn("relay close", "err", err)
 		}
 	}
-	if store != nil {
-		if err := store.Close(); err != nil {
-			log.Warn("store close", "err", err)
-		}
+	if err := store.Close(); err != nil {
+		log.Warn("store close", "err", err)
 	}
 	return nil
 }
@@ -256,6 +249,10 @@ func main() {
 		// the conventional "bad command-line usage" status.
 		os.Exit(2)
 	}
+
+	// Align the package default logger with the chosen format so the fatal-exit
+	// slog.Error below (and any other default-logger use) honors -log.
+	slog.SetDefault(newLogger(cfg.Log))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
