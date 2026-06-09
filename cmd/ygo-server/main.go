@@ -161,9 +161,12 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 	var relay *redis.Relay
 	if cfg.Redis != "" {
 		client := goredis.NewClient(&goredis.Options{Addr: cfg.Redis})
+		// client is owned here for the lifetime of run; close it on every exit
+		// path (happy shutdown and the error paths below) so its connection pool
+		// is released even when run is invoked repeatedly in-process (tests).
+		defer func() { _ = client.Close() }()
 		r, err := redis.New(client, redis.Config{})
 		if err != nil {
-			_ = client.Close()
 			if store != nil {
 				_ = store.Close()
 			}
@@ -171,7 +174,6 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 		}
 		if err := srv.AttachRelay(r); err != nil {
 			_ = r.Close()
-			_ = client.Close()
 			if store != nil {
 				_ = store.Close()
 			}
@@ -211,7 +213,9 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 	case <-ctx.Done():
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			// Best-effort cleanup before surfacing the serve failure.
+			// Best-effort cleanup before surfacing the serve failure. srv.Shutdown
+			// is skipped here because returning this error makes main() exit
+			// fatally (os.Exit(1)); the deferred client.Close() still runs.
 			if relay != nil {
 				_ = relay.Close()
 			}
