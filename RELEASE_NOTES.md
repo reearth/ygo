@@ -1,50 +1,55 @@
 ## What's new
 
-Correctness hardening. This patch fixes five CRDT convergence/interop defects
-surfaced by an internal architecture review. Each is reproduced by a new
-regression test and verified against `yjs@13.6.30`; there are no public API changes.
+Native mobile bindings. This release adds a new `mobile/` package: a
+gomobile-bindable façade over ygo's `crdt` and `awareness` packages, so you can
+embed ygo directly in iOS and Android apps via `gomobile bind` — no JavaScript
+runtime and no CGo. v1 scope is **sync + render**: apply peer updates, encode
+state/diffs, and read the current document and presence; on-device editing
+(mutators) is a planned follow-up.
 
-### Fixed
+### Added — `mobile/` (gomobile bindings for iOS/Android)
 
-- **Concurrent `YMap` / XML-attribute writes no longer lose a key depending on
-  apply order.** Last-writer-wins previously decided the winner from the
-  immediate linked-list right neighbour, so an unrelated-key write landing
-  between two same-key writes could make an item falsely consider itself the
-  current value. Receivers diverged on the key, and a subsequent full-state
-  cross-sync deleted it outright. The winner is now the rightmost same-key item
-  in YATA order — which is order-independent — so all receivers converge.
+The package exposes two bound types with a **gomobile-safe surface** —
+gomobile bind only supports a restricted set of types across the language
+boundary, so every method uses only `string`, `int64`, `bool`, `[]byte`,
+`error`, and the bound pointers `*Doc` / `*Awareness` (no unsigned ints, maps,
+non-byte slices, `any`, variadics, or callbacks; the package translates at the
+boundary):
 
-- **Out-of-order updates with a missing right origin now park instead of
-  integrating at the wrong position.** An item whose `rightOrigin` referenced a
-  not-yet-integrated client was placed incorrectly (permanent text divergence)
-  because the future-clock dependency check was skipped for root types. It now
-  defers and retries when the missing client arrives, matching Yjs `getMissing`.
+- **`Doc`** — `NewDoc` / `NewDocWithClientID`, `ClientID`, `ApplyUpdate`,
+  `EncodeStateAsUpdate`, `EncodeStateVector`, `EncodeDiff` (incremental sync from
+  a remote state vector), `GetText`, `GetTextJSON`, `GetMapJSON`, `GetArrayJSON`,
+  and `Close`.
+- **`Awareness`** — `NewAwareness`, `ClientID`, `SetLocalState`,
+  `ClearLocalState`, `LocalStateJSON`, `StatesJSON`, `EncodeAll`, `ApplyUpdate`,
+  and `Close`.
 
-- **A document no longer fails to decode its own full-state encode.** When a
-  lower-clientID peer wrote into a higher-clientID peer's nested type (e.g. an
-  XML element attribute), the child's parent-by-ID reference decoded before its
-  parent and hard-failed `ApplyUpdate` — breaking persistence reload and the
-  initial sync handshake for such documents. The reference is now deferred and
-  resolved once the container integrates, mirroring Yjs `pendingStructs`.
+Build the frameworks with the standard gomobile tooling (a build-time tool, not
+a dependency — `go.mod` is unchanged):
 
-- **`RelativePosition` and `Snapshot` are now wire-compatible with Yjs.** The
-  `RelativePosition` encoding used the wrong type tags, so shared cursors
-  exchanged with a JS peer mis-decoded or crashed lib0; `Snapshot` wrote its
-  blocks in the wrong order with extra length prefixes. Both now match
-  `Y.encodeRelativePosition` / `Y.encodeSnapshot` and are verified by encoding
-  in Go and decoding/resolving in `yjs@13.6.30`.
+```
+gomobile bind -target=ios     ./mobile   # → Mobile.xcframework
+gomobile bind -target=android -androidapi 21 ./mobile   # → mobile.aar
+```
 
-### Compatibility
+All methods are synchronous and blocking and copy `[]byte` across the boundary,
+so call `ApplyUpdate` / `Encode*` off the UI thread (Kotlin `Dispatchers.IO` /
+a Swift background queue) and prefer incremental `EncodeDiff` over full-state
+encodes on the hot path. Call `Close()` when done (`ViewModel.onCleared` /
+Swift `deinit`) rather than relying on cross-binding finalization.
 
-No API changes. The internal `RelativePosition` and `Snapshot` byte formats
-changed to become Yjs-compatible — if you persisted those bytes from v1.23.0
-(uncommon; document updates are unaffected), re-capture them. Document update
-and state-vector formats are unchanged. Drop-in upgrade from v1.23.0.
+The package is pure-Go / CGo-free, so it builds with `CGO_ENABLED=0` like the
+rest of ygo (guarded in CI). Note one known caveat: `GetTextJSON` and
+`StatesJSON` currently return ygo's internal struct shapes (Go field names),
+not idiomatic Yjs JSON; stable/idiomatic shapes are a planned follow-up, so
+don't hard-code against them long-term. See [`mobile/README.md`](https://github.com/reearth/ygo/blob/main/mobile/README.md)
+for the full integration guide (threading, lifecycle, binary size / ABI,
+error handling, change notifications, and Kotlin/Swift snippets).
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.23.1
+go get github.com/reearth/ygo@v1.24.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
