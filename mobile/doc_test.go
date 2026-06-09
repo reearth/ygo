@@ -48,6 +48,10 @@ func TestDoc_ReadAccessors(t *testing.T) {
 		mp.Set(tx, "k", "v")
 		arr.Push(tx, []any{int64(1), "two"})
 	})
+	// Format the inserted text bold so the delta carries an attribute.
+	d.d.Transact(func(tx *crdt.Transaction) {
+		txt.Format(tx, 0, 2, crdt.Attributes{"bold": true})
+	})
 
 	if got := d.GetText("t"); got != "hi" {
 		t.Fatalf("GetText = %q, want %q", got, "hi")
@@ -60,8 +64,15 @@ func TestDoc_ReadAccessors(t *testing.T) {
 	if err != nil || string(aj) != `[1,"two"]` {
 		t.Fatalf("GetArrayJSON = %q err=%v", aj, err)
 	}
-	if _, err := d.GetTextJSON("t"); err != nil {
+	// GetTextJSON must return the rich-text delta (insert op + formatting
+	// attributes), NOT the plain-string JSON. This assertion fails if
+	// formatting is dropped, because it references the bold attribute.
+	tj, err := d.GetTextJSON("t")
+	if err != nil {
 		t.Fatalf("GetTextJSON err=%v", err)
+	}
+	if want := `[{"Op":0,"Insert":"hi","Delete":0,"Retain":0,"Attributes":{"bold":true}}]`; string(tj) != want {
+		t.Fatalf("GetTextJSON = %q, want %q", tj, want)
 	}
 
 	d.Close()

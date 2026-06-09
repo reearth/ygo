@@ -1,6 +1,7 @@
 package mobile
 
 import (
+	"encoding/json"
 	"sync"
 
 	"github.com/reearth/ygo/crdt"
@@ -88,13 +89,15 @@ func (m *Doc) GetText(name string) string {
 	return d.GetText(name).ToString()
 }
 
-// GetTextJSON returns the named YText root as a Yjs delta JSON document.
+// GetTextJSON returns the named YText root as Yjs delta JSON — an array of
+// insert ops, each carrying any formatting attributes — suitable for rich-text
+// rendering. Returns ErrClosed after Close.
 func (m *Doc) GetTextJSON(name string) ([]byte, error) {
 	d := m.inner()
 	if d == nil {
 		return nil, ErrClosed
 	}
-	return d.GetText(name).ToJSON()
+	return json.Marshal(d.GetText(name).ToDelta())
 }
 
 // GetMapJSON returns the named YMap root as JSON.
