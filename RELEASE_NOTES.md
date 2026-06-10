@@ -27,9 +27,19 @@ regression test and verified against `yjs@13.6.30`; there are no API changes.
   initial sync handshake for such documents. The reference is now deferred and
   resolved once the container integrates, mirroring Yjs `pendingStructs`.
 
+- **`RelativePosition` and `Snapshot` are now wire-compatible with Yjs.** The
+  `RelativePosition` encoding used the wrong type tags, so shared cursors
+  exchanged with a JS peer mis-decoded or crashed lib0; `Snapshot` wrote its
+  blocks in the wrong order with extra length prefixes. Both now match
+  `Y.encodeRelativePosition` / `Y.encodeSnapshot` and are verified by encoding
+  in Go and decoding/resolving in `yjs@13.6.30`.
+
 ### Compatibility
 
-No API or wire-format changes. Drop-in upgrade from v1.23.0.
+No API changes. The internal `RelativePosition` and `Snapshot` byte formats
+changed to become Yjs-compatible — if you persisted those bytes from v1.23.0
+(uncommon; document updates are unaffected), re-capture them. Document update
+and state-vector formats are unchanged. Drop-in upgrade from v1.23.0.
 
 ## Install
 

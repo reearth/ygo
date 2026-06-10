@@ -25,52 +25,57 @@ func CaptureSnapshot(doc *Doc) *Snapshot {
 	}
 }
 
-// EncodeSnapshot serialises snap to bytes.
-// Wire format: VarBytes(encodedStateVector) + VarBytes(encodedDeleteSet)
-// This format is compatible with Y.encodeSnapshot / Y.decodeSnapshot in the
-// JavaScript Yjs reference implementation.
+// EncodeSnapshot serialises snap to bytes in the Yjs V1 snapshot format,
+// interoperable with Y.encodeSnapshot / Y.decodeSnapshot.
+//
+// Wire layout (matching Yjs encodeSnapshotV2 with a V1 encoder): the delete set
+// FIRST, then the state vector, concatenated into a single stream with NO outer
+// length prefixes — `writeDeleteSet(enc, ds); writeStateVector(enc, sv)`. The
+// previous ygo layout wrote the state vector first, each block wrapped in its own
+// VarBytes length prefix, which no Yjs peer could parse (review finding F-5).
 func EncodeSnapshot(snap *Snapshot) []byte {
 	enc := encoding.NewEncoder()
-
-	// State vector block.
-	svEnc := encoding.NewEncoder()
-	clients := clientsSorted(snap.StateVector)
-	svEnc.WriteVarUint(uint64(len(clients)))
-	for _, c := range clients {
-		svEnc.WriteVarUint(uint64(c))
-		svEnc.WriteVarUint(snap.StateVector[c])
-	}
-	enc.WriteVarBytes(svEnc.Bytes())
-
-	// Delete set block.
-	dsEnc := encoding.NewEncoder()
-	encodeDeleteSet(dsEnc, snap.DeleteSet)
-	enc.WriteVarBytes(dsEnc.Bytes())
-
+	encodeDeleteSet(enc, snap.DeleteSet)
+	encodeSnapshotStateVector(enc, snap.StateVector)
 	return enc.Bytes()
 }
 
-// DecodeSnapshot parses bytes produced by EncodeSnapshot.
+// encodeSnapshotStateVector writes the state vector inline (no length prefix),
+// matching Yjs writeStateVector: count, then (client, clock) pairs.
+func encodeSnapshotStateVector(enc *encoding.Encoder, sv StateVector) {
+	clients := clientsSorted(sv)
+	enc.WriteVarUint(uint64(len(clients)))
+	for _, c := range clients {
+		enc.WriteVarUint(uint64(c))
+		enc.WriteVarUint(sv[c])
+	}
+}
+
+// DecodeSnapshot parses bytes produced by EncodeSnapshot (or Y.encodeSnapshot):
+// delete set first, then the state vector, both inline (no length prefixes).
 func DecodeSnapshot(data []byte) (*Snapshot, error) {
 	dec := encoding.NewDecoder(data)
 
-	svBytes, err := dec.ReadVarBytes()
+	ds, err := decodeDeleteSet(dec)
 	if err != nil {
 		return nil, wrapUpdateErr(err)
-	}
-	sv, err := DecodeStateVectorV1(svBytes)
-	if err != nil {
-		return nil, err
 	}
 
-	dsBytes, err := dec.ReadVarBytes()
+	n, err := dec.ReadVarUint()
 	if err != nil {
 		return nil, wrapUpdateErr(err)
 	}
-	dsDec := encoding.NewDecoder(dsBytes)
-	ds, err := decodeDeleteSet(dsDec)
-	if err != nil {
-		return nil, wrapUpdateErr(err)
+	sv := make(StateVector, n)
+	for i := uint64(0); i < n; i++ {
+		client, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, wrapUpdateErr(err)
+		}
+		clock, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, wrapUpdateErr(err)
+		}
+		sv[ClientID(client)] = clock
 	}
 
 	return &Snapshot{StateVector: sv, DeleteSet: ds}, nil

@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and hard-failed `ApplyUpdate` (breaking persistence reload and initial sync).
   Such references are now deferred and resolved once the container integrates,
   mirroring Yjs `pendingStructs`.
+- **`RelativePosition` is now wire-compatible with Yjs.** The encoding used the
+  wrong type tags (item/tname were `1`/`2` instead of Yjs's `0`/`1`), so every
+  shared cursor exchanged with a JS peer mis-decoded or crashed lib0. Tags now
+  match Yjs (`0`=item, `1`=tname, `2`=type), the type-anchored variant
+  round-trips, and `assoc` is optional on decode. Verified by encoding in Go and
+  resolving in `yjs@13.6.30`.
+- **`Snapshot` encoding is now wire-compatible with Yjs.** ygo wrote the state
+  vector first with per-block length prefixes; Yjs writes the delete set first,
+  then the state vector, with none. The layout now matches `Y.encodeSnapshot` /
+  `Y.decodeSnapshot`.
 
 Found by an internal architecture review; each is covered by a new
 order-independence / convergence regression test (`crdt/convergence_p0_test.go`),

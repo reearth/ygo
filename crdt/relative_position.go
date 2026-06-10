@@ -27,6 +27,12 @@ type RelativePosition struct {
 	// Tname is the root type name; used when Item is nil.
 	Tname string
 
+	// TypeItem anchors the position to the start of a nested type whose
+	// containing item has this ID (Yjs RelativePosition case 2 / wire tag 2).
+	// ygo does not yet generate these; the field exists so positions received
+	// from a Yjs peer round-trip on the wire rather than being rejected.
+	TypeItem *ID
+
 	// Assoc controls which side of Item this position is on.
 	//   Assoc >= 0: cursor is after Item (default — use for most cursors).
 	//   Assoc <  0: cursor is before Item (use when cursor is at end of type,
@@ -113,6 +119,12 @@ func ToAbsolutePosition(doc *Doc, rp RelativePosition) (AbsolutePosition, bool) 
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 
+	if rp.TypeItem != nil {
+		// Position anchored to a nested type (Yjs case 2). Not yet resolvable in
+		// ygo — return not-found rather than mis-resolving it as a root start.
+		return AbsolutePosition{}, false
+	}
+
 	if rp.Item == nil {
 		// Null anchor = start of the named type (index 0).
 		return AbsolutePosition{Name: rp.Tname, Index: 0, Assoc: rp.Assoc}, true
@@ -151,21 +163,30 @@ func ToAbsolutePosition(doc *Doc, rp RelativePosition) (AbsolutePosition, bool) 
 	return AbsolutePosition{Name: at.name, Index: index, Assoc: rp.Assoc}, true
 }
 
-// EncodeRelativePosition serialises rp to bytes using the Yjs wire format.
-// The encoding is compatible with Y.encodeRelativePosition in the JS Yjs
-// reference implementation.
+// EncodeRelativePosition serialises rp to bytes using the Yjs wire format,
+// interoperable with Y.encodeRelativePosition / Y.decodeRelativePosition.
 //
-// Wire layout:
-//   - If Item != nil:  VarUint(1) + VarUint(client) + VarUint(clock) + VarInt(assoc)
-//   - If Item == nil:  VarUint(2) + VarString(tname) + VarInt(assoc)
+// Wire layout (matching Yjs writeRelativePosition — note the tag values, which
+// the previous ygo encoding had wrong, breaking all cross-language cursor
+// interop, review finding C-4):
+//   - item-anchored:  VarUint(0) + VarUint(client) + VarUint(clock)
+//   - tname-anchored: VarUint(1) + VarString(tname)
+//   - type-anchored:  VarUint(2) + VarUint(client) + VarUint(clock)
+//
+// followed by VarInt(assoc).
 func EncodeRelativePosition(rp RelativePosition) []byte {
 	enc := encoding.NewEncoder()
-	if rp.Item != nil {
-		enc.WriteVarUint(1)
+	switch {
+	case rp.Item != nil:
+		enc.WriteVarUint(0)
 		enc.WriteVarUint(uint64(rp.Item.Client))
 		enc.WriteVarUint(rp.Item.Clock)
-	} else {
+	case rp.TypeItem != nil:
 		enc.WriteVarUint(2)
+		enc.WriteVarUint(uint64(rp.TypeItem.Client))
+		enc.WriteVarUint(rp.TypeItem.Clock)
+	default:
+		enc.WriteVarUint(1)
 		enc.WriteVarString(rp.Tname)
 	}
 	enc.WriteVarInt(int64(rp.Assoc))
@@ -180,33 +201,50 @@ func DecodeRelativePosition(data []byte) (RelativePosition, error) {
 		return RelativePosition{}, ErrInvalidRelativePosition
 	}
 
-	var rp RelativePosition
-	switch kind {
-	case 1: // anchored to a specific item ID
+	readID := func() (*ID, error) {
 		client, err := dec.ReadVarUint()
 		if err != nil {
-			return RelativePosition{}, ErrInvalidRelativePosition
+			return nil, ErrInvalidRelativePosition
 		}
 		clock, err := dec.ReadVarUint()
 		if err != nil {
-			return RelativePosition{}, ErrInvalidRelativePosition
+			return nil, ErrInvalidRelativePosition
 		}
-		id := ID{Client: ClientID(client), Clock: clock}
-		rp.Item = &id
-	case 2: // start of named type
+		return &ID{Client: ClientID(client), Clock: clock}, nil
+	}
+
+	var rp RelativePosition
+	switch kind {
+	case 0: // anchored to a specific item ID
+		id, err := readID()
+		if err != nil {
+			return RelativePosition{}, err
+		}
+		rp.Item = id
+	case 1: // start of named root type
 		name, err := dec.ReadVarString()
 		if err != nil {
 			return RelativePosition{}, ErrInvalidRelativePosition
 		}
 		rp.Tname = name
+	case 2: // anchored to a nested type by its containing item ID
+		id, err := readID()
+		if err != nil {
+			return RelativePosition{}, err
+		}
+		rp.TypeItem = id
 	default:
 		return RelativePosition{}, ErrInvalidRelativePosition
 	}
 
-	assoc, err := dec.ReadVarInt()
-	if err != nil {
-		return RelativePosition{}, ErrInvalidRelativePosition
+	// assoc is optional on the wire (Yjs reads it only when content remains, so
+	// an older encoding without it decodes as assoc=0).
+	if dec.Remaining() > 0 {
+		assoc, err := dec.ReadVarInt()
+		if err != nil {
+			return RelativePosition{}, ErrInvalidRelativePosition
+		}
+		rp.Assoc = int(assoc)
 	}
-	rp.Assoc = int(assoc)
 	return rp, nil
 }

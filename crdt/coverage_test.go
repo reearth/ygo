@@ -1810,17 +1810,16 @@ func TestUnit_RunGC_MergesAdjacentTombstones(t *testing.T) {
 // ── DecodeSnapshot: truncated at delete-set bytes ─────────────────────────────
 
 func TestUnit_DecodeSnapshot_TruncatedAtDeleteSet(t *testing.T) {
-	// Encode a valid snapshot, then truncate it after the SV bytes to force an
-	// error when DecodeSnapshot tries to read the delete-set length prefix.
-	doc := newTestDoc(1)
-	txt := doc.GetText("t")
-	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+	// In the Yjs snapshot layout the delete set comes FIRST, then the state
+	// vector, with no length prefixes. Feed inputs truncated at each stage and
+	// confirm DecodeSnapshot reports an error rather than silently succeeding.
 
-	full := EncodeSnapshot(CaptureSnapshot(doc))
+	// Delete-set header claims one client but provides no range data.
+	_, err := DecodeSnapshot([]byte{0x01})
+	require.Error(t, err)
 
-	// Truncate to just 4 bytes — too short to contain the full SV varint-length
-	// prefix + SV data + DS varint-length prefix, so the DS read must fail.
-	truncated := full[:4]
-	_, err := DecodeSnapshot(truncated)
+	// Valid empty delete set (0x00), then a state-vector header claiming one
+	// client with no client/clock bytes following.
+	_, err = DecodeSnapshot([]byte{0x00, 0x01})
 	assert.Error(t, err)
 }
