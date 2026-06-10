@@ -1,41 +1,40 @@
 ## What's new
 
-Durable storage and a runnable server. This release adds a pure-Go SQLite
-persistence backend and a ready-to-run WebSocket collaboration server binary, so
-you can stand up a restart-surviving, optionally horizontally-scaled Yjs server
-without writing any glue code.
+Correctness hardening. This patch fixes three CRDT convergence/interop defects
+surfaced by an internal architecture review. Each is reproduced by a new
+regression test and verified against `yjs@13.6.30`; there are no API changes.
 
-### Added — `persistence/sqlite` (pure-Go durable backend)
+### Fixed
 
-A `VersionedPersistence` implementation backed by SQLite through
-`modernc.org/sqlite` — **CGo-free**, so it cross-compiles and builds with
-`CGO_ENABLED=0` like the rest of ygo. It runs in WAL mode, keeps full versioned
-history, and prunes old versions with a crash-safe two-phase delete. It passes
-the shared `RunConformance` suite, so it behaves identically to the in-memory
-reference store. Wiring it in is a one-liner:
+- **Concurrent `YMap` / XML-attribute writes no longer lose a key depending on
+  apply order.** Last-writer-wins previously decided the winner from the
+  immediate linked-list right neighbour, so an unrelated-key write landing
+  between two same-key writes could make an item falsely consider itself the
+  current value. Receivers diverged on the key, and a subsequent full-state
+  cross-sync deleted it outright. The winner is now the rightmost same-key item
+  in YATA order — which is order-independent — so all receivers converge.
 
-```go
-store, err := sqlite.Open("data.db")
-```
+- **Out-of-order updates with a missing right origin now park instead of
+  integrating at the wrong position.** An item whose `rightOrigin` referenced a
+  not-yet-integrated client was placed incorrectly (permanent text divergence)
+  because the future-clock dependency check was skipped for root types. It now
+  defers and retries when the missing client arrives, matching Yjs `getMissing`.
 
-### Added — `cmd/ygo-server` (ready-to-run server)
+- **A document no longer fails to decode its own full-state encode.** When a
+  lower-clientID peer wrote into a higher-clientID peer's nested type (e.g. an
+  XML element attribute), the child's parent-by-ID reference decoded before its
+  parent and hard-failed `ApplyUpdate` — breaking persistence reload and the
+  initial sync handshake for such documents. The reference is now deferred and
+  resolved once the container integrates, mirroring Yjs `pendingStructs`.
 
-A single-binary Yjs-compatible WebSocket collaboration server built on
-`provider/websocket`. It exposes flags for the listen address, allowed origins,
-connection / per-room / room-count limits, and max message size; optional Redis
-cluster relay via `-redis` (multiple instances share one logical document per
-room); and SQLite persistence via `-store` (rooms survive restarts). It shuts
-down gracefully on SIGINT/SIGTERM — draining in-flight work, detaching the relay,
-and closing the store. Run it straight from the module:
+### Compatibility
 
-```
-go run github.com/reearth/ygo/cmd/ygo-server -addr :1234 -store data.db
-```
+No API or wire-format changes. Drop-in upgrade from v1.23.0.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.23.0
+go get github.com/reearth/ygo@v1.23.1
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.

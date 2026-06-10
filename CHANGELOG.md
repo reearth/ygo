@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.1] — 2026-06-09
+
+### Fixed
+
+- **Concurrent `YMap`/attribute writes no longer lose a key by apply order.**
+  Last-writer-wins decided the winner from the immediate linked-list right
+  neighbour, so an unrelated-key write landing between two same-key writes made
+  an item falsely consider itself rightmost; receivers diverged and a cross-sync
+  then deleted the key outright. The winner is now the rightmost same-key item in
+  YATA order (itself order-independent), with an `itemMap` fast path that keeps
+  distinct-key population O(N).
+- **Out-of-order updates with a missing `rightOrigin` now park instead of
+  diverging.** An item whose right origin referenced a not-yet-integrated client
+  was integrated at the wrong position (permanent text divergence) because the
+  future-clock check was skipped for root types. It now defers and retries once
+  the missing client arrives, matching Yjs `getMissing`.
+- **A document no longer fails to decode its own full-state encode.** When a
+  lower-clientID peer wrote into a higher-clientID peer's nested type (e.g. an
+  XML attribute), the child's parent-by-ID reference decoded before its parent
+  and hard-failed `ApplyUpdate` (breaking persistence reload and initial sync).
+  Such references are now deferred and resolved once the container integrates,
+  mirroring Yjs `pendingStructs`.
+
+Found by an internal architecture review; each is covered by a new
+order-independence / convergence regression test (`crdt/convergence_p0_test.go`),
+verified against `yjs@13.6.30`.
+
 ## [1.23.0] — 2026-06-09
 
 ### Added
