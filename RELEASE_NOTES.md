@@ -1,8 +1,8 @@
 ## What's new
 
-Correctness hardening. This patch fixes three CRDT convergence/interop defects
+Correctness hardening. This patch fixes five CRDT convergence/interop defects
 surfaced by an internal architecture review. Each is reproduced by a new
-regression test and verified against `yjs@13.6.30`; there are no API changes.
+regression test and verified against `yjs@13.6.30`; there are no public API changes.
 
 ### Fixed
 

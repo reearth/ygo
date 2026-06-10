@@ -37,7 +37,7 @@ func TestCompat_RelPosAndSnapshot_GoToJS(t *testing.T) {
 
 	// Item-anchored relative position at index 2; must resolve back to 2 in Yjs.
 	rpItem := crdt.EncodeRelativePosition(crdt.CreateRelativePositionFromIndex(txt, 2, 0))
-	// Tname-anchored position (index past end with assoc<0 → start-of-type anchor).
+	// Tname-anchored position (no item; assoc=0) — a start-of-type anchor.
 	rpTname := crdt.EncodeRelativePosition(crdt.RelativePosition{Tname: "t", Assoc: 0})
 	// Snapshot of the current state (ds empty, sv {1:5}).
 	snap := crdt.EncodeSnapshot(crdt.CaptureSnapshot(doc))

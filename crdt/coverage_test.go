@@ -1821,5 +1821,11 @@ func TestUnit_DecodeSnapshot_TruncatedAtDeleteSet(t *testing.T) {
 	// Valid empty delete set (0x00), then a state-vector header claiming one
 	// client with no client/clock bytes following.
 	_, err = DecodeSnapshot([]byte{0x00, 0x01})
-	assert.Error(t, err)
+	require.Error(t, err)
+
+	// DoS guard: empty delete set (0x00) then a state-vector count of ~4.3e9
+	// (varuint FF FF FF FF 0F) with no entry bytes. Must be rejected by the
+	// remaining-bytes/maxV2Items bound rather than attempting a huge allocation.
+	_, err = DecodeSnapshot([]byte{0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F})
+	require.Error(t, err)
 }

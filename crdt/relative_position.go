@@ -27,11 +27,13 @@ type RelativePosition struct {
 	// Tname is the root type name; used when Item is nil.
 	Tname string
 
-	// TypeItem anchors the position to the start of a nested type whose
+	// typeItem anchors the position to the start of a nested type whose
 	// containing item has this ID (Yjs RelativePosition case 2 / wire tag 2).
-	// ygo does not yet generate these; the field exists so positions received
-	// from a Yjs peer round-trip on the wire rather than being rejected.
-	TypeItem *ID
+	// ygo does not yet generate these; the field is unexported (so the public
+	// struct shape — and positional composite literals — is unchanged) and
+	// exists only so positions received from a Yjs peer round-trip on the wire
+	// rather than being rejected.
+	typeItem *ID
 
 	// Assoc controls which side of Item this position is on.
 	//   Assoc >= 0: cursor is after Item (default — use for most cursors).
@@ -119,7 +121,7 @@ func ToAbsolutePosition(doc *Doc, rp RelativePosition) (AbsolutePosition, bool) 
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 
-	if rp.TypeItem != nil {
+	if rp.typeItem != nil {
 		// Position anchored to a nested type (Yjs case 2). Not yet resolvable in
 		// ygo — return not-found rather than mis-resolving it as a root start.
 		return AbsolutePosition{}, false
@@ -181,10 +183,10 @@ func EncodeRelativePosition(rp RelativePosition) []byte {
 		enc.WriteVarUint(0)
 		enc.WriteVarUint(uint64(rp.Item.Client))
 		enc.WriteVarUint(rp.Item.Clock)
-	case rp.TypeItem != nil:
+	case rp.typeItem != nil:
 		enc.WriteVarUint(2)
-		enc.WriteVarUint(uint64(rp.TypeItem.Client))
-		enc.WriteVarUint(rp.TypeItem.Clock)
+		enc.WriteVarUint(uint64(rp.typeItem.Client))
+		enc.WriteVarUint(rp.typeItem.Clock)
 	default:
 		enc.WriteVarUint(1)
 		enc.WriteVarString(rp.Tname)
@@ -232,7 +234,7 @@ func DecodeRelativePosition(data []byte) (RelativePosition, error) {
 		if err != nil {
 			return RelativePosition{}, err
 		}
-		rp.TypeItem = id
+		rp.typeItem = id
 	default:
 		return RelativePosition{}, ErrInvalidRelativePosition
 	}
