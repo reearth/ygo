@@ -18,6 +18,12 @@ type Item struct {
 	ParentSub *string
 	Content   Content
 	Deleted   bool
+	// parentID is transient decode state: the ID of the container item when this
+	// item's parent is referenced by item-ID (a nested type) but that container
+	// has not yet been integrated. It lets integration defer the item until the
+	// parent arrives (Yjs pendingStructs parity, review finding C-3) instead of
+	// hard-failing the decode. Resolved to Parent during integration; never encoded.
+	parentID *ID
 	// MovedBy points to the winning ContentMove item that has claimed this item
 	// as its target. When non-nil, this item is rendered at the ContentMove's
 	// position instead of its original linked-list position. Set by integrate()
@@ -227,15 +233,38 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		ct.Type.item = item
 	}
 
-	// For map-keyed items, maintain last-write-wins semantics.
+	// For map-keyed items, maintain last-write-wins semantics. The winner for a
+	// key is the RIGHTMOST same-key item in YATA order (Yjs's parent._map value).
+	// YATA placement above already orders concurrent same-key writes
+	// deterministically by (origin, clientID), so this resolution is independent
+	// of arrival order. We must scan past items of OTHER keys (and tombstones) to
+	// the right rather than inspecting only the immediate right neighbour: a
+	// different-key item landing between two same-key items would otherwise make
+	// us falsely believe we are the rightmost, permanently diverging the winner
+	// and losing the key on cross-sync (review finding C-1).
 	if item.ParentSub != nil {
 		key := *item.ParentSub
-		if item.Right != nil && parentSubEqual(item.Right.ParentSub, item.ParentSub) {
-			// A same-key item to our right won the concurrent write race — delete ourselves.
+		rightmost := true
+		// Fast path: if no item has ever been recorded for this key, none can be
+		// to our right, so we are trivially the rightmost. This keeps populating a
+		// map with N distinct keys O(N) rather than O(N²). Only when a prior
+		// same-key item exists do we scan right (past other keys / tombstones) to
+		// see whether it sits to our right and supersedes us.
+		if _, exists := item.Parent.itemMap[key]; exists {
+			for r := item.Right; r != nil; r = r.Right {
+				if parentSubEqual(r.ParentSub, item.ParentSub) {
+					// A same-key item (live or tombstone) sits to our right and is
+					// therefore the more-recent value — we are superseded.
+					rightmost = false
+					break
+				}
+			}
+		}
+		if !rightmost {
 			item.delete(txn)
 		} else {
 			// We are the rightmost item for this key; delete the previous winner.
-			if existing, ok := item.Parent.itemMap[key]; ok && !existing.Deleted {
+			if existing, ok := item.Parent.itemMap[key]; ok && existing != item && !existing.Deleted {
 				existing.delete(txn)
 			}
 			item.Parent.itemMap[key] = item
