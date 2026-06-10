@@ -32,15 +32,16 @@ import "errors"
 // ErrClosed is returned by methods called after Close.
 var ErrClosed = errors.New("ygo/mobile: used after Close")
 
-// maxSafeInteger is JavaScript's Number.MAX_SAFE_INTEGER (2^53). Client IDs must
-// not exceed it, or they cannot be represented by JS Yjs peers.
-const maxSafeInteger = int64(1) << 53
+// maxSafeInteger is JavaScript's Number.MAX_SAFE_INTEGER, 2^53 - 1
+// (9007199254740991) — the largest integer JS can represent exactly. Client IDs
+// must not exceed it, or they cannot be represented exactly by JS Yjs peers.
+const maxSafeInteger = int64(1)<<53 - 1
 
 // checkClientID validates a caller-supplied client ID for cross-language safety:
 // non-negative and within JS safe-integer range.
 func checkClientID(id int64) error {
 	if id < 0 || id > maxSafeInteger {
-		return errors.New("ygo/mobile: client ID must be in [0, 2^53]")
+		return errors.New("ygo/mobile: client ID must be in [0, 2^53 - 1]")
 	}
 	return nil
 }

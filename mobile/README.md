@@ -15,8 +15,9 @@ boundary, so **every exported function and method in this package uses only**:
 `*Awareness`. It never exposes unsigned ints, maps, non-byte slices, `any`,
 variadics, or callbacks. (The underlying `crdt` / `awareness` packages use
 `uint64` client IDs, maps, and `[]uint64` internally; this package translates at
-the boundary — e.g. client IDs are `int64` and constrained to `[0, 2^53]`, the
-JS safe-integer range, and structured values cross the boundary as JSON `[]byte`.)
+the boundary — e.g. client IDs are `int64` and constrained to `[0, 2^53 - 1]`,
+the JS safe-integer range (`Number.MAX_SAFE_INTEGER`), and structured values
+cross the boundary as JSON `[]byte`.)
 
 The bound surface is:
 

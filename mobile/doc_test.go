@@ -2,6 +2,7 @@ package mobile
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -9,8 +10,8 @@ import (
 
 func TestDoc_ConstructionAndClientID(t *testing.T) {
 	d := NewDoc()
-	if id := d.ClientID(); id < 0 || id > (1<<53) {
-		t.Fatalf("NewDoc ClientID = %d, want within [0, 2^53]", id)
+	if id := d.ClientID(); id < 0 || id > (1<<53)-1 {
+		t.Fatalf("NewDoc ClientID = %d, want within [0, 2^53 - 1]", id)
 	}
 
 	d2, err := NewDocWithClientID(42)
@@ -18,6 +19,13 @@ func TestDoc_ConstructionAndClientID(t *testing.T) {
 		t.Fatalf("NewDocWithClientID(42): id=%d err=%v", d2.ClientID(), err)
 	}
 
+	// Boundary: 2^53 - 1 (Number.MAX_SAFE_INTEGER) is accepted; 2^53 is not.
+	if d3, err := NewDocWithClientID((1 << 53) - 1); err != nil || d3.ClientID() != (1<<53)-1 {
+		t.Fatalf("NewDocWithClientID(2^53-1): id=%d err=%v, want accepted", d3.ClientID(), err)
+	}
+	if _, err := NewDocWithClientID(1 << 53); err == nil {
+		t.Fatal("NewDocWithClientID(2^53): expected error (one past max safe integer)")
+	}
 	if _, err := NewDocWithClientID(-1); err == nil {
 		t.Fatal("NewDocWithClientID(-1): expected error")
 	}
@@ -131,5 +139,45 @@ func TestDoc_GetTextJSON_AbsentRootIsEmptyArray(t *testing.T) {
 	tj, err := NewDoc().GetTextJSON("nope")
 	if err != nil || string(tj) != "[]" {
 		t.Fatalf("GetTextJSON(absent) = %q err=%v, want []", tj, err)
+	}
+}
+
+// TestDoc_ConcurrentCloseIsRaceFree hammers every operation from many goroutines
+// while Close races them. Under -race this asserts the lifecycle guard fully
+// synchronizes access to the inner pointer; functionally it asserts nothing
+// panics and, once Close has completed, operations return the documented closed
+// values.
+func TestDoc_ConcurrentCloseIsRaceFree(t *testing.T) {
+	d := NewDoc()
+	upd := NewDoc().EncodeStateAsUpdate() // a valid (empty) peer update to apply
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = d.ApplyUpdate(upd)
+			_ = d.EncodeStateAsUpdate()
+			_ = d.EncodeStateVector()
+			_, _ = d.EncodeDiff(d.EncodeStateVector())
+			_ = d.GetText("t")
+			_, _ = d.GetTextJSON("t")
+			_ = d.ClientID()
+		}()
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); d.Close() }() // races the operations above
+	wg.Wait()
+
+	// Close has completed (happens-before via wg): the doc is now closed and
+	// operations must return the documented closed values without panicking.
+	if err := d.ApplyUpdate(upd); err != ErrClosed {
+		t.Fatalf("ApplyUpdate after Close = %v, want ErrClosed", err)
+	}
+	if got := d.EncodeStateAsUpdate(); got != nil {
+		t.Fatalf("EncodeStateAsUpdate after Close = %v, want nil", got)
+	}
+	if id := d.ClientID(); id != 0 {
+		t.Fatalf("ClientID after Close = %d, want 0", id)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -56,6 +57,14 @@ func TestAwareness_Validation_Clear_Close(t *testing.T) {
 	}
 	if err := a.SetLocalState([]byte(`not json`)); err == nil {
 		t.Fatal("SetLocalState(invalid): expected error")
+	}
+	if err := a.SetLocalState([]byte(`null`)); err == nil {
+		t.Fatal("SetLocalState(null): expected error (use ClearLocalState; null must not silently remove presence)")
+	}
+	// A null payload must not have leaked through and cleared presence: the `{}`
+	// state set above should still be present.
+	if ls, err := a.LocalStateJSON(); err != nil || string(ls) == "null" {
+		t.Fatalf("LocalStateJSON after rejected null = %q err=%v, want the present {} state intact", ls, err)
 	}
 	a.ClearLocalState()
 	a.Close()
@@ -187,5 +196,45 @@ func TestAwareness_PostClose_Contract(t *testing.T) {
 	// ClientID: 0
 	if id := a.ClientID(); id != 0 {
 		t.Fatalf("ClientID after Close = %d, want 0", id)
+	}
+}
+
+// TestAwareness_ConcurrentCloseIsRaceFree races every operation against Close
+// (which calls Destroy on the underlying awareness) from many goroutines. Under
+// -race this asserts the lifecycle guard serializes Close against in-flight
+// operations so no method ever runs on a destroyed awareness; functionally it
+// asserts nothing panics and post-Close calls return the documented values.
+func TestAwareness_ConcurrentCloseIsRaceFree(t *testing.T) {
+	a, _ := NewAwareness(1)
+	peer, _ := NewAwareness(2)
+	if err := peer.SetLocalState([]byte(`{"x":1}`)); err != nil {
+		t.Fatalf("peer SetLocalState: %v", err)
+	}
+	upd := peer.EncodeAll()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = a.SetLocalState([]byte(`{"x":1}`))
+			_ = a.ApplyUpdate(upd)
+			_, _ = a.StatesJSON()
+			_, _ = a.LocalStateJSON()
+			_ = a.EncodeAll()
+			a.ClearLocalState()
+			_ = a.ClientID()
+		}()
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); a.Close() }() // races the operations above
+	wg.Wait()
+
+	// Close has completed (happens-before via wg): operations must now report closed.
+	if err := a.ApplyUpdate(upd); err != ErrClosed {
+		t.Fatalf("ApplyUpdate after Close = %v, want ErrClosed", err)
+	}
+	if _, err := a.StatesJSON(); err != ErrClosed {
+		t.Fatalf("StatesJSON after Close = %v, want ErrClosed", err)
 	}
 }

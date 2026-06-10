@@ -13,8 +13,9 @@ func TestCheckClientID(t *testing.T) {
 	}{
 		{"zero", 0, true},
 		{"one", 1, true},
-		{"max safe integer", 1 << 53, true},
+		{"max safe integer (2^53 - 1)", (1 << 53) - 1, true},
 		{"negative", -1, false},
+		{"two to the 53 (one past max safe)", 1 << 53, false},
 		{"above max safe integer", (1 << 53) + 1, false},
 	}
 	for _, c := range cases {
