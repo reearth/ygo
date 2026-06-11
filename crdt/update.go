@@ -592,6 +592,22 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 				continue
 			}
 
+			// OriginRight referencing a not-yet-integrated clock: defer (Yjs
+			// getMissing parity). A root type's parent is resolved by name, so
+			// such an item is NOT caught by the parent==nil defer above; without
+			// this, an item whose right origin is a missing concurrent client
+			// would integrate at the wrong position — permanent divergence
+			// (review finding C-2). Deferral routes it through the within-update
+			// retry and, failing that, store.pending via itemFutureDep. Only at
+			// offset==0: a split (offset>0) overlaps an already-present item, so
+			// its origins are necessarily satisfied.
+			if offset == 0 && item.OriginRight != nil &&
+				item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
+				pending = append(pending, item)
+				clock = itemEnd
+				continue
+			}
+
 			// Resolve left neighbor from the Origin ID so that integrate()
 			// starts its scan from the correct position in the linked list.
 			// (Local inserts set item.Left directly; remote items only have Origin.)
@@ -631,15 +647,36 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 					item.Parent = ori.Parent
 				}
 			}
+			// Parent referenced by container item-ID (review finding C-3): now
+			// that earlier groups in this update have integrated, the container
+			// may exist. Resolve precisely BEFORE the ParentSub fallback below,
+			// which would otherwise graft this keyed item onto an arbitrary map.
+			if item.Parent == nil && item.parentID != nil {
+				if pi := txn.doc.store.Find(*item.parentID); pi != nil {
+					if ct, ok := pi.Content.(*ContentType); ok {
+						item.Parent = ct.Type
+					}
+				}
+			}
 			// If the origin is a GC placeholder (no parent), search the
 			// entire store for an item with the same ParentSub that does
 			// have a parent. This handles the Yjs wire-format case where
 			// deleted YMap entries become GC structs and the parent type
 			// name is lost.
-			if item.Parent == nil && item.ParentSub != nil {
+			if item.Parent == nil && item.parentID == nil && item.ParentSub != nil {
 				item.Parent = findParentForMapEntry(txn.doc.store)
 			}
 			if item.Parent != nil {
+				// A resolved parent is not sufficient: the item may still depend
+				// on a not-yet-integrated origin/rightOrigin clock (review finding
+				// C-2). Integrating now would place it at the wrong position
+				// (permanent divergence). Defer it to `remaining` so the
+				// no-progress branch below parks it via itemFutureDep for retry
+				// when the missing client arrives.
+				if _, _, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+					remaining = append(remaining, item)
+					continue
+				}
 				if item.Origin != nil {
 					item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
 				}
@@ -830,6 +867,7 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 
 	var parent *abstractType
 	var parentSub *string
+	var parentByID *ID // set when the parent is referenced by ID but not yet integrated
 
 	if !hasOrigin && !hasRightOrigin {
 		// Explicit parent info.
@@ -856,13 +894,18 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 			}
 			parentItem := doc.store.Find(ID{Client: ClientID(pc), Clock: pk})
 			if parentItem == nil {
-				return nil, fmt.Errorf("parent item {%d,%d} not found", pc, pk)
-			}
-			ct, ok := parentItem.Content.(*ContentType)
-			if !ok {
+				// Container not integrated yet. EncodeStateAsUpdate sorts groups
+				// ascending by client, so a lower-clientID item written into a
+				// higher-clientID peer's nested type decodes before its parent.
+				// Defer instead of hard-failing (Yjs pendingStructs parity,
+				// review finding C-3): record the parent ID and let integration
+				// resolve it once the container arrives.
+				parentByID = &ID{Client: ClientID(pc), Clock: pk}
+			} else if ct, ok := parentItem.Content.(*ContentType); ok {
+				parent = ct.Type
+			} else {
 				return nil, fmt.Errorf("parent item {%d,%d} is not a ContentType", pc, pk)
 			}
-			parent = ct.Type
 		}
 	}
 
@@ -892,6 +935,7 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 		OriginRight: originRight,
 		Parent:      parent,
 		ParentSub:   parentSub,
+		parentID:    parentByID,
 		Content:     content,
 	}
 
@@ -1262,7 +1306,20 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 				return false
 			}
 		}
-		if item.Parent == nil && item.ParentSub != nil {
+		// Parent referenced by container item-ID (review finding C-3): resolve
+		// precisely if the container has arrived; if it references a future
+		// clock, park (return false) rather than grafting onto an arbitrary map
+		// via the ParentSub fallback below.
+		if item.Parent == nil && item.parentID != nil {
+			if pi := store.Find(*item.parentID); pi != nil {
+				if ct, ok := pi.Content.(*ContentType); ok {
+					item.Parent = ct.Type
+				}
+			} else if item.parentID.Clock >= store.NextClock(item.parentID.Client) {
+				return false
+			}
+		}
+		if item.Parent == nil && item.parentID == nil && item.ParentSub != nil {
 			item.Parent = findParentForMapEntry(store)
 		}
 		if item.Parent == nil {
@@ -1274,6 +1331,18 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 
 	// Origin present but referring to a future clock -> still blocked.
 	if item.Origin != nil && item.Origin.Clock >= store.NextClock(item.Origin.Client) {
+		return false
+	}
+
+	// OriginRight referring to a future clock -> still blocked. Yjs's getMissing
+	// blocks integration on origin, rightOrigin, OR parent; ygo only checked
+	// OriginRight inside the Parent==nil branch above. A root type's parent is
+	// resolved by name, so that branch is skipped and an item whose right origin
+	// is a not-yet-integrated client would otherwise integrate at the wrong
+	// position (permanent divergence, review finding C-2). itemFutureDep already
+	// reports OriginRight as the missing dependency, so the item parks here and
+	// retries once that client's clock advances.
+	if item.OriginRight != nil && item.OriginRight.Clock >= store.NextClock(item.OriginRight.Client) {
 		return false
 	}
 
@@ -1302,6 +1371,14 @@ func itemFutureDep(item *Item, store *StructStore) (ClientID, uint64, bool) {
 		storeClock := store.NextClock(item.OriginRight.Client)
 		if item.OriginRight.Clock >= storeClock {
 			return item.OriginRight.Client, storeClock, true
+		}
+	}
+	// Parent referenced by an as-yet-unintegrated container item (review
+	// finding C-3): park on the container's client until it arrives.
+	if item.Parent == nil && item.parentID != nil {
+		storeClock := store.NextClock(item.parentID.Client)
+		if item.parentID.Clock >= storeClock {
+			return item.parentID.Client, storeClock, true
 		}
 	}
 	return 0, 0, false
