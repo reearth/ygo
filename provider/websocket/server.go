@@ -418,9 +418,16 @@ type Server struct {
 	// remote client's presence as removed if no update for it arrives within this
 	// duration. It reclaims "ghost" presence from peers that died silently
 	// (mobile sleep, NAT timeout, half-open TCP) without a clean disconnect.
-	// Zero (the default) disables auto-expiry. Suggested production value: 30s
-	// (matching y-protocols). The sweep goroutine is stopped when the room is
-	// evicted.
+	// Zero (the default) disables auto-expiry. The sweep goroutine is stopped
+	// when the room is evicted.
+	//
+	// Set this comfortably ABOVE the clients' presence keep-alive interval, or a
+	// still-connected client will be expired between its keep-alives. Yjs clients
+	// re-announce local presence roughly every 15s (half the y-protocols 30s
+	// outdated-timeout), and that re-announce — including for a peer attached to
+	// another cluster node, since awareness is relayed — refreshes the entry's
+	// last-update time here. The default suggested value 30s leaves ample margin;
+	// values at or below ~15s risk flapping live peers offline.
 	AwarenessExpiry time.Duration
 
 	// connSem enforces MaxConnections as a hard cap. Lazily initialised on
