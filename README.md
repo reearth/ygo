@@ -21,6 +21,7 @@ ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (
 - Both update wire formats (V1 and V2, with V1↔V2 conversion)
 - The y-protocols sync handshake and awareness layer
 - WebSocket and HTTP transport bindings (the core is transport-agnostic)
+- Native iOS/Android embedding via `gomobile` (the `mobile/` subpackage) — no JS runtime, no CGO
 - Snapshots, garbage collection, undo manager, persistence adapters
 
 The current release is **v1.14.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
@@ -35,6 +36,7 @@ The current release is **v1.14.0**. See [CHANGELOG.md](CHANGELOG.md) for the per
 - **Awareness** — presence, cursor sharing, ephemeral state.
 - **Snapshots** — point-in-time document history and restore.
 - **Transport-agnostic** — core logic has no transport dependency; WebSocket and HTTP handlers are addons.
+- **Mobile bindings** — embed natively in iOS/Android via `gomobile bind` (the [`mobile/`](mobile/) subpackage). Pure Go, no CGO; v1 is sync + render.
 
 Post-v1.0 hardening:
 
@@ -276,6 +278,17 @@ type PersistenceAdapter interface {
 For a ready-made durable backend, [`persistence/sqlite`](persistence/sqlite/) provides a pure-Go (CGO-free, `modernc.org/sqlite`) `VersionedPersistence` store with WAL mode, full versioned history, and a crash-safe two-phase prune. Open it with `sqlite.Open("data.db")`.
 
 For backend examples (Postgres, Redis, file-system) and the v1.7.0 context-aware extension that lets adapters abort in-flight writes during `Server.Shutdown`, see [docs/PERSISTENCE.md](docs/PERSISTENCE.md).
+
+## Mobile (iOS / Android)
+
+The [`mobile/`](mobile/) subpackage is a [`gomobile bind`](https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile)-able façade over `crdt` and `awareness`, so you can embed ygo natively in iOS and Android apps — **no JavaScript runtime and no CGO**. v1 scope is **sync + render**: a Swift/Kotlin app can receive, merge, and display a collaboratively-edited document and exchange presence (on-device editing is a planned follow-up).
+
+```
+gomobile bind -target=ios                ./mobile   # → Mobile.xcframework
+gomobile bind -target=android -androidapi 21 ./mobile  # → mobile.aar
+```
+
+`Doc` exposes sync (`ApplyUpdate`, `EncodeStateAsUpdate`, `EncodeStateVector`, `EncodeDiff`) and read accessors (`GetText`, `GetTextJSON`, `GetMapJSON`, `GetArrayJSON`); `Awareness` exposes presence (`SetLocalState`, `StatesJSON`, `EncodeAll`, `ApplyUpdate`). Every exported signature uses only gomobile-safe types (`string` / `int64` / `bool` / `[]byte` / `error`), and `Close()` releases the native state. `gomobile` is a build-time tool, not a dependency — `go.mod` is unchanged. See [`mobile/README.md`](mobile/README.md) for the build matrix, threading and lifecycle guidance, binary size / ABI notes, and Kotlin / Swift snippets.
 
 ## Running in production
 
