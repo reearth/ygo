@@ -1,55 +1,40 @@
 ## What's new
 
-Native mobile bindings. This release adds a new `mobile/` package: a
-gomobile-bindable façade over ygo's `crdt` and `awareness` packages, so you can
-embed ygo directly in iOS and Android apps via `gomobile bind` — no JavaScript
-runtime and no CGo. v1 scope is **sync + render**: apply peer updates, encode
-state/diffs, and read the current document and presence; on-device editing
-(mutators) is a planned follow-up.
+Server-side awareness hardening. This release closes a memory-exhaustion DoS in
+the awareness subsystem and reclaims stale presence, with new knobs on the
+websocket server and the `ygo-server` binary. No breaking API changes.
 
-### Added — `mobile/` (gomobile bindings for iOS/Android)
+### Security
 
-The package exposes two bound types with a **gomobile-safe surface** —
-gomobile bind only supports a restricted set of types across the language
-boundary, so every method uses only `string`, `int64`, `bool`, `[]byte`,
-`error`, and the bound pointers `*Doc` / `*Awareness` (no unsigned ints, maps,
-non-byte slices, `any`, variadics, or callbacks; the package translates at the
-boundary):
+- **Bounded awareness memory growth.** A peer could exhaust a room's memory by
+  sending awareness updates that invent unbounded client IDs — including
+  null-state entries, which bypassed the existing per-room byte cap. A new
+  distinct-entry cap stops this: once a room is at capacity, previously-unseen
+  client IDs are dropped while already-tracked clients keep updating.
+  - `awareness.Awareness.SetMaxClients(n)` — library-level cap.
+  - `websocket.Server.MaxAwarenessClientsPerRoom` — per-room cap.
 
-- **`Doc`** — `NewDoc` / `NewDocWithClientID`, `ClientID`, `ApplyUpdate`,
-  `EncodeStateAsUpdate`, `EncodeStateVector`, `EncodeDiff` (incremental sync from
-  a remote state vector), `GetText`, `GetTextJSON`, `GetMapJSON`, `GetArrayJSON`,
-  and `Close`.
-- **`Awareness`** — `NewAwareness`, `ClientID`, `SetLocalState`,
-  `ClearLocalState`, `LocalStateJSON`, `StatesJSON`, `EncodeAll`, `ApplyUpdate`,
-  and `Close`.
+### Added
 
-Build the frameworks with the standard gomobile tooling (a build-time tool, not
-a dependency — `go.mod` is unchanged):
+- **Server-side awareness expiry.** `websocket.Server.AwarenessExpiry` (when
+  > 0) reclaims a remote client's presence after it goes idle, clearing "ghost"
+  presence left by peers that died silently (mobile sleep, NAT timeout) without
+  a clean disconnect. The per-room sweep goroutine is stopped on room eviction.
+- **`ygo-server` flags** `-max-awareness-clients` (default 10000) and
+  `-awareness-expiry` (default 30s) enable both protections out of the box.
 
-```
-gomobile bind -target=ios     ./mobile   # → Mobile.xcframework
-gomobile bind -target=android -androidapi 21 ./mobile   # → mobile.aar
-```
+### Compatibility
 
-All methods are synchronous and blocking and copy `[]byte` across the boundary,
-so call `ApplyUpdate` / `Encode*` off the UI thread (Kotlin `Dispatchers.IO` /
-a Swift background queue) and prefer incremental `EncodeDiff` over full-state
-encodes on the hot path. Call `Close()` when done (`ViewModel.onCleared` /
-Swift `deinit`) rather than relying on cross-binding finalization.
-
-The package is pure-Go / CGo-free, so it builds with `CGO_ENABLED=0` like the
-rest of ygo (guarded in CI). Note one known caveat: `GetTextJSON` and
-`StatesJSON` currently return ygo's internal struct shapes (Go field names),
-not idiomatic Yjs JSON; stable/idiomatic shapes are a planned follow-up, so
-don't hard-code against them long-term. See [`mobile/README.md`](https://github.com/reearth/ygo/blob/main/mobile/README.md)
-for the full integration guide (threading, lifecycle, binary size / ABI,
-error handling, change notifications, and Kotlin/Swift snippets).
+No breaking API changes — the new fields and methods are additive and default
+to off at the library level (0 = unlimited / disabled), preserving existing
+behavior. The `ygo-server` binary now enables both protections by default;
+pass `-max-awareness-clients 0` / `-awareness-expiry 0` to restore the prior
+unbounded behavior.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.24.0
+go get github.com/reearth/ygo@v1.25.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.

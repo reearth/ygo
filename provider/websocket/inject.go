@@ -525,6 +525,9 @@ func (s *Server) CloseRoom(name string, force bool) error {
 	// s.rooms (the early-return above handled the lost-race case), so
 	// firing here is exactly-once vs handleDisconnect — see #93 self-
 	// review B1.
+	// Stop the awareness auto-expiry goroutine (if any) so it doesn't outlive
+	// the room. Idempotent; no-op when expiry was never started.
+	rm.awareness.Destroy()
 	s.teardownRelayRoom(rm, name)
 	if hook := s.OnUnloadDocument; hook != nil {
 		s.safeHook("OnUnloadDocument", func() {

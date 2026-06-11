@@ -2,11 +2,16 @@
 package websocket
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/reearth/ygo/awareness"
 )
 
 func TestServer_MaxMessageBytes_ConfigurableDefault(t *testing.T) {
@@ -50,4 +55,62 @@ func TestPeer_RunWriter_ExitsOnChannelClose(t *testing.T) {
 	// Verify runWriter exits cleanly when writeCh is closed.
 	// Requires a fake peer + fake conn.
 	t.Skip("requires fake conn; see implementation comment")
+}
+
+// awarenessUpdateFor builds a one-client awareness update frame (live state) for
+// use in wiring tests.
+func awarenessUpdateFor(id uint64) []byte {
+	a := awareness.New(id)
+	a.SetLocalState(map[string]any{"v": "x"})
+	return a.EncodeUpdate([]uint64{id})
+}
+
+// TestServer_MaxAwarenessClientsPerRoom_IsWired verifies the per-room distinct-
+// entry cap is applied to rooms the server creates (S-1 DoS guard).
+func TestServer_MaxAwarenessClientsPerRoom_IsWired(t *testing.T) {
+	s := NewServer()
+	s.MaxAwarenessClientsPerRoom = 2
+	rm, err := s.getOrCreateRoom(context.Background(), "room")
+	if err != nil {
+		t.Fatalf("getOrCreateRoom: %v", err)
+	}
+	for id := uint64(1); id <= 10; id++ {
+		_ = rm.awareness.ApplyUpdate(awarenessUpdateFor(id), nil)
+	}
+	if got := len(rm.awareness.GetStates()); got > 2 {
+		t.Fatalf("room awareness tracked %d clients, want <= 2 (cap not wired)", got)
+	}
+}
+
+// TestServer_AwarenessExpiry_GoroutineStoppedOnEvict verifies the auto-expiry
+// goroutine started for a room does not outlive the room (CloseRoom -> Destroy).
+func TestServer_AwarenessExpiry_GoroutineStoppedOnEvict(t *testing.T) {
+	s := NewServer()
+	s.AwarenessExpiry = 50 * time.Millisecond
+
+	before := runtime.NumGoroutine()
+	rm, err := s.getOrCreateRoom(context.Background(), "room")
+	if err != nil {
+		t.Fatalf("getOrCreateRoom: %v", err)
+	}
+	if rm.awareness == nil {
+		t.Fatal("room has no awareness")
+	}
+	if err := s.CloseRoom("room", true); err != nil {
+		t.Fatalf("CloseRoom: %v", err)
+	}
+
+	// Poll until the goroutine count returns to baseline (the expiry goroutine
+	// exits when Destroy stops it). Condition-based wait avoids flakiness.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		runtime.Gosched()
+		if runtime.NumGoroutine() <= before+1 { // +1 tolerance for scheduler noise
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expiry goroutine leaked: before=%d after=%d", before, runtime.NumGoroutine())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

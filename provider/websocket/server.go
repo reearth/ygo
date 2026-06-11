@@ -406,6 +406,23 @@ type Server struct {
 	// cap. Suggested production value: 100 MiB. See issue #48 vector B.
 	MaxAwarenessBytesPerRoom int64
 
+	// MaxAwarenessClientsPerRoom caps the number of DISTINCT awareness client
+	// entries tracked in one room (live presence plus retained removal
+	// tombstones). Without it a peer can invent unbounded client IDs — including
+	// null-state entries, which bypass MaxAwarenessBytesPerRoom — to exhaust
+	// memory. Previously-unseen client IDs past this cap are dropped. Zero (the
+	// default) disables the cap. Suggested production value: 10,000.
+	MaxAwarenessClientsPerRoom int
+
+	// AwarenessExpiry, when > 0, starts a per-room background sweep that marks a
+	// remote client's presence as removed if no update for it arrives within this
+	// duration. It reclaims "ghost" presence from peers that died silently
+	// (mobile sleep, NAT timeout, half-open TCP) without a clean disconnect.
+	// Zero (the default) disables auto-expiry. Suggested production value: 30s
+	// (matching y-protocols). The sweep goroutine is stopped when the room is
+	// evicted.
+	AwarenessExpiry time.Duration
+
 	// connSem enforces MaxConnections as a hard cap. Lazily initialised on
 	// first ServeHTTP. nil when MaxConnections == 0 (unlimited).
 	connSem     *semaphore.Weighted
@@ -573,6 +590,13 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 	aw := awareness.New(0)
 	if s.MaxAwarenessBytesPerRoom > 0 {
 		aw.SetMaxBytes(s.MaxAwarenessBytesPerRoom)
+	}
+	if s.MaxAwarenessClientsPerRoom > 0 {
+		aw.SetMaxClients(s.MaxAwarenessClientsPerRoom)
+	}
+	if s.AwarenessExpiry > 0 {
+		// Background sweep; stopped via aw.Destroy() when the room is evicted.
+		aw.StartAutoExpiry(s.AwarenessExpiry)
 	}
 	r := &room{
 		doc:       crdt.New(docOpts...),

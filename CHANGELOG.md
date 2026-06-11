@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.0] — 2026-06-11
+
+### Security
+
+- **Bounded awareness memory growth (DoS hardening).** A peer could exhaust a
+  room's memory by sending awareness updates that invent unbounded client IDs —
+  including null-state entries, which bypassed the existing per-room byte cap.
+  `awareness.Awareness` now supports `SetMaxClients(n)`, a cap on the number of
+  distinct tracked client entries (live presence plus removal tombstones); once
+  reached, previously-unseen client IDs are dropped while existing clients keep
+  updating. The websocket `Server` exposes this as `MaxAwarenessClientsPerRoom`.
+
+### Added
+
+- **Server-side awareness expiry.** `Server.AwarenessExpiry` (when > 0) starts a
+  per-room background sweep that reclaims a remote client's presence after the
+  configured idle duration — clearing "ghost" presence left by peers that died
+  silently (mobile sleep, NAT timeout) without a clean disconnect. The sweep
+  goroutine is stopped when the room is evicted.
+- **`cmd/ygo-server` flags** `-max-awareness-clients` (default 10000) and
+  `-awareness-expiry` (default 30s) wire the two protections on by default for
+  the turnkey server.
+
 ## [1.24.0] — 2026-06-09
 
 ### Added
