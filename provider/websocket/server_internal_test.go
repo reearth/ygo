@@ -75,7 +75,9 @@ func TestServer_MaxAwarenessClientsPerRoom_IsWired(t *testing.T) {
 		t.Fatalf("getOrCreateRoom: %v", err)
 	}
 	for id := uint64(1); id <= 10; id++ {
-		_ = rm.awareness.ApplyUpdate(awarenessUpdateFor(id), nil)
+		if err := rm.awareness.ApplyUpdate(awarenessUpdateFor(id), nil); err != nil {
+			t.Fatalf("ApplyUpdate(client %d): %v", id, err)
+		}
 	}
 	if got := len(rm.awareness.GetStates()); got > 2 {
 		t.Fatalf("room awareness tracked %d clients, want <= 2 (cap not wired)", got)

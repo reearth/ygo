@@ -389,6 +389,15 @@ func TestUnit_Awareness_ApplyUpdate_StateTooLarge_Errors(t *testing.T) {
 	assert.ErrorIs(t, err, awareness.ErrStateTooLarge)
 }
 
+func TestAwareness_StartAutoExpiry_TinyTimeoutDoesNotPanic(t *testing.T) {
+	// A sub-2ns timeout makes timeout/2 round to 0; time.NewTicker(0) panics.
+	// Since the timeout is caller- (and CLI-) configurable, StartAutoExpiry must
+	// clamp the tick interval rather than crash.
+	a := awareness.New(0)
+	stop := a.StartAutoExpiry(1 * time.Nanosecond) // would panic without the clamp
+	stop()
+}
+
 func TestAwareness_StartAutoExpiry_NoLeakOnDoubleCall(t *testing.T) {
 	// Regression for #34: calling StartAutoExpiry twice must not leak
 	// the first goroutine.

@@ -478,9 +478,17 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 		// (exists) still update and can be removed. This bounds the states map
 		// against a peer inventing unbounded client IDs — crucially including
 		// null-state entries, which bypass the byte cap above. The local client
-		// is exempt: it is handled by the self-state branch before this point.
-		if !exists && a.maxClients > 0 && len(a.states) >= a.maxClients {
-			continue
+		// is exempt — it is set by trusted embedder code, not adversarial wire
+		// input — so it does not count toward the cap and is never rejected here
+		// (the self-state branch above already handles a null for our own ID).
+		if !exists && a.maxClients > 0 {
+			remote := len(a.states)
+			if _, hasLocal := a.states[a.clientID]; hasLocal {
+				remote-- // exclude the exempt local entry from the cap
+			}
+			if remote >= a.maxClients {
+				continue
+			}
 		}
 
 		wasActive := exists && current.State != nil
@@ -591,7 +599,15 @@ func (a *Awareness) StartAutoExpiry(timeout time.Duration) func() {
 		prev()
 	}
 
-	ticker := time.NewTicker(timeout / 2)
+	// Tick at half the timeout so an entry is checked at least twice within its
+	// window. Clamp to a positive minimum: time.NewTicker panics on a zero or
+	// negative duration, and timeout is caller- (and CLI-) configurable, so a
+	// sub-2ns value would make timeout/2 round to 0 and crash the room.
+	interval := timeout / 2
+	if interval <= 0 {
+		interval = 1
+	}
+	ticker := time.NewTicker(interval)
 	done := make(chan struct{})
 	go func() {
 		defer ticker.Stop()
