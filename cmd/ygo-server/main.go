@@ -68,6 +68,13 @@ type Config struct {
 	MaxRooms int
 	// MaxMessageBytes is the per-message read cap in bytes.
 	MaxMessageBytes int64
+	// MaxAwarenessClients caps the distinct awareness client entries per room
+	// (live presence plus removal tombstones). Bounds memory against a peer that
+	// invents unbounded client IDs. 0 = unlimited.
+	MaxAwarenessClients int
+	// AwarenessExpiry reclaims a remote client's presence if no update arrives
+	// within this duration (ghost-presence cleanup). 0 = disabled.
+	AwarenessExpiry time.Duration
 	// Redis is the Redis address for the cross-process relay. Empty disables
 	// clustering.
 	Redis string
@@ -92,6 +99,8 @@ func parseFlags(args []string) (Config, error) {
 	fs.IntVar(&cfg.MaxPeersPerRoom, "max-peers-per-room", 0, "per-room peer cap (0 = unlimited)")
 	fs.IntVar(&cfg.MaxRooms, "max-rooms", 0, "cap on total resident rooms (0 = unlimited)")
 	fs.Int64Var(&cfg.MaxMessageBytes, "max-message-bytes", 64<<20, "per-message read cap in bytes")
+	fs.IntVar(&cfg.MaxAwarenessClients, "max-awareness-clients", 10_000, "per-room cap on distinct awareness client entries (0 = unlimited)")
+	fs.DurationVar(&cfg.AwarenessExpiry, "awareness-expiry", 30*time.Second, "reclaim a remote client's presence after this idle duration (0 = disabled)")
 	fs.StringVar(&cfg.Redis, "redis", "", "Redis address for cross-process relay (empty = disabled)")
 	fs.StringVar(&cfg.Path, "path", "/yjs/{room}", "URL path pattern for the WebSocket handler")
 	fs.StringVar(&cfg.Log, "log", "text", `log format: "text" or "json"`)
@@ -166,6 +175,8 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 	srv.MaxPeersPerRoom = cfg.MaxPeersPerRoom
 	srv.MaxRooms = cfg.MaxRooms
 	srv.MaxMessageBytes = cfg.MaxMessageBytes
+	srv.MaxAwarenessClientsPerRoom = cfg.MaxAwarenessClients
+	srv.AwarenessExpiry = cfg.AwarenessExpiry
 	srv.Logger = log
 
 	// Clustering: a non-empty Redis address attaches a Redis-backed relay so

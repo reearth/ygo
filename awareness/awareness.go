@@ -123,6 +123,7 @@ type Awareness struct {
 	wireBytes   map[uint64]int
 	activeBytes int64 // sum of wireBytes values
 	maxBytes    int64 // 0 = unlimited (default; backward compatible)
+	maxClients  int   // 0 = unlimited (default; backward compatible)
 }
 
 // New creates an Awareness instance for the given client.
@@ -151,6 +152,26 @@ func New(clientID uint64) *Awareness {
 func (a *Awareness) SetMaxBytes(n int64) {
 	a.mu.Lock()
 	a.maxBytes = n
+	a.mu.Unlock()
+}
+
+// SetMaxClients caps the number of distinct client entries this Awareness will
+// track — live presence plus retained removal tombstones. Once the cap is
+// reached, ApplyUpdate refuses previously-unseen client IDs; clients already
+// tracked can still update and be removed. This bounds memory against a peer
+// that invents unbounded client IDs to exhaust the room — including null-state
+// entries, which are NOT subject to the byte cap (see SetMaxBytes) and so would
+// otherwise grow the states map without limit.
+//
+// A value of 0 (the default) disables the cap. Local state set via
+// SetLocalState is exempt — the local client is always allowed. Suggested
+// production value: a few thousand to tens of thousands per room.
+//
+// Set this once at construction time; changes while concurrent updates are
+// being processed are safe (the field is read under a.mu).
+func (a *Awareness) SetMaxClients(n int) {
+	a.mu.Lock()
+	a.maxClients = n
 	a.mu.Unlock()
 }
 
@@ -452,6 +473,24 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 			continue
 		}
 
+		// Distinct-entry cap (#48 / S-1 DoS guard): once the room is at
+		// capacity, refuse previously-unseen client IDs. Already-tracked clients
+		// (exists) still update and can be removed. This bounds the states map
+		// against a peer inventing unbounded client IDs — crucially including
+		// null-state entries, which bypass the byte cap above. The local client
+		// is exempt — it is set by trusted embedder code, not adversarial wire
+		// input — so it does not count toward the cap and is never rejected here
+		// (the self-state branch above already handles a null for our own ID).
+		if !exists && a.maxClients > 0 {
+			remote := len(a.states)
+			if _, hasLocal := a.states[a.clientID]; hasLocal {
+				remote-- // exclude the exempt local entry from the cap
+			}
+			if remote >= a.maxClients {
+				continue
+			}
+		}
+
 		wasActive := exists && current.State != nil
 
 		// Decode JSON state. Reject deeply nested payloads before unmarshalling
@@ -560,7 +599,15 @@ func (a *Awareness) StartAutoExpiry(timeout time.Duration) func() {
 		prev()
 	}
 
-	ticker := time.NewTicker(timeout / 2)
+	// Tick at half the timeout so an entry is checked at least twice within its
+	// window. Clamp to a positive minimum: time.NewTicker panics on a zero or
+	// negative duration, and timeout is caller- (and CLI-) configurable, so a
+	// sub-2ns value would make timeout/2 round to 0 and crash the room.
+	interval := timeout / 2
+	if interval <= 0 {
+		interval = 1
+	}
+	ticker := time.NewTicker(interval)
 	done := make(chan struct{})
 	go func() {
 		defer ticker.Stop()

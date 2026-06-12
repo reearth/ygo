@@ -274,6 +274,9 @@ func (p *peer) handleDisconnect() {
 			}
 		}
 		if roomEvicted {
+			// Stop the awareness auto-expiry goroutine (if any) so it doesn't
+			// outlive the room. Idempotent; no-op when expiry was never started.
+			rm.awareness.Destroy()
 			p.server.teardownRelayRoom(rm, p.roomName)
 			if hook := p.server.OnUnloadDocument; hook != nil {
 				p.server.safeHook("OnUnloadDocument", func() {
