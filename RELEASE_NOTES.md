@@ -1,54 +1,39 @@
 ## What's new
 
-Deployment-security and wire-handling hardening. This release makes the
-`ygo-server` binary secure by default, lets large documents sync without hitting
-an artificial field-size ceiling, surfaces malformed frames in the logs, and
-aligns `RelativePosition` resolution with the Yjs reference. No breaking API
-changes.
-
-### Security
-
-- **`ygo-server` is secure by default.** The server has no built-in
-  authentication, so it now binds `127.0.0.1:1234` (loopback only) by default
-  instead of all interfaces. A non-loopback bind still works but logs a loud
-  `SECURITY` warning — any host that can reach the port could otherwise read and
-  modify every document. Front a public deployment with an authenticating
-  reverse proxy.
+A rich-text formatting correctness fix. `YText.Format` is now a faithful port of
+the Yjs reference algorithm, so formatting no longer leaks outside the range it
+was applied to, and `ToDelta` output matches Yjs.
 
 ### Fixed
 
-- **Large single fields no longer fail to sync below the message cap.** A single
-  wire field was capped at a fixed 16 MiB even though every message layer allows
-  64 MiB by default, so a document with one >16 MiB text node or binary embed
-  was silently rejected inside an otherwise-valid message. A field is now bounded
-  by the size of the message that carries it (policed by the provider's own
-  `MaxMessageBytes`), removing the silent failure without weakening the
-  out-of-memory guard.
-- **`RelativePosition` resolves to the end of a type, matching Yjs.** A position
-  anchored to a root type (the form `CreateRelativePositionFromIndex` produces
-  for an end-of-type cursor) now resolves to the end of the type for
-  `Assoc >= 0` (and to the start for `Assoc < 0`), matching `toAbsolutePosition`
-  in Yjs. Previously it always resolved to index 0, snapping an end-of-document
-  cursor back to the start.
+- **`YText.Format` no longer strips formatting outside its range.** Re-applying
+  or toggling a format over a sub-range of an already-formatted run used to
+  delete the marker bounding content *after* the range, stripping the
+  surrounding run's formatting — most visibly on documents loaded via
+  `ApplyUpdate`, but also on freshly-typed text. `Format` now ports Yjs JS
+  `formatText` (cursor-based, with negated-attribute restoration): it opens
+  markers only where the value changes, deletes only in-range overlapping
+  markers, and restores the post-range state. Verified against `yjs@13.6.30`
+  across fresh and loaded documents.
 
-### Added
+### Changed
 
-- **Malformed inbound frames are logged.** The websocket server now logs each
-  dropped unreadable / unappliable message at `Debug` level (with the room and
-  error) so an operator can diagnose why a peer's edits never land. `Debug`, not
-  `Warn`, because the rate is attacker-controlled.
+- **`YText.ToDelta` coalesces adjacent inserts with equal attributes** into one
+  op, matching Yjs JS `toDelta`. A run split across multiple backing Items (e.g.
+  by a `Format` boundary) previously emitted several adjacent ops with identical
+  attributes; consumers will now see fewer, coalesced ops. The rendered text and
+  attributes are unchanged.
 
 ### Compatibility
 
-No breaking API changes. The `ygo-server` binary's default `-addr` changes from
-`:1234` to `127.0.0.1:1234`; a deployment that relied on the previous
-all-interfaces default must now pass `-addr :1234` (or a specific address)
-explicitly, and will then see the new security warning.
+No breaking API changes. `ToDelta` returns the same text/attributes, just merged
+into fewer ops where they were previously split — code that compares the full op
+list (rather than the rendered content) should expect the coalesced shape.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.26.0
+go get github.com/reearth/ygo@v1.27.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
