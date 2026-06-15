@@ -21,7 +21,9 @@ var ErrInvalidRelativePosition = errors.New("crdt: invalid relative position")
 // reference implementation.
 type RelativePosition struct {
 	// Item is the ID of the item this position is anchored to.
-	// Nil means the position is at the very start of the named root type (Tname).
+	// Nil anchors the position to the named root type (Tname) itself, which
+	// resolves to the end of the type when Assoc >= 0 and to the start when
+	// Assoc < 0 (matching Yjs toAbsolutePosition).
 	Item *ID
 
 	// Tname is the root type name; used when Item is nil.
@@ -128,8 +130,20 @@ func ToAbsolutePosition(doc *Doc, rp RelativePosition) (AbsolutePosition, bool) 
 	}
 
 	if rp.Item == nil {
-		// Null anchor = start of the named type (index 0).
-		return AbsolutePosition{Name: rp.Tname, Index: 0, Assoc: rp.Assoc}, true
+		// Null item anchor = the named root type. Matching toAbsolutePosition in
+		// the Yjs JS reference, this resolves to the END of the type (its length)
+		// for assoc >= 0 and to the start (index 0) for assoc < 0. (ygo previously
+		// always returned 0, which silently snapped an end-of-type cursor — the
+		// form CreateRelativePositionFromIndex produces for a position past the
+		// last item — back to the start.) A type that does not exist yet has
+		// length 0, so both associativities resolve to 0.
+		index := 0
+		if rp.Assoc >= 0 {
+			if t, ok := doc.share[rp.Tname]; ok {
+				index = t.baseType().length
+			}
+		}
+		return AbsolutePosition{Name: rp.Tname, Index: index, Assoc: rp.Assoc}, true
 	}
 
 	item := doc.store.Find(*rp.Item)
