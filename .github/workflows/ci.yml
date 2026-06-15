@@ -15,16 +15,18 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: ["1.23", "1.24"]
+        # Minimum supported (go.mod floor) + latest stable. Keep the upper bound
+        # in step with the govulncheck job below as new Go releases land.
+        go: ["1.23", "1.26"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
           cache: true
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: testutil/package-lock.json
       - run: npm ci
@@ -35,7 +37,7 @@ jobs:
       - run: go test -race -timeout 120s -coverprofile=coverage.txt -covermode=atomic ./...
       - name: CGo-free build (pure Go)
         run: CGO_ENABLED=0 go build ./persistence/sqlite/... ./cmd/ygo-server/... ./mobile/...
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@v5
         if: matrix.go == '1.23'
         with:
           files: coverage.txt
@@ -45,20 +47,20 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
           cache: true
       - uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.11.4
+          version: v2.12.2
 
   vuln:
     name: Vulnerability scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           # Track the latest 1.26 patch so the scan always runs on a toolchain
