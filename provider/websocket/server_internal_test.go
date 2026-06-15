@@ -2,10 +2,12 @@
 package websocket
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,36 @@ import (
 
 	"github.com/reearth/ygo/awareness"
 )
+
+// captureDebugLogger returns a logger writing Debug-level (and above) text logs
+// into buf, for asserting the server emits a line on a given path.
+func captureDebugLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// TestPeer_HandleMessage_LogsMalformedFrames verifies that malformed inbound
+// frames are no longer dropped silently: the server logs each discard at Debug
+// level so an operator can diagnose why a peer's edits never land (N-12). The
+// lines are Debug (not Warn) so a hostile peer cannot flood the log.
+func TestPeer_HandleMessage_LogsMalformedFrames(t *testing.T) {
+	t.Run("bad outer type", func(t *testing.T) {
+		var buf bytes.Buffer
+		p := &peer{server: &Server{Logger: captureDebugLogger(&buf)}, roomName: "r"}
+		p.handleMessage(nil) // empty: the outer type VarUint cannot be read
+		if !strings.Contains(buf.String(), "malformed") {
+			t.Fatalf("expected a malformed-message log line, got: %q", buf.String())
+		}
+	})
+	t.Run("truncated awareness frame", func(t *testing.T) {
+		var buf bytes.Buffer
+		p := &peer{server: &Server{Logger: captureDebugLogger(&buf)}, roomName: "r"}
+		// msgAwareness, then a VarBytes length of 5 with no payload bytes.
+		p.handleMessage([]byte{byte(msgAwareness), 0x05})
+		if !strings.Contains(buf.String(), "awareness") {
+			t.Fatalf("expected a malformed-awareness log line, got: %q", buf.String())
+		}
+	})
+}
 
 func TestServer_MaxMessageBytes_ConfigurableDefault(t *testing.T) {
 	// Default: zero in config means use the maxWSMessageBytes constant.
