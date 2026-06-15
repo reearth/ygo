@@ -19,6 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restoration), so it opens markers only where the value changes, deletes only
   in-range overlapping markers, and restores the post-range state. Verified
   against `yjs@13.6.30` across fresh and loaded docs.
+- **`UndoManager` undo of a deletion now propagates to peers (CRDT-sound).**
+  Undo previously flipped `Deleted = false` in place, which produced no wire
+  record: a peer that already had the tombstone never revived the content, and a
+  back-sync re-deleted it locally — silently losing the undo. Undo now re-inserts
+  a copy of the deleted content as a new item (Yjs `redoItem`), so the
+  restoration is a normal insert that converges across peers. Works for YText,
+  YArray, and YMap. (Undoing a deletion of items inside a *deleted nested type*
+  remains a known gap.)
+
+### Added
+
+- **`crdt.SharedType`** — the previously-unexported interface satisfied by
+  `YText` / `YArray` / `YMap` / `YXml*` is now exported, so `NewUndoManager`'s
+  scope can be named from outside the package (`crdt.NewUndoManager(doc,
+  []crdt.SharedType{txt, arr})`). It was effectively unusable externally before.
+  Its methods stay unexported, so only ygo's own types can satisfy it.
 
 ### Changed
 

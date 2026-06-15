@@ -449,10 +449,10 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		// content; runs BEFORE Unlock so other goroutines never see partially-
 		// GC'd state. No-op when doc.gc is false.
 		//
-		// When an UndoManager is attached we skip auto-GC: applyStackItem
-		// reconstructs deleted items by flipping the Deleted flag, which only
-		// works if their original Content is still present. Yjs handles this
-		// with a per-item keep flag; for v1.15.0 we take the conservative
+		// When an UndoManager is attached we skip auto-GC: undoing a deletion
+		// re-inserts a COPY of the deleted item's content (applyStackItem →
+		// redoItem), which only works if that original content is still present.
+		// Yjs handles this with a per-item keep flag; we take the conservative
 		// position of disabling auto-GC entirely while any UndoManager is
 		// registered. RunGC remains available as the explicit manual entry point.
 		if d.gc && d.undoManagerCount == 0 {

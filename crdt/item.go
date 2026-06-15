@@ -29,6 +29,13 @@ type Item struct {
 	// position instead of its original linked-list position. Set by integrate()
 	// during ContentMove priority arbitration.
 	MovedBy *Item
+	// redone is transient UndoManager state: when this item's deletion has been
+	// undone, it holds the ID of the new item that re-inserted a copy of its
+	// content. Undo restores a deletion by re-inserting (so the change
+	// propagates to peers), not by flipping Deleted in place; redone tracks the
+	// re-insertion to avoid redoing the same item twice and to let neighbour
+	// position-tracing follow the chain. Never encoded. (Yjs Item.redone parity.)
+	redone *ID
 }
 
 // parentSubKey collapses a *string parentSub to a plain string bucket label for
