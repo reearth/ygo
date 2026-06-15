@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.0] — 2026-06-15
+
+### Security
+
+- **`cmd/ygo-server` is now secure by default.** The server wires no
+  authentication of its own, so it now binds `127.0.0.1:1234` (loopback only) by
+  default instead of all interfaces. A non-loopback bind still works but logs a
+  prominent `SECURITY` warning, since any host that can reach the port could
+  otherwise read and modify every document. Front a public deployment with an
+  authenticating reverse proxy.
+
+### Fixed
+
+- **Large single fields no longer fail to sync below the message cap (N-12).** A
+  single wire field (`VarBytes` / `VarString`) was capped at a fixed 16 MiB even
+  though every message layer allows 64 MiB by default — so a document with one
+  >16 MiB text node or binary embed was silently rejected inside an
+  otherwise-valid message. A field is now bounded by the size of the message that
+  carries it (policed by the provider's own `MaxMessageBytes`), removing the
+  silent failure without weakening the out-of-memory guard: `ReadVarBytes`
+  returns a sub-slice that aliases the buffer, so the buffer length is the real
+  bound and a crafted oversized length prefix is still rejected without
+  allocating.
+- **`RelativePosition` resolution matches Yjs at the end of a type.** A position
+  anchored to a root type (a null-item / tname anchor — the form
+  `CreateRelativePositionFromIndex` produces for an end-of-type cursor) now
+  resolves to the end of the type when `Assoc >= 0` (and to the start when
+  `Assoc < 0`), matching `toAbsolutePosition` in the Yjs JS reference. Previously
+  it always resolved to index 0, snapping an end-of-document cursor back to the
+  start. This is a resolution-semantics fix; the wire format was already aligned
+  in v1.23.1 (C-4).
+
+### Added
+
+- **Malformed inbound frames are logged.** The websocket server previously
+  dropped unreadable or unappliable messages (bad framing, malformed awareness,
+  un-appliable sync / stateless) silently. It now logs each discard at `Debug`
+  level with the room and error, so an operator can diagnose why a peer's edits
+  never land. The level is `Debug`, not `Warn`, because the rate is
+  attacker-controlled — keeping this from becoming a log-flood vector.
+
+### Compatibility
+
+No breaking API changes. The `ygo-server` binary's default `-addr` changes from
+`:1234` to `127.0.0.1:1234`; deployments that relied on the previous
+all-interfaces default must now pass `-addr :1234` (or a specific address)
+explicitly — and will then see the new security warning.
+
 ## [1.25.0] — 2026-06-11
 
 ### Security

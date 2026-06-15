@@ -24,7 +24,7 @@ ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (
 - Native iOS/Android embedding via `gomobile` (the `mobile/` subpackage) — no JS runtime, no CGO
 - Snapshots, garbage collection, undo manager, persistence adapters
 
-The current release is **v1.14.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
+The current release is **v1.26.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
 
 ## Features
 
@@ -54,6 +54,12 @@ Post-v1.0 hardening:
 - **Cross-reference audit** (v1.9.0–v1.14.0). A systematic comparison of ygo against Yjs JS and yrs reference implementations surfaced ten correctness gaps, tracked under the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps). Notable fixes: YATA `OriginRight` boundary (#65, #68), awareness self-state protection (#73), `Item.delete` cascade into nested types + `DeleteSet` partial-overlap split (#72), YText format-marker correctness (#71: bleed, accumulation, gap cleanup, current-attribute inheritance), `YText.InsertEmbed` (#76), and `YArray/YMap.ToJSON` recursive unwrap of nested types (#75). See [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps) for the full list.
 - **Sync read-loop resilience** (v1.9.0). `sync.WithErrorHandler` option lets `ApplySyncMessage` route a single malformed update to a caller-supplied handler rather than tearing down the connection.
 - **Awareness heartbeat** (v1.11.0). `Awareness.Heartbeat()` re-emits local state at an incremented clock so peers learn we're still alive without the local state needing to change. Pairs with `StartAutoExpiry` on the peer side.
+- **Hocuspocus compatibility** (v1.18.0–v1.19.0). The websocket server handles Hocuspocus message types (sync-reply, stateless, broadcast-stateless, close, ping/pong), exposes room lifecycle hooks (`OnLoadDocument`, `OnUnloadDocument`, `OnFirstPeer`, `OnLastPeer`) and an `OnStateless` hook, and ships a [`provider/webhook`](provider/webhook/) subpackage with HMAC-signed, debounced, retrying delivery.
+- **Horizontal scale** (v1.20.0–v1.21.0). A [`cluster`](cluster/) relay (Redis-backed adapter in [`cluster/redis`](cluster/redis/)) shares one logical document per room across multiple server instances behind a load balancer, alongside a versioned persistence layer.
+- **SQLite persistence & turnkey server** (v1.23.0). A pure-Go (CGo-free, `modernc.org/sqlite`) `VersionedPersistence` store with WAL mode, full versioned history, and crash-safe two-phase prune ([`persistence/sqlite`](persistence/sqlite/)), plus a ready-to-run [`cmd/ygo-server`](cmd/ygo-server/) binary.
+- **CRDT convergence & Yjs-interop fixes** (v1.23.1). Map-key last-writer-wins via scan-right, out-of-order `rightOrigin` parking, self-encode reload of nested types, and `RelativePosition` / `Snapshot` wire formats aligned to the Yjs JS reference.
+- **Awareness DoS hardening** (v1.25.0). A per-room cap on distinct presence entries (`Awareness.SetMaxClients`, `Server.MaxAwarenessClientsPerRoom`) plus server-side auto-expiry (`Server.AwarenessExpiry`) that reclaims ghost presence from peers that died silently.
+- **Server secure-by-default & decode-ceiling alignment** (v1.26.0). `cmd/ygo-server` binds loopback by default and warns loudly on a public bind (it has no built-in auth); a single wire field is now bounded by the message size rather than a fixed 16 MiB ceiling (large documents no longer fail to sync below the configured cap); malformed inbound frames are logged; and a `RelativePosition` anchored to a root type resolves to the end of the type, matching Yjs.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release picture.
 
@@ -147,7 +153,10 @@ func main() {
 For a ready-to-run binary — with flags for origins, connection/room limits, an optional Redis cluster relay (`-redis`), and SQLite persistence (`-store`) — use [`cmd/ygo-server`](cmd/ygo-server/):
 
 ```bash
-go run github.com/reearth/ygo/cmd/ygo-server -addr :1234 -store data.db
+# Binds 127.0.0.1:1234 by default (loopback only). The server has no built-in
+# auth, so it logs a loud warning if you bind a public address (e.g. -addr :1234)
+# — put an authenticating reverse proxy in front in that case.
+go run github.com/reearth/ygo/cmd/ygo-server -store data.db
 ```
 
 ## Server-side document injection
