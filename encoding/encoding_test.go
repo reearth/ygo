@@ -1,6 +1,7 @@
 package encoding_test
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
@@ -118,6 +119,39 @@ func TestUnit_VarBytes_RoundTrip(t *testing.T) {
 	got, err := encoding.NewDecoder(e.Bytes()).ReadVarBytes()
 	require.NoError(t, err)
 	assert.Equal(t, b, got)
+}
+
+// TestUnit_VarBytes_LargeFieldWithinBuffer verifies a single field larger than
+// the former fixed 16 MiB ceiling decodes successfully when the bytes are
+// actually present. Before N-12 this returned ErrOverflow, silently making a
+// large document (one >16 MiB text node or binary embed) un-syncable inside an
+// otherwise-valid message whose size limit (default 64 MiB) was not exceeded.
+// The field size is now bounded only by the buffer the decoder was handed,
+// which the provider layer caps separately via its own message limits.
+func TestUnit_VarBytes_LargeFieldWithinBuffer(t *testing.T) {
+	const size = 20 << 20 // 20 MiB — above the old 16 MiB ceiling
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	e := encoding.NewEncoder()
+	e.WriteVarBytes(payload)
+	got, err := encoding.NewDecoder(e.Bytes()).ReadVarBytes()
+	require.NoError(t, err)
+	require.Len(t, got, size)
+	assert.True(t, bytes.Equal(payload, got))
+}
+
+// TestUnit_VarBytes_OverDeclaredLengthRejected verifies a length prefix larger
+// than the bytes actually present is rejected with ErrUnexpectedEOF without
+// allocating. A crafted multi-GiB length prefix must never trigger a large
+// allocation: ReadVarBytes returns a sub-slice that aliases the buffer, so the
+// real bound is the buffer length, not any fixed ceiling.
+func TestUnit_VarBytes_OverDeclaredLengthRejected(t *testing.T) {
+	e := encoding.NewEncoder()
+	e.WriteVarUint(1 << 40) // declare ~1 TiB; no data follows
+	_, err := encoding.NewDecoder(e.Bytes()).ReadVarBytes()
+	assert.ErrorIs(t, err, encoding.ErrUnexpectedEOF)
 }
 
 // --- Float32 / Float64 ---

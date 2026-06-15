@@ -43,6 +43,59 @@ func TestParseOrigins(t *testing.T) {
 	}
 }
 
+// TestParseFlags_DefaultAddrIsLoopback locks in the secure-by-default bind
+// (S-2): a fresh ygo-server, wiring no authentication, must listen only on
+// loopback so it is not silently exposed to the network. An operator who wants
+// a public bind has to opt in explicitly via -addr.
+func TestParseFlags_DefaultAddrIsLoopback(t *testing.T) {
+	cfg, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.Addr != "127.0.0.1:1234" {
+		t.Fatalf("default -addr = %q, want %q (secure-by-default loopback bind)", cfg.Addr, "127.0.0.1:1234")
+	}
+}
+
+// TestIsPublicBindAddr classifies listen addresses: a wildcard/empty host or a
+// non-loopback IP/hostname is "public" (network-reachable); loopback is not.
+func TestIsPublicBindAddr(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{":1234", true},             // empty host = all interfaces
+		{"0.0.0.0:1234", true},      // IPv4 wildcard
+		{"[::]:1234", true},         // IPv6 wildcard
+		{"192.168.1.10:1234", true}, // LAN IP
+		{"example.com:1234", true},  // hostname — cannot prove loopback
+		{"127.0.0.1:1234", false},   // IPv4 loopback
+		{"[::1]:1234", false},       // IPv6 loopback
+		{"localhost:1234", false},   // loopback name
+	}
+	for _, c := range cases {
+		if got := isPublicBindAddr(c.addr); got != c.want {
+			t.Errorf("isPublicBindAddr(%q) = %v, want %v", c.addr, got, c.want)
+		}
+	}
+}
+
+// TestWarnIfInsecureBind_FiresOnlyWhenPublic verifies the loud SECURITY warning
+// is emitted for a public bind and stays silent for the loopback default.
+func TestWarnIfInsecureBind_FiresOnlyWhenPublic(t *testing.T) {
+	var pub bytes.Buffer
+	warnIfInsecureBind(newLoggerTo(&pub, "text"), "0.0.0.0:1234")
+	if !strings.Contains(pub.String(), "SECURITY") {
+		t.Fatalf("expected a SECURITY warning for a public bind, got: %q", pub.String())
+	}
+
+	var loop bytes.Buffer
+	warnIfInsecureBind(newLoggerTo(&loop, "text"), "127.0.0.1:1234")
+	if loop.Len() != 0 {
+		t.Fatalf("expected no warning for the loopback bind, got: %q", loop.String())
+	}
+}
+
 // TestNewLogger_FormatSelection verifies the -log flag actually changes the
 // handler: "json" emits JSON; "text" and unknown values emit text. This is the
 // primitive the fatal-exit path relies on via slog.SetDefault(newLogger(cfg.Log)).

@@ -39,6 +39,11 @@ func (p *peer) handleMessage(data []byte) {
 	dec := encoding.NewDecoder(data)
 	outerType, err := dec.ReadVarUint()
 	if err != nil {
+		// Debug, not Warn: the rate is attacker-controlled, so a noisier level
+		// would be a log-flood vector. Still logged so an operator can see that
+		// frames are being discarded (N-12).
+		p.server.log().Debug("discarded malformed message: unreadable outer type",
+			"room", p.roomName, "err", err)
 		return
 	}
 
@@ -48,6 +53,8 @@ func (p *peer) handleMessage(data []byte) {
 		payload := dec.RemainingBytes()
 		reply, err := ygsync.ApplySyncMessage(p.room.doc, payload, p)
 		if err != nil {
+			p.server.log().Debug("discarded unappliable sync message",
+				"room", p.roomName, "err", err)
 			return
 		}
 		if reply != nil {
@@ -62,11 +69,16 @@ func (p *peer) handleMessage(data []byte) {
 		// Awareness payload is VarBytes-wrapped (y-websocket protocol).
 		awBytes, err := dec.ReadVarBytes()
 		if err != nil {
+			p.server.log().Debug("discarded malformed awareness frame",
+				"room", p.roomName, "err", err)
 			return
 		}
 		p.trackAwarenessClients(awBytes)
 		if err := p.room.awareness.ApplyUpdate(awBytes, p); err != nil {
-			return // Drop invalid awareness updates; do not broadcast.
+			// Drop invalid awareness updates; do not broadcast.
+			p.server.log().Debug("discarded unappliable awareness update",
+				"room", p.roomName, "err", err)
+			return
 		}
 		p.broadcastAwareness(awBytes)
 
@@ -86,6 +98,8 @@ func (p *peer) handleMessage(data []byte) {
 		// own step-1.
 		payload := dec.RemainingBytes()
 		if _, err := ygsync.ApplySyncMessage(p.room.doc, payload, p); err != nil {
+			p.server.log().Debug("discarded unappliable sync(reply) message",
+				"room", p.roomName, "err", err)
 			return
 		}
 		p.broadcastSync(payload)
@@ -96,6 +110,8 @@ func (p *peer) handleMessage(data []byte) {
 		// application via Server.OnStateless if configured.
 		payload, err := dec.ReadVarString()
 		if err != nil {
+			p.server.log().Debug("discarded malformed stateless frame",
+				"room", p.roomName, "err", err)
 			return
 		}
 		if hook := p.server.OnStateless; hook != nil {
@@ -114,6 +130,8 @@ func (p *peer) handleMessage(data []byte) {
 		// at others as Stateless.
 		payload, err := dec.ReadVarString()
 		if err != nil {
+			p.server.log().Debug("discarded malformed broadcast-stateless frame",
+				"room", p.roomName, "err", err)
 			return
 		}
 		p.broadcast(encoding.EncodeBytes(func(enc *encoding.Encoder) {

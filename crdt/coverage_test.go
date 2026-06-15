@@ -260,13 +260,15 @@ func TestUnit_RelativePosition_BeyondEnd(t *testing.T) {
 	txt := doc.GetText("t")
 	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hi", nil) })
 
-	// index beyond length returns Tname anchor
+	// An index beyond the length (assoc >= 0) returns a Tname anchor, which now
+	// resolves to the END of the type (its length), matching Yjs toAbsolutePosition
+	// — not index 0 as ygo previously returned.
 	rp := CreateRelativePositionFromIndex(txt, 100, 0)
 	assert.Nil(t, rp.Item)
 
 	abs, ok := ToAbsolutePosition(doc, rp)
 	require.True(t, ok)
-	assert.Equal(t, 0, abs.Index)
+	assert.Equal(t, txt.Len(), abs.Index)
 }
 
 func TestUnit_DecodeRelativePosition_InvalidKind(t *testing.T) {

@@ -9,7 +9,8 @@
 //
 //	ygo-server [flags]
 //
-//	-addr               TCP listen address (default ":1234")
+//	-addr               TCP listen address (default "127.0.0.1:1234", loopback-only;
+//	                    a non-loopback bind exposes the server, which has no built-in auth)
 //	-store              SQLite DB path; empty = ephemeral in-memory (lost on restart)
 //	-origins            comma-separated allowed WebSocket origins; empty = same-origin
 //	-max-conns          server-wide cap on simultaneous peers (0 = unlimited)
@@ -92,7 +93,8 @@ func parseFlags(args []string) (Config, error) {
 	fs := flag.NewFlagSet("ygo-server", flag.ContinueOnError)
 
 	var cfg Config
-	fs.StringVar(&cfg.Addr, "addr", ":1234", "TCP listen address")
+	fs.StringVar(&cfg.Addr, "addr", "127.0.0.1:1234",
+		"TCP listen address (default loopback-only; a non-loopback bind exposes the server, which has no built-in auth)")
 	fs.StringVar(&cfg.Store, "store", "", "SQLite DB path (empty = ephemeral in-memory; lost on restart)")
 	fs.StringVar(&cfg.Origins, "origins", "", "comma-separated allowed WebSocket origins (empty = same-origin)")
 	fs.IntVar(&cfg.MaxConns, "max-conns", 0, "server-wide cap on simultaneous peers (0 = unlimited)")
@@ -143,6 +145,47 @@ func parseOrigins(s string) []string {
 	return origins
 }
 
+// isPublicBindAddr reports whether addr — a TCP listen address such as
+// ":1234", "0.0.0.0:1234", or "127.0.0.1:1234" — binds a non-loopback
+// interface, making the server reachable from other hosts. An empty host
+// (":1234") or a wildcard address (0.0.0.0 / ::) binds every interface and is
+// therefore public; a loopback host (127.0.0.1, ::1, localhost) is private.
+// Any other host (a LAN IP, a public IP, or a DNS name we cannot prove is
+// loopback) is treated as public so the security warning errs toward caution.
+func isPublicBindAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port (or otherwise unparseable): treat the whole value as the host.
+		host = addr
+	}
+	switch host {
+	case "":
+		return true // ":1234" binds all interfaces
+	case "localhost":
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return !ip.IsLoopback()
+	}
+	return true
+}
+
+// warnIfInsecureBind logs a prominent warning when addr exposes the server to
+// the network. ygo-server wires no authentication of its own, so a non-loopback
+// bind means any host that can reach the port can read and modify every
+// document. The default bind is loopback, so this fires only when an operator
+// overrides -addr — at which point the deployment is expected to provide auth
+// at a layer in front (e.g. an authenticating reverse proxy).
+func warnIfInsecureBind(log *slog.Logger, addr string) {
+	if !isPublicBindAddr(addr) {
+		return
+	}
+	log.Warn("SECURITY: ygo-server is bound to a non-loopback address with NO authentication — "+
+		"any host that can reach this port can read and modify every document. Bind to 127.0.0.1 "+
+		"(the default), front it with an authenticating reverse proxy, or restrict access at the "+
+		"network layer.", "addr", addr)
+}
+
 // run boots the server and blocks until ctx is cancelled (e.g. by a signal) or
 // the HTTP server fails, then shuts everything down gracefully and returns.
 //
@@ -158,6 +201,11 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 	if cfg.Path == "" {
 		cfg.Path = "/yjs/{room}"
 	}
+
+	// S-2: the server has no built-in authentication, so a non-loopback bind is
+	// only safe behind a separate auth layer. Warn loudly when that is the case
+	// (the default bind is loopback, so this stays silent for a default run).
+	warnIfInsecureBind(log, cfg.Addr)
 
 	// Persistence: always wire SQLite via the LegacyAdapter so every committed
 	// transaction becomes a persisted version. An empty Store opens an ephemeral
