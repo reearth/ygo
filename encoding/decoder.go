@@ -7,11 +7,6 @@ import (
 	"unicode/utf8"
 )
 
-// maxStringBytes is the maximum number of bytes accepted for a single
-// VarBytes / VarString field. A crafted 4 GB length prefix before the guard
-// would cause multi-GB allocation; this cap prevents that.
-const maxStringBytes = 16 << 20 // 16 MiB
-
 var (
 	// ErrUnexpectedEOF is returned when the buffer is exhausted before decoding completes.
 	ErrUnexpectedEOF = errors.New("encoding: unexpected end of input")
@@ -152,20 +147,25 @@ func (d *Decoder) ReadVarString() (string, error) {
 
 // ReadVarBytes decodes a length-prefixed byte slice.
 // The returned slice is a sub-slice of the decoder's buffer; copy if you need to retain it.
-// Returns ErrOverflow if the declared length exceeds maxStringBytes (16 MiB) to prevent
-// OOM from a crafted 4 GB length prefix.
+//
+// A field can be no larger than the bytes that remain in the buffer; a declared
+// length beyond that is malformed and returns ErrUnexpectedEOF. Because the
+// returned slice aliases the buffer (no allocation), the buffer length is the
+// real bound — a crafted multi-GiB length prefix is rejected here without any
+// large allocation. Bounding by the remaining buffer rather than a fixed
+// ceiling (previously 16 MiB) lets a single large field — e.g. a big text node
+// or binary embed — sync inside an otherwise-valid message, with the maximum
+// message size policed by the provider layer (MaxMessageBytes, default 64 MiB)
+// instead of being silently rejected here (N-12).
 func (d *Decoder) ReadVarBytes() ([]byte, error) {
 	n, err := d.ReadVarUint()
 	if err != nil {
 		return nil, err
 	}
-	if n > maxStringBytes {
-		return nil, ErrOverflow
-	}
-	end := d.pos + int(n)
-	if end > len(d.buf) {
+	if n > uint64(d.Remaining()) {
 		return nil, ErrUnexpectedEOF
 	}
+	end := d.pos + int(n)
 	out := d.buf[d.pos:end]
 	d.pos = end
 	return out, nil
