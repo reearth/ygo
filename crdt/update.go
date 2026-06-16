@@ -91,26 +91,8 @@ func UpdateV2ToV1(v2 []byte) ([]byte, error) {
 	return EncodeStateAsUpdateV1(doc, nil), nil
 }
 
-// MergeUpdatesV1 combines multiple V1 updates into one by applying them all
-// to a temporary document and re-encoding its full state.
-func MergeUpdatesV1(updates ...[]byte) ([]byte, error) {
-	doc := New()
-	for _, u := range updates {
-		if err := ApplyUpdateV1(doc, u, nil); err != nil {
-			return nil, err
-		}
-	}
-	return EncodeStateAsUpdateV1(doc, nil), nil
-}
-
-// DiffUpdateV1 returns the subset of update that is missing from sv.
-func DiffUpdateV1(update []byte, sv StateVector) ([]byte, error) {
-	doc := New()
-	if err := ApplyUpdateV1(doc, update, nil); err != nil {
-		return nil, err
-	}
-	return EncodeStateAsUpdateV1(doc, sv), nil
-}
+// MergeUpdatesV1 and DiffUpdateV1 live in merge.go — they operate at the struct
+// level (preserving non-integrable structs) rather than integrate-then-reencode.
 
 // EncodeStateVectorV1 serialises the document's state vector as a compact
 // binary blob (VarUint count, then client/clock pairs).
@@ -203,7 +185,14 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 	// Orphaned items (no parent) came from GC wire format where the parent
 	// type name is lost. Encode them as GC structs so receivers get valid
 	// clock accounting instead of corrupt data.
-	if item.Parent == nil {
+	//
+	// Require no origins too: a struct-level-decoded item (MergeUpdatesV1 /
+	// DiffUpdateV1) that infers its parent from an origin legitimately has a nil
+	// Parent but a valid Origin/OriginRight — it must be encoded as a normal item
+	// (origin + content, no parent info), NOT as a GC placeholder, or its content
+	// would be lost. Parent info is only written in the no-origin branch below,
+	// so an origin-bearing item never dereferences item.Parent. (#125)
+	if item.Parent == nil && item.Origin == nil && item.OriginRight == nil {
 		length := item.Content.Len()
 		if offset > 0 {
 			length -= offset
