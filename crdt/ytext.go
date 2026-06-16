@@ -989,6 +989,10 @@ func (txt *YText) ToDelta() []Delta {
 	// reference delta. Embeds always flush and emit their own op.
 	var buf strings.Builder
 	var bufAttrs Attributes // attributes of the buffered run; nil == unformatted
+	// attrsDirty is set when a live ContentFormat changes currentAttrs, so we
+	// only re-snapshot/compare attributes at an actual attribute boundary rather
+	// than once per string item (the common case is a long run with no markers).
+	attrsDirty := false
 
 	attrsCopy := func() Attributes {
 		if len(currentAttrs) == 0 {
@@ -999,6 +1003,20 @@ func (txt *YText) ToDelta() []Delta {
 			a[k] = v
 		}
 		return a
+	}
+	// sameAsBuffered reports whether the live currentAttrs equals the buffered
+	// run's attributes, treating an empty map and a nil snapshot as equal — so
+	// no allocation is needed just to compare.
+	sameAsBuffered := func() bool {
+		if len(currentAttrs) != len(bufAttrs) {
+			return false
+		}
+		for k, v := range currentAttrs {
+			if bv, ok := bufAttrs[k]; !ok || !reflect.DeepEqual(v, bv) {
+				return false
+			}
+		}
+		return true
 	}
 	flush := func() {
 		if buf.Len() == 0 {
@@ -1015,13 +1033,14 @@ func (txt *YText) ToDelta() []Delta {
 		}
 		switch c := item.Content.(type) {
 		case *ContentString:
-			a := attrsCopy()
-			if buf.Len() > 0 && !reflect.DeepEqual(a, bufAttrs) {
+			switch {
+			case buf.Len() == 0:
+				bufAttrs = attrsCopy()
+			case attrsDirty && !sameAsBuffered():
 				flush()
+				bufAttrs = attrsCopy()
 			}
-			if buf.Len() == 0 {
-				bufAttrs = a
-			}
+			attrsDirty = false
 			buf.WriteString(c.Str)
 		case *ContentEmbed:
 			// #76: embeds are emitted as their own Delta entries with Insert
@@ -1031,6 +1050,7 @@ func (txt *YText) ToDelta() []Delta {
 			deltas = append(deltas, Delta{Op: DeltaOpInsert, Insert: c.Val, Attributes: attrsCopy()})
 		case *ContentFormat:
 			updateAttr(currentAttrs, c)
+			attrsDirty = true
 		}
 	}
 	flush()
