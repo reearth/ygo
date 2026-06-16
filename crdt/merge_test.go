@@ -83,3 +83,73 @@ func TestUnit_EncodeStateVectorFromUpdate_MatchesDoc(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, EncodeStateVectorV1(a), fromUpdate)
 }
+
+// ── V2 (#57) — mirror the V1 cases over the columnar codec ──────────────────
+
+func TestUnit_MergeUpdatesV2_PreservesNonIntegrableStruct(t *testing.T) {
+	d := New(WithClientID(1))
+	txt := d.GetText("t")
+	d.Transact(func(tx *Transaction) { txt.Insert(tx, 0, "A", nil) })
+	svAfterA := d.StateVector()
+	updA := EncodeStateAsUpdateV2(d, nil)
+	d.Transact(func(tx *Transaction) { txt.Insert(tx, 1, "B", nil) })
+	diff := EncodeStateAsUpdateV2(d, svAfterA)
+
+	merged, err := MergeUpdatesV2(diff)
+	require.NoError(t, err)
+
+	base := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV2(base, updA, nil))
+	require.NoError(t, ApplyUpdateV2(base, merged, nil))
+	require.Equal(t, "AB", base.GetText("t").ToString())
+}
+
+func TestUnit_MergeUpdatesV2_MapKeyChain(t *testing.T) {
+	doc := New(WithClientID(1))
+	m := doc.GetMap("meta")
+	var updates [][]byte
+	// Capture each transaction's incremental V2 update directly from the
+	// integrated doc (EncodeStateAsUpdateV2 with the prior state vector) — NOT
+	// via UpdateV1ToV2, which has the very drop bug this batch fixes.
+	prevSV := doc.StateVector()
+	for i := 0; i < 3; i++ {
+		doc.Transact(func(txn *Transaction) { m.Set(txn, "title", i) })
+		updates = append(updates, EncodeStateAsUpdateV2(doc, prevSV))
+		prevSV = doc.StateVector()
+	}
+	merged := updates[0]
+	var err error
+	for i := 1; i < len(updates); i++ {
+		merged, err = MergeUpdatesV2(merged, updates[i])
+		require.NoError(t, err)
+	}
+	d2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV2(d2, merged, nil))
+	v, ok := d2.GetMap("meta").Get("title")
+	require.True(t, ok, "key 'title' lost after V2 merge")
+	assert.Equal(t, int64(2), v)
+}
+
+func TestUnit_DiffUpdateV2_RoundTrip(t *testing.T) {
+	a := New(WithClientID(1))
+	ta := a.GetText("t")
+	a.Transact(func(tx *Transaction) { ta.Insert(tx, 0, "hello", nil) })
+	b := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV2(b, EncodeStateAsUpdateV2(a, nil), nil))
+	a.Transact(func(tx *Transaction) { ta.Insert(tx, 5, " world", nil) })
+
+	diff, err := DiffUpdateV2(EncodeStateAsUpdateV2(a, nil), b.StateVector())
+	require.NoError(t, err)
+	require.NoError(t, ApplyUpdateV2(b, diff, nil))
+	require.Equal(t, "hello world", b.GetText("t").ToString())
+}
+
+func TestUnit_EncodeStateVectorFromUpdateV2_MatchesDoc(t *testing.T) {
+	a := New(WithClientID(7))
+	ta := a.GetText("t")
+	a.Transact(func(tx *Transaction) { ta.Insert(tx, 0, "hello", nil) })
+
+	fromUpdate, err := EncodeStateVectorFromUpdateV2(EncodeStateAsUpdateV2(a, nil))
+	require.NoError(t, err)
+	assert.Equal(t, EncodeStateVectorV1(a), fromUpdate)
+}

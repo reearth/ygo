@@ -185,12 +185,12 @@ func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 // buildMergeStore decodes every update into one merged set of per-client struct
 // slices (deduped/sliced, gaps preserved) and the union of their delete sets,
 // plus a StructStore holding every struct for origin look-ups during encode.
-func buildMergeStore(updates [][]byte) (map[ClientID][]*Item, DeleteSet, *StructStore, error) {
+func buildMergeStore(updates [][]byte, decode func(*Doc, []byte) (map[ClientID][]*Item, DeleteSet, error)) (map[ClientID][]*Item, DeleteSet, *StructStore, error) {
 	scratch := New()
 	perClient := make(map[ClientID][]*Item)
 	mergedDS := newDeleteSet()
 	for _, u := range updates {
-		structs, ds, err := decodeStructsV1(scratch, u)
+		structs, ds, err := decode(scratch, u)
 		if err != nil {
 			return nil, DeleteSet{}, nil, err
 		}
@@ -249,7 +249,7 @@ func resolveParents(store *StructStore) {
 // sets are unioned — matching Yjs mergeUpdates. (Previously this applied to a
 // temp Doc and re-encoded, silently dropping parked structs; #125.)
 func MergeUpdatesV1(updates ...[]byte) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore(updates)
+	perClient, ds, store, err := buildMergeStore(updates, decodeStructsV1)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +262,7 @@ func MergeUpdatesV1(updates ...[]byte) ([]byte, error) {
 // idempotent — matching Yjs diffUpdate). (Previously this dropped parked
 // structs; #125.)
 func DiffUpdateV1(update []byte, sv StateVector) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore([][]byte{update})
+	perClient, ds, store, err := buildMergeStore([][]byte{update}, decodeStructsV1)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +273,7 @@ func DiffUpdateV1(update []byte, sv StateVector) ([]byte, error) {
 // — the next clock per client (max struct end) — without integrating it. Useful
 // for computing what a peer is missing directly from an update. (#57)
 func EncodeStateVectorFromUpdate(update []byte) ([]byte, error) {
-	perClient, _, _, err := buildMergeStore([][]byte{update})
+	perClient, _, _, err := buildMergeStore([][]byte{update}, decodeStructsV1)
 	if err != nil {
 		return nil, err
 	}

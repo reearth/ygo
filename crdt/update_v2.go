@@ -377,7 +377,13 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 	// Orphaned items (no parent) came from GC wire format where the parent
 	// type name is lost. Encode as GC struct for valid clock accounting.
-	if item.Parent == nil {
+	//
+	// Require no origins too: a struct-level-decoded item (MergeUpdatesV2 /
+	// DiffUpdateV2) that infers its parent from an origin legitimately has a nil
+	// Parent but a valid Origin/OriginRight — encode it as a normal item, not a
+	// GC placeholder, or its content is lost. Parent info is only written in the
+	// no-origin branch below. (#125 / #57)
+	if item.Parent == nil && item.Origin == nil && item.OriginRight == nil {
 		length := item.Content.Len()
 		if offset > 0 {
 			length -= offset

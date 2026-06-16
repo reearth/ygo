@@ -1,34 +1,41 @@
 ## What's new
 
-A rich-text formatting correctness fix. `YText.Format` is now a faithful port of
-the Yjs reference algorithm, so formatting no longer leaks outside the range it
-was applied to, and `ToDelta` output matches Yjs.
+A batch of three CRDT correctness fixes, each verified against the Yjs reference
+(`yjs@13.6.30`). No breaking API changes.
 
 ### Fixed
 
 - **`YText.Format` no longer strips formatting outside its range.** Re-applying
   or toggling a format over a sub-range of an already-formatted run used to
-  delete the marker bounding content *after* the range, stripping the
-  surrounding run's formatting — most visibly on documents loaded via
-  `ApplyUpdate`, but also on freshly-typed text. `Format` now ports Yjs JS
-  `formatText` (cursor-based, with negated-attribute restoration): it opens
-  markers only where the value changes, deletes only in-range overlapping
-  markers, and restores the post-range state. Verified against `yjs@13.6.30`
-  across fresh and loaded documents.
+  delete the marker bounding content *after* the range — most visibly on
+  documents loaded via `ApplyUpdate`. `Format` now ports the Yjs `formatText`
+  algorithm; `YText.ToDelta` also coalesces adjacent equal-attribute inserts to
+  match Yjs `toDelta`.
+- **Undo of a deletion is now CRDT-sound and propagates to peers.** `UndoManager`
+  previously flipped the deleted flag in place, which produced no wire record —
+  so a peer never revived the content and a back-sync re-deleted it, silently
+  losing the undo. Undo now re-inserts a copy of the content as a new item (Yjs
+  `redoItem`), converging across peers. Works for YText, YArray, and YMap.
+- **`MergeUpdatesV1` / `DiffUpdateV1` no longer drop non-integrable structs.**
+  They re-encoded an integrated temp document, so a struct whose dependency was
+  in a prior update was silently dropped. They now merge at the struct level
+  (Yjs `mergeUpdates`/`diffUpdate` parity), preserving every struct.
 
-### Changed
+### Added
 
-- **`YText.ToDelta` coalesces adjacent inserts with equal attributes** into one
-  op, matching Yjs JS `toDelta`. A run split across multiple backing Items (e.g.
-  by a `Format` boundary) previously emitted several adjacent ops with identical
-  attributes; consumers will now see fewer, coalesced ops. The rendered text and
-  attributes are unchanged.
+- **`crdt.SharedType`** is exported, so `NewUndoManager`'s scope can be named
+  from outside the package (it was effectively unusable externally before).
+- **`MergeUpdatesV2`, `DiffUpdateV2`, `EncodeStateVectorFromUpdate` /
+  `EncodeStateVectorFromUpdateV2`** — the V2 columnar equivalents of the
+  merge/diff fixes, plus extracting a state vector straight from an update
+  without integrating it (closes #57).
 
 ### Compatibility
 
-No breaking API changes. `ToDelta` returns the same text/attributes, just merged
-into fewer ops where they were previously split — code that compares the full op
-list (rather than the rendered content) should expect the coalesced shape.
+No breaking API changes. One behavioral note: `YText.ToDelta` now returns the
+same text/attributes merged into fewer ops where a run was previously split
+across backing Items — code comparing the full op list should expect the
+coalesced shape.
 
 ## Install
 
