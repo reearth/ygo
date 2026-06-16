@@ -26,7 +26,8 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 	if numClients > maxV2Items {
 		return nil, DeleteSet{}, ErrInvalidUpdate
 	}
-	out := make(map[ClientID][]*Item, numClients)
+	// Don't pre-size by the attacker-controlled numClients (see decodeStructsV1).
+	out := make(map[ClientID][]*Item)
 	total := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
 		numStructs, err := dec.restDec.ReadVarUint()
@@ -63,15 +64,13 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 					Deleted: true,
 				})
 				clock += uint64(l)
-			case 10: // skip struct (length on the rest stream)
+			case 10: // skip struct: a clock-range placeholder, not content.
 				l, err := dec.restDec.ReadVarUint()
 				if err != nil {
 					return nil, DeleteSet{}, wrapUpdateErr(err)
 				}
-				structs = append(structs, &Item{
-					ID:      ID{Client: client, Clock: clock},
-					Content: &contentSkip{length: int(l)},
-				})
+				// Advance clock but don't carry the skip (encodeItemV2 can't
+				// encode it); the gap is re-emitted as a skip by the encoder.
 				clock += l
 			default:
 				item, contentLen, err := decodeItemV2(dec, scratch, client, clock, info)

@@ -30,7 +30,10 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 	if numClients > maxV2Items {
 		return nil, DeleteSet{}, ErrInvalidUpdate
 	}
-	out := make(map[ClientID][]*Item, numClients)
+	// Don't pre-size by numClients: it's attacker-controlled (a tiny update can
+	// claim up to maxV2Items clients), so a size hint would amplify allocation.
+	// The map grows as real groups are read.
+	out := make(map[ClientID][]*Item)
 	total := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
 		numStructs, err := dec.ReadVarUint()
@@ -56,8 +59,15 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 			if err != nil {
 				return nil, DeleteSet{}, wrapUpdateErr(err)
 			}
-			structs = append(structs, item)
 			clock += uint64(item.Content.Len())
+			// Skip structs are clock-range placeholders, not content. Drop them
+			// from the struct list — advancing clock above leaves a gap that the
+			// encoder re-emits as a skip (Yjs filterSkips). Carrying them would
+			// later hand a contentSkip to encodeItem, which can't encode it.
+			if _, isSkip := item.Content.(*contentSkip); isSkip {
+				continue
+			}
+			structs = append(structs, item)
 		}
 		out[client] = structs
 	}
@@ -73,9 +83,16 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 // merging. Content.Splice(offset) mutates the receiver to hold [0,offset) and
 // returns the suffix; we keep the suffix.
 func sliceItemFront(item *Item, offset int) {
+	// An origin-less, parent-less struct (a GC placeholder) must stay so it
+	// re-encodes as a GC struct rather than a normal item; only set Origin for a
+	// real item (one that already has an origin or a resolved parent). Skip
+	// structs never reach here — they're filtered out during decode.
+	hadAnchor := item.Origin != nil || item.Parent != nil
 	suffix := item.Content.Splice(offset)
 	item.ID.Clock += uint64(offset)
-	item.Origin = &ID{Client: item.ID.Client, Clock: item.ID.Clock - 1}
+	if hadAnchor {
+		item.Origin = &ID{Client: item.ID.Client, Clock: item.ID.Clock - 1}
+	}
 	item.Content = suffix
 }
 
@@ -83,7 +100,15 @@ func sliceItemFront(item *Item, offset int) {
 // overlaps so the result is non-overlapping and clock-ascending. Clock GAPS are
 // preserved (the encoder emits skip structs for them).
 func dedupClientStructs(items []*Item) []*Item {
-	sort.Slice(items, func(i, j int) bool { return items[i].ID.Clock < items[j].ID.Clock })
+	// Sort by clock, longest-first on ties, so the merge is deterministic when
+	// two inputs carry overlapping ranges starting at the same clock (the longer
+	// struct is kept and shorter duplicates are dropped/sliced consistently).
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].ID.Clock != items[j].ID.Clock {
+			return items[i].ID.Clock < items[j].ID.Clock
+		}
+		return items[i].Content.Len() > items[j].Content.Len()
+	})
 	out := items[:0]
 	var covEnd uint64
 	hasCov := false

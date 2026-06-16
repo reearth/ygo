@@ -55,6 +55,37 @@ func TestUnit_MergeUpdatesV1_MapKeyChain(t *testing.T) {
 	assert.Equal(t, int64(2), v, "newest value wins after merge")
 }
 
+// A merged update that CONTAINS a skip struct (a clock gap) must re-merge
+// without corruption: the skip must be filtered on decode (not handed to
+// encodeItem, which can't encode it) and the gap re-emitted from clock
+// arithmetic. Regression for the F-6 review (#128).
+func TestUnit_MergeUpdatesV1_HandlesSkipStructs(t *testing.T) {
+	// Build a gappy update directly: client 1 text items at clock 0 ("A") and
+	// clock 5 ("F"), clocks 1-5 absent → encodeStructStoreV1 emits a skip.
+	scratch := New(WithClientID(1))
+	parent := scratch.GetText("t").baseType()
+	a := &Item{ID: ID{Client: 1, Clock: 0}, Parent: parent, Content: NewContentString("A")}
+	f := &Item{ID: ID{Client: 1, Clock: 5}, Origin: &ID{Client: 1, Clock: 4}, Parent: parent, Content: NewContentString("F")}
+	items := []*Item{a, f}
+	gappy := encodeStructStoreV1(map[ClientID][]*Item{1: items}, newDeleteSet(), StateVector{},
+		&StructStore{clients: map[ClientID][]*Item{1: items}})
+
+	merged, err := MergeUpdatesV1(gappy)
+	require.NoError(t, err)
+
+	per2, _, _, err := buildMergeStore([][]byte{merged}, decodeStructsV1)
+	require.NoError(t, err)
+	got := map[uint64]string{}
+	for _, it := range per2[1] {
+		if cs, ok := it.Content.(*ContentString); ok {
+			got[it.ID.Clock] = cs.Str
+		}
+	}
+	require.Len(t, per2[1], 2, "skip filtered; only the two real items remain")
+	assert.Equal(t, "A", got[0])
+	assert.Equal(t, "F", got[5], "content past the gap survives (skip not mis-encoded)")
+}
+
 // DiffUpdateV1 returns what a peer is missing and round-trips through apply.
 func TestUnit_DiffUpdateV1_RoundTrip(t *testing.T) {
 	a := New(WithClientID(1))
