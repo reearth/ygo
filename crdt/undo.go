@@ -442,8 +442,9 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item) *Item {
 }
 
 // neighbourOrigins computes the Origin / OriginRight IDs for a new item placed
-// immediately between left and right. A zero-width left (e.g. a format marker)
-// uses its own clock; a multi-unit left uses its last clock.
+// immediately between left and right. The origin is left's LAST clock — left's
+// own ID clock for a single-unit item (most items, incl. format markers, occupy
+// one clock slot), or ID.Clock + Len - 1 for a multi-unit run.
 func neighbourOrigins(left, right *Item) (origin, originRight *ID) {
 	if left != nil {
 		clock := left.ID.Clock
