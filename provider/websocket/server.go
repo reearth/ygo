@@ -257,8 +257,11 @@ type Server struct {
 	AuthFunc func(r *http.Request) bool
 
 	// AllowedOrigins is the list of origins permitted to open WebSocket
-	// connections (C2 — CORS). Each entry must be a full origin string, e.g.
-	// "https://example.com". Use "*" to allow any origin.
+	// connections (C2 — CORS). Each entry is a full origin string, e.g.
+	// "https://example.com". An entry may contain "*" wildcards, each matching
+	// any run of characters: "https://*.example.com" matches any subdomain and
+	// "https://pr-*---web-*.run.app" matches preview hosts. A bare "*" allows any
+	// origin. Matching is case-insensitive.
 	//
 	// If the slice is empty the server falls back to a same-origin check:
 	// the request Origin header must match the HTTP Host header. Non-browser
@@ -466,11 +469,49 @@ func (s *Server) checkOrigin(r *http.Request) bool {
 		return strings.EqualFold(u.Host, r.Host)
 	}
 	for _, allowed := range s.AllowedOrigins {
-		if allowed == "*" || strings.EqualFold(allowed, origin) {
+		if originMatches(allowed, origin) {
 			return true
 		}
 	}
 	return false
+}
+
+// originMatches reports whether origin matches an AllowedOrigins entry,
+// case-insensitively. An entry without "*" must equal origin exactly. An entry
+// may contain one or more "*" wildcards, each matching any (possibly empty) run
+// of characters, so "https://*.example.com" matches "https://app.example.com"
+// and "https://pr-*---web-*.run.app" matches "https://pr-12---web-abc.run.app".
+// A bare "*" matches any origin. The first and last literal segments are
+// anchored to the start and end of origin, so a wildcard suffix cannot be
+// spoofed (e.g. "https://*.example.com" does not match
+// "https://x.example.com.evil").
+func originMatches(pattern, origin string) bool {
+	if !strings.Contains(pattern, "*") {
+		return strings.EqualFold(pattern, origin)
+	}
+	p := strings.ToLower(pattern)
+	o := strings.ToLower(origin)
+	segs := strings.Split(p, "*")
+	// First literal segment must be a prefix.
+	if !strings.HasPrefix(o, segs[0]) {
+		return false
+	}
+	o = o[len(segs[0]):]
+	// Last literal segment must be a suffix.
+	last := segs[len(segs)-1]
+	if !strings.HasSuffix(o, last) {
+		return false
+	}
+	o = o[:len(o)-len(last)]
+	// Middle literal segments must occur in order.
+	for _, mid := range segs[1 : len(segs)-1] {
+		i := strings.Index(o, mid)
+		if i < 0 {
+			return false
+		}
+		o = o[i+len(mid):]
+	}
+	return true
 }
 
 // isValidRoomName reports whether name is a safe, non-empty room identifier.

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`websocket.Server.AllowedOrigins` now supports `*` wildcards.** Each entry
+  may contain one or more `*` wildcards, each matching any run of characters
+  (e.g. `https://*.netlify.app`, `https://pr-*---web-*.run.app`), in addition to
+  exact origins and the bare `*` allow-all. Literal segments are anchored to the
+  start and end of the Origin, so a wildcard cannot spoof a different host
+  (`https://*.example.com` does not match `https://x.example.com.evil`); a
+  *trailing* `*` matches only an optional `:<port>` (`https://app.example.com*`
+  matches `https://app.example.com:8443` but not `https://app.example.com.evil`).
+  Matching is case-insensitive. Previously only exact matches (and a bare `*`)
+  were honored, so wildcard entries silently never matched.
+
 ## [1.28.0] — 2026-06-18
 
 ### Added
@@ -43,7 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the common low-contention path (`BenchmarkTwoPeerConvergence` allocations
   unchanged). Closes the last open item (C) of #54; A shipped in v1.16.0 and B was
   measured and intentionally not adopted.
-
 ## [1.27.0] — 2026-06-16
 
 ### Fixed
