@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.27.0] — 2026-06-15
+## [1.27.0] — 2026-06-16
 
 ### Fixed
 
@@ -19,6 +19,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restoration), so it opens markers only where the value changes, deletes only
   in-range overlapping markers, and restores the post-range state. Verified
   against `yjs@13.6.30` across fresh and loaded docs.
+- **`UndoManager` undo of a deletion now propagates to peers (CRDT-sound).**
+  Undo previously flipped `Deleted = false` in place, which produced no wire
+  record: a peer that already had the tombstone never revived the content, and a
+  back-sync re-deleted it locally — silently losing the undo. Undo now re-inserts
+  a copy of the deleted content as a new item (Yjs `redoItem`), so the
+  restoration is a normal insert that converges across peers. Works for YText,
+  YArray, and YMap. (Undoing a deletion of items inside a *deleted nested type*
+  remains a known gap.)
+- **`MergeUpdatesV1` / `DiffUpdateV1` no longer drop non-integrable structs.**
+  They applied the input to a temporary document and re-encoded its *integrated*
+  state, so any struct whose dependency was missing (it parked in the pending
+  queue) was silently dropped — corrupting the common partial-diff case. They now
+  merge at the **struct level** (Yjs `mergeUpdates`/`diffUpdate` parity): decode
+  every struct without integrating, merge per client (dedup/slice overlaps,
+  preserve clock gaps as skip structs), union delete sets, and re-encode — so
+  non-integrable structs survive verbatim. Verified against `yjs@13.6.30`.
+
+### Added
+
+- **`crdt.SharedType`** — the previously-unexported interface satisfied by
+  `YText` / `YArray` / `YMap` / `YXml*` is now exported, so `NewUndoManager`'s
+  scope can be named from outside the package (`crdt.NewUndoManager(doc,
+  []crdt.SharedType{txt, arr})`). It was effectively unusable externally before.
+  Its methods stay unexported, so only ygo's own types can satisfy it.
+- **Struct-level update utilities** (closes #57): `MergeUpdatesV2`,
+  `DiffUpdateV2`, and `EncodeStateVectorFromUpdate` / `EncodeStateVectorFromUpdateV2`
+  — the V2 columnar equivalents of the merge/diff fixes above, plus extracting a
+  state vector directly from an update without integrating it. All verified
+  against `yjs@13.6.30`.
 
 ### Changed
 

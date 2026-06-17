@@ -1,0 +1,186 @@
+package crdt
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// F-6 (#125): MergeUpdatesV1 must preserve structs that cannot integrate on
+// their own (dependency in a prior update) instead of dropping them.
+func TestUnit_MergeUpdatesV1_PreservesNonIntegrableStruct(t *testing.T) {
+	d := New(WithClientID(1))
+	txt := d.GetText("t")
+	d.Transact(func(tx *Transaction) { txt.Insert(tx, 0, "A", nil) })
+	svAfterA := d.StateVector()
+	updA := EncodeStateAsUpdateV1(d, nil) // full state = just "A"
+	d.Transact(func(tx *Transaction) { txt.Insert(tx, 1, "B", nil) })
+
+	diff := EncodeStateAsUpdateV1(d, svAfterA) // carries only "B" (origin = "A")
+
+	merged, err := MergeUpdatesV1(diff)
+	require.NoError(t, err)
+
+	base := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(base, updA, nil))   // base has "A"
+	require.NoError(t, ApplyUpdateV1(base, merged, nil)) // apply merged diff
+	require.Equal(t, "AB", base.GetText("t").ToString(), "merged diff must still carry B")
+}
+
+// TestUnit_MergeUpdatesV1_MapKeyChain folds incremental YMap.Set updates and
+// asserts the merged result still carries the key. Logs decoded structs.
+func TestUnit_MergeUpdatesV1_MapKeyChain(t *testing.T) {
+	doc := New(WithClientID(1))
+	m := doc.GetMap("meta")
+	var updates [][]byte
+	doc.OnUpdate(func(u []byte, _ any) { updates = append(updates, u) })
+	for i := 0; i < 3; i++ {
+		doc.Transact(func(txn *Transaction) { m.Set(txn, "title", i) })
+	}
+
+	// Fold incrementally (simulates persistence). The origin chain linking each
+	// keyed item to the previous must survive every fold, or the key is lost.
+	merged := updates[0]
+	var err error
+	for i := 1; i < len(updates); i++ {
+		merged, err = MergeUpdatesV1(merged, updates[i])
+		require.NoError(t, err)
+	}
+
+	d2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(d2, merged, nil))
+	v, ok := d2.GetMap("meta").Get("title")
+	require.True(t, ok, "key 'title' lost after struct-level merge")
+	assert.Equal(t, int64(2), v, "newest value wins after merge")
+}
+
+// A merged update that CONTAINS a skip struct (a clock gap) must re-merge
+// without corruption: the skip must be filtered on decode (not handed to
+// encodeItem, which can't encode it) and the gap re-emitted from clock
+// arithmetic. Regression for the F-6 review (#128).
+func TestUnit_MergeUpdatesV1_HandlesSkipStructs(t *testing.T) {
+	// Build a gappy update directly: client 1 text items at clock 0 ("A") and
+	// clock 5 ("F"), clocks 1-5 absent → encodeStructStoreV1 emits a skip.
+	scratch := New(WithClientID(1))
+	parent := scratch.GetText("t").baseType()
+	a := &Item{ID: ID{Client: 1, Clock: 0}, Parent: parent, Content: NewContentString("A")}
+	f := &Item{ID: ID{Client: 1, Clock: 5}, Origin: &ID{Client: 1, Clock: 4}, Parent: parent, Content: NewContentString("F")}
+	items := []*Item{a, f}
+	gappy := encodeStructStoreV1(map[ClientID][]*Item{1: items}, newDeleteSet(), StateVector{},
+		&StructStore{clients: map[ClientID][]*Item{1: items}})
+
+	merged, err := MergeUpdatesV1(gappy)
+	require.NoError(t, err)
+
+	per2, _, _, err := buildMergeStore([][]byte{merged}, decodeStructsV1)
+	require.NoError(t, err)
+	got := map[uint64]string{}
+	for _, it := range per2[1] {
+		if cs, ok := it.Content.(*ContentString); ok {
+			got[it.ID.Clock] = cs.Str
+		}
+	}
+	require.Len(t, per2[1], 2, "skip filtered; only the two real items remain")
+	assert.Equal(t, "A", got[0])
+	assert.Equal(t, "F", got[5], "content past the gap survives (skip not mis-encoded)")
+}
+
+// DiffUpdateV1 returns what a peer is missing and round-trips through apply.
+func TestUnit_DiffUpdateV1_RoundTrip(t *testing.T) {
+	a := New(WithClientID(1))
+	ta := a.GetText("t")
+	a.Transact(func(tx *Transaction) { ta.Insert(tx, 0, "hello", nil) })
+
+	b := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(b, EncodeStateAsUpdateV1(a, nil), nil))
+	a.Transact(func(tx *Transaction) { ta.Insert(tx, 5, " world", nil) })
+
+	diff, err := DiffUpdateV1(EncodeStateAsUpdateV1(a, nil), b.StateVector())
+	require.NoError(t, err)
+	require.NoError(t, ApplyUpdateV1(b, diff, nil))
+	require.Equal(t, "hello world", b.GetText("t").ToString())
+}
+
+// EncodeStateVectorFromUpdate reports the next clock per client carried by an
+// update, matching EncodeStateVectorV1 of a doc that applied it.
+func TestUnit_EncodeStateVectorFromUpdate_MatchesDoc(t *testing.T) {
+	a := New(WithClientID(7))
+	ta := a.GetText("t")
+	a.Transact(func(tx *Transaction) { ta.Insert(tx, 0, "hello", nil) })
+	upd := EncodeStateAsUpdateV1(a, nil)
+
+	fromUpdate, err := EncodeStateVectorFromUpdate(upd)
+	require.NoError(t, err)
+	assert.Equal(t, EncodeStateVectorV1(a), fromUpdate)
+}
+
+// ── V2 (#57) — mirror the V1 cases over the columnar codec ──────────────────
+
+func TestUnit_MergeUpdatesV2_PreservesNonIntegrableStruct(t *testing.T) {
+	d := New(WithClientID(1))
+	txt := d.GetText("t")
+	d.Transact(func(tx *Transaction) { txt.Insert(tx, 0, "A", nil) })
+	svAfterA := d.StateVector()
+	updA := EncodeStateAsUpdateV2(d, nil)
+	d.Transact(func(tx *Transaction) { txt.Insert(tx, 1, "B", nil) })
+	diff := EncodeStateAsUpdateV2(d, svAfterA)
+
+	merged, err := MergeUpdatesV2(diff)
+	require.NoError(t, err)
+
+	base := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV2(base, updA, nil))
+	require.NoError(t, ApplyUpdateV2(base, merged, nil))
+	require.Equal(t, "AB", base.GetText("t").ToString())
+}
+
+func TestUnit_MergeUpdatesV2_MapKeyChain(t *testing.T) {
+	doc := New(WithClientID(1))
+	m := doc.GetMap("meta")
+	var updates [][]byte
+	// Capture each transaction's incremental V2 update directly from the
+	// integrated doc (EncodeStateAsUpdateV2 with the prior state vector) — NOT
+	// via UpdateV1ToV2, which has the very drop bug this batch fixes.
+	prevSV := doc.StateVector()
+	for i := 0; i < 3; i++ {
+		doc.Transact(func(txn *Transaction) { m.Set(txn, "title", i) })
+		updates = append(updates, EncodeStateAsUpdateV2(doc, prevSV))
+		prevSV = doc.StateVector()
+	}
+	merged := updates[0]
+	var err error
+	for i := 1; i < len(updates); i++ {
+		merged, err = MergeUpdatesV2(merged, updates[i])
+		require.NoError(t, err)
+	}
+	d2 := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV2(d2, merged, nil))
+	v, ok := d2.GetMap("meta").Get("title")
+	require.True(t, ok, "key 'title' lost after V2 merge")
+	assert.Equal(t, int64(2), v)
+}
+
+func TestUnit_DiffUpdateV2_RoundTrip(t *testing.T) {
+	a := New(WithClientID(1))
+	ta := a.GetText("t")
+	a.Transact(func(tx *Transaction) { ta.Insert(tx, 0, "hello", nil) })
+	b := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV2(b, EncodeStateAsUpdateV2(a, nil), nil))
+	a.Transact(func(tx *Transaction) { ta.Insert(tx, 5, " world", nil) })
+
+	diff, err := DiffUpdateV2(EncodeStateAsUpdateV2(a, nil), b.StateVector())
+	require.NoError(t, err)
+	require.NoError(t, ApplyUpdateV2(b, diff, nil))
+	require.Equal(t, "hello world", b.GetText("t").ToString())
+}
+
+func TestUnit_EncodeStateVectorFromUpdateV2_MatchesDoc(t *testing.T) {
+	a := New(WithClientID(7))
+	ta := a.GetText("t")
+	a.Transact(func(tx *Transaction) { ta.Insert(tx, 0, "hello", nil) })
+
+	fromUpdate, err := EncodeStateVectorFromUpdateV2(EncodeStateAsUpdateV2(a, nil))
+	require.NoError(t, err)
+	assert.Equal(t, EncodeStateVectorV1(a), fromUpdate)
+}

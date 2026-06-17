@@ -12,6 +12,15 @@ type posCacheEntry struct {
 	item  *Item
 }
 
+// SharedType is the public interface satisfied by every exported CRDT type
+// (YArray, YMap, YText, YXmlFragment, …). It exists so external callers can
+// name the element type of NewUndoManager's scope slice
+// (`[]crdt.SharedType{txt, arr}`). Its methods are unexported, so only ygo's own
+// types can satisfy it — external code can pass and hold values, but not
+// implement it. It is a type alias for the internal sharedType, so existing
+// in-package call sites are unaffected.
+type SharedType = sharedType
+
 // sharedType is implemented by every exported CRDT type (YArray, YMap, YText).
 // Doc.share stores sharedType values so it can fire per-type observers after
 // each transaction without knowing the concrete type.

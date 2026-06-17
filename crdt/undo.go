@@ -84,7 +84,7 @@ type UndoManager struct {
 // NewUndoManager creates an UndoManager that tracks the listed shared types.
 // scope must not be empty. Multiple types can be tracked simultaneously; any
 // local transaction that touches at least one scope type is captured.
-func NewUndoManager(doc *Doc, scope []sharedType, opts ...UndoManagerOption) *UndoManager {
+func NewUndoManager(doc *Doc, scope []SharedType, opts ...UndoManagerOption) *UndoManager {
 	u := &UndoManager{
 		doc:            doc,
 		captureTimeout: 500 * time.Millisecond,
@@ -312,7 +312,14 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 			}
 		}
 
-		// Step 2: restore items that were deleted by the captured transaction.
+		// Step 2: restore items that were deleted by the captured transaction by
+		// RE-INSERTING a copy of their content as new items (redoItem). Flipping
+		// Deleted=false in place produced no wire record, so the restoration never
+		// propagated and a back-sync from a peer (which still had the tombstone)
+		// re-deleted it locally. Re-inserting makes undo a real, convergent insert.
+		// Collect targets first, then redo (integrate appends new items to the
+		// store, which we must not visit as restore targets).
+		var toRedo []*Item
 		for client, ranges := range item.deletions.clients {
 			for _, r := range ranges {
 				for _, storeItem := range u.doc.store.clients[client] {
@@ -322,28 +329,135 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 					if !storeItem.Deleted || !u.itemInScope(storeItem) {
 						continue
 					}
-					// Skip items whose content was freed by GC — we can't restore them.
+					// Content freed by GC cannot be restored.
 					if _, isGC := storeItem.Content.(*ContentDeleted); isGC {
 						continue
 					}
-					storeItem.Deleted = false
-					if storeItem.Content.IsCountable() {
-						storeItem.Parent.length += storeItem.Content.Len()
-						storeItem.Parent.invalidatePosCache()
-					}
-					txn.addChanged(storeItem.Parent, parentSubKey(storeItem.ParentSub))
+					toRedo = append(toRedo, storeItem)
 				}
 			}
+		}
+		for _, it := range toRedo {
+			u.redoItem(txn, it)
 		}
 
 		resultItem = &StackItem{
 			beforeState: txn.beforeState.Clone(),
-			afterState:  txn.afterState.Clone(),
-			deletions:   cloneDeleteSet(txn.deleteSet),
+			// Capture afterState from the live store: txn.afterState is only set
+			// at commit (after this closure), so it is nil here. The inverse
+			// stack item must record items this inversion INSERTED — e.g. the
+			// re-inserted content from undoing a deletion (redoItem) — so the
+			// opposite operation can delete them. Reading the store now reflects
+			// those inserts; txn.beforeState (set at txn start) is the lower bound.
+			afterState: u.doc.store.StateVector(),
+			deletions:  cloneDeleteSet(txn.deleteSet),
 		}
 	}, u) // origin = u so captureTransaction skips this txn
 
 	return resultItem
+}
+
+// redoItem re-inserts a copy of a deleted item's content as a NEW item so that
+// undoing the deletion propagates to peers as a real insert (rather than an
+// in-place tombstone flip, which never syncs). The new item is positioned via
+// the original's neighbours, following redone chains across already-restored
+// neighbours; for root and live-nested parents this reduces to the original
+// (now-tombstoned) neighbours, which preserves order. Mirrors Yjs redoItem.
+// Returns the new item, or nil if it cannot be placed.
+func (u *UndoManager) redoItem(txn *Transaction, item *Item) *Item {
+	if item.redone != nil {
+		return u.doc.store.Find(*item.redone)
+	}
+	parent := item.Parent
+	if parent == nil {
+		return nil
+	}
+	// If the containing type was itself deleted (a nested type that was removed),
+	// the parent must be redone first. ygo does not yet track that chain, so skip
+	// rather than mis-place — undoing a delete of items inside a deleted nested
+	// type is a known gap (rare; the common root/live-nested cases work).
+	if parent.item != nil && parent.item.Deleted {
+		return nil
+	}
+
+	var left, right *Item
+	if item.ParentSub == nil {
+		// Sequence element: position between the original left neighbour and the
+		// item itself, following redone pointers across neighbours that now belong
+		// to a different (re-inserted) parent.
+		left = item.Left
+		for left != nil {
+			lt := left
+			for lt != nil && lt.Parent != parent {
+				if lt.redone == nil {
+					lt = nil
+				} else {
+					lt = u.doc.store.Find(*lt.redone)
+				}
+			}
+			if lt != nil && lt.Parent == parent {
+				left = lt
+				break
+			}
+			left = left.Left
+		}
+		right = item
+		for right != nil {
+			rt := right
+			for rt != nil && rt.Parent != parent {
+				if rt.redone == nil {
+					rt = nil
+				} else {
+					rt = u.doc.store.Find(*rt.redone)
+				}
+			}
+			if rt != nil && rt.Parent == parent {
+				right = rt
+				break
+			}
+			right = right.Right
+		}
+	} else {
+		// Map entry: chain after the key's current entry (integrate's per-key LWW
+		// then picks the highest-clock winner). right stays nil.
+		if existing, ok := parent.itemMap[*item.ParentSub]; ok {
+			left = existing
+		}
+	}
+
+	origin, originRight := neighbourOrigins(left, right)
+	ni := &Item{
+		ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
+		Origin:      origin,
+		OriginRight: originRight,
+		Left:        left,
+		Parent:      parent,
+		ParentSub:   item.ParentSub,
+		Content:     item.Content.Copy(),
+	}
+	nid := ni.ID
+	item.redone = &nid
+	ni.integrate(txn, 0)
+	return ni
+}
+
+// neighbourOrigins computes the Origin / OriginRight IDs for a new item placed
+// immediately between left and right. The origin is left's LAST clock — left's
+// own ID clock for a single-unit item (most items, incl. format markers, occupy
+// one clock slot), or ID.Clock + Len - 1 for a multi-unit run.
+func neighbourOrigins(left, right *Item) (origin, originRight *ID) {
+	if left != nil {
+		clock := left.ID.Clock
+		if n := left.Content.Len(); n > 0 {
+			clock += uint64(n) - 1
+		}
+		origin = &ID{Client: left.ID.Client, Clock: clock}
+	}
+	if right != nil {
+		id := right.ID
+		originRight = &id
+	}
+	return
 }
 
 // txnAffectsScope reports whether txn touched at least one tracked type.
