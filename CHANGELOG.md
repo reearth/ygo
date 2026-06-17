@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.0] — 2026-06-15
+
+### Fixed
+
+- **`YText.Format` no longer strips formatting outside its range.** Re-applying
+  or toggling a format over a sub-range of an already-formatted run deleted the
+  closing marker that bounded content *after* `index+length`, stripping the
+  surrounding run's formatting — most visibly on documents loaded via
+  `ApplyUpdate` (un-split runs; cf. yjs#606), but also on freshly-typed text.
+  `Format` is now a faithful port of the Yjs JS `formatText` algorithm
+  (cursor-based, with `minimizeAttributeChanges` / negated-attribute
+  restoration), so it opens markers only where the value changes, deletes only
+  in-range overlapping markers, and restores the post-range state. Verified
+  against `yjs@13.6.30` across fresh and loaded docs.
+
+### Changed
+
+- **`YText.ToDelta` coalesces adjacent inserts with equal attributes** into a
+  single op, matching Yjs JS `toDelta`. Previously each backing Item emitted its
+  own op, so a run split across Items (e.g. by a `Format` boundary) produced
+  several adjacent ops with identical attributes. Consumers that relied on the
+  one-op-per-Item shape will now see fewer, coalesced ops (the rendered text and
+  attributes are unchanged).
+
 ## [1.26.0] — 2026-06-15
 
 ### Security

@@ -220,11 +220,15 @@ func TestUnit_YText_Insert_AtStart_ExplicitAttrs_DoesNotInheritFromEndOfDoc(t *t
 		"Insert(0, ..., bold:true) must emit its own opener+closer pair "+
 			"independent of formatting later in the doc (anchor==nil early-exit)")
 
-	// Sanity: the inserted X must actually be bold in ToDelta.
+	// Sanity: the inserted X must actually be bold in ToDelta. With Yjs-faithful
+	// delta coalescing, the X run merges with the equally-bold "later" into a
+	// single op (X's opener + closer net-cancel between the two runs), so the
+	// first op is "Xlater". The marker-count assertion above is what proves X
+	// carries its OWN opener+closer pair rather than phantom-sharing one.
 	delta := txt.ToDelta()
 	require.NotEmpty(t, delta)
 	first := delta[0]
-	require.Equal(t, "X", first.Insert)
+	require.Equal(t, "Xlater", first.Insert)
 	assert.Equal(t, Attributes{"bold": true}, first.Attributes,
 		"X must be bold via its OWN marker pair, not by accident")
 }
