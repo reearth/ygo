@@ -134,7 +134,12 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 				// the same position. Lower ClientID wins (placed to the left).
 				if o.ID.Client < item.ID.Client {
 					left = o
-					conflicting = make(map[*Item]struct{})
+					// Reuse the map instead of reallocating (Yjs does
+					// conflictingItems.clear() here). Under high same-position
+					// contention this fires O(group size) times per integrate, so
+					// a fresh make() each time made conflict-scan allocation
+					// quadratic in the conflict-group size (#54-C).
+					clear(conflicting)
 				} else if originIDEquals(item.OriginRight, o.OriginRight) {
 					// Same left and right origin — truly symmetric; stop.
 					break
@@ -150,7 +155,7 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 				if _, inBefore := beforeOrigin[oOriginItem]; inBefore {
 					if _, inConflict := conflicting[oOriginItem]; !inConflict {
 						left = o
-						conflicting = make(map[*Item]struct{})
+						clear(conflicting) // reuse the map, not realloc (see above / Yjs parity)
 					}
 				} else {
 					break

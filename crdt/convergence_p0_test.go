@@ -261,6 +261,59 @@ func TestP0_ConcurrentUpdatesConvergeInAllOrders(t *testing.T) {
 	}
 }
 
+// TestP0_ManyConcurrentSamePositionInserts_Converge stresses the YATA
+// conflict-scan with a large conflict group: every insert lands at position 0 of
+// the same empty base, so all share Origin=nil. It guards the #54-C allocation
+// optimization (reusing the conflict map via clear() instead of reallocating it
+// inside the scan loop) — the change must not alter the conflict-resolution
+// outcome, so every apply order must converge to byte-identical state with all
+// inserts surviving.
+func TestP0_ManyConcurrentSamePositionInserts_Converge(t *testing.T) {
+	const n = 24
+	base := New()
+	updates := make([][]byte, n)
+	for i := 0; i < n; i++ {
+		updates[i] = textIns(t, base, ClientID(i+1), 0, string(rune('a'+i)))
+	}
+
+	apply := func(order []int) *Doc {
+		d := New()
+		for _, i := range order {
+			if err := ApplyUpdateV1(d, updates[i], nil); err != nil {
+				t.Fatalf("apply: %v", err)
+			}
+		}
+		return d
+	}
+
+	forward := make([]int, n)
+	reverse := make([]int, n)
+	rotated := make([]int, n)
+	for i := 0; i < n; i++ {
+		forward[i], reverse[i], rotated[i] = i, n-1-i, (i+n/2)%n
+	}
+
+	ref := apply(forward)
+	wantState := EncodeStateAsUpdateV1(ref, nil)
+	wantText := ref.GetText("t").ToString()
+	if len([]rune(wantText)) != n {
+		t.Fatalf("reference lost inserts: got %d chars, want %d (%q)", len([]rune(wantText)), n, wantText)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		order []int
+	}{{"reverse", reverse}, {"rotated", rotated}} {
+		d := apply(tc.order)
+		if got := d.GetText("t").ToString(); got != wantText {
+			t.Fatalf("%s order: text=%q want %q", tc.name, got, wantText)
+		}
+		if got := EncodeStateAsUpdateV1(d, nil); !bytes.Equal(got, wantState) {
+			t.Fatalf("%s order: full-state encode differs from reference (divergent CRDT state)", tc.name)
+		}
+	}
+}
+
 func mapSet(t *testing.T, base *Doc, id ClientID, key, val string) []byte {
 	t.Helper()
 	d := New(WithClientID(id))
