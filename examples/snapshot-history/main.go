@@ -12,7 +12,8 @@
 //	crdt.CaptureSnapshot(doc)           — take a point-in-time snapshot
 //	crdt.EncodeSnapshot(snap)           — serialise to bytes (store in DB, file, etc.)
 //	crdt.DecodeSnapshot(data)           — deserialise
-//	crdt.RestoreDocument(doc, snap)     — reconstruct the document at snapshot time
+//	crdt.CreateDocFromSnapshot(doc, snap) — reconstruct the document at snapshot time (Yjs-parity name)
+//	crdt.RestoreDocument(doc, snap)     — alias of CreateDocFromSnapshot, kept for compatibility
 //	crdt.EncodeStateFromSnapshot(doc, snap) — get an update representing the historical state
 package main
 
@@ -243,15 +244,15 @@ func main() {
 	crdt.RunGC(gcDoc)
 	fmt.Println("  GC has run: deleted item content has been freed.")
 
-	// Attempt to restore to snapshot A (before the delete).
+	// Attempt to restore to snapshot A (before the delete). Because gcDoc has GC
+	// enabled, deleted items' content is freed at commit, so reconstruction can't
+	// be faithful — CreateDocFromSnapshot / RestoreDocument now refuse upfront with
+	// ErrSnapshotSourceGCed rather than returning a silently-incomplete document.
 	restoredGC, err := crdt.RestoreDocument(gcDoc, snapBeforeDelete)
 	if err != nil {
-		fmt.Printf("  Restoration after GC failed: %v\n", err)
+		fmt.Printf("  Restoration from a GC-enabled doc refused: %v\n", err)
 	} else {
-		restoredText := restoredGC.GetText("notes").ToString()
-		// After GC the content bytes of deleted items are gone, so the restored
-		// document only contains items that are still live (not freed).
-		fmt.Printf("  Restored text (after GC): %q\n", restoredText)
+		fmt.Printf("  Restored text (after GC): %q\n", restoredGC.GetText("notes").ToString())
 	}
 	fmt.Println()
 	fmt.Println("  Warning: if GC has run, items deleted AFTER a snapshot can no longer be")

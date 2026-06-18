@@ -69,22 +69,24 @@ _, err := db.Exec("INSERT INTO snapshots (doc_id, revision, data) VALUES (?, ?, 
 
 // Later: decode and restore
 snap, err := crdt.DecodeSnapshot(data)
-restored, err := crdt.RestoreDocument(doc, snap)
+restored, err := crdt.CreateDocFromSnapshot(doc, snap)
 ```
 
-## RestoreDocument vs EncodeStateFromSnapshot
+## CreateDocFromSnapshot vs EncodeStateFromSnapshot
 
 Both functions work with a snapshot, but serve different purposes:
 
-### `RestoreDocument(doc, snap) (*Doc, error)`
+### `CreateDocFromSnapshot(doc, snap) (*Doc, error)`
 
-Creates a new, independent `Doc` that reflects the document state at snapshot time. Deletions from the snapshot's delete set are applied, so the result is an exact replica of the document as it appeared at that moment.
+Creates a new, independent `Doc` that reflects the document state at snapshot time — the Go equivalent of Yjs JS's `createDocFromSnapshot`. Deletions from the snapshot's delete set are applied, so the result is an exact replica of the document as it appeared at that moment. (`RestoreDocument` is a backward-compatible alias.)
+
+The source doc must have been created `WithGC(false)`; a GC-enabled source returns `ErrSnapshotSourceGCed`, because GC frees deleted items' content at commit and reconstruction could not be faithful.
 
 Use this when you want to **read** or **display** a past version locally.
 
 ```go
 snap, _ := crdt.DecodeSnapshot(storedBytes)
-historical, _ := crdt.RestoreDocument(doc, snap)
+historical, _ := crdt.CreateDocFromSnapshot(doc, snap) // doc created WithGC(false)
 fmt.Println(historical.GetText("article").ToString())
 ```
 

@@ -285,3 +285,93 @@ func TestInteg_Snapshot_MultipleClients_Convergence(t *testing.T) {
 	snap2 := CaptureSnapshot(doc2)
 	assert.True(t, EqualSnapshots(snap1, snap2))
 }
+
+// ── CreateDocFromSnapshot (#58) ─────────────────────────────────────────────
+
+// Yjs-parity reconstruction: rebuild a historic doc from a snapshot taken
+// before later mutations.
+func TestInteg_CreateDocFromSnapshot_AtPastState(t *testing.T) {
+	src := New(WithClientID(1), WithGC(false))
+	txt := src.GetText("t")
+	src.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+	snap := CaptureSnapshot(src)
+
+	src.Transact(func(txn *Transaction) { txt.Insert(txn, 5, " world", nil) })
+	require.Equal(t, "hello world", txt.ToString())
+
+	got, err := CreateDocFromSnapshot(src, snap)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", got.GetText("t").ToString())
+}
+
+// A key deleted AFTER the snapshot must reappear in the reconstruction — this
+// is the case that silently breaks when the source was GC'd (content of the
+// post-snapshot-deleted item is gone), which the guard below prevents.
+func TestInteg_CreateDocFromSnapshot_YMapDeletedKeyReappears(t *testing.T) {
+	src := New(WithClientID(1), WithGC(false))
+	m := src.GetMap("m")
+	src.Transact(func(txn *Transaction) {
+		m.Set(txn, "a", "alpha")
+		m.Set(txn, "b", "beta")
+	})
+	snap := CaptureSnapshot(src)
+	src.Transact(func(txn *Transaction) { m.Delete(txn, "a") })
+
+	got, err := CreateDocFromSnapshot(src, snap)
+	require.NoError(t, err)
+	va, ok := got.GetMap("m").Get("a")
+	require.True(t, ok, "key deleted after the snapshot must reappear in the reconstruction")
+	assert.Equal(t, "alpha", va)
+}
+
+// A GC-enabled source may have discarded the content/tombstones the snapshot
+// references, so reconstruction can't be faithful — CreateDocFromSnapshot must
+// refuse rather than return a silently-wrong doc.
+func TestUnit_CreateDocFromSnapshot_ErrorsOnGCEnabledSource(t *testing.T) {
+	src := New(WithClientID(1)) // gc defaults to true
+	txt := src.GetText("t")
+	src.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+	snap := CaptureSnapshot(src)
+
+	got, err := CreateDocFromSnapshot(src, snap)
+	require.ErrorIs(t, err, ErrSnapshotSourceGCed)
+	assert.Nil(t, got)
+}
+
+// The reconstructed doc is independent of the source and is itself non-GC, so
+// it can be snapshotted/restored further.
+func TestInteg_CreateDocFromSnapshot_ReconstructedIsIndependentAndRestorable(t *testing.T) {
+	src := New(WithClientID(1), WithGC(false))
+	txt := src.GetText("t")
+	src.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "base", nil) })
+	snap := CaptureSnapshot(src)
+
+	got, err := CreateDocFromSnapshot(src, snap)
+	require.NoError(t, err)
+
+	// Mutating the reconstruction must not touch the source. (Resolve the text
+	// ref outside Transact — GetText inside the closure would deadlock on the
+	// doc lock.)
+	gotTxt := got.GetText("t")
+	got.Transact(func(txn *Transaction) { gotTxt.Insert(txn, 4, "X", nil) })
+	assert.Equal(t, "base", txt.ToString(), "source unaffected by edits to the reconstruction")
+	assert.Equal(t, "baseX", gotTxt.ToString())
+
+	// Reconstruction is non-GC: it can be snapshotted again without losing history.
+	assert.False(t, got.gc)
+	snap2 := CaptureSnapshot(got)
+	assert.NotNil(t, snap2)
+}
+
+// RestoreDocument now delegates to CreateDocFromSnapshot, so it gains the same
+// GC-safety guard instead of silently returning a wrong doc.
+func TestUnit_RestoreDocument_ErrorsOnGCEnabledSource(t *testing.T) {
+	src := New(WithClientID(1)) // gc defaults to true
+	txt := src.GetText("t")
+	src.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hi", nil) })
+	snap := CaptureSnapshot(src)
+
+	got, err := RestoreDocument(src, snap)
+	require.ErrorIs(t, err, ErrSnapshotSourceGCed)
+	assert.Nil(t, got)
+}
