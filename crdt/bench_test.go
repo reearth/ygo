@@ -268,3 +268,36 @@ func BenchmarkTwoPeerConvergence(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkConcurrentSamePositionInsert stresses the YATA conflict-scan slow
+// path in Item.integrate (issue #54-C). N peers each insert one element at
+// position 0 of an empty doc, so every item shares Origin=nil and OriginRight=nil
+// — the maximal-contention case. Converging all N updates into one doc forces
+// integrate to walk a conflict group that grows toward N, which is exactly where
+// the `conflicting` / `beforeOrigin` maps (item.go) are allocated and reset.
+// Measure this before deciding whether pooling those maps is worthwhile.
+func BenchmarkConcurrentSamePositionInsert(b *testing.B) {
+	for _, peers := range []int{20, 100, 400} {
+		b.Run(fmt.Sprintf("peers=%d", peers), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				updates := make([][]byte, peers)
+				for p := 0; p < peers; p++ {
+					d := New(WithClientID(ClientID(p + 1)))
+					t := d.GetText("t")
+					d.Transact(func(txn *Transaction) { t.Insert(txn, 0, "x", nil) })
+					updates[p] = EncodeStateAsUpdateV1(d, nil)
+				}
+				merged := New(WithClientID(999999))
+				b.StartTimer()
+
+				for _, u := range updates {
+					if err := ApplyUpdateV1(merged, u, nil); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+		})
+	}
+}

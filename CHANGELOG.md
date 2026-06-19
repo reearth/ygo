@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.28.0] — 2026-06-18
+
+### Added
+
+- **`crdt.CreateDocFromSnapshot(src, snap)`** reconstructs the state a snapshot
+  captured into a new, independent `Doc` — the Go equivalent of Yjs JS's
+  `createDocFromSnapshot`. Items inserted after the snapshot are excluded and
+  post-snapshot deletions are not applied, so a key/element deleted after the
+  snapshot reappears in the reconstruction. The returned doc is non-GC, so it can
+  be snapshotted or restored from again. (#58)
+- **`crdt.ErrSnapshotSourceGCed`** is returned by `CreateDocFromSnapshot`,
+  `RestoreDocument`, and `EncodeStateFromSnapshot` when the source doc has GC
+  enabled: a GC-enabled doc replaces deleted items' content with length-only
+  tombstones at transaction commit, so an item deleted after the snapshot no
+  longer carries the content it had at snapshot time and reconstruction cannot be
+  faithful. Create the source `WithGC(false)`.
+
+### Changed
+
+- **`RestoreDocument` and `EncodeStateFromSnapshot` now guard against a
+  GC-enabled source.** They return `ErrSnapshotSourceGCed` rather than silently
+  producing an incomplete document/update when the source had GC enabled
+  (previously they returned wrong data with a nil error). `RestoreDocument`
+  delegates to `CreateDocFromSnapshot`. Callers already following the documented
+  `WithGC(false)` snapshot-history contract are unaffected. (#58)
+
+### Performance
+
+- **`Item.integrate` conflict scan no longer reallocates its conflict-tracking
+  map on every conflict-group reset.** It now reuses the map via `clear()`
+  (matching Yjs's `conflictingItems.clear()`) instead of allocating a fresh one,
+  which had made conflict-scan allocation quadratic in the conflict-group size.
+  Under high same-position contention (many peers inserting at the same index)
+  this cuts convergence allocations sharply — about −92% allocs, −55% bytes and
+  −29% time at 400 concurrent same-position inserts — with no measurable change to
+  the common low-contention path (`BenchmarkTwoPeerConvergence` allocations
+  unchanged). Closes the last open item (C) of #54; A shipped in v1.16.0 and B was
+  measured and intentionally not adopted.
+
 ## [1.27.0] — 2026-06-16
 
 ### Fixed

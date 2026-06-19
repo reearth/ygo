@@ -24,7 +24,7 @@ ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (
 - Native iOS/Android embedding via `gomobile` (the `mobile/` subpackage) — no JS runtime, no CGO
 - Snapshots, garbage collection, undo manager, persistence adapters
 
-The current release is **v1.27.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
+The current release is **v1.28.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
 
 ## Features
 
@@ -61,6 +61,7 @@ Post-v1.0 hardening:
 - **Awareness DoS hardening** (v1.25.0). A per-room cap on distinct presence entries (`Awareness.SetMaxClients`, `Server.MaxAwarenessClientsPerRoom`) plus server-side auto-expiry (`Server.AwarenessExpiry`) that reclaims ghost presence from peers that died silently.
 - **Server secure-by-default & decode-ceiling alignment** (v1.26.0). `cmd/ygo-server` binds loopback by default and warns loudly on a public bind (it has no built-in auth); a single wire field is now bounded by the message size rather than a fixed 16 MiB ceiling (large documents no longer fail to sync below the configured cap); malformed inbound frames are logged; and a `RelativePosition` anchored to a root type resolves to the end of the type, matching Yjs.
 - **CRDT correctness batch** (v1.27.0). Three Yjs-parity fixes, all verified against `yjs@13.6.30`: `YText.Format` ports the Yjs `formatText` algorithm so re-applying/toggling a format over a sub-range no longer strips the surrounding run (`ToDelta` also coalesces adjacent equal-attribute inserts); `UndoManager` undo of a deletion re-inserts content as a new item so it propagates to peers instead of being silently lost on the next sync; and `MergeUpdatesV1`/`DiffUpdateV1` merge at the struct level so non-integrable structs are no longer dropped. Adds struct-level `MergeUpdatesV2`/`DiffUpdateV2`/`EncodeStateVectorFromUpdate` and exports `crdt.SharedType`.
+- **Snapshot reconstruction & conflict-scan perf** (v1.28.0). Adds `crdt.CreateDocFromSnapshot` (Yjs-parity name for rebuilding a historic doc from a `Snapshot`), with a `WithGC(false)` safety guard (`ErrSnapshotSourceGCed`) so reconstruction can't silently return incomplete history; `RestoreDocument` now shares that guard. `Item.integrate` also reuses its YATA conflict-tracking map via `clear()` instead of reallocating it, cutting convergence allocations ~92% under high same-position contention with no change to the common path.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release picture.
 

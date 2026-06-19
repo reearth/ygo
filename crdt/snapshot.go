@@ -1,10 +1,20 @@
 package crdt
 
 import (
+	"errors"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
 )
+
+// ErrSnapshotSourceGCed is returned by CreateDocFromSnapshot / RestoreDocument
+// when the source doc has garbage collection enabled. A GC-enabled doc replaces
+// the content of deleted items with length-only tombstones at transaction
+// commit (#78 H1), so an item deleted AFTER the snapshot no longer carries the
+// content it had at snapshot time — reconstruction would silently produce a
+// wrong (incomplete) document. Create the source with WithGC(false) to preserve
+// the history a snapshot needs.
+var ErrSnapshotSourceGCed = errors.New("crdt: cannot reconstruct from a GC-enabled source doc; create it with WithGC(false)")
 
 // Snapshot captures the state of a Yjs document at a specific moment in time.
 // It records which items existed (StateVector) and which were deleted (DeleteSet)
@@ -114,26 +124,61 @@ func EqualSnapshots(a, b *Snapshot) bool {
 	return true
 }
 
+// CreateDocFromSnapshot reconstructs the document state captured by snap into a
+// new, independent Doc — the Go equivalent of Yjs JS's createDocFromSnapshot.
+// Items inserted after the snapshot are excluded, and only deletions present in
+// the snapshot's DeleteSet are applied; a key/element deleted after the snapshot
+// reappears in the reconstruction.
+//
+// src must have been created WithGC(false) (the snapshot-history pattern):
+// a GC-enabled source may have discarded the content/tombstones the snapshot
+// references, so reconstruction returns ErrSnapshotSourceGCed rather than a
+// silently-wrong doc. The returned doc is itself non-GC, so it can be
+// snapshotted or restored from again.
+//
+// Do not call from inside a Transact callback: it acquires src's lock and would
+// deadlock — resolve the snapshot outside the transaction.
+func CreateDocFromSnapshot(src *Doc, snap *Snapshot) (*Doc, error) {
+	src.mu.Lock()
+	if src.gc {
+		src.mu.Unlock()
+		return nil, ErrSnapshotSourceGCed
+	}
+	update := encodeFromSnapshotLocked(src, snap)
+	src.mu.Unlock()
+
+	newDoc := New(WithGC(false))
+	if err := ApplyUpdateV1(newDoc, update, nil); err != nil {
+		return nil, err
+	}
+	return newDoc, nil
+}
+
 // RestoreDocument creates a new Doc that reflects doc's state at the time snap
 // was taken. Items inserted after the snapshot are excluded, and only deletions
 // present in the snapshot's DeleteSet are applied.
 //
-// The original doc must still contain the full item history — either
-// doc.gc was false, or RunGC has not yet discarded items relevant to the
-// snapshot.
+// Retained for backward compatibility; it delegates to CreateDocFromSnapshot
+// (the Yjs-parity name) and shares its GC-safety guard — see
+// ErrSnapshotSourceGCed.
 func RestoreDocument(doc *Doc, snap *Snapshot) (*Doc, error) {
-	doc.mu.Lock()
-	update := encodeFromSnapshotLocked(doc, snap)
-	doc.mu.Unlock()
-
-	newDoc := New(WithGC(false))
-	return newDoc, ApplyUpdateV1(newDoc, update, nil)
+	return CreateDocFromSnapshot(doc, snap)
 }
 
 // EncodeStateFromSnapshot returns a V1 update representing doc's state at snap
 // time. Apply it to a fresh Doc to reconstruct the historical version.
+//
+// Like CreateDocFromSnapshot, doc must have been created WithGC(false): a
+// GC-enabled source may have discarded content the snapshot references, so this
+// returns ErrSnapshotSourceGCed rather than a silently-incomplete export. Do not
+// call it from inside a Transact callback — it takes the doc lock and would
+// deadlock.
 func EncodeStateFromSnapshot(doc *Doc, snap *Snapshot) ([]byte, error) {
 	doc.mu.Lock()
+	if doc.gc {
+		doc.mu.Unlock()
+		return nil, ErrSnapshotSourceGCed
+	}
 	update := encodeFromSnapshotLocked(doc, snap)
 	doc.mu.Unlock()
 	return update, nil
