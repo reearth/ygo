@@ -5,10 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.29.0] — 2026-06-19
+
+### Added
+
+- **`http.Server.AuthFunc`** — an optional `func(*http.Request) bool` called before
+  any document is read or mutated; returning false rejects the request with 401.
+  Brings the HTTP provider to parity with the WebSocket provider, which previously
+  had no auth hook on the HTTP path (security finding S-5, #50).
+- **`http.Server.MaxUpdateBytes`** — configurable POST-body cap (bytes); oversize
+  bodies are rejected with 413 before being buffered. Zero keeps the existing
+  64 MiB default. (#50)
+- **`websocket.Server.MessageRateLimit` / `MessageRateBurst`** — optional per-peer
+  inbound message rate limit (token bucket, `golang.org/x/time/rate`). Each peer
+  gets its own limiter; a peer that exceeds it is **disconnected** rather than
+  having the offending message dropped (silently discarding a CRDT update would
+  leave the peer permanently diverged). Zero (the default) is unlimited, preserving
+  existing behaviour (security finding S-7, #51).
 
 ### Changed
 
+- **The HTTP provider now validates room names**, rejecting empty, oversized,
+  `.`/`..`, and control-character names with 400 — matching the WebSocket
+  provider's rule, now centralised in the shared `internal/roomname` package so
+  both providers enforce one definition. (#50)
 - **`websocket.Server.AllowedOrigins` now supports `*` wildcards.** Each entry
   may contain one or more `*` wildcards, each matching any run of characters
   (e.g. `https://*.netlify.app`, `https://pr-*---web-*.run.app`), in addition to
@@ -18,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *trailing* `*` matches only an optional `:<port>` (`https://app.example.com*`
   matches `https://app.example.com:8443` but not `https://app.example.com.evil`).
   Matching is case-insensitive. Previously only exact matches (and a bare `*`)
-  were honored, so wildcard entries silently never matched.
+  were honored, so wildcard entries silently never matched. (#129)
 
 ## [1.28.0] — 2026-06-18
 

@@ -1,39 +1,30 @@
 ## What's new
 
-A snapshot-reconstruction API addition and a CRDT conflict-scan performance fix.
-No breaking changes for callers following the documented snapshot contract.
+Provider security hardening. The HTTP provider gains the auth hook, room-name
+validation, and configurable body-size cap the WebSocket provider already had, and
+the WebSocket provider gains optional per-peer message rate limiting. No breaking
+changes — every new field defaults to today's behaviour.
 
 ### Added
 
-- **`CreateDocFromSnapshot(src, snap)`** — reconstruct a document's historic state
-  (the state a `Snapshot` captured) into a new, independent `Doc`. The Go
-  equivalent of Yjs JS's `createDocFromSnapshot`: items inserted after the
-  snapshot are excluded, and a key/element deleted *after* the snapshot reappears
-  in the reconstruction. The returned doc is non-GC, so it can be snapshotted or
-  restored from again.
-- **`ErrSnapshotSourceGCed`** — returned when reconstructing/exporting from a
-  GC-enabled source doc, which cannot be done faithfully (a GC-enabled doc
-  discards deleted items' content at commit). Create the source `WithGC(false)`.
+- **`http.Server.AuthFunc`** — reject unauthenticated requests with 401 before any
+  document is read or mutated (parity with the WebSocket provider). (#50)
+- **`http.Server.MaxUpdateBytes`** — configurable POST-body cap; oversize bodies get
+  413. Zero keeps the 64 MiB default. (#50)
+- **`websocket.Server.MessageRateLimit` / `MessageRateBurst`** — optional per-peer
+  inbound rate limit. A peer that floods past it is disconnected — not silently
+  dropped, which would diverge it. Zero is unlimited. (#51)
 
 ### Changed
 
-- **`RestoreDocument` and `EncodeStateFromSnapshot`** now return
-  `ErrSnapshotSourceGCed` for a GC-enabled source instead of silently returning
-  incomplete history. `RestoreDocument` shares the new reconstruction path;
-  callers already using `WithGC(false)` are unaffected.
-
-### Performance
-
-- **Faster, leaner convergence under high same-position contention.**
-  `Item.integrate` now reuses its YATA conflict-tracking map via `clear()` rather
-  than reallocating it on every conflict-group reset (matching Yjs). At 400 peers
-  inserting at the same index, convergence does about 92% fewer allocations, 55%
-  less memory and 29% less time; the common low-contention path is unchanged.
+- **The HTTP provider now validates room names** (empty / oversized / `.` / `..` /
+  control chars → 400), using the same rule as the WebSocket provider, now shared
+  via the `internal/roomname` package. (#50)
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.28.0
+go get github.com/reearth/ygo@v1.29.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
