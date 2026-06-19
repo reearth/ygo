@@ -11,15 +11,16 @@ No breaking changes for callers following the documented snapshot contract.
   snapshot are excluded, and a key/element deleted *after* the snapshot reappears
   in the reconstruction. The returned doc is non-GC, so it can be snapshotted or
   restored from again.
-- **`ErrSnapshotSourceGCed`** — returned when reconstructing from a GC-enabled
-  source doc, which cannot be done faithfully (a GC-enabled doc discards deleted
-  items' content at commit). Create the source `WithGC(false)`.
+- **`ErrSnapshotSourceGCed`** — returned when reconstructing/exporting from a
+  GC-enabled source doc, which cannot be done faithfully (a GC-enabled doc
+  discards deleted items' content at commit). Create the source `WithGC(false)`.
 
 ### Changed
 
-- **`RestoreDocument`** now returns `ErrSnapshotSourceGCed` for a GC-enabled
-  source instead of silently returning an incomplete document. It shares the new
-  reconstruction path; callers already using `WithGC(false)` are unaffected.
+- **`RestoreDocument` and `EncodeStateFromSnapshot`** now return
+  `ErrSnapshotSourceGCed` for a GC-enabled source instead of silently returning
+  incomplete history. `RestoreDocument` shares the new reconstruction path;
+  callers already using `WithGC(false)` are unaffected.
 
 ### Performance
 

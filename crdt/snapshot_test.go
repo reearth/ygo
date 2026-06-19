@@ -375,3 +375,17 @@ func TestUnit_RestoreDocument_ErrorsOnGCEnabledSource(t *testing.T) {
 	require.ErrorIs(t, err, ErrSnapshotSourceGCed)
 	assert.Nil(t, got)
 }
+
+// EncodeStateFromSnapshot shares the same GC-safety guard: a GC-enabled source
+// can't export faithful history, so it returns ErrSnapshotSourceGCed rather than
+// a silently-incomplete update.
+func TestUnit_EncodeStateFromSnapshot_ErrorsOnGCEnabledSource(t *testing.T) {
+	src := New(WithClientID(1)) // gc defaults to true
+	txt := src.GetText("t")
+	src.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hi", nil) })
+	snap := CaptureSnapshot(src)
+
+	got, err := EncodeStateFromSnapshot(src, snap)
+	require.ErrorIs(t, err, ErrSnapshotSourceGCed)
+	assert.Nil(t, got)
+}

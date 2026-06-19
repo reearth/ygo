@@ -15,18 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   post-snapshot deletions are not applied, so a key/element deleted after the
   snapshot reappears in the reconstruction. The returned doc is non-GC, so it can
   be snapshotted or restored from again. (#58)
-- **`crdt.ErrSnapshotSourceGCed`** is returned by `CreateDocFromSnapshot` /
-  `RestoreDocument` when the source doc has GC enabled: a GC-enabled doc replaces
-  deleted items' content with length-only tombstones at transaction commit, so an
-  item deleted after the snapshot no longer carries the content it had at snapshot
-  time and reconstruction cannot be faithful. Create the source `WithGC(false)`.
+- **`crdt.ErrSnapshotSourceGCed`** is returned by `CreateDocFromSnapshot`,
+  `RestoreDocument`, and `EncodeStateFromSnapshot` when the source doc has GC
+  enabled: a GC-enabled doc replaces deleted items' content with length-only
+  tombstones at transaction commit, so an item deleted after the snapshot no
+  longer carries the content it had at snapshot time and reconstruction cannot be
+  faithful. Create the source `WithGC(false)`.
 
 ### Changed
 
-- **`RestoreDocument` now guards against a GC-enabled source.** It delegates to
-  `CreateDocFromSnapshot` and returns `ErrSnapshotSourceGCed` rather than silently
-  producing an incomplete document when the source had GC enabled (previously it
-  returned a wrong doc with a nil error). Callers already following the documented
+- **`RestoreDocument` and `EncodeStateFromSnapshot` now guard against a
+  GC-enabled source.** They return `ErrSnapshotSourceGCed` rather than silently
+  producing an incomplete document/update when the source had GC enabled
+  (previously they returned wrong data with a nil error). `RestoreDocument`
+  delegates to `CreateDocFromSnapshot`. Callers already following the documented
   `WithGC(false)` snapshot-history contract are unaffected. (#58)
 
 ### Performance

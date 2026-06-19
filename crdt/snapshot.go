@@ -135,6 +135,9 @@ func EqualSnapshots(a, b *Snapshot) bool {
 // references, so reconstruction returns ErrSnapshotSourceGCed rather than a
 // silently-wrong doc. The returned doc is itself non-GC, so it can be
 // snapshotted or restored from again.
+//
+// Do not call from inside a Transact callback: it acquires src's lock and would
+// deadlock — resolve the snapshot outside the transaction.
 func CreateDocFromSnapshot(src *Doc, snap *Snapshot) (*Doc, error) {
 	src.mu.Lock()
 	if src.gc {
@@ -164,8 +167,18 @@ func RestoreDocument(doc *Doc, snap *Snapshot) (*Doc, error) {
 
 // EncodeStateFromSnapshot returns a V1 update representing doc's state at snap
 // time. Apply it to a fresh Doc to reconstruct the historical version.
+//
+// Like CreateDocFromSnapshot, doc must have been created WithGC(false): a
+// GC-enabled source may have discarded content the snapshot references, so this
+// returns ErrSnapshotSourceGCed rather than a silently-incomplete export. Do not
+// call it from inside a Transact callback — it takes the doc lock and would
+// deadlock.
 func EncodeStateFromSnapshot(doc *Doc, snap *Snapshot) ([]byte, error) {
 	doc.mu.Lock()
+	if doc.gc {
+		doc.mu.Unlock()
+		return nil, ErrSnapshotSourceGCed
+	}
 	update := encodeFromSnapshotLocked(doc, snap)
 	doc.mu.Unlock()
 	return update, nil
