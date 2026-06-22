@@ -34,10 +34,15 @@ func TestOriginMatches(t *testing.T) {
 		{"https://pr-*---reearth-flow-web-*.a.run.app", "https://wsgo---reearth-flow-web-x.a.run.app", false},      // wrong prefix
 		{"https://pr-*---reearth-flow-web-*.a.run.app", "https://pr-1---reearth-flow-web-x.a.run.app.evil", false}, // suffix anchored
 
-		// trailing wildcard (e.g. allow an optional port)
+		// trailing wildcard: only an optional ":<port>", never a different host
 		{"https://app.example.com*", "https://app.example.com", true},
 		{"https://app.example.com*", "https://app.example.com:8443", true},
 		{"https://app.example.com*", "https://app.example.org", false},
+		// #129 review — a trailing "*" must NOT be a suffix-spoof vector.
+		{"https://app.example.com*", "https://app.example.com.evil", false},
+		{"https://app.example.com*", "https://app.example.com.evil.com", false},
+		{"https://app.example.com*", "https://app.example.computer.io", false},
+		{"https://app.example.com*", "https://app.example.com:80/x", false}, // port must be digits only
 	}
 	for _, c := range cases {
 		if got := originMatches(c.pattern, c.origin); got != c.want {

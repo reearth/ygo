@@ -482,15 +482,23 @@ func (s *Server) checkOrigin(r *http.Request) bool {
 // of characters, so "https://*.example.com" matches "https://app.example.com"
 // and "https://pr-*---web-*.run.app" matches "https://pr-12---web-abc.run.app".
 // A bare "*" matches any origin. The first and last literal segments are
-// anchored to the start and end of origin, so a wildcard suffix cannot be
-// spoofed (e.g. "https://*.example.com" does not match
-// "https://x.example.com.evil").
+// anchored to the start and end of origin, so a wildcard cannot be used to spoof
+// a different host (e.g. "https://*.example.com" does not match
+// "https://x.example.com.evil"). A trailing "*" is restricted to an optional
+// ":<port>": "https://app.example.com*" matches "https://app.example.com" and
+// "https://app.example.com:8443" but not "https://app.example.com.evil".
 func originMatches(pattern, origin string) bool {
 	if !strings.Contains(pattern, "*") {
 		return strings.EqualFold(pattern, origin)
 	}
 	p := strings.ToLower(pattern)
 	o := strings.ToLower(origin)
+	// A trailing "*" (other than the bare "*" allow-all) must NOT act as an
+	// unanchored suffix — otherwise "https://app.example.com*" would also match
+	// "https://app.example.com.evil", a CORS allow-list bypass (#129 review).
+	// Restrict it to an optional ":<port>" so it only covers the "host with
+	// optional port" case it is intended for.
+	trailingStar := p != "*" && strings.HasSuffix(p, "*")
 	segs := strings.Split(p, "*")
 	// First literal segment must be a prefix.
 	if !strings.HasPrefix(o, segs[0]) {
@@ -510,6 +518,29 @@ func originMatches(pattern, origin string) bool {
 			return false
 		}
 		o = o[i+len(mid):]
+	}
+	if trailingStar {
+		// Whatever remains is what the trailing "*" matched; allow only an
+		// optional ":<port>" so it cannot extend onto a different host.
+		return isOptionalPort(o)
+	}
+	return true
+}
+
+// isOptionalPort reports whether s is empty or a ":<digits>" port suffix. It
+// bounds what a trailing "*" in an AllowedOrigins pattern may match so the
+// wildcard cannot be abused to match a different host.
+func isOptionalPort(s string) bool {
+	if s == "" {
+		return true
+	}
+	if len(s) < 2 || s[0] != ':' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
 	}
 	return true
 }
