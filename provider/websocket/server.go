@@ -257,8 +257,11 @@ type Server struct {
 	AuthFunc func(r *http.Request) bool
 
 	// AllowedOrigins is the list of origins permitted to open WebSocket
-	// connections (C2 — CORS). Each entry must be a full origin string, e.g.
-	// "https://example.com". Use "*" to allow any origin.
+	// connections (C2 — CORS). Each entry is a full origin string, e.g.
+	// "https://example.com". An entry may contain "*" wildcards, each matching
+	// any run of characters: "https://*.example.com" matches any subdomain and
+	// "https://pr-*---web-*.run.app" matches preview hosts. A bare "*" allows any
+	// origin. Matching is case-insensitive.
 	//
 	// If the slice is empty the server falls back to a same-origin check:
 	// the request Origin header must match the HTTP Host header. Non-browser
@@ -466,11 +469,80 @@ func (s *Server) checkOrigin(r *http.Request) bool {
 		return strings.EqualFold(u.Host, r.Host)
 	}
 	for _, allowed := range s.AllowedOrigins {
-		if allowed == "*" || strings.EqualFold(allowed, origin) {
+		if originMatches(allowed, origin) {
 			return true
 		}
 	}
 	return false
+}
+
+// originMatches reports whether origin matches an AllowedOrigins entry,
+// case-insensitively. An entry without "*" must equal origin exactly. An entry
+// may contain one or more "*" wildcards, each matching any (possibly empty) run
+// of characters, so "https://*.example.com" matches "https://app.example.com"
+// and "https://pr-*---web-*.run.app" matches "https://pr-12---web-abc.run.app".
+// A bare "*" matches any origin. The first and last literal segments are
+// anchored to the start and end of origin, so a wildcard cannot be used to spoof
+// a different host (e.g. "https://*.example.com" does not match
+// "https://x.example.com.evil"). A trailing "*" is restricted to an optional
+// ":<port>": "https://app.example.com*" matches "https://app.example.com" and
+// "https://app.example.com:8443" but not "https://app.example.com.evil".
+func originMatches(pattern, origin string) bool {
+	if !strings.Contains(pattern, "*") {
+		return strings.EqualFold(pattern, origin)
+	}
+	p := strings.ToLower(pattern)
+	o := strings.ToLower(origin)
+	// A trailing "*" (other than the bare "*" allow-all) must NOT act as an
+	// unanchored suffix — otherwise "https://app.example.com*" would also match
+	// "https://app.example.com.evil", a CORS allow-list bypass (#129 review).
+	// Restrict it to an optional ":<port>" so it only covers the "host with
+	// optional port" case it is intended for.
+	trailingStar := p != "*" && strings.HasSuffix(p, "*")
+	segs := strings.Split(p, "*")
+	// First literal segment must be a prefix.
+	if !strings.HasPrefix(o, segs[0]) {
+		return false
+	}
+	o = o[len(segs[0]):]
+	// Last literal segment must be a suffix.
+	last := segs[len(segs)-1]
+	if !strings.HasSuffix(o, last) {
+		return false
+	}
+	o = o[:len(o)-len(last)]
+	// Middle literal segments must occur in order.
+	for _, mid := range segs[1 : len(segs)-1] {
+		i := strings.Index(o, mid)
+		if i < 0 {
+			return false
+		}
+		o = o[i+len(mid):]
+	}
+	if trailingStar {
+		// Whatever remains is what the trailing "*" matched; allow only an
+		// optional ":<port>" so it cannot extend onto a different host.
+		return isOptionalPort(o)
+	}
+	return true
+}
+
+// isOptionalPort reports whether s is empty or a ":<digits>" port suffix. It
+// bounds what a trailing "*" in an AllowedOrigins pattern may match so the
+// wildcard cannot be abused to match a different host.
+func isOptionalPort(s string) bool {
+	if s == "" {
+		return true
+	}
+	if len(s) < 2 || s[0] != ':' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isValidRoomName reports whether name is a safe, non-empty room identifier.
