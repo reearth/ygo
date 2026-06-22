@@ -1,10 +1,11 @@
 ## What's new
 
 Provider security hardening. The HTTP provider gains the auth hook, room-name
-validation, and configurable body-size cap the WebSocket provider already had, and
-the WebSocket provider gains optional per-peer message rate limiting. Every new
-config field is additive (zero values preserve current behaviour); the one
-behaviour change is that the HTTP provider now rejects invalid room names with 400.
+validation, and configurable body-size cap the WebSocket provider already had; the
+WebSocket provider gains optional per-peer message rate limiting and `*` wildcard
+matching in `AllowedOrigins`. Every new config field is additive (zero values
+preserve current behaviour); the one behaviour change is that the HTTP provider now
+rejects invalid room names with 400.
 
 ### Added
 
@@ -21,6 +22,10 @@ behaviour change is that the HTTP provider now rejects invalid room names with 4
 - **The HTTP provider now validates room names** (empty / oversized / `.` / `..` /
   control chars → 400), using the same rule as the WebSocket provider. Names that
   were previously accepted are now rejected. (#50)
+- **`websocket.Server.AllowedOrigins` now supports `*` wildcards** — e.g.
+  `https://*.netlify.app` or `https://pr-*---web-*.run.app`, in addition to exact
+  origins and the bare `*`. Matching is anchored so a wildcard can't spoof a host,
+  and a trailing `*` covers only an optional `:<port>`. (#129)
 
 ## Install
 
