@@ -2,8 +2,9 @@
 
 Provider security hardening. The HTTP provider gains the auth hook, room-name
 validation, and configurable body-size cap the WebSocket provider already had, and
-the WebSocket provider gains optional per-peer message rate limiting. No breaking
-changes — every new field defaults to today's behaviour.
+the WebSocket provider gains optional per-peer message rate limiting. Every new
+config field is additive (zero values preserve current behaviour); the one
+behaviour change is that the HTTP provider now rejects invalid room names with 400.
 
 ### Added
 
@@ -18,8 +19,8 @@ changes — every new field defaults to today's behaviour.
 ### Changed
 
 - **The HTTP provider now validates room names** (empty / oversized / `.` / `..` /
-  control chars → 400), using the same rule as the WebSocket provider, now shared
-  via the `internal/roomname` package. (#50)
+  control chars → 400), using the same rule as the WebSocket provider. Names that
+  were previously accepted are now rejected. (#50)
 
 ## Install
 

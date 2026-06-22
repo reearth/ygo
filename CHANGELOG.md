@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`http.Server.AuthFunc`** — an optional `func(*http.Request) bool` called before
   any document is read or mutated; returning false rejects the request with 401.
-  Brings the HTTP provider to parity with the WebSocket provider, which previously
-  had no auth hook on the HTTP path (security finding S-5, #50).
+  The HTTP provider previously had no auth hook (any caller could GET full state or
+  POST arbitrary updates), so this brings it to parity with the WebSocket provider's
+  existing `AuthFunc` (security finding S-5, #50).
 - **`http.Server.MaxUpdateBytes`** — configurable POST-body cap (bytes); oversize
   bodies are rejected with 413 before being buffered. Zero keeps the existing
   64 MiB default. (#50)
@@ -26,9 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **The HTTP provider now validates room names**, rejecting empty, oversized,
-  `.`/`..`, and control-character names with 400 — matching the WebSocket
-  provider's rule, now centralised in the shared `internal/roomname` package so
-  both providers enforce one definition. (#50)
+  `.`/`..`, and control-character names with 400. This is a behaviour change:
+  names that were previously accepted are now rejected. The rule matches the
+  WebSocket provider's and is centralised in a shared internal validator so both
+  providers enforce one definition. (#50)
 - **`websocket.Server.AllowedOrigins` now supports `*` wildcards.** Each entry
   may contain one or more `*` wildcards, each matching any run of characters
   (e.g. `https://*.netlify.app`, `https://pr-*---web-*.run.app`), in addition to
