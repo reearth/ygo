@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/internal/roomname"
 )
 
 // maxUpdateBytes is the maximum accepted size for a POST body or sv parameter
@@ -35,6 +36,27 @@ type Server struct {
 	// out-of-order delivery to resolve. Zero or negative uses the crdt default
 	// (100,000). See crdt.WithMaxPendingItems and issue #46.
 	MaxPendingItems int
+
+	// AuthFunc, if non-nil, is called on every request before any document is
+	// read or mutated. Returning false rejects the request with 401 Unauthorized.
+	// This mirrors websocket.Server.AuthFunc (issue #50); without it, any caller
+	// can GET full document state or POST arbitrary updates.
+	AuthFunc func(r *http.Request) bool
+
+	// MaxUpdateBytes is the maximum accepted size (bytes) of a POST body. Bodies
+	// larger than this are rejected with 413 before being buffered. Zero or
+	// negative uses the package default (64 MiB), matching the cap the WebSocket
+	// provider applies to peer frames (issue #50).
+	MaxUpdateBytes int
+}
+
+// effectiveMaxUpdateBytes returns the configured POST-body cap, or the 64 MiB
+// default when MaxUpdateBytes is unset.
+func (s *Server) effectiveMaxUpdateBytes() int64 {
+	if s.MaxUpdateBytes > 0 {
+		return int64(s.MaxUpdateBytes)
+	}
+	return maxUpdateBytes
 }
 
 // NewServer returns a new Server with an empty document store.
@@ -84,10 +106,23 @@ func (s *Server) GetDoc(room string) *crdt.Doc {
 // A 400 is returned if the POST body cannot be applied.
 // A 405 is returned for any other method.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Auth gate (issue #50): reject before touching any document.
+	if s.AuthFunc != nil && !s.AuthFunc(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	// Extract room name: try PathValue first (Go 1.22 ServeMux), fall back to path.Base.
 	room := r.PathValue("room")
 	if room == "" {
 		room = path.Base(r.URL.Path)
+	}
+
+	// Reject crafted room names (empty, oversized, "."/"..", control chars) using
+	// the same rule as the WebSocket provider (issue #50).
+	if !roomname.Valid(room) {
+		http.Error(w, "invalid room name", http.StatusBadRequest)
+		return
 	}
 
 	switch r.Method {
@@ -138,8 +173,8 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, room string)
 		return
 	}
 
-	// Reject bodies exceeding maxUpdateBytes before buffering the entire payload.
-	r.Body = http.MaxBytesReader(w, r.Body, maxUpdateBytes)
+	// Reject bodies exceeding the configured cap before buffering the payload.
+	r.Body = http.MaxBytesReader(w, r.Body, s.effectiveMaxUpdateBytes())
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusRequestEntityTooLarge)

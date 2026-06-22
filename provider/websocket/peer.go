@@ -6,6 +6,7 @@ import (
 	"time"
 
 	gws "github.com/gorilla/websocket"
+	"golang.org/x/time/rate"
 
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/encoding"
@@ -25,6 +26,7 @@ type peer struct {
 	cidMu      sync.Mutex
 	writeCh    chan []byte   // buffered queue drained by runWriter goroutine
 	writerDone chan struct{} // closed when runWriter exits
+	limiter    *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's

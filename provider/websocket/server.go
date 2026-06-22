@@ -16,10 +16,12 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/time/rate"
 
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/reearth/ygo/internal/roomname"
 	ygsync "github.com/reearth/ygo/sync"
 )
 
@@ -369,6 +371,20 @@ type Server struct {
 	// raise it for unusual bulk-sync workloads.
 	MaxMessageBytes int64
 
+	// MessageRateLimit caps the sustained inbound-message rate (messages per
+	// second) for each peer. Zero (the default) means unlimited, preserving
+	// existing behaviour. When set, every peer gets its own token-bucket limiter;
+	// a peer that exceeds it is disconnected (issue #51). Disconnect — rather than
+	// dropping the offending message — is deliberate: silently discarding a CRDT
+	// update would leave that peer permanently diverged.
+	MessageRateLimit rate.Limit
+
+	// MessageRateBurst is the token-bucket burst size paired with
+	// MessageRateLimit (how many messages may arrive back-to-back before the
+	// sustained rate applies). Ignored when MessageRateLimit is zero. Zero or
+	// negative with a non-zero MessageRateLimit defaults to defaultRateBurst.
+	MessageRateBurst int
+
 	// Logger receives structured log entries for connection lifecycle, write
 	// failures, slow-peer disconnects, and persistence errors. nil falls back
 	// to slog.Default(). Most operators want to wire this to their app logger
@@ -546,23 +562,28 @@ func isOptionalPort(s string) bool {
 }
 
 // isValidRoomName reports whether name is a safe, non-empty room identifier.
-// Rejected: empty string, names exceeding 255 bytes, names consisting solely
-// of "." or ".." (path traversal), and names containing control characters
-// (runes < 0x20). All other printable content, including spaces and Unicode,
-// is permitted — matching the permissive behavior of the y-websocket JS server.
+// The rule is centralised in internal/roomname so the HTTP provider enforces
+// identical limits (issue #50).
 func isValidRoomName(name string) bool {
-	if len(name) == 0 || len(name) > 255 {
-		return false
+	return roomname.Valid(name)
+}
+
+// defaultRateBurst is the token-bucket burst used when MessageRateLimit is set
+// but MessageRateBurst is not — enough slack to absorb a client's initial
+// sync handshake batch without tripping the sustained-rate limit.
+const defaultRateBurst = 32
+
+// newPeerLimiter returns a per-peer inbound-message limiter, or nil when rate
+// limiting is disabled (MessageRateLimit == 0).
+func (s *Server) newPeerLimiter() *rate.Limiter {
+	if s.MessageRateLimit <= 0 {
+		return nil
 	}
-	if name == "." || name == ".." {
-		return false
+	burst := s.MessageRateBurst
+	if burst <= 0 {
+		burst = defaultRateBurst
 	}
-	for _, r := range name {
-		if r < 0x20 {
-			return false
-		}
-	}
-	return true
+	return rate.NewLimiter(s.MessageRateLimit, burst)
 }
 
 // NewServer returns a new Server with an empty room store and no persistence.
@@ -810,6 +831,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		clientIDs:  make(map[uint64]struct{}),
 		writeCh:    make(chan []byte, s.peerWriteQueueSize()),
 		writerDone: make(chan struct{}),
+		limiter:    s.newPeerLimiter(),
 	}
 
 	// Verify the room is still in the server map before adding the peer.
@@ -908,6 +930,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			firstMessage = false
+		}
+		// Per-peer inbound rate limit (#51). On exceed, disconnect rather than
+		// drop the message: silently discarding a CRDT update would leave this
+		// peer permanently diverged.
+		if p.limiter != nil && !p.limiter.Allow() {
+			p.server.log().Warn("disconnecting peer: inbound message rate limit exceeded",
+				"room", p.roomName)
+			break
 		}
 		p.handleMessage(data)
 	}
