@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.29.1] — 2026-06-29
+
+### Fixed
+
+- **WebSocket clustering deadlock**: `getOrCreateRoom` invoked the relay's
+  `RoomActivated` callback while holding the server's rooms lock (`s.rmu`). A relay
+  that replays stream history from within `RoomActivated` by calling `Sink.Inject`
+  re-entered `getOrCreateRoom` and blocked on the same non-reentrant mutex,
+  deadlocking the goroutine while it still held the lock and wedging the entire
+  instance — every subsequent room create or serve blocked. This was reachable in
+  normal multi-node operation: the second instance to activate a room whose cluster
+  stream already had history ran a catch-up replay at activation time and
+  deadlocked. `RoomActivated` now fires after the rooms lock is released and the
+  room is published, so a re-entrant `Inject` finds the room and returns instead of
+  deadlocking. This mirrors `RoomDeactivated`, which already fired off-lock. (#133)
+
 ## [1.29.0] — 2026-06-19
 
 ### Added
