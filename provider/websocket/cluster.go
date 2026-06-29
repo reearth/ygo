@@ -110,8 +110,8 @@ func (s *Server) relayWorker(ctx context.Context, out <-chan relayOutbound) {
 
 // registerRelayObservers wires doc.OnUpdate and awareness.OnChange for a room so
 // local (non-sentinel-origin) changes are published to the relay. Must be called
-// with s.rmu.Lock held (from getOrCreateRoom). The unsubscribe functions are
-// stored on the room and invoked by teardownRelayRoom.
+// with s.rmu.Lock held (from getOrCreateRoomLocked). The unsubscribe functions
+// are stored on the room and invoked by teardownRelayRoom.
 func (s *Server) registerRelayObservers(r *room, name string) {
 	sentinel := s.relaySentinel
 

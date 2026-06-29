@@ -674,14 +674,38 @@ func (s *Server) GetDoc(name string) *crdt.Doc {
 	return nil
 }
 
+// getOrCreateRoom returns the room for name, creating it on first use. When a
+// new room is created and a relay is attached, the relay's RoomActivated
+// callback fires AFTER s.rmu is released (#133): RoomActivated may synchronously
+// replay stream history via Sink.Inject, which re-enters getOrCreateRoom — under
+// s.rmu the non-reentrant mutex would self-deadlock and wedge the whole instance.
+// This mirrors teardownRelayRoom, which already fires RoomDeactivated off-lock.
 func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error) {
+	r, created, err := s.getOrCreateRoomLocked(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if created && s.relay != nil {
+		// Off-lock: the room is already published into s.rooms, so a re-entrant
+		// Sink.Inject finds it and returns instead of blocking on s.rmu.
+		s.relay.RoomActivated(name)
+	}
+	return r, nil
+}
+
+// getOrCreateRoomLocked is the locked portion of getOrCreateRoom. It returns the
+// room, whether it was newly created (so the caller fires RoomActivated exactly
+// once off-lock), and any creation error. Relay observers are registered here,
+// before the room is published into s.rooms, so no local change is missed — only
+// the RoomActivated notification is deferred until after s.rmu is released.
+func (s *Server) getOrCreateRoomLocked(ctx context.Context, name string) (*room, bool, error) {
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
 	if r, ok := s.rooms[name]; ok {
-		return r, nil
+		return r, false, nil
 	}
 	if s.MaxRooms > 0 && len(s.rooms) >= s.MaxRooms {
-		return nil, ErrTooManyRooms
+		return nil, false, ErrTooManyRooms
 	}
 	docOpts := []crdt.DocOption{}
 	if s.MaxPendingItems > 0 {
@@ -709,11 +733,11 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 	if s.persistence != nil {
 		data, err := s.persistence.LoadDoc(name)
 		if err != nil {
-			return nil, fmt.Errorf("loading room %q: %w", name, err)
+			return nil, false, fmt.Errorf("loading room %q: %w", name, err)
 		}
 		if len(data) > 0 {
 			if err := crdt.ApplyUpdateV1(r.doc, data, nil); err != nil {
-				return nil, fmt.Errorf("bootstrapping room %q: %w", name, err)
+				return nil, false, fmt.Errorf("bootstrapping room %q: %w", name, err)
 			}
 		}
 	}
@@ -730,7 +754,7 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 			hookErr = hook(ctx, name, r.doc)
 		})
 		if hookErr != nil {
-			return nil, fmt.Errorf("OnLoadDocument for room %q: %w", name, hookErr)
+			return nil, false, fmt.Errorf("OnLoadDocument for room %q: %w", name, hookErr)
 		}
 	}
 	if s.persistence != nil {
@@ -749,15 +773,15 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 		})
 	}
 	// Wire relay observers (doc.OnUpdate + awareness.OnChange) so local changes
-	// are published to other nodes. Registered under s.rmu.Lock (held by the
-	// caller) before the room is published into s.rooms, so no change is missed.
-	// No-op when no relay is attached.
+	// are published to other nodes. Registered under s.rmu.Lock before the room
+	// is published into s.rooms, so no change is missed. No-op when no relay is
+	// attached. RoomActivated is NOT fired here — the caller fires it off-lock
+	// once getOrCreateRoomLocked returns created=true (#133).
 	if s.relay != nil {
 		s.registerRelayObservers(r, name)
-		s.relay.RoomActivated(name)
 	}
 	s.rooms[name] = r
-	return r, nil
+	return r, true, nil
 }
 
 // ServeHTTP upgrades the request to WebSocket and runs the peer sync loop.

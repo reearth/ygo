@@ -1,36 +1,26 @@
 ## What's new
 
-Provider security hardening. The HTTP provider gains the auth hook, room-name
-validation, and configurable body-size cap the WebSocket provider already had; the
-WebSocket provider gains optional per-peer message rate limiting and `*` wildcard
-matching in `AllowedOrigins`. Every new config field is additive (zero values
-preserve current behaviour); the one behaviour change is that the HTTP provider now
-rejects invalid room names with 400.
+A clustering bug fix. When multiple WebSocket server instances share a document
+through a `cluster.Relay`, the second instance to activate a room that already had
+history on the shared stream could deadlock — and because it deadlocked while
+holding the server's rooms lock, the whole instance stopped serving every room.
+This release fixes that; no API changes.
 
-### Added
+### Fixed
 
-- **`http.Server.AuthFunc`** — reject unauthenticated requests with 401 before any
-  document is read or mutated (parity with the WebSocket provider). (#50)
-- **`http.Server.MaxUpdateBytes`** — configurable POST-body cap; oversize bodies get
-  413. Zero keeps the 64 MiB default. (#50)
-- **`websocket.Server.MessageRateLimit` / `MessageRateBurst`** — optional per-peer
-  inbound rate limit. A peer that floods past it is disconnected — not silently
-  dropped, which would diverge it. Zero is unlimited. (#51)
-
-### Changed
-
-- **The HTTP provider now validates room names** (empty / oversized / `.` / `..` /
-  control chars → 400), using the same rule as the WebSocket provider. Names that
-  were previously accepted are now rejected. (#50)
-- **`websocket.Server.AllowedOrigins` now supports `*` wildcards** — e.g.
-  `https://*.netlify.app` or `https://pr-*---web-*.run.app`, in addition to exact
-  origins and the bare `*`. Matching is anchored so a wildcard can't spoof a host,
-  and a trailing `*` covers only an optional `:<port>`. (#129)
+- **WebSocket clustering deadlock (#133)** — `getOrCreateRoom` fired the relay's
+  `RoomActivated` callback while holding the rooms lock. A relay that replays
+  caught-up history from inside `RoomActivated` (via `Sink.Inject`) re-entered
+  `getOrCreateRoom` and blocked on the same non-reentrant lock, wedging the whole
+  instance. `RoomActivated` now fires after the lock is released and the room is
+  published, so the re-entrant `Inject` finds the room and returns. This matches
+  how `RoomDeactivated` was already invoked off-lock. Single-node and
+  first-instance deployments were never affected.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.29.0
+go get github.com/reearth/ygo@v1.29.1
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
