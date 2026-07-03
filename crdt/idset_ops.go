@@ -17,8 +17,15 @@ func MergeIDSets(sets ...*IDSet) *IDSet {
 	return out
 }
 
-// ExcludeIDSet returns set minus exclude as a fresh IDSet (yjs diffIdSet).
+// ExcludeIDSet returns set minus exclude as a fresh IDSet (yjs diffIdSet). A
+// nil set is treated as empty; a nil exclude excludes nothing.
 func ExcludeIDSet(set, exclude *IDSet) *IDSet {
+	if set == nil {
+		return NewIDSet()
+	}
+	if exclude == nil {
+		return MergeIDSets(set)
+	}
 	out := NewIDSet()
 	for client, r := range set.clients {
 		setRanges := r.getIDs()
@@ -94,9 +101,12 @@ func ExcludeIDSet(set, exclude *IDSet) *IDSet {
 }
 
 // IntersectIDSets returns the overlap of a and b as a fresh IDSet
-// (yjs intersectSets).
+// (yjs intersectSets). A nil operand has no ranges, so the result is empty.
 func IntersectIDSets(a, b *IDSet) *IDSet {
 	out := NewIDSet()
+	if a == nil || b == nil {
+		return out
+	}
 	for client, ar := range a.clients {
 		br, ok := b.clients[client]
 		if !ok {
@@ -122,9 +132,12 @@ func IntersectIDSets(a, b *IDSet) *IDSet {
 }
 
 // IDSetFromIDMap projects an IDMap onto a plain IDSet, dropping attribution
-// (yjs createIdSetFromIdMap).
+// (yjs createIdSetFromIdMap). A nil m projects to an empty IDSet.
 func IDSetFromIDMap(m *IDMap) *IDSet {
 	out := NewIDSet()
+	if m == nil {
+		return out
+	}
 	for client, r := range m.clients {
 		for _, rg := range r.getIDs() {
 			out.Add(client, rg.Clock, rg.Len)

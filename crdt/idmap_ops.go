@@ -19,9 +19,16 @@ func MergeIDMaps(maps ...*IDMap) *IDMap {
 }
 
 // ExcludeIDMap returns m minus the ranges in exclude, preserving attribution
-// (yjs _diffSet applied to an IdMap).
+// (yjs _diffSet applied to an IdMap). A nil m is treated as empty; a nil
+// exclude excludes nothing.
 func ExcludeIDMap(m *IDMap, exclude *IDSet) *IDMap {
 	out := NewIDMap()
+	if m == nil {
+		return out
+	}
+	if exclude == nil {
+		return MergeIDMaps(m)
+	}
 	for client, r := range m.clients {
 		ranges := r.getIDs()
 		er, ok := exclude.clients[client]
@@ -63,9 +70,13 @@ func ExcludeIDMap(m *IDMap, exclude *IDSet) *IDMap {
 
 // IntersectIDMaps returns the overlap of a and b; each overlap range carries
 // the concatenation of both sides' attrs (yjs _intersectSets on AttrRanges:
-// concat, no value-dedup — preserved for wire fidelity).
+// concat, no value-dedup — preserved for wire fidelity). A nil operand has
+// no ranges, so the result is empty.
 func IntersectIDMaps(a, b *IDMap) *IDMap {
 	out := NewIDMap()
+	if a == nil || b == nil {
+		return out
+	}
 	for client, ar := range a.clients {
 		br, ok := b.clients[client]
 		if !ok {
@@ -91,8 +102,12 @@ func IntersectIDMaps(a, b *IDMap) *IDMap {
 }
 
 // FilterIDMap returns the ranges whose attrs satisfy pred (yjs filterIdMap).
+// A nil m has no ranges, so the result is empty.
 func FilterIDMap(m *IDMap, pred func([]*ContentAttribute) bool) *IDMap {
 	out := NewIDMap()
+	if m == nil {
+		return out
+	}
 	for client, r := range m.clients {
 		for _, rg := range r.getIDs() {
 			if pred(rg.Attrs) {
@@ -104,9 +119,12 @@ func FilterIDMap(m *IDMap, pred func([]*ContentAttribute) bool) *IDMap {
 }
 
 // IDMapFromIDSet stamps every range of s with attrs
-// (yjs createIdMapFromIdSet).
+// (yjs createIdMapFromIdSet). A nil s stamps to an empty IDMap.
 func IDMapFromIDSet(s *IDSet, attrList []*ContentAttribute) *IDMap {
 	out := NewIDMap()
+	if s == nil {
+		return out
+	}
 	for client, r := range s.clients {
 		for _, rg := range r.getIDs() {
 			out.Add(client, rg.Clock, rg.Len, attrList)

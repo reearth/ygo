@@ -106,3 +106,24 @@ func TestContentIDsFromUpdateV1_Malformed(t *testing.T) {
 		t.Fatal("malformed update should error")
 	}
 }
+
+// --- Nil-half tolerance (issue #56 final review: nil-half dereference panic) ---
+
+func TestContentMapAlgebraWrappers_NilHalves(t *testing.T) {
+	keepAll := func([]*ContentAttribute) bool { return true }
+
+	excluded := ExcludeContentMap(ContentMap{}, ContentIDs{})
+	if !excluded.Inserts.IsEmpty() || !excluded.Deletes.IsEmpty() {
+		t.Fatalf("ExcludeContentMap(ContentMap{}, ContentIDs{}) = %+v, want empty halves", excluded)
+	}
+
+	intersected := IntersectContentMaps(ContentMap{}, ContentMap{})
+	if !intersected.Inserts.IsEmpty() || !intersected.Deletes.IsEmpty() {
+		t.Fatalf("IntersectContentMaps(ContentMap{}, ContentMap{}) = %+v, want empty halves", intersected)
+	}
+
+	filtered := FilterContentMap(ContentMap{}, keepAll, keepAll)
+	if !filtered.Inserts.IsEmpty() || !filtered.Deletes.IsEmpty() {
+		t.Fatalf("FilterContentMap(ContentMap{}, keepAll, keepAll) = %+v, want empty halves", filtered)
+	}
+}

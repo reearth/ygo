@@ -61,8 +61,14 @@ func (r *idSetRLEReader) readLen() (uint64, error) {
 }
 
 // writeIDSet appends the canonical encoding of s to enc (yjs writeIdSet:
-// clients DESCENDING, zero-range clients omitted).
+// clients DESCENDING, zero-range clients omitted). A nil s encodes as an
+// empty IDSet, matching how the algebra ops (MergeIDSets et al.) already
+// treat a nil input as empty.
 func writeIDSet(enc *encoding.Encoder, s *IDSet) {
+	if s == nil {
+		enc.WriteVarUint(0)
+		return
+	}
 	type entry struct {
 		client ClientID
 		ids    []IDRange
@@ -144,8 +150,14 @@ func DecodeIDSet(data []byte) (*IDSet, error) {
 	return s, nil
 }
 
-// writeIDMap appends the canonical encoding of m to enc (yjs writeIdMap).
+// writeIDMap appends the canonical encoding of m to enc (yjs writeIdMap). A
+// nil m encodes as an empty IDMap, matching how the algebra ops
+// (MergeIDMaps et al.) already treat a nil input as empty.
 func writeIDMap(enc *encoding.Encoder, m *IDMap) {
+	if m == nil {
+		enc.WriteVarUint(0)
+		return
+	}
 	type entry struct {
 		client ClientID
 		ids    []AttrRange

@@ -106,3 +106,57 @@ func TestDecodeIDMap_Malformed(t *testing.T) {
 		}
 	}
 }
+
+// --- Nil-half tolerance (issue #56 final review: nil-half dereference panic) ---
+
+func TestEncodeIDSet_Nil(t *testing.T) {
+	got := EncodeIDSet(nil)
+	want := EncodeIDSet(NewIDSet())
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("EncodeIDSet(nil) = %v, want %v (same as empty IDSet)", got, want)
+	}
+	decoded, err := DecodeIDSet(got)
+	if err != nil {
+		t.Fatalf("DecodeIDSet(EncodeIDSet(nil)): %v", err)
+	}
+	if !decoded.IsEmpty() {
+		t.Fatalf("DecodeIDSet(EncodeIDSet(nil)) = %v, want empty", decoded)
+	}
+}
+
+func TestEncodeIDMap_Nil(t *testing.T) {
+	got := EncodeIDMap(nil)
+	want := EncodeIDMap(NewIDMap())
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("EncodeIDMap(nil) = %v, want %v (same as empty IDMap)", got, want)
+	}
+	decoded, err := DecodeIDMap(got)
+	if err != nil {
+		t.Fatalf("DecodeIDMap(EncodeIDMap(nil)): %v", err)
+	}
+	if !decoded.IsEmpty() {
+		t.Fatalf("DecodeIDMap(EncodeIDMap(nil)) = %v, want empty", decoded)
+	}
+}
+
+func TestEncodeContentIDs_ZeroValue(t *testing.T) {
+	data := EncodeContentIDs(ContentIDs{}) // both halves nil
+	got, err := DecodeContentIDs(data)
+	if err != nil {
+		t.Fatalf("DecodeContentIDs: %v", err)
+	}
+	if !got.Inserts.IsEmpty() || !got.Deletes.IsEmpty() {
+		t.Fatalf("DecodeContentIDs(EncodeContentIDs(ContentIDs{})) = %+v, want two empty halves", got)
+	}
+}
+
+func TestEncodeContentMap_ZeroValue(t *testing.T) {
+	data := EncodeContentMap(ContentMap{}) // both halves nil
+	got, err := DecodeContentMap(data)
+	if err != nil {
+		t.Fatalf("DecodeContentMap: %v", err)
+	}
+	if !got.Inserts.IsEmpty() || !got.Deletes.IsEmpty() {
+		t.Fatalf("DecodeContentMap(EncodeContentMap(ContentMap{})) = %+v, want two empty halves", got)
+	}
+}

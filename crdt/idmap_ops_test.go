@@ -66,3 +66,49 @@ func TestIDMapFromIDSet(t *testing.T) {
 		t.Fatal("projection back to IDSet should match source")
 	}
 }
+
+// --- Nil-half tolerance (issue #56 final review: nil-half dereference panic) ---
+
+func TestExcludeIDMap_Nil(t *testing.T) {
+	s := idsetOf(t, 1, IDRange{0, 5})
+	m := NewIDMap()
+	m.Add(1, 0, 5, attrs(t, "u", "a"))
+
+	if got := ExcludeIDMap(nil, s); !got.IsEmpty() {
+		t.Fatalf("ExcludeIDMap(nil, s) = %v, want empty", got)
+	}
+	if got, want := ExcludeIDMap(m, nil).Ranges(1), m.Ranges(1); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ExcludeIDMap(m, nil) = %+v, want copy of m %+v", got, want)
+	}
+	if got := ExcludeIDMap(nil, nil); !got.IsEmpty() {
+		t.Fatalf("ExcludeIDMap(nil, nil) = %v, want empty", got)
+	}
+}
+
+func TestIntersectIDMaps_Nil(t *testing.T) {
+	m := NewIDMap()
+	m.Add(1, 0, 5, attrs(t, "u", "a"))
+
+	if got := IntersectIDMaps(nil, m); !got.IsEmpty() {
+		t.Fatalf("IntersectIDMaps(nil, m) = %v, want empty", got)
+	}
+	if got := IntersectIDMaps(m, nil); !got.IsEmpty() {
+		t.Fatalf("IntersectIDMaps(m, nil) = %v, want empty", got)
+	}
+	if got := IntersectIDMaps(nil, nil); !got.IsEmpty() {
+		t.Fatalf("IntersectIDMaps(nil, nil) = %v, want empty", got)
+	}
+}
+
+func TestFilterIDMap_Nil(t *testing.T) {
+	pred := func([]*ContentAttribute) bool { return true }
+	if got := FilterIDMap(nil, pred); !got.IsEmpty() {
+		t.Fatalf("FilterIDMap(nil, pred) = %v, want empty", got)
+	}
+}
+
+func TestIDMapFromIDSet_Nil(t *testing.T) {
+	if got := IDMapFromIDSet(nil, attrs(t, "u", "a")); !got.IsEmpty() {
+		t.Fatalf("IDMapFromIDSet(nil, attrs) = %v, want empty", got)
+	}
+}
