@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.31.0] — 2026-07-03
+
+### Added
+
+- **`crdt.IDSet`** (yjs-v14 `IdSet`) — a per-client set of item-ID runs
+  (`(clock, len)`), with `Add`, `Has`/`HasID`, `Clients`, `Ranges`, `IsEmpty`,
+  and `Clone`. Wire codec `EncodeIDSet`/`DecodeIDSet` is byte-compatible with
+  published yjs v14's `writeIdSet`/`readIdSet` (pinned `npm:yjs@14.0.0-16`).
+- **`crdt.IDMap`** (yjs-v14 `IdMap`) — `IDSet` plus attribution metadata per
+  range; overlapping ranges split and their attributes join on read
+  (`Add`, `Has`, `Clients`, `Ranges`, `Slice`, `IsEmpty`). Wire codec
+  `EncodeIDMap`/`DecodeIDMap` is byte-compatible with published yjs v14's
+  `writeIdMap`/`readIdMap` (same pin).
+- **`crdt.ContentAttribute`** (yjs-v14 `ContentAttribute`) — one `{Name,
+  Value}` attribution fact. `NewContentAttribute`/`MustContentAttribute`
+  validate `Value` against the lib0 `any` domain so an unsupported value
+  (`ErrUnsupportedAttributeValue`) fails at the call site instead of panicking
+  inside the encoder.
+- **`crdt.ContentIDs`** / **`crdt.ContentMap`** (yjs-v14 `ContentIds` /
+  `ContentMap`) — the insert/delete pair of `IDSet`s or `IDMap`s for one
+  update or doc. `EncodeContentIDs`/`DecodeContentIDs` and
+  `EncodeContentMap`/`DecodeContentMap` encode inserts then deletes, following
+  yjs-main's `writeContentIds`/`writeContentMap` composition; each half is
+  byte-verified against the same yjs v14 pin, but no published yjs v14 rc
+  exposes a top-level `ContentMap`/`encodeContentMap` export to pin the
+  wrapper itself against (that API exists only on yjs's unreleased `main`).
+- **Builders**: `ContentIDsFromUpdateV1`/`ContentIDsFromUpdateV2` (yjs-v14
+  extraction from a V1/V2 update without integrating it — the entry point for
+  stamping an incoming update), `InsertSetFromDoc`/`DeleteSetFromDoc` (yjs
+  `createInsertSetFromStructStore`/`createDeleteSetFromStructStore` — extract
+  from a live doc's store), `CreateContentMapFromContentIDs` (yjs
+  `createContentMapFromContentIds` — stamp insert/delete IDs with attributes).
+- **Set algebra**: `MergeIDSets`/`MergeIDMaps`, `ExcludeIDSet`/`ExcludeIDMap`,
+  `IntersectIDSets`/`IntersectIDMaps`, `FilterIDMap`, `IDSetFromIDMap`,
+  `IDMapFromIDSet` (yjs-v14 `mergeIdSets`/`mergeIdMaps`,
+  `excludeIdSet`/`excludeIdMap`, `intersectIdSets`/`intersectIdMaps`,
+  `filterIdMap`), plus the `ContentMap`-level wrappers
+  `MergeContentMaps`/`ExcludeContentMap`/`IntersectContentMaps`/`FilterContentMap`
+  (yjs-main `mergeContentMaps`/`excludeContentMap`/`intersectContentMap`/`filterContentMap`).
+- **`crdt.Example_attribution`** — a runnable godoc example
+  (`crdt/example_attribution_test.go`) showing the full stamp → encode → store
+  → decode round trip.
+
+### Security
+
+- **Decode ceilings on all four new decoders.** `DecodeIDSet`, `DecodeIDMap`,
+  `DecodeContentIDs`, and `DecodeContentMap` bound every length-prefixed count
+  (client count, range count, attribute count) against the decoder's
+  remaining input before allocating, so a crafted/truncated payload cannot
+  trigger an oversized allocation ahead of the eventual read failure. Errors
+  are wrapped in `ErrAttributionDecode`.
+
+### Docs
+
+- New README **Attribution** section: the primitive/builder/algebra surface,
+  a stamp→encode→store→decode code sample mirroring the godoc example, the
+  y-redis (y/hub) positioning, the exact yjs v14 pin this release is verified
+  against, the scope boundary between byte-verified `IDSet`/`IDMap` and the
+  `ContentMap` wrapper (which follows yjs-main's composition but has no
+  published function to pin against yet), and the GC caveat for rendering
+  attributed history (retain updates, or create the doc `WithGC(false)`).
+
 ## [1.29.1] — 2026-06-29
 
 ### Fixed

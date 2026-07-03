@@ -24,7 +24,7 @@ ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (
 - Native iOS/Android embedding via `gomobile` (the `mobile/` subpackage) — no JS runtime, no CGO
 - Snapshots, garbage collection, undo manager, persistence adapters
 
-The current release is **v1.29.1**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
+The current release is **v1.31.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
 
 ## Features
 
@@ -63,6 +63,7 @@ Post-v1.0 hardening:
 - **CRDT correctness batch** (v1.27.0). Three Yjs-parity fixes, all verified against `yjs@13.6.30`: `YText.Format` ports the Yjs `formatText` algorithm so re-applying/toggling a format over a sub-range no longer strips the surrounding run (`ToDelta` also coalesces adjacent equal-attribute inserts); `UndoManager` undo of a deletion re-inserts content as a new item so it propagates to peers instead of being silently lost on the next sync; and `MergeUpdatesV1`/`DiffUpdateV1` merge at the struct level so non-integrable structs are no longer dropped. Adds struct-level `MergeUpdatesV2`/`DiffUpdateV2`/`EncodeStateVectorFromUpdate` and exports `crdt.SharedType`.
 - **Snapshot reconstruction & conflict-scan perf** (v1.28.0). Adds `crdt.CreateDocFromSnapshot` (Yjs-parity name for rebuilding a historic doc from a `Snapshot`), with a `WithGC(false)` safety guard (`ErrSnapshotSourceGCed`) so reconstruction can't silently return incomplete history; `RestoreDocument` now shares that guard. `Item.integrate` also reuses its YATA conflict-tracking map via `clear()` instead of reallocating it, cutting convergence allocations ~92% under high same-position contention with no change to the common path.
 - **Provider security hardening** (v1.29.0). The HTTP provider gains `AuthFunc` (401), room-name validation (400, the same rule the WebSocket provider uses), and a configurable `MaxUpdateBytes` (413) — parity with the WebSocket provider. The WebSocket provider gains optional per-peer message rate limiting (`MessageRateLimit`/`MessageRateBurst`): a peer that floods past the limit is disconnected rather than diverged. `AllowedOrigins` also gains `*` wildcard matching (e.g. `https://*.netlify.app`), anchored so a wildcard can't spoof a host. The new config fields are additive (zero values preserve current behaviour); the one behaviour change is that the HTTP provider now rejects invalid room names with 400.
+- **Attribution API** (v1.31.0). `IDSet`/`IDMap`/`ContentMap` + wire codec tracking yjs v14-rc `14.0.0-16` — stamp CRDT content with per-item authorship (`userid`, `ts`, …) and exchange it with JS. Non-goals documented (no storage integration; `diffDocsToDelta` deferred). See [Attribution](#attribution) below.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release picture.
 
@@ -273,6 +274,90 @@ database connection — do not expose it directly to untrusted code.
 authorization. A caller who can reach either API can craft updates that
 spoof any client ID, which is equivalent to the authority already
 granted by `GetDoc` + `ApplyUpdateV1`.
+
+## Attribution
+
+The `crdt` package exposes yjs-v14's attribution primitives for stamping CRDT
+content with per-item authorship metadata — who inserted or deleted which
+item, and any other attribute you want to attach (`userid`, `ts`, a request
+ID, …) — without integrating the update into a doc. This is the pattern
+[y-redis](https://github.com/yjs/y-redis) (also known as y/hub, the Yjs
+cluster backend) uses to store per-character authorship in Postgres.
+
+- **`IDSet`** — the set of item IDs touched by an update or a doc (yjs-v14
+  `IdSet`): per-client sorted, merged `(clock, len)` runs.
+- **`IDMap`** — `IDSet` plus attribution data per range (yjs-v14 `IdMap`):
+  overlapping ranges are split and their attributes joined on read.
+- **`ContentAttribute`** — one `{Name, Value}` fact, built via
+  `NewContentAttribute`/`MustContentAttribute`, which validate `Value` against
+  the lib0 `any` domain so a bad value fails at the call site instead of
+  panicking deep inside the encoder.
+- **`ContentIDs`** / **`ContentMap`** — the insert/delete pair of `IDSet`s or
+  `IDMap`s for one update or doc (yjs-v14 `ContentIds` / `ContentMap`).
+- Builders: `ContentIDsFromUpdateV1`/`V2` (extract touched IDs from an update
+  without applying it), `InsertSetFromDoc`/`DeleteSetFromDoc` (extract from a
+  live doc's store), `CreateContentMapFromContentIDs` (stamp IDs with
+  attributes).
+- Set algebra mirroring yjs-v14: `MergeIDSets`/`MergeIDMaps`,
+  `ExcludeIDSet`/`ExcludeIDMap`, `IntersectIDSets`/`IntersectIDMaps`,
+  `FilterIDMap`, plus the `ContentMap`-level wrappers
+  `MergeContentMaps`/`ExcludeContentMap`/`IntersectContentMaps`/`FilterContentMap`.
+
+Typical server-side flow: a collaborator's update arrives, the server stamps
+it with attribution and stores both side by side, without ever integrating
+the update into a live doc.
+
+```go
+// A collaborator produced an update…
+src := crdt.New(crdt.WithClientID(7))
+txt := src.GetText("t") // resolve OUTSIDE Transact
+src.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "hi", nil) })
+update := crdt.EncodeStateAsUpdateV1(src, nil)
+
+// …the server stamps it without integrating it.
+ids, _ := crdt.ContentIDsFromUpdateV1(update)
+userid := crdt.MustContentAttribute("userid", "alice")
+cm := crdt.CreateContentMapFromContentIDs(ids, []*crdt.ContentAttribute{userid}, nil)
+
+// Store EncodeContentMap(cm) next to the update; later, read it back.
+decoded, _ := crdt.DecodeContentMap(crdt.EncodeContentMap(cm))
+for _, r := range decoded.Inserts.Slice(7, 0, 2) {
+    fmt.Printf("clocks [%d,%d): %s=%v\n", r.Clock, r.Clock+r.Len, r.Attrs[0].Name, r.Attrs[0].Value)
+}
+// clocks [0,2): userid=alice
+```
+
+See `Example_attribution` in [`crdt/example_attribution_test.go`](crdt/example_attribution_test.go)
+for the runnable version (`go test ./crdt/ -run Example_attribution`).
+
+### Interop scope — read this before treating attribution as wire-stable with a specific yjs release
+
+- **`IDSet`/`IDMap` are byte-compatible with published yjs v14.** Verified
+  byte-for-byte against a pinned yjs14 build (`npm:yjs@14.0.0-16`) — see
+  `crdt/attribution_js_compat_test.go` and `testutil/gen_fixtures_attribution.js`.
+- **`ContentMap`/`ContentIDs` follow yjs-main's `writeContentMap`/`writeContentIds`
+  composition** (two `IdMap`s / `IdSet`s, inserts then deletes) — each half is
+  byte-verified as above, but **no published yjs v14 rc exposes a top-level
+  `ContentMap`/`encodeContentMap` function to pin the wrapper against**; that
+  API exists only on yjs's unreleased `main` branch as of this writing. Treat
+  `ContentMap`'s wire format as "matches yjs-main's composition of
+  byte-verified parts," not "byte-compatible with a shipped `yjs.encodeContentMap`."
+  Tracked as a follow-up to re-verify once yjs v14.0.0 final publishes that API.
+- **`diffDocsToDelta`** (yjs-main's Prosemirror-style delta-with-attribution
+  renderer) is **not implemented**. It depends on yjs v14's delta/renderer
+  subsystem, which is still changing on `main`; porting it is a tracked
+  follow-up once that subsystem stabilizes in a published release.
+- **No storage integration.** ygo does not persist `ContentMap`s for you —
+  callers store `EncodeContentMap(cm)` next to the update in their own
+  database, exactly as shown above.
+- **Garbage collection erases attributed history.** `IDSet`/`IDMap` reference
+  item IDs by `(client, clock)`; once GC (the default) frees deleted items'
+  content, ranges that pointed at deleted content no longer correspond to
+  retrievable data. To render attributed history later (e.g. "who wrote this
+  paragraph, including deleted-and-restored text"), either retain the raw
+  updates you stamped (so `ContentIDsFromUpdateV1` can re-derive IDs from the
+  update itself) or create the doc with `crdt.WithGC(false)` — see
+  `CreateDocFromSnapshot` and the snapshot-history pattern above.
 
 ## Persistence
 

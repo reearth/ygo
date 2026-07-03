@@ -297,7 +297,11 @@ func DecodeIDMap(data []byte) (*IDMap, error) {
 	return readIDMap(dec)
 }
 
-// EncodeContentIDs encodes c (inserts then deletes; yjs encodeContentIds).
+// EncodeContentIDs encodes c as inserts then deletes, following yjs-main's
+// writeContentIds composition (src/utils/meta.js): two IdSets concatenated.
+// Each half's wire format is byte-verified against published yjs v14; the
+// published yjs v14 rc line has no top-level writeContentIds/ContentIds
+// export to pin the wrapper itself against (see attribution_js_compat_test.go).
 func EncodeContentIDs(c ContentIDs) []byte {
 	enc := encoding.NewEncoder()
 	writeIDSet(enc, c.Inserts)
@@ -305,7 +309,7 @@ func EncodeContentIDs(c ContentIDs) []byte {
 	return enc.Bytes()
 }
 
-// DecodeContentIDs decodes data produced by EncodeContentIDs / yjs encodeContentIds.
+// DecodeContentIDs decodes data produced by EncodeContentIDs.
 func DecodeContentIDs(data []byte) (ContentIDs, error) {
 	dec := encoding.NewDecoder(data)
 	inserts, err := readIDSet(dec)
@@ -319,7 +323,13 @@ func DecodeContentIDs(data []byte) (ContentIDs, error) {
 	return ContentIDs{Inserts: inserts, Deletes: deletes}, nil
 }
 
-// EncodeContentMap encodes c (inserts then deletes; yjs encodeContentMap).
+// EncodeContentMap encodes c as inserts then deletes, following yjs-main's
+// writeContentMap composition (src/utils/meta.js): two IdMaps concatenated.
+// Each half's wire format is byte-verified against published yjs v14. The
+// published yjs v14 rc line has no top-level writeContentMap/ContentMap
+// export to pin the wrapper itself against — that API exists only on yjs's
+// unreleased main branch (see attribution_js_compat_test.go and the
+// follow-up issue to re-verify once yjs v14.0.0 final ships).
 func EncodeContentMap(c ContentMap) []byte {
 	enc := encoding.NewEncoder()
 	writeIDMap(enc, c.Inserts)
@@ -327,7 +337,7 @@ func EncodeContentMap(c ContentMap) []byte {
 	return enc.Bytes()
 }
 
-// DecodeContentMap decodes data produced by EncodeContentMap / yjs encodeContentMap.
+// DecodeContentMap decodes data produced by EncodeContentMap.
 func DecodeContentMap(data []byte) (ContentMap, error) {
 	dec := encoding.NewDecoder(data)
 	inserts, err := readIDMap(dec)
