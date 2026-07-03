@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.30.0] — 2026-07-03
 
+This release bundles two additive features: read-only WebSocket connections
+(#59) and the CRDT attribution API (#56).
+
 ### Added
 
 - **`websocket.Server.Authorize`** — a richer alternative to `AuthFunc`:
@@ -18,7 +21,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   docs, viewer roles, monitoring connections (#59).
 - **`websocket.ConnectionConfig`** — per-connection configuration returned by
   `Authorize`. Currently carries `ReadOnly bool`; extensible for future
-  per-connection settings.
+  per-connection settings. (#59)
+- **`crdt.IDSet`** (yjs-v14 `IdSet`) — a per-client set of item-ID runs
+  (`(clock, len)`), with `Add`, `Has`/`HasID`, `Clients`, `Ranges`, `IsEmpty`,
+  and `Clone`. Wire codec `EncodeIDSet`/`DecodeIDSet` is byte-compatible with
+  published yjs v14's `writeIdSet`/`readIdSet` (pinned `npm:yjs@14.0.0-16`). (#56)
+- **`crdt.IDMap`** (yjs-v14 `IdMap`) — `IDSet` plus attribution metadata per
+  range; overlapping ranges split and their attributes join on read
+  (`Add`, `Has`, `Clients`, `Ranges`, `Slice`, `IsEmpty`). Wire codec
+  `EncodeIDMap`/`DecodeIDMap` is byte-compatible with published yjs v14's
+  `writeIdMap`/`readIdMap` (same pin). (#56)
+- **`crdt.ContentAttribute`** (yjs-v14 `ContentAttribute`) — one `{Name,
+  Value}` attribution fact. `NewContentAttribute`/`MustContentAttribute`
+  validate `Value` against the lib0 `any` domain so an unsupported value
+  (`ErrUnsupportedAttributeValue`) fails at the call site instead of panicking
+  inside the encoder. (#56)
+- **`crdt.ContentIDs`** / **`crdt.ContentMap`** — the insert/delete pair of
+  `IDSet`s or `IDMap`s for one update or doc. `EncodeContentIDs`/`DecodeContentIDs`
+  and `EncodeContentMap`/`DecodeContentMap` encode inserts then deletes, following
+  yjs-main's `writeContentIds`/`writeContentMap` composition; each half is
+  byte-verified against the same yjs v14 pin, but no published yjs v14 rc
+  exposes a top-level `ContentMap`/`encodeContentMap` export to pin the
+  wrapper itself against (that API exists only on yjs's unreleased `main`). (#56)
+- **Builders**: `ContentIDsFromUpdateV1`/`ContentIDsFromUpdateV2` (extract from a
+  V1/V2 update without integrating it — the entry point for stamping an incoming
+  update), `InsertSetFromDoc`/`DeleteSetFromDoc` (yjs
+  `createInsertSetFromStructStore`/`createDeleteSetFromStructStore`),
+  `CreateContentMapFromContentIDs` (yjs `createContentMapFromContentIds` — stamp
+  insert/delete IDs with attributes). (#56)
+- **Set algebra**: `MergeIDSets`/`MergeIDMaps`, `ExcludeIDSet`/`ExcludeIDMap`,
+  `IntersectIDSets`/`IntersectIDMaps`, `FilterIDMap`, `IDSetFromIDMap`,
+  `IDMapFromIDSet`, plus the `ContentMap`-level wrappers
+  `MergeContentMaps`/`ExcludeContentMap`/`IntersectContentMaps`/`FilterContentMap`. (#56)
+- **`crdt.Example_attribution`** — a runnable godoc example
+  (`crdt/example_attribution_test.go`) showing the full stamp → encode → store
+  → decode round trip. (#56)
 
 ### Changed
 
@@ -30,6 +67,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates are not applied or broadcast. Stateless signals (tags 5/6) are not
   gated by read-only. This is additive — connections authorized via `AuthFunc`
   (or with no auth hook) remain read-write. (#59)
+
+### Security
+
+- **Decode ceilings on all four attribution decoders.** `DecodeIDSet`,
+  `DecodeIDMap`, `DecodeContentIDs`, and `DecodeContentMap` bound every
+  length-prefixed count (client count, range count, attribute count) against the
+  decoder's remaining input before allocating, and `DecodeIDMap` additionally
+  caps the per-range attribute pre-allocation (the pointer-slice analogue of the
+  `encoding` `maxAnyElements` guard, N-C2), so a crafted/truncated payload cannot
+  trigger an oversized allocation ahead of the eventual read failure. Errors are
+  wrapped in `ErrAttributionDecode`. (#56)
+
+### Docs
+
+- New README **Attribution** section: the primitive/builder/algebra surface,
+  a stamp→encode→store→decode code sample mirroring the godoc example, the
+  y-redis (y/hub) positioning, the exact yjs v14 pin this release is verified
+  against, the scope boundary between byte-verified `IDSet`/`IDMap` and the
+  `ContentMap` wrapper (which follows yjs-main's composition but has no
+  published function to pin against yet), and the GC caveat for rendering
+  attributed history (retain updates, or create the doc `WithGC(false)`). (#56)
 
 ## [1.29.1] — 2026-06-29
 
