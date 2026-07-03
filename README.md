@@ -24,7 +24,7 @@ ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (
 - Native iOS/Android embedding via `gomobile` (the `mobile/` subpackage) — no JS runtime, no CGO
 - Snapshots, garbage collection, undo manager, persistence adapters
 
-The current release is **v1.31.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
+The current release is **v1.30.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
 
 ## Features
 
@@ -63,7 +63,8 @@ Post-v1.0 hardening:
 - **CRDT correctness batch** (v1.27.0). Three Yjs-parity fixes, all verified against `yjs@13.6.30`: `YText.Format` ports the Yjs `formatText` algorithm so re-applying/toggling a format over a sub-range no longer strips the surrounding run (`ToDelta` also coalesces adjacent equal-attribute inserts); `UndoManager` undo of a deletion re-inserts content as a new item so it propagates to peers instead of being silently lost on the next sync; and `MergeUpdatesV1`/`DiffUpdateV1` merge at the struct level so non-integrable structs are no longer dropped. Adds struct-level `MergeUpdatesV2`/`DiffUpdateV2`/`EncodeStateVectorFromUpdate` and exports `crdt.SharedType`.
 - **Snapshot reconstruction & conflict-scan perf** (v1.28.0). Adds `crdt.CreateDocFromSnapshot` (Yjs-parity name for rebuilding a historic doc from a `Snapshot`), with a `WithGC(false)` safety guard (`ErrSnapshotSourceGCed`) so reconstruction can't silently return incomplete history; `RestoreDocument` now shares that guard. `Item.integrate` also reuses its YATA conflict-tracking map via `clear()` instead of reallocating it, cutting convergence allocations ~92% under high same-position contention with no change to the common path.
 - **Provider security hardening** (v1.29.0). The HTTP provider gains `AuthFunc` (401), room-name validation (400, the same rule the WebSocket provider uses), and a configurable `MaxUpdateBytes` (413) — parity with the WebSocket provider. The WebSocket provider gains optional per-peer message rate limiting (`MessageRateLimit`/`MessageRateBurst`): a peer that floods past the limit is disconnected rather than diverged. `AllowedOrigins` also gains `*` wildcard matching (e.g. `https://*.netlify.app`), anchored so a wildcard can't spoof a host. The new config fields are additive (zero values preserve current behaviour); the one behaviour change is that the HTTP provider now rejects invalid room names with 400.
-- **Attribution API** (v1.31.0). `IDSet`/`IDMap`/`ContentMap` + wire codec tracking yjs v14-rc `14.0.0-16` — stamp CRDT content with per-item authorship (`userid`, `ts`, …) and exchange it with JS. Non-goals documented (no storage integration; `diffDocsToDelta` deferred). See [Attribution](#attribution) below.
+- **Read-only WebSocket connections** (v1.30.0). New `Server.Authorize func(*http.Request) (ConnectionConfig, bool)` both accepts/rejects a connection and reports per-connection config — currently `ReadOnly`. A read-only peer receives document and awareness broadcasts but its inbound writes (sync step-2/update and awareness) are dropped server-side, while still being able to request state (SyncStep1) and query awareness. The existing bool `AuthFunc` is unchanged; `Authorize` takes precedence when both are set. Matches Hocuspocus's `readOnly` connection flag (#59).
+- **Attribution API** (v1.30.0). `IDSet`/`IDMap`/`ContentMap` + wire codec tracking yjs v14-rc `14.0.0-16` — stamp CRDT content with per-item authorship (`userid`, `ts`, …) and exchange it with JS. Non-goals documented (no storage integration; `diffDocsToDelta` deferred). See [Attribution](#attribution) below.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release picture.
 
@@ -433,6 +434,17 @@ Each defaults to a sensible value or unlimited where noted.
 ```go
 server.AuthFunc = func(r *http.Request) bool {
     return validateBearer(r.Header.Get("Authorization"))
+}
+```
+
+For **read-only connections** (v1.30.0, #59), use `Server.Authorize` instead — it both accepts/rejects and reports per-connection config. A read-only peer receives document and awareness broadcasts but its inbound writes (sync step-2/update and awareness) are dropped server-side; it can still request state (SyncStep1) and query awareness. When set, `Authorize` takes precedence over `AuthFunc`:
+
+```go
+server.Authorize = func(r *http.Request) (ygws.ConnectionConfig, bool) {
+    if !validateBearer(r.Header.Get("Authorization")) {
+        return ygws.ConnectionConfig{}, false // reject → 401
+    }
+    return ygws.ConnectionConfig{ReadOnly: !isEditor(r)}, true
 }
 ```
 

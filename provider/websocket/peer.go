@@ -27,6 +27,7 @@ type peer struct {
 	writeCh    chan []byte   // buffered queue drained by runWriter goroutine
 	writerDone chan struct{} // closed when runWriter exits
 	limiter    *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
+	readOnly   bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -53,6 +54,14 @@ func (p *peer) handleMessage(data []byte) {
 	case msgSync:
 		// Sync payload follows directly (no VarBytes wrapper).
 		payload := dec.RemainingBytes()
+		if p.readOnly {
+			// Read-only peers may still request state (SyncStep1 → we reply with
+			// SyncStep2), but must not push changes: drop SyncStep2/Update without
+			// applying or broadcasting (#59). A malformed frame is dropped too.
+			if subType, _, e := ygsync.ReadSyncMessage(payload); e != nil || subType != ygsync.MsgSyncStep1 {
+				return
+			}
+		}
 		reply, err := ygsync.ApplySyncMessage(p.room.doc, payload, p)
 		if err != nil {
 			p.server.log().Debug("discarded unappliable sync message",
@@ -68,6 +77,9 @@ func (p *peer) handleMessage(data []byte) {
 		}
 
 	case msgAwareness:
+		if p.readOnly {
+			return // #59: read-only peers' inbound awareness is dropped.
+		}
 		// Awareness payload is VarBytes-wrapped (y-websocket protocol).
 		awBytes, err := dec.ReadVarBytes()
 		if err != nil {
@@ -98,6 +110,9 @@ func (p *peer) handleMessage(data []byte) {
 		// back, which would cause an infinite ping-pong on noisy links.
 		// Apply locally and broadcast updates, but never reply with our
 		// own step-1.
+		if p.readOnly {
+			return // #59: SyncReply carries a SyncStep2 write; drop it for read-only peers.
+		}
 		payload := dec.RemainingBytes()
 		if _, err := ygsync.ApplySyncMessage(p.room.doc, payload, p); err != nil {
 			p.server.log().Debug("discarded unappliable sync(reply) message",
