@@ -1,0 +1,145 @@
+package crdt
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+
+	"github.com/reearth/ygo/encoding"
+)
+
+// ErrAttributionDecode wraps every malformed-input error returned by the
+// attribution decoders (DecodeIDSet, DecodeIDMap, DecodeContentIDs,
+// DecodeContentMap).
+var ErrAttributionDecode = errors.New("ygo/crdt: malformed attribution data")
+
+func attrDecodeErr(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrAttributionDecode, fmt.Sprintf(format, args...))
+}
+
+// idSetRLEWriter is the clock/len RLE state of yjs IdSetEncoderV2: clocks are
+// written as diffs against a per-client cursor; lens as len-1 (len 0 is
+// forbidden on the wire — normalization removes zero-length ranges).
+type idSetRLEWriter struct {
+	enc *encoding.Encoder
+	cur uint64
+}
+
+func (w *idSetRLEWriter) reset() { w.cur = 0 }
+func (w *idSetRLEWriter) writeClock(clock uint64) {
+	w.enc.WriteVarUint(clock - w.cur)
+	w.cur = clock
+}
+func (w *idSetRLEWriter) writeLen(l uint64) { // caller guarantees l > 0
+	w.enc.WriteVarUint(l - 1)
+	w.cur += l
+}
+
+// idSetRLEReader mirrors idSetRLEWriter.
+type idSetRLEReader struct {
+	dec *encoding.Decoder
+	cur uint64
+}
+
+func (r *idSetRLEReader) reset() { r.cur = 0 }
+func (r *idSetRLEReader) readClock() (uint64, error) {
+	diff, err := r.dec.ReadVarUint()
+	if err != nil {
+		return 0, err
+	}
+	r.cur += diff
+	return r.cur, nil
+}
+func (r *idSetRLEReader) readLen() (uint64, error) {
+	v, err := r.dec.ReadVarUint()
+	if err != nil {
+		return 0, err
+	}
+	l := v + 1
+	r.cur += l
+	return l, nil
+}
+
+// writeIDSet appends the canonical encoding of s to enc (yjs writeIdSet:
+// clients DESCENDING, zero-range clients omitted).
+func writeIDSet(enc *encoding.Encoder, s *IDSet) {
+	type entry struct {
+		client ClientID
+		ids    []IDRange
+	}
+	entries := make([]entry, 0, len(s.clients))
+	for c, r := range s.clients {
+		if ids := r.getIDs(); len(ids) > 0 {
+			entries = append(entries, entry{c, ids})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].client > entries[j].client })
+	enc.WriteVarUint(uint64(len(entries)))
+	w := idSetRLEWriter{enc: enc}
+	for _, e := range entries {
+		w.reset()
+		enc.WriteVarUint(uint64(e.client))
+		enc.WriteVarUint(uint64(len(e.ids)))
+		for _, rg := range e.ids {
+			w.writeClock(rg.Clock)
+			w.writeLen(rg.Len)
+		}
+	}
+}
+
+// readIDSet consumes one IDSet from dec.
+func readIDSet(dec *encoding.Decoder) (*IDSet, error) {
+	numClients, err := dec.ReadVarUint()
+	if err != nil {
+		return nil, attrDecodeErr("idset client count: %v", err)
+	}
+	// Ceiling (N-12): each client entry needs ≥2 bytes (client + range count).
+	if numClients > uint64(dec.Remaining()) {
+		return nil, attrDecodeErr("idset client count %d exceeds remaining input %d", numClients, dec.Remaining())
+	}
+	s := NewIDSet()
+	r := idSetRLEReader{dec: dec}
+	for i := uint64(0); i < numClients; i++ {
+		r.reset()
+		client, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, attrDecodeErr("idset client: %v", err)
+		}
+		numRanges, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, attrDecodeErr("idset range count: %v", err)
+		}
+		if numRanges > uint64(dec.Remaining())+1 { // each range needs ≥2 bytes; +1 tolerates final 1-byte pairs
+			return nil, attrDecodeErr("idset range count %d exceeds remaining input %d", numRanges, dec.Remaining())
+		}
+		for j := uint64(0); j < numRanges; j++ {
+			clock, err := r.readClock()
+			if err != nil {
+				return nil, attrDecodeErr("idset clock: %v", err)
+			}
+			length, err := r.readLen()
+			if err != nil {
+				return nil, attrDecodeErr("idset len: %v", err)
+			}
+			s.Add(ClientID(client), clock, length)
+		}
+	}
+	return s, nil
+}
+
+// EncodeIDSet encodes s in the yjs-v14 IdSet binary format (IdSetEncoderV2).
+func EncodeIDSet(s *IDSet) []byte {
+	enc := encoding.NewEncoder()
+	writeIDSet(enc, s)
+	return enc.Bytes()
+}
+
+// DecodeIDSet decodes data produced by EncodeIDSet / yjs encodeIdSet.
+func DecodeIDSet(data []byte) (*IDSet, error) {
+	dec := encoding.NewDecoder(data)
+	s, err := readIDSet(dec)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
