@@ -1,26 +1,32 @@
 ## What's new
 
-A clustering bug fix. When multiple WebSocket server instances share a document
-through a `cluster.Relay`, the second instance to activate a room that already had
-history on the shared stream could deadlock — and because it deadlocked while
-holding the server's rooms lock, the whole instance stopped serving every room.
-This release fixes that; no API changes.
+Read-only WebSocket connections. The WebSocket provider gains a richer auth entry
+point, `Server.Authorize`, that can mark a connection read-only — it receives
+document and awareness broadcasts but its inbound writes are dropped server-side.
+This matches Hocuspocus's `readOnly` connection flag and covers public-read docs,
+viewer roles, and monitoring connections. Additive: the existing `AuthFunc` is
+unchanged and connections stay read-write unless you opt in.
 
-### Fixed
+### Added
 
-- **WebSocket clustering deadlock (#133)** — `getOrCreateRoom` fired the relay's
-  `RoomActivated` callback while holding the rooms lock. A relay that replays
-  caught-up history from inside `RoomActivated` (via `Sink.Inject`) re-entered
-  `getOrCreateRoom` and blocked on the same non-reentrant lock, wedging the whole
-  instance. `RoomActivated` now fires after the lock is released and the room is
-  published, so the re-entrant `Inject` finds the room and returns. This matches
-  how `RoomDeactivated` was already invoked off-lock. Single-node and
-  first-instance deployments were never affected.
+- **`websocket.Server.Authorize func(*http.Request) (ConnectionConfig, bool)`** —
+  accepts/rejects a connection (false → 401) *and* reports its config. Takes
+  precedence over `AuthFunc` when both are set. (#59)
+- **`websocket.ConnectionConfig{ ReadOnly bool }`** — per-connection config
+  returned by `Authorize`; extensible for future settings. (#59)
+
+### Behaviour
+
+- A **read-only** peer still receives broadcasts, gets a `SyncStep2` in reply to
+  its `SyncStep1`, and can query awareness — but its inbound document writes
+  (`SyncStep2`/`Update`, Hocuspocus `SyncReply`) and awareness updates are dropped
+  server-side. Stateless signals are not gated. Connections authorized via
+  `AuthFunc` (or with no auth hook) remain read-write.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.29.1
+go get github.com/reearth/ygo@v1.30.0
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
