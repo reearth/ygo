@@ -17,6 +17,15 @@ func attrDecodeErr(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrAttributionDecode, fmt.Sprintf(format, args...))
 }
 
+// maxPreallocAttrs caps the up-front capacity of the per-range attribute slice
+// in readIDMap. attrCount is bounded only by the remaining input, so a crafted
+// payload could otherwise force an ~8*Remaining()-byte pointer-slice allocation
+// (make([]*ContentAttribute, 0, attrCount)) before decode fails on the first
+// missing attr byte — the pointer-slice analogue of encoding's maxAnyElements
+// guard (N-C2). append still grows the slice for a genuinely large, valid range,
+// and each real attribute consumes input, so total work stays bounded.
+const maxPreallocAttrs = 1024
+
 // idSetRLEWriter is the clock/len RLE state of yjs IdSetEncoderV2: clocks are
 // written as diffs against a per-client cursor; lens as len-1 (len 0 is
 // forbidden on the wire — normalization removes zero-length ranges).
@@ -250,7 +259,7 @@ func readIDMap(dec *encoding.Decoder) (*IDMap, error) {
 			if attrCount > uint64(dec.Remaining())+1 {
 				return nil, attrDecodeErr("idmap attr count %d exceeds remaining input %d", attrCount, dec.Remaining())
 			}
-			rangeAttrs := make([]*ContentAttribute, 0, attrCount)
+			rangeAttrs := make([]*ContentAttribute, 0, min(attrCount, maxPreallocAttrs))
 			for k := uint64(0); k < attrCount; k++ {
 				attrID, err := dec.ReadVarUint()
 				if err != nil {

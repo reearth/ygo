@@ -2,8 +2,37 @@ package crdt
 
 import (
 	"reflect"
+	"strconv"
 	"testing"
 )
+
+// A single range carrying more attributes than maxPreallocAttrs must still
+// round-trip intact: the capped pre-allocation in readIDMap (which prevents a
+// crafted attrCount from forcing a huge up-front pointer-slice allocation) is
+// only a capacity hint, so append must grow the slice past the cap for a
+// genuinely large, valid range. Guards against a future change turning the cap
+// into a truncation or a hard rejection of valid input.
+func TestDecodeIDMap_AttrPreallocCapDoesNotTruncate(t *testing.T) {
+	n := maxPreallocAttrs + 5
+	attrs := make([]*ContentAttribute, 0, n)
+	for i := 0; i < n; i++ {
+		attrs = append(attrs, MustContentAttribute("k"+strconv.Itoa(i), int64(i)))
+	}
+	m := NewIDMap()
+	m.Add(1, 0, 1, attrs)
+
+	got, err := DecodeIDMap(EncodeIDMap(m))
+	if err != nil {
+		t.Fatalf("DecodeIDMap: %v", err)
+	}
+	r := got.Ranges(1)
+	if len(r) != 1 {
+		t.Fatalf("expected 1 range, got %d", len(r))
+	}
+	if len(r[0].Attrs) != n {
+		t.Fatalf("attrs truncated: got %d, want %d", len(r[0].Attrs), n)
+	}
+}
 
 func TestEncodeDecodeIDSet_RoundTrip(t *testing.T) {
 	s := NewIDSet()
