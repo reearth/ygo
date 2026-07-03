@@ -1,0 +1,22 @@
+{
+  "idset_basic": {
+    "bytes": "AyoBZOcHBwEDAAECAAQFBw=="
+  },
+  "idmap_basic": {
+    "bytes": "AgECBQQBAAAEdXNlcncDYm9iCgABAQEIcmV2aWV3ZWR4AgIAAwICAHcFYWxpY2UDAgJ0c32oDwYBAgID"
+  },
+  "idmap_overlap": {
+    "bytes": "AQEEAAQBAAABdXcBYQAEAgABAHcBYgAEAQEFBAIAAQ=="
+  },
+  "contentmap_stamp": {
+    "update": "AQKd8pWHAwABAQF0BoSd8pWHAwUFd29ybGQBnfKVhwMBAAY=",
+    "contentIdsBytes": "AZ3ylYcDAQAKAZ3ylYcDAQAF",
+    "bytes": "AZ3ylYcDAQAKAgAABnVzZXJpZHcFYWxpY2UBAQJ0c32oDwGd8pWHAwEABQIAAAZ1c2VyaWR3BWFsaWNlAQECdHN9qA8="
+  },
+  "idset_empty": {
+    "bytes": "AA=="
+  },
+  "idmap_empty": {
+    "bytes": "AA=="
+  }
+}
