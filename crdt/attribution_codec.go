@@ -296,3 +296,47 @@ func DecodeIDMap(data []byte) (*IDMap, error) {
 	dec := encoding.NewDecoder(data)
 	return readIDMap(dec)
 }
+
+// EncodeContentIDs encodes c (inserts then deletes; yjs encodeContentIds).
+func EncodeContentIDs(c ContentIDs) []byte {
+	enc := encoding.NewEncoder()
+	writeIDSet(enc, c.Inserts)
+	writeIDSet(enc, c.Deletes)
+	return enc.Bytes()
+}
+
+// DecodeContentIDs decodes data produced by EncodeContentIDs / yjs encodeContentIds.
+func DecodeContentIDs(data []byte) (ContentIDs, error) {
+	dec := encoding.NewDecoder(data)
+	inserts, err := readIDSet(dec)
+	if err != nil {
+		return ContentIDs{}, err
+	}
+	deletes, err := readIDSet(dec)
+	if err != nil {
+		return ContentIDs{}, err
+	}
+	return ContentIDs{Inserts: inserts, Deletes: deletes}, nil
+}
+
+// EncodeContentMap encodes c (inserts then deletes; yjs encodeContentMap).
+func EncodeContentMap(c ContentMap) []byte {
+	enc := encoding.NewEncoder()
+	writeIDMap(enc, c.Inserts)
+	writeIDMap(enc, c.Deletes)
+	return enc.Bytes()
+}
+
+// DecodeContentMap decodes data produced by EncodeContentMap / yjs encodeContentMap.
+func DecodeContentMap(data []byte) (ContentMap, error) {
+	dec := encoding.NewDecoder(data)
+	inserts, err := readIDMap(dec)
+	if err != nil {
+		return ContentMap{}, err
+	}
+	deletes, err := readIDMap(dec)
+	if err != nil {
+		return ContentMap{}, err
+	}
+	return ContentMap{Inserts: inserts, Deletes: deletes}, nil
+}
