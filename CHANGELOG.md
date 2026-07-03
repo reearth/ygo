@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.30.0] — 2026-07-03
+
+### Added
+
+- **`websocket.Server.Authorize`** — a richer alternative to `AuthFunc`:
+  `func(*http.Request) (ConnectionConfig, bool)`. The bool accepts/rejects the
+  connection (false → 401, as before); the returned `ConnectionConfig` describes
+  the accepted connection. The first field is `ReadOnly`. When `Authorize` is set
+  it takes precedence over `AuthFunc`; `AuthFunc` is unchanged and still grants
+  read-write. This enables Hocuspocus-style read-only connections — public-read
+  docs, viewer roles, monitoring connections (#59).
+- **`websocket.ConnectionConfig`** — per-connection configuration returned by
+  `Authorize`. Currently carries `ReadOnly bool`; extensible for future
+  per-connection settings.
+
+### Changed
+
+- **Read-only WebSocket peers drop inbound writes.** A peer accepted with
+  `ConnectionConfig{ReadOnly: true}` still receives document and awareness
+  broadcasts and can request state (its `SyncStep1` is answered with `SyncStep2`)
+  and query awareness, but its inbound writes are dropped server-side: sync
+  `SyncStep2`/`Update` messages, Hocuspocus `SyncReply` (tag 4), and awareness
+  updates are not applied or broadcast. Stateless signals (tags 5/6) are not
+  gated by read-only. This is additive — connections authorized via `AuthFunc`
+  (or with no auth hook) remain read-write. (#59)
+
 ## [1.29.1] — 2026-06-29
 
 ### Fixed

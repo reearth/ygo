@@ -221,6 +221,16 @@ type room struct {
 	relayUnsub []func()
 }
 
+// ConnectionConfig describes an accepted WebSocket connection. It is returned by
+// Server.Authorize (issue #59). Additional per-connection settings can be added
+// here in a backward-compatible way.
+type ConnectionConfig struct {
+	// ReadOnly, when true, makes the peer read-only: it receives document and
+	// awareness broadcasts but its inbound writes are dropped server-side. See
+	// Server.Authorize for the exact semantics.
+	ReadOnly bool
+}
+
 // Server is a net/http-compatible WebSocket handler.
 // Each distinct room name maps to an independent Yjs document.
 type Server struct {
@@ -256,7 +266,20 @@ type Server struct {
 	// connection. Return false to reject the connection; the server responds
 	// with 401 Unauthorized. Use this hook for token validation, session checks,
 	// or IP allow-lists. If nil, all connections are accepted.
+	//
+	// AuthFunc grants read-write access. To grant read-only access, use Authorize
+	// instead — when Authorize is set it takes precedence and AuthFunc is ignored.
 	AuthFunc func(r *http.Request) bool
+
+	// Authorize, if non-nil, is the richer alternative to AuthFunc: it both
+	// accepts/rejects the connection (second return value; false → 401) and
+	// returns a ConnectionConfig describing the accepted connection — notably
+	// whether it is read-only (issue #59). When Authorize is set it takes
+	// precedence over AuthFunc. A read-only peer receives document and awareness
+	// broadcasts but its inbound writes (SyncStep2/Update and awareness updates)
+	// are dropped; it can still request state (SyncStep1 is answered) and query
+	// awareness. Stateless signals are not gated by read-only.
+	Authorize func(r *http.Request) (ConnectionConfig, bool)
 
 	// AllowedOrigins is the list of origins permitted to open WebSocket
 	// connections (C2 — CORS). Each entry is a full origin string, e.g.
@@ -788,9 +811,23 @@ func (s *Server) getOrCreateRoomLocked(ctx context.Context, name string) (*room,
 // Room name is taken from the {room} path variable (Go 1.22 ServeMux) or
 // falls back to the last path segment.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.AuthFunc != nil && !s.AuthFunc(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+	// Authorize (issue #59) takes precedence over AuthFunc when both are set: it
+	// both accepts/rejects and reports per-connection config (read-only). AuthFunc
+	// grants read-write. Rejecting either way is a 401 before the upgrade.
+	var readOnly bool
+	switch {
+	case s.Authorize != nil:
+		cfg, ok := s.Authorize(r)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		readOnly = cfg.ReadOnly
+	case s.AuthFunc != nil:
+		if !s.AuthFunc(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	name := r.PathValue("room")
@@ -856,6 +893,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeCh:    make(chan []byte, s.peerWriteQueueSize()),
 		writerDone: make(chan struct{}),
 		limiter:    s.newPeerLimiter(),
+		readOnly:   readOnly,
 	}
 
 	// Verify the room is still in the server map before adding the peer.
