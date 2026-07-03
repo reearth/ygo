@@ -49,3 +49,60 @@ func TestDecodeIDSet_Malformed(t *testing.T) {
 		}
 	}
 }
+
+func TestEncodeDecodeIDMap_RoundTripWithDedup(t *testing.T) {
+	m := NewIDMap()
+	shared := attrs(t, "user", "alice", "ts", int64(1000))
+	m.Add(3, 0, 4, shared)
+	m.Add(3, 10, 2, shared)                     // same attrs -> attr table hit
+	m.Add(1, 5, 5, attrs(t, "user", "bob"))     // new attr, shared name "user"
+	m.Add(1, 20, 1, attrs(t, "reviewed", true)) // new name
+
+	data := EncodeIDMap(m)
+	got, err := DecodeIDMap(data)
+	if err != nil {
+		t.Fatalf("DecodeIDMap: %v", err)
+	}
+	if !reflect.DeepEqual(got.Clients(), m.Clients()) {
+		t.Fatalf("clients = %v, want %v", got.Clients(), m.Clients())
+	}
+	for _, c := range m.Clients() {
+		w, g := m.Ranges(c), got.Ranges(c)
+		if len(w) != len(g) {
+			t.Fatalf("client %d: %d ranges, want %d", c, len(g), len(w))
+		}
+		for i := range w {
+			if w[i].Clock != g[i].Clock || w[i].Len != g[i].Len || len(w[i].Attrs) != len(g[i].Attrs) {
+				t.Fatalf("client %d range %d = %+v, want %+v", c, i, g[i], w[i])
+			}
+			for j := range w[i].Attrs {
+				if attrKey(w[i].Attrs[j]) != attrKey(g[i].Attrs[j]) {
+					t.Fatalf("client %d range %d attr %d differs", c, i, j)
+				}
+			}
+		}
+	}
+	// Decoded attrs with equal values must be the SAME interned instance.
+	r3 := got.Ranges(3)
+	if r3[0].Attrs[0] != r3[1].Attrs[0] {
+		t.Fatal("decoded equal attrs should be one interned instance")
+	}
+	// Canonical re-encode stability.
+	if again := EncodeIDMap(got); !reflect.DeepEqual(again, data) {
+		t.Fatal("re-encode of decoded IDMap is not byte-stable")
+	}
+}
+
+func TestDecodeIDMap_Malformed(t *testing.T) {
+	cases := map[string][]byte{
+		"truncated":        {},
+		"huge clients":     {0xFF, 0xFF, 0xFF, 0x0F},
+		"huge attr count":  {1, 1, 1, 0, 0, 0xFF, 0xFF, 0xFF, 0x0F},
+		"dangling attr id": {1, 1, 1, 0, 0, 1, 9}, // attrID 9 refers past the table with no definition bytes
+	}
+	for name, data := range cases {
+		if _, err := DecodeIDMap(data); err == nil {
+			t.Errorf("%s: expected error, got nil", name)
+		}
+	}
+}

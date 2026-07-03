@@ -143,3 +143,156 @@ func DecodeIDSet(data []byte) (*IDSet, error) {
 	}
 	return s, nil
 }
+
+// writeIDMap appends the canonical encoding of m to enc (yjs writeIdMap).
+func writeIDMap(enc *encoding.Encoder, m *IDMap) {
+	type entry struct {
+		client ClientID
+		ids    []AttrRange
+	}
+	entries := make([]entry, 0, len(m.clients))
+	for c, r := range m.clients {
+		if ids := r.getIDs(); len(ids) > 0 {
+			entries = append(entries, entry{c, ids})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].client < entries[j].client })
+	enc.WriteVarUint(uint64(len(entries)))
+	w := idSetRLEWriter{enc: enc}
+	var lastClient uint64
+	visitedAttrs := make(map[*ContentAttribute]uint64) // instance -> attrID (encounter order)
+	visitedNames := make(map[string]uint64)            // name -> attrNameID (encounter order)
+	for _, e := range entries {
+		w.reset()
+		enc.WriteVarUint(uint64(e.client) - lastClient)
+		lastClient = uint64(e.client)
+		enc.WriteVarUint(uint64(len(e.ids)))
+		for _, rg := range e.ids {
+			w.writeClock(rg.Clock)
+			w.writeLen(rg.Len)
+			enc.WriteVarUint(uint64(len(rg.Attrs)))
+			for _, attr := range rg.Attrs {
+				if id, ok := visitedAttrs[attr]; ok {
+					enc.WriteVarUint(id)
+					continue
+				}
+				id := uint64(len(visitedAttrs))
+				visitedAttrs[attr] = id
+				enc.WriteVarUint(id)
+				if nameID, ok := visitedNames[attr.Name]; ok {
+					enc.WriteVarUint(nameID)
+				} else {
+					nameID := uint64(len(visitedNames))
+					visitedNames[attr.Name] = nameID
+					enc.WriteVarUint(nameID)
+					enc.WriteVarString(attr.Name)
+				}
+				enc.WriteAny(attr.Value)
+			}
+		}
+	}
+}
+
+// readIDMap consumes one IDMap from dec.
+func readIDMap(dec *encoding.Decoder) (*IDMap, error) {
+	numClients, err := dec.ReadVarUint()
+	if err != nil {
+		return nil, attrDecodeErr("idmap client count: %v", err)
+	}
+	if numClients > uint64(dec.Remaining()) {
+		return nil, attrDecodeErr("idmap client count %d exceeds remaining input %d", numClients, dec.Remaining())
+	}
+	m := NewIDMap()
+	r := idSetRLEReader{dec: dec}
+	var visitedAttrs []*ContentAttribute
+	var visitedNames []string
+	var lastClient uint64
+	for i := uint64(0); i < numClients; i++ {
+		r.reset()
+		delta, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, attrDecodeErr("idmap client delta: %v", err)
+		}
+		client := lastClient + delta
+		lastClient = client
+		numRanges, err := dec.ReadVarUint()
+		if err != nil {
+			return nil, attrDecodeErr("idmap range count: %v", err)
+		}
+		if numRanges > uint64(dec.Remaining())+1 {
+			return nil, attrDecodeErr("idmap range count %d exceeds remaining input %d", numRanges, dec.Remaining())
+		}
+		for j := uint64(0); j < numRanges; j++ {
+			clock, err := r.readClock()
+			if err != nil {
+				return nil, attrDecodeErr("idmap clock: %v", err)
+			}
+			length, err := r.readLen()
+			if err != nil {
+				return nil, attrDecodeErr("idmap len: %v", err)
+			}
+			attrCount, err := dec.ReadVarUint()
+			if err != nil {
+				return nil, attrDecodeErr("idmap attr count: %v", err)
+			}
+			if attrCount > uint64(dec.Remaining())+1 {
+				return nil, attrDecodeErr("idmap attr count %d exceeds remaining input %d", attrCount, dec.Remaining())
+			}
+			rangeAttrs := make([]*ContentAttribute, 0, attrCount)
+			for k := uint64(0); k < attrCount; k++ {
+				attrID, err := dec.ReadVarUint()
+				if err != nil {
+					return nil, attrDecodeErr("idmap attr id: %v", err)
+				}
+				if attrID < uint64(len(visitedAttrs)) {
+					rangeAttrs = append(rangeAttrs, visitedAttrs[attrID])
+					continue
+				}
+				if attrID != uint64(len(visitedAttrs)) {
+					return nil, attrDecodeErr("idmap attr id %d skips table size %d", attrID, len(visitedAttrs))
+				}
+				nameID, err := dec.ReadVarUint()
+				if err != nil {
+					return nil, attrDecodeErr("idmap attr name id: %v", err)
+				}
+				var name string
+				switch {
+				case nameID < uint64(len(visitedNames)):
+					name = visitedNames[nameID]
+				case nameID == uint64(len(visitedNames)):
+					name, err = dec.ReadVarString()
+					if err != nil {
+						return nil, attrDecodeErr("idmap attr name: %v", err)
+					}
+					visitedNames = append(visitedNames, name)
+				default:
+					return nil, attrDecodeErr("idmap attr name id %d skips table size %d", nameID, len(visitedNames))
+				}
+				value, err := dec.ReadAny()
+				if err != nil {
+					return nil, attrDecodeErr("idmap attr value: %v", err)
+				}
+				attr := &ContentAttribute{Name: name, Value: value}
+				visitedAttrs = append(visitedAttrs, attr)
+				rangeAttrs = append(rangeAttrs, attr)
+			}
+			m.Add(ClientID(client), clock, length, rangeAttrs)
+		}
+	}
+	return m, nil
+}
+
+// EncodeIDMap encodes m in the yjs-v14 IdMap binary format. All attributes must
+// come from NewContentAttribute (or otherwise stay within the lib0 any domain);
+// hand-constructed literals with unsupported values panic in WriteAny.
+func EncodeIDMap(m *IDMap) []byte {
+	enc := encoding.NewEncoder()
+	writeIDMap(enc, m)
+	return enc.Bytes()
+}
+
+// DecodeIDMap decodes data produced by EncodeIDMap / yjs encodeIdMap.
+func DecodeIDMap(data []byte) (*IDMap, error) {
+	dec := encoding.NewDecoder(data)
+	return readIDMap(dec)
+}
