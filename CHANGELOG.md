@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.30.1] — 2026-07-08
+
+### Fixed
+
+- **`MergeUpdatesV1`/`DiffUpdateV1` silently dropped a nested-type child whose
+  parent is referenced by item-ID when the container is in a later client group**
+  (the deferred parent-by-ID / C-3 case). The struct-level merge decodes structs
+  without integrating them, so a deferred child kept `Parent == nil` with only
+  `parentID` set; `encodeItem` then (1) matched the GC-orphan guard and re-encoded
+  the child as a content-less GC placeholder, and (2) wrote an empty-named root
+  type for the parent — either way detaching the child. A 37-byte full-state
+  update round-tripped through `MergeUpdatesV1` came back 20 bytes with the child
+  reduced to a GC placeholder, so `MergeUpdatesV1(u)` was not equivalent to
+  apply-then-encode. Regression from the struct-level merge rewrite (#125),
+  present v1.27.0–v1.30.0. Fixed by excluding deferred `parentID` items from the
+  GC-orphan guard and re-emitting the explicit parent-by-ID when `Parent` is
+  still unresolved. Consumers that reconstruct a document by folding a base
+  snapshot plus tail updates through `MergeUpdatesV1` (e.g. loading from
+  persistence) no longer lose nested-type children authored by a lower-clientID
+  peer. (#140)
+
 ## [1.30.0] — 2026-07-03
 
 This release bundles two additive features: read-only WebSocket connections

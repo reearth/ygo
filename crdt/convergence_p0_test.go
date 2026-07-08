@@ -350,3 +350,37 @@ func permute(a []int, k int, fn func([]int)) {
 		a[k], a[i] = a[i], a[k]
 	}
 }
+
+// C-3 (merge path) — MergeUpdatesV1 must preserve a cross-client parent-by-ID
+// child, not just ApplyUpdateV1. The struct-level merge decodes without
+// integrating, so the encoder must re-emit the deferred parentID; otherwise the
+// child detaches from its container on re-encode (silent data loss). #140.
+func TestP0_C3_MergeUpdatesPreservesCrossClientChild(t *testing.T) {
+	d200 := New(WithClientID(200))
+	frag := d200.GetXmlFragment("f")
+	el := NewYXmlElement("div")
+	d200.Transact(func(txn *Transaction) { frag.InsertElement(txn, 0, el) })
+
+	d100 := New(WithClientID(100))
+	if err := ApplyUpdateV1(d100, fullState(d200), nil); err != nil {
+		t.Fatalf("seed d100: %v", err)
+	}
+	el100 := d100.GetXmlFragment("f").Children()[0].(*YXmlElement)
+	d100.Transact(func(txn *Transaction) { el100.SetAttribute(txn, "class", "hello") })
+
+	merged, err := MergeUpdatesV1(fullState(d100))
+	if err != nil {
+		t.Fatalf("MergeUpdatesV1: %v", err)
+	}
+	fresh := New()
+	if err := ApplyUpdateV1(fresh, merged, nil); err != nil {
+		t.Fatalf("apply merged: %v", err)
+	}
+	fc := fresh.GetXmlFragment("f").Children()
+	if len(fc) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(fc))
+	}
+	if v, ok := fc[0].(*YXmlElement).GetAttribute("class"); !ok || v != "hello" {
+		t.Fatalf("merged element attribute class=%q ok=%v, want \"hello\"", v, ok)
+	}
+}
