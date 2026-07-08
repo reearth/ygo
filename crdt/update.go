@@ -192,7 +192,13 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 	// (origin + content, no parent info), NOT as a GC placeholder, or its content
 	// would be lost. Parent info is only written in the no-origin branch below,
 	// so an origin-bearing item never dereferences item.Parent. (#125)
-	if item.Parent == nil && item.Origin == nil && item.OriginRight == nil {
+	//
+	// Also exclude items carrying a deferred parent-by-ID: they have a nil Parent
+	// (not yet integrated) but a known container ID in parentID, and must be
+	// encoded as a normal item so the no-origin branch below can re-emit the
+	// explicit parent-by-ID. Treating them as GC orphans here dropped their
+	// content and parent link (silent data loss on merge). (#140)
+	if item.Parent == nil && item.Origin == nil && item.OriginRight == nil && item.parentID == nil {
 		length := item.Content.Len()
 		if offset > 0 {
 			length -= offset
@@ -288,6 +294,17 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 			enc.WriteUint8(0)
 			enc.WriteVarUint(uint64(item.Parent.item.ID.Client))
 			enc.WriteVarUint(item.Parent.item.ID.Clock)
+		} else if item.parentID != nil {
+			// Deferred parent-by-ID: this item was decoded but not yet
+			// integrated (its container is in a later client group), so Parent
+			// is still nil while parentID holds the container's ID. Re-emit the
+			// explicit parent-by-ID so the receiver can defer and resolve it too.
+			// Without this the struct-level MergeUpdatesV1/DiffUpdateV1 encode
+			// path falls through to the root-named-type branch below and writes
+			// an empty name, detaching the child (silent data loss). (#140)
+			enc.WriteUint8(0)
+			enc.WriteVarUint(uint64(item.parentID.Client))
+			enc.WriteVarUint(item.parentID.Clock)
 		} else {
 			// Root named type.
 			enc.WriteUint8(1)

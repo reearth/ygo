@@ -22,7 +22,11 @@ type Item struct {
 	// item's parent is referenced by item-ID (a nested type) but that container
 	// has not yet been integrated. It lets integration defer the item until the
 	// parent arrives (Yjs pendingStructs parity, review finding C-3) instead of
-	// hard-failing the decode. Resolved to Parent during integration; never encoded.
+	// hard-failing the decode. Resolved to Parent during integration. The
+	// integrate/apply path never encodes it (Parent is set by then), but the
+	// struct-level MergeUpdatesV1/DiffUpdateV1 encode path (which does not
+	// integrate) re-emits it as the explicit parent-by-ID so the child is not
+	// detached on re-encode. (#140)
 	parentID *ID
 	// MovedBy points to the winning ContentMove item that has claimed this item
 	// as its target. When non-nil, this item is rendered at the ContentMove's
