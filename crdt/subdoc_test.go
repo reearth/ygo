@@ -253,3 +253,115 @@ func TestSubdocs_V2AndMergeRoundTrip(t *testing.T) {
 		t.Fatalf("merge v2 lost subdoc/opts: %v", s)
 	}
 }
+
+// noDocInBothAddedAndRemoved fails the test if any event has the same *Doc
+// appearing in both Added and Removed — the corruption signature of the #63
+// final-review I-1 bug, where the tail-positioned ContentDoc registration ran
+// AFTER the ParentSub last-writer-wins self-delete, so a losing concurrent
+// embed got routed to subdocsRemoved and then unconditionally re-added.
+func noDocInBothAddedAndRemoved(t *testing.T, events []SubdocsEvent) {
+	t.Helper()
+	for i, ev := range events {
+		added := map[*Doc]bool{}
+		for _, d := range ev.Added {
+			added[d] = true
+		}
+		for _, d := range ev.Removed {
+			if added[d] {
+				t.Fatalf("event %d: doc %q present in both Added and Removed: %+v", i, d.GUID(), ev)
+			}
+		}
+	}
+}
+
+// TestSubdocs_ConcurrentSameKeySameGUID_RegistryNotEvicted reproduces #63
+// final-review finding I-1 for the same-guid variant: two peers concurrently
+// embed a subdocument (same guid, different Go *Doc objects) under the same
+// map key. YATA arbitration makes one lose (integrates non-rightmost) and
+// self-delete. Before the fix, the loser's registration ran after its own
+// self-delete, so the loser got recorded in both subdocsAdded and
+// subdocsRemoved for the same guid string — and since the registry
+// (d.subdocs) is keyed by guid, the Added pass (last write wins by guid) and
+// then the Removed pass (delete by guid) could evict the WINNER's live entry
+// entirely, even though the winner was added in an earlier, independent
+// transaction. GetSubdocGUIDs() must keep listing the winner.
+//
+// Deterministic ClientIDs pin the YATA arbitration: an item's Origin/Right
+// are both nil for a first write to a fresh key, so the tie-break is a raw
+// ID.Client comparison (crdt/item.go's conflict scan). The item that
+// integrates SECOND with the LOWER ClientID ends up placed to the LEFT of
+// (i.e. non-rightmost relative to) the already-integrated higher-ClientID
+// item, and therefore self-deletes via the ParentSub LWW block.
+func TestSubdocs_ConcurrentSameKeySameGUID_RegistryNotEvicted(t *testing.T) {
+	parentHi := New(WithClientID(2))
+	parentLo := New(WithClientID(1))
+	embedSubdoc(t, parentHi, "k", New(WithGUID("shared")))
+	embedSubdoc(t, parentLo, "k", New(WithGUID("shared")))
+
+	updHi := EncodeStateAsUpdateV1(parentHi, nil)
+	updLo := EncodeStateAsUpdateV1(parentLo, nil)
+
+	target := New()
+	var events []SubdocsEvent
+	target.OnSubdocs(func(ev SubdocsEvent) { events = append(events, ev) })
+
+	// Apply the higher-ClientID update first so its item becomes parent.start
+	// (trivially rightmost, wins). Then apply the lower-ClientID update: its
+	// item loses YATA arbitration against the already-placed item and
+	// integrates non-rightmost, triggering the self-delete path.
+	if err := ApplyUpdateV1(target, updHi, nil); err != nil {
+		t.Fatalf("apply hi: %v", err)
+	}
+	if err := ApplyUpdateV1(target, updLo, nil); err != nil {
+		t.Fatalf("apply lo: %v", err)
+	}
+
+	if guids := target.GetSubdocGUIDs(); len(guids) != 1 || guids[0] != "shared" {
+		t.Fatalf("registry lost the live winner: guids=%v (want [\"shared\"])", guids)
+	}
+	if subs := target.GetSubdocs(); len(subs) != 1 || subs[0].GUID() != "shared" {
+		t.Fatalf("GetSubdocs() lost the live winner: %+v", subs)
+	}
+	noDocInBothAddedAndRemoved(t, events)
+}
+
+// TestSubdocs_ConcurrentSameKeyDistinctGUID_NoPhantomEvent is the
+// distinct-guid variant of the same #63 I-1 finding. The loser's embed+
+// self-delete happen inside the single ApplyUpdateV1 transaction that
+// decodes it, so — once registration precedes the LWW check — the add is
+// cancelled in-transaction and nets to zero subdocs events for that call
+// (mirrors TestSubdocs_AddThenDeleteSameTxnCancels, but here the cancel
+// spans item.integrate's registration and item.delete's cancel logic rather
+// than two explicit calls). Before the fix, the loser's registration ran
+// after the self-delete, so it landed in Added AND Removed (and Loaded) of
+// the SAME event instead of cancelling out.
+func TestSubdocs_ConcurrentSameKeyDistinctGUID_NoPhantomEvent(t *testing.T) {
+	parentHi := New(WithClientID(2))
+	parentLo := New(WithClientID(1))
+	embedSubdoc(t, parentHi, "k", New(WithGUID("doc-hi")))
+	embedSubdoc(t, parentLo, "k", New(WithGUID("doc-lo")))
+
+	updHi := EncodeStateAsUpdateV1(parentHi, nil)
+	updLo := EncodeStateAsUpdateV1(parentLo, nil)
+
+	target := New()
+	var events []SubdocsEvent
+	target.OnSubdocs(func(ev SubdocsEvent) { events = append(events, ev) })
+
+	if err := ApplyUpdateV1(target, updHi, nil); err != nil {
+		t.Fatalf("apply hi: %v", err)
+	}
+	events = events[:0] // only the second apply (the losing embed) is under test
+
+	if err := ApplyUpdateV1(target, updLo, nil); err != nil {
+		t.Fatalf("apply lo: %v", err)
+	}
+
+	if guids := target.GetSubdocGUIDs(); len(guids) != 1 || guids[0] != "doc-hi" {
+		t.Fatalf("expected only the winner resident, got %v", guids)
+	}
+	if len(events) != 0 {
+		t.Fatalf("losing concurrent embed should net to zero subdocs events (add+self-delete cancel in one txn), got %d: %+v", len(events), events)
+	}
+	noDocInBothAddedAndRemoved(t, events)
+}

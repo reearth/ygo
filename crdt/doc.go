@@ -190,6 +190,8 @@ func (d *Doc) AutoLoad() bool {
 
 // ShouldLoad returns whether a provider should sync this doc now.
 func (d *Doc) ShouldLoad() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return d.shouldLoad
 }
 
