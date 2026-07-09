@@ -193,6 +193,27 @@ func (d *Doc) CollectionID() string {
 	return d.collectionID
 }
 
+// Load signals that this subdocument's data should be synced. On a subdocument
+// it sets shouldLoad=true and emits a subdocs "loaded" event on the parent; on a
+// root doc it just sets shouldLoad=true. Safe to call multiple times.
+//
+// Load opens a transaction on the PARENT document, so it MUST NOT be called from
+// inside a Transact closure (re-entrant lock — same footgun as GetText-in-Transact).
+func (d *Doc) Load() {
+	d.mu.Lock()
+	if d.shouldLoad {
+		d.mu.Unlock()
+		return
+	}
+	d.shouldLoad = true
+	item := d.item
+	d.mu.Unlock()
+	if item == nil || item.Parent == nil {
+		return
+	}
+	item.Parent.doc.Transact(func(txn *Transaction) { txn.addSubdocLoaded(d) })
+}
+
 // maxPendingItemsLimit returns the effective cap on the pending queue depth.
 func (d *Doc) maxPendingItemsLimit() int {
 	if d.maxPendingItems <= 0 {

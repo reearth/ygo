@@ -143,3 +143,32 @@ func TestSubdocs_AddThenDeleteSameTxnCancels(t *testing.T) {
 		t.Fatalf("add+delete in one txn should fire nothing, fired %d", fires)
 	}
 }
+
+func TestSubdocs_LocalSubdocLoadsOnIntegrate(t *testing.T) {
+	parent := New()
+	var ev SubdocsEvent
+	parent.OnSubdocs(func(e SubdocsEvent) { ev = e })
+	embedSubdoc(t, parent, "a", New(WithGUID("c"))) // shouldLoad defaults true
+	if len(ev.Loaded) != 1 || ev.Loaded[0].GUID() != "c" {
+		t.Fatalf("local subdoc should load on integrate; Loaded=%v", ev.Loaded)
+	}
+}
+
+func TestSubdocs_LoadEmitsLoadedForUnloadedChild(t *testing.T) {
+	parent := New()
+	child := New(WithGUID("c"))
+	child.shouldLoad = false // simulate a decoded/remote child (no autoLoad)
+	embedSubdoc(t, parent, "a", child)
+	var ev SubdocsEvent
+	fires := 0
+	parent.OnSubdocs(func(e SubdocsEvent) { ev = e; fires++ })
+	child.Load()
+	if fires != 1 || len(ev.Loaded) != 1 || ev.Loaded[0] != child || !child.ShouldLoad() {
+		t.Fatalf("Load() should emit loaded once + set shouldLoad; fires=%d Loaded=%v", fires, ev.Loaded)
+	}
+	fires = 0
+	child.Load()
+	if fires != 0 {
+		t.Error("second Load() must be a no-op")
+	}
+}
