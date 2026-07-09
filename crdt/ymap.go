@@ -2,6 +2,16 @@ package crdt
 
 import "encoding/json"
 
+// contentForValue wraps a YMap value into Content. A *Doc becomes a ContentDoc
+// (subdocument embedding, Yjs parity: ymap.set(k, new Y.Doc())); everything else
+// becomes ContentAny.
+func contentForValue(value any) Content {
+	if d, ok := value.(*Doc); ok {
+		return NewContentDoc(d)
+	}
+	return NewContentAny(value)
+}
+
 // mapSub pairs a unique subscription ID with a YMapEvent callback.
 type mapSub struct {
 	id uint64
@@ -146,7 +156,7 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 		Left:      left,
 		Parent:    t,
 		ParentSub: strPtr(key),
-		Content:   NewContentAny(value),
+		Content:   contentForValue(value),
 	}
 	item.integrate(txn, 0)
 }
@@ -170,6 +180,9 @@ func (m *YMap) Get(key string) (any, bool) {
 	item, ok := t.itemMap[key]
 	if !ok || item.Deleted {
 		return nil, false
+	}
+	if cd, ok := item.Content.(*ContentDoc); ok {
+		return cd.Doc, cd.Doc != nil
 	}
 	ca, ok := item.Content.(*ContentAny)
 	if !ok || len(ca.Vals) == 0 {

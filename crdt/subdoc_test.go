@@ -71,3 +71,27 @@ func (d *Doc) fireSubdocsForTest(ev SubdocsEvent) {
 		fn(ev)
 	}
 }
+
+func TestYMap_SetGetSubdoc(t *testing.T) {
+	parent := New()
+	child := New(WithGUID("child-1"))
+	m := parent.GetMap("root")
+	parent.Transact(func(txn *Transaction) { m.Set(txn, "a", child) })
+
+	got, ok := m.Get("a")
+	if !ok {
+		t.Fatal("subdoc key should be present")
+	}
+	sd, ok := got.(*Doc)
+	if !ok {
+		t.Fatalf("Get returned %T, want *Doc", got)
+	}
+	if sd.GUID() != "child-1" {
+		t.Fatalf("guid = %q, want child-1", sd.GUID())
+	}
+	// Non-doc values still round-trip as before.
+	parent.Transact(func(txn *Transaction) { m.Set(txn, "n", float64(42)) })
+	if v, _ := m.Get("n"); v != float64(42) {
+		t.Fatalf("scalar value regressed: %v", v)
+	}
+}
