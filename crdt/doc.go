@@ -68,6 +68,16 @@ func WithGUID(guid string) DocOption {
 	return func(d *Doc) { d.guid = guid }
 }
 
+// WithAutoLoad marks a subdocument to be auto-loaded by remote peers. Default false.
+func WithAutoLoad(v bool) DocOption { return func(d *Doc) { d.autoLoad = v } }
+
+// WithShouldLoad controls whether a provider should sync this doc now. Default
+// true; a decoded/remote subdocument starts false until Load().
+func WithShouldLoad(v bool) DocOption { return func(d *Doc) { d.shouldLoad = v } }
+
+// WithCollectionID sets an optional subdocument collection identifier.
+func WithCollectionID(id string) DocOption { return func(d *Doc) { d.collectionID = id } }
+
 // defaultMaxPendingItems is the default cap on items parked in the per-doc
 // pending queue waiting for out-of-order dependencies. Matches the per-update
 // limit (maxV2Items) used by the decoder. See WithMaxPendingItems and #46.
@@ -99,13 +109,33 @@ type transactionSub struct {
 	fn func(*Transaction)
 }
 
+// SubdocsEvent reports subdocument lifecycle changes for one transaction. The
+// slices are freshly allocated per fire; do not retain or mutate them.
+type SubdocsEvent struct {
+	Added   []*Doc
+	Removed []*Doc
+	Loaded  []*Doc
+}
+
+// subdocsSub pairs a unique subscription ID with an OnSubdocs callback.
+type subdocsSub struct { //nolint:unused // used in subdoc lifecycle tasks
+	id uint64
+	fn func(SubdocsEvent)
+}
+
 // Doc is the root of a Yjs collaborative document.
 // All shared types (YArray, YMap, YText, …) live inside a Doc.
 type Doc struct {
 	clientID        ClientID
 	gc              bool
 	guid            string // subdocument identifier; empty for root docs
-	maxPendingItems int    // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
+	shouldLoad      bool
+	autoLoad        bool
+	collectionID    string
+	item            *Item           //nolint:unused // used in subdoc lifecycle tasks
+	subdocs         map[string]*Doc //nolint:unused // used in subdoc lifecycle tasks
+	onSubdocs       []subdocsSub    //nolint:unused // used in subdoc lifecycle tasks
+	maxPendingItems int             // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -148,12 +178,40 @@ func (d *Doc) GUID() string {
 	return d.guid
 }
 
+// AutoLoad returns whether this subdocument should be auto-loaded by remote peers.
+func (d *Doc) AutoLoad() bool {
+	return d.autoLoad
+}
+
+// ShouldLoad returns whether a provider should sync this doc now.
+func (d *Doc) ShouldLoad() bool {
+	return d.shouldLoad
+}
+
+// CollectionID returns the optional subdocument collection identifier.
+func (d *Doc) CollectionID() string {
+	return d.collectionID
+}
+
 // maxPendingItemsLimit returns the effective cap on the pending queue depth.
 func (d *Doc) maxPendingItemsLimit() int {
 	if d.maxPendingItems <= 0 {
 		return defaultMaxPendingItems
 	}
 	return d.maxPendingItems
+}
+
+// uuidV4 returns a random RFC-4122 v4 UUID string. Used as the default document
+// guid so every Doc has a stable unique id for subdocument embedding (Yjs
+// parity: Yjs defaults guid to uuidv4()). No external dependency.
+func uuidV4() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Errorf("crypto/rand failed: %w", err))
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // NewClientID generates a fresh ClientID via crypto/rand.
@@ -176,10 +234,13 @@ func NewClientID() ClientID {
 // New creates a new Doc with a randomly generated ClientID.
 func New(opts ...DocOption) *Doc {
 	d := &Doc{
-		clientID: NewClientID(), // uint32 keeps IDs within JS Number.MAX_SAFE_INTEGER
-		gc:       true,
-		store:    newStructStore(),
-		share:    make(map[string]sharedType),
+		clientID:   NewClientID(),
+		gc:         true,
+		guid:       uuidV4(),
+		shouldLoad: true,
+		store:      newStructStore(),
+		share:      make(map[string]sharedType),
+		subdocs:    make(map[string]*Doc),
 	}
 	for _, opt := range opts {
 		opt(d)

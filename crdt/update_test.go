@@ -586,7 +586,8 @@ func TestUnit_WithGUID(t *testing.T) {
 	assert.Equal(t, "test-guid", doc.GUID())
 
 	doc2 := New()
-	assert.Empty(t, doc2.GUID())
+	assert.NotEmpty(t, doc2.GUID())
+	assert.Len(t, doc2.GUID(), 36) // UUID v4 format is 36 chars
 }
 
 func TestUnit_MergeUpdatesV1_YMapWithGCdOrigins(t *testing.T) {
