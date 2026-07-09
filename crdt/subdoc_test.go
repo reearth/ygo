@@ -172,3 +172,24 @@ func TestSubdocs_LoadEmitsLoadedForUnloadedChild(t *testing.T) {
 		t.Error("second Load() must be a no-op")
 	}
 }
+
+func TestContentDoc_CopyClonesFreshDoc(t *testing.T) {
+	orig := New(WithGUID("g"), WithAutoLoad(true), WithCollectionID("cid"))
+	cp := (&ContentDoc{orig}).Copy().(*ContentDoc)
+	if cp.Doc == orig || cp.Doc.GUID() != "g" || !cp.Doc.AutoLoad() || cp.Doc.CollectionID() != "cid" {
+		t.Fatalf("Copy must clone opts into a fresh Doc; got %+v", cp.Doc)
+	}
+}
+
+func TestSubdocs_DoubleEmbedGuard(t *testing.T) {
+	parent := New()
+	child := New(WithGUID("c"))
+	embedSubdoc(t, parent, "a", child)
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("re-embedding an integrated subdoc should panic")
+		}
+	}()
+	m := parent.GetMap("root")
+	parent.Transact(func(txn *Transaction) { m.Set(txn, "b", child) })
+}

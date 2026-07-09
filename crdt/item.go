@@ -296,6 +296,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// the only earlier return in this function is the `item.Parent == nil`
 	// guard above, which bails before an item is ever placed.
 	if cd, ok := item.Content.(*ContentDoc); ok && cd.Doc != nil {
+		if cd.Doc.item != nil && cd.Doc.item != item {
+			panic(ErrSubdocAlreadyIntegrated)
+		}
 		cd.Doc.item = item
 		txn.addSubdocAdded(cd.Doc)
 		if cd.Doc.shouldLoad {

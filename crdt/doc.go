@@ -42,10 +42,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 )
+
+// ErrSubdocAlreadyIntegrated is raised when a Doc already embedded as a
+// subdocument is embedded again. Create a second Doc with the same guid instead.
+var ErrSubdocAlreadyIntegrated = errors.New("ygo/crdt: subdocument already integrated; create a second instance with the same guid")
 
 // DocOption configures a Doc at creation time.
 type DocOption func(*Doc)

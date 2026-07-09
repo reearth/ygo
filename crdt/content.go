@@ -220,10 +220,25 @@ func (c *ContentType) Splice(_ int) Content       { panic("crdt: ContentType is 
 // ContentDoc holds a reference to a subdocument.
 type ContentDoc struct{ Doc *Doc }
 
-func NewContentDoc(d *Doc) *ContentDoc     { return &ContentDoc{d} }
-func (c *ContentDoc) Len() int             { return 1 }
-func (c *ContentDoc) IsCountable() bool    { return true }
-func (c *ContentDoc) Copy() Content        { return &ContentDoc{c.Doc} }
+func NewContentDoc(d *Doc) *ContentDoc  { return &ContentDoc{d} }
+func (c *ContentDoc) Len() int          { return 1 }
+func (c *ContentDoc) IsCountable() bool { return true }
+
+// Copy returns a ContentDoc wrapping a FRESH Doc with the same guid and opts. A
+// Doc may be embedded only once (its item back-reference is single-valued), so
+// item copies during split/merge must not alias one inner Doc. Mirrors Yjs
+// ContentDoc.copy / createDocFromOpts.
+func (c *ContentDoc) Copy() Content {
+	if c.Doc == nil {
+		return &ContentDoc{nil}
+	}
+	s := c.Doc
+	return &ContentDoc{New(
+		WithGUID(s.guid), WithGC(s.gc), WithAutoLoad(s.autoLoad),
+		WithShouldLoad(s.shouldLoad), WithCollectionID(s.collectionID),
+	)}
+}
+
 func (c *ContentDoc) Splice(_ int) Content { panic("crdt: ContentDoc is not splittable") }
 
 // ContentMove is a CRDT-safe array move marker. It sits at the destination
