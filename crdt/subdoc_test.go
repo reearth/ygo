@@ -95,3 +95,51 @@ func TestYMap_SetGetSubdoc(t *testing.T) {
 		t.Fatalf("scalar value regressed: %v", v)
 	}
 }
+
+// embedSubdoc embeds child into parent's root map under key inside a single
+// transaction. Shared helper used by the subdoc lifecycle test suite (#63).
+func embedSubdoc(t *testing.T, parent *Doc, key string, child *Doc) {
+	t.Helper()
+	m := parent.GetMap("root")
+	parent.Transact(func(txn *Transaction) { m.Set(txn, key, child) })
+}
+
+func TestSubdocs_AddedEventAndRegistry(t *testing.T) {
+	parent := New()
+	var ev SubdocsEvent
+	fires := 0
+	parent.OnSubdocs(func(e SubdocsEvent) { ev = e; fires++ })
+	embedSubdoc(t, parent, "a", New(WithGUID("child-1")))
+	if fires != 1 || len(ev.Added) != 1 || ev.Added[0].GUID() != "child-1" {
+		t.Fatalf("fires=%d Added=%v", fires, ev.Added)
+	}
+	if g := parent.GetSubdocGUIDs(); len(g) != 1 || g[0] != "child-1" {
+		t.Fatalf("registry=%v", g)
+	}
+}
+
+func TestSubdocs_RemovedOnDelete(t *testing.T) {
+	parent := New()
+	embedSubdoc(t, parent, "a", New(WithGUID("c")))
+	var ev SubdocsEvent
+	parent.OnSubdocs(func(e SubdocsEvent) { ev = e })
+	m := parent.GetMap("root")
+	parent.Transact(func(txn *Transaction) { m.Delete(txn, "a") })
+	if len(ev.Removed) != 1 || ev.Removed[0].GUID() != "c" || len(parent.GetSubdocs()) != 0 {
+		t.Fatalf("Removed=%v registry=%v", ev.Removed, parent.GetSubdocs())
+	}
+}
+
+func TestSubdocs_AddThenDeleteSameTxnCancels(t *testing.T) {
+	parent := New()
+	fires := 0
+	parent.OnSubdocs(func(SubdocsEvent) { fires++ })
+	m := parent.GetMap("root")
+	parent.Transact(func(txn *Transaction) {
+		m.Set(txn, "a", New(WithGUID("c")))
+		m.Delete(txn, "a")
+	})
+	if fires != 0 {
+		t.Fatalf("add+delete in one txn should fire nothing, fired %d", fires)
+	}
+}

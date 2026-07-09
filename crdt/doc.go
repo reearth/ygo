@@ -132,7 +132,7 @@ type Doc struct {
 	shouldLoad      bool
 	autoLoad        bool
 	collectionID    string
-	item            *Item //nolint:unused // used in subdoc lifecycle tasks
+	item            *Item // set on integrate when this Doc is embedded as a subdocument (#63)
 	subdocs         map[string]*Doc
 	onSubdocs       []subdocsSub
 	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
@@ -424,7 +424,31 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 		onAfterTxnSnap[i] = s.fn
 	}
 
-	if len(fireFns) == 0 && len(deepSnap) == 0 && len(onUpdateSnap) == 0 && len(onAfterTxnSnap) == 0 {
+	// #63 — reconcile the subdoc registry and build the event under the lock.
+	// This runs ABOVE the early-return below so GetSubdocs()/GetSubdocGUIDs()
+	// reflect adds/removes even when there are zero OnSubdocs observers.
+	hasSubdocs := len(txn.subdocsAdded)+len(txn.subdocsRemoved)+len(txn.subdocsLoaded) > 0
+	var subdocsEv SubdocsEvent
+	if hasSubdocs {
+		for sd := range txn.subdocsAdded {
+			d.subdocs[sd.guid] = sd
+			subdocsEv.Added = append(subdocsEv.Added, sd)
+		}
+		for sd := range txn.subdocsRemoved {
+			delete(d.subdocs, sd.guid)
+			subdocsEv.Removed = append(subdocsEv.Removed, sd)
+		}
+		for sd := range txn.subdocsLoaded {
+			subdocsEv.Loaded = append(subdocsEv.Loaded, sd)
+		}
+	}
+	onSubdocsSnap := make([]func(SubdocsEvent), len(d.onSubdocs))
+	for i, s := range d.onSubdocs {
+		onSubdocsSnap[i] = s.fn
+	}
+
+	if len(fireFns) == 0 && len(deepSnap) == 0 && len(onUpdateSnap) == 0 &&
+		len(onAfterTxnSnap) == 0 && (!hasSubdocs || len(onSubdocsSnap) == 0) {
 		return nil
 	}
 
@@ -442,6 +466,11 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 		}
 		for _, fn := range onAfterTxnSnap {
 			fn(txn)
+		}
+		if hasSubdocs {
+			for _, fn := range onSubdocsSnap {
+				fn(subdocsEv)
+			}
 		}
 	}
 }

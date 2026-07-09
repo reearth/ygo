@@ -290,6 +290,18 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	if item.Parent != nil {
 		txn.addChanged(item.Parent, parentSubKey(item.ParentSub))
 	}
+
+	// #63 — register an embedded subdocument (Content has no integrate hook).
+	// This runs exactly once, here at the single successful-integration tail:
+	// the only earlier return in this function is the `item.Parent == nil`
+	// guard above, which bails before an item is ever placed.
+	if cd, ok := item.Content.(*ContentDoc); ok && cd.Doc != nil {
+		cd.Doc.item = item
+		txn.addSubdocAdded(cd.Doc)
+		if cd.Doc.shouldLoad {
+			txn.addSubdocLoaded(cd.Doc)
+		}
+	}
 }
 
 // delete marks this item as a tombstone. The item stays in the linked list so
@@ -330,6 +342,17 @@ func (item *Item) delete(txn *Transaction) {
 			if !child.Deleted {
 				child.delete(txn)
 			}
+		}
+	}
+
+	// #63 — subdocument removal. Cancel an add-in-same-txn; else mark removed.
+	// GC does not remove subdocs (matches Yjs ContentDoc: gc is a no-op).
+	if cd, ok := item.Content.(*ContentDoc); ok && cd.Doc != nil {
+		if _, added := txn.subdocsAdded[cd.Doc]; added {
+			delete(txn.subdocsAdded, cd.Doc)
+			delete(txn.subdocsLoaded, cd.Doc)
+		} else {
+			txn.addSubdocRemoved(cd.Doc)
 		}
 	}
 }
