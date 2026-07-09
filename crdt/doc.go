@@ -118,7 +118,7 @@ type SubdocsEvent struct {
 }
 
 // subdocsSub pairs a unique subscription ID with an OnSubdocs callback.
-type subdocsSub struct { //nolint:unused // used in subdoc lifecycle tasks
+type subdocsSub struct {
 	id uint64
 	fn func(SubdocsEvent)
 }
@@ -132,10 +132,10 @@ type Doc struct {
 	shouldLoad      bool
 	autoLoad        bool
 	collectionID    string
-	item            *Item           //nolint:unused // used in subdoc lifecycle tasks
-	subdocs         map[string]*Doc //nolint:unused // used in subdoc lifecycle tasks
-	onSubdocs       []subdocsSub    //nolint:unused // used in subdoc lifecycle tasks
-	maxPendingItems int             // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
+	item            *Item //nolint:unused // used in subdoc lifecycle tasks
+	subdocs         map[string]*Doc
+	onSubdocs       []subdocsSub
+	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -636,6 +636,51 @@ func (d *Doc) OnAfterTransaction(fn func(*Transaction)) func() {
 			}
 		}
 	}
+}
+
+// OnSubdocs registers a callback fired once after any transaction that adds,
+// removes, or loads subdocuments. Returns an unsubscribe function. Mirrors
+// OnUpdate (safe concurrent, out-of-order unsubscribe).
+func (d *Doc) OnSubdocs(fn func(SubdocsEvent)) func() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.subIDGen++
+	id := d.subIDGen
+	d.onSubdocs = append(d.onSubdocs, subdocsSub{id: id, fn: fn})
+	return func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		for i, s := range d.onSubdocs {
+			if s.id == id {
+				d.onSubdocs = append(d.onSubdocs[:i], d.onSubdocs[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// GetSubdocs returns the resident subdocuments, sorted by guid.
+func (d *Doc) GetSubdocs() []*Doc {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]*Doc, 0, len(d.subdocs))
+	for _, sd := range d.subdocs {
+		out = append(out, sd)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].guid < out[j].guid })
+	return out
+}
+
+// GetSubdocGUIDs returns the guids of the resident subdocuments, sorted.
+func (d *Doc) GetSubdocGUIDs() []string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]string, 0, len(d.subdocs))
+	for g := range d.subdocs {
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // GetXmlFragment returns the named root YXmlFragment, creating it if it does
