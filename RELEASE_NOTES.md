@@ -1,4 +1,4 @@
-## [Unreleased]
+## v1.31.0
 
 Subdocument lifecycle (issue #63): a `Doc` can now embed another `Doc` as a
 subdocument — its own clock space and GUID, nested inside a parent doc's
@@ -38,9 +38,7 @@ is a separate, tracked follow-up (see [#142](https://github.com/reearth/ygo/issu
 ## Install
 
 ```
-go get github.com/reearth/ygo@vX.Y.Z
+go get github.com/reearth/ygo@v1.31.0
 ```
-
-*(Version to be assigned at release time.)*
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
