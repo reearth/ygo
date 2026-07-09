@@ -65,6 +65,7 @@ Post-v1.0 hardening:
 - **Provider security hardening** (v1.29.0). The HTTP provider gains `AuthFunc` (401), room-name validation (400, the same rule the WebSocket provider uses), and a configurable `MaxUpdateBytes` (413) — parity with the WebSocket provider. The WebSocket provider gains optional per-peer message rate limiting (`MessageRateLimit`/`MessageRateBurst`): a peer that floods past the limit is disconnected rather than diverged. `AllowedOrigins` also gains `*` wildcard matching (e.g. `https://*.netlify.app`), anchored so a wildcard can't spoof a host. The new config fields are additive (zero values preserve current behaviour); the one behaviour change is that the HTTP provider now rejects invalid room names with 400.
 - **Read-only WebSocket connections** (v1.30.0). New `Server.Authorize func(*http.Request) (ConnectionConfig, bool)` both accepts/rejects a connection and reports per-connection config — currently `ReadOnly`. A read-only peer receives document and awareness broadcasts but its inbound writes (sync step-2/update and awareness) are dropped server-side, while still being able to request state (SyncStep1) and query awareness. The existing bool `AuthFunc` is unchanged; `Authorize` takes precedence when both are set. Matches Hocuspocus's `readOnly` connection flag (#59).
 - **Attribution API** (v1.30.0). `IDSet`/`IDMap`/`ContentMap` + wire codec tracking yjs v14-rc `14.0.0-16` — stamp CRDT content with per-item authorship (`userid`, `ts`, …) and exchange it with JS. Non-goals documented (no storage integration; `diffDocsToDelta` deferred). See [Attribution](#attribution) below.
+- **Subdocument lifecycle** (#63). A `Doc` can embed another `Doc` as a subdocument via `YMap.Set(txn, key, subdoc)`; `GetSubdocs`/`GetSubdocGUIDs`/`OnSubdocs`/`Load` plus `WithAutoLoad`/`WithShouldLoad`/`WithCollectionID` track and drive the add/remove/load lifecycle — the local half of Yjs's subdocuments feature. Also: `New()` now defaults a Doc's `guid` to a random uuidv4 instead of `""` (Yjs parity). Live cross-peer subdoc sync is a separate, tracked follow-up (#142). See [Subdocuments](#subdocuments) below.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release picture.
 
@@ -376,6 +377,75 @@ type PersistenceAdapter interface {
 For a ready-made durable backend, [`persistence/sqlite`](persistence/sqlite/) provides a pure-Go (CGO-free, `modernc.org/sqlite`) `VersionedPersistence` store with WAL mode, full versioned history, and a crash-safe two-phase prune. Open it with `sqlite.Open("data.db")`.
 
 For backend examples (Postgres, Redis, file-system) and the v1.7.0 context-aware extension that lets adapters abort in-flight writes during `Server.Shutdown`, see [docs/PERSISTENCE.md](docs/PERSISTENCE.md).
+
+## Subdocuments
+
+A `Doc` can embed another `Doc` as a **subdocument** — a separate CRDT
+document (its own clock space, its own GUID) nested inside a parent doc's
+`YMap`. This is the same pattern Yjs uses to split a large workspace into
+independently-loadable documents (e.g. one subdoc per page in a multi-page
+app) while still tracking them from a single root doc.
+
+Embed one by setting a `*crdt.Doc` as a `YMap` value — there is no separate
+"embed" method, it's just `Set`:
+
+```go
+parent := crdt.New()
+child := crdt.New(crdt.WithGUID("page-1"), crdt.WithAutoLoad(true))
+
+root := parent.GetMap("pages") // resolve OUTSIDE Transact
+parent.Transact(func(txn *crdt.Transaction) {
+    root.Set(txn, "page-1", child)
+})
+```
+
+`YMap.Get` returns the embedded `*crdt.Doc` back out (type-assert on read,
+same as any other `any`-typed map value). A `Doc` can only be embedded once;
+embedding the same `*Doc` a second time panics with `ErrSubdocAlreadyIntegrated`
+— create a second `Doc` with the same GUID instead.
+
+- **`Doc.GetSubdocs()` / `Doc.GetSubdocGUIDs()`** — the subdocuments currently
+  resident on this doc (sorted by GUID). Reflects adds/removes even if nothing
+  is observing via `OnSubdocs`.
+- **`Doc.OnSubdocs(func(crdt.SubdocsEvent))`** — fires once per transaction
+  that changes subdocument state. `SubdocsEvent{Added, Removed, Loaded []*Doc}`
+  reports docs newly embedded, docs detached (their `YMap` entry deleted), and
+  docs that should now be synced (see `Load` below). Embedding and then
+  deleting the same doc within one transaction cancels out — no event fires.
+- **`Doc.Load()`** — signals that a subdocument's data should be synced now.
+  A locally-created, locally-embedded subdoc loads immediately on integrate
+  (`ShouldLoad()` defaults to `true`); a subdoc decoded off the wire starts
+  with `ShouldLoad() == false` until the receiving application decides to
+  page it in and calls `Load()`, which flips `ShouldLoad()` to `true` and
+  emits a `Loaded` event on the **parent**. `Load` opens a transaction on the
+  parent, so — like `GetText` — it must not be called from inside a `Transact`
+  closure.
+- **`crdt.WithAutoLoad(bool)`** — marks a subdocument so remote peers/providers
+  auto-load it instead of waiting for an explicit `Load()` call. Default `false`.
+- **`crdt.WithShouldLoad(bool)`** — sets the initial `ShouldLoad()` value.
+  Default `true` for a doc you create yourself; a doc materialized from a
+  decoded update starts `false` (derived from `autoLoad`) until `Load()`.
+- **`crdt.WithCollectionID(string)`** — an optional grouping label
+  (`Doc.CollectionID()`), e.g. to batch-load every subdoc in a collection.
+
+```go
+child := crdt.New(
+    crdt.WithGUID("page-1"),
+    crdt.WithAutoLoad(true),
+    crdt.WithCollectionID("workspace-42"),
+)
+```
+
+See `Example_subdocs` in
+[`crdt/example_subdocs_test.go`](crdt/example_subdocs_test.go) for the
+runnable version (`go test ./crdt/ -run Example_subdocs`).
+
+**Scope**: this is the local lifecycle surface — creating, embedding,
+enumerating, and observing subdocuments on a single doc, matching Yjs's
+`Y.Doc` subdocs API. Actually syncing a subdocument's *contents* across peers
+(a provider recognizing `Added`/`Loaded` events and opening a connection per
+subdocument) is a separate, not-yet-implemented layer, tracked in
+[#142](https://github.com/reearth/ygo/issues/142).
 
 ## Mobile (iOS / Android)
 

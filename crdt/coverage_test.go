@@ -64,13 +64,18 @@ func TestUnit_ContentEmbed_Methods(t *testing.T) {
 }
 
 func TestUnit_ContentDoc_Methods(t *testing.T) {
-	inner := New()
+	inner := New(WithGUID("g"), WithCollectionID("cid"))
 	c := NewContentDoc(inner)
 	assert.Equal(t, 1, c.Len())
 	assert.True(t, c.IsCountable())
 
 	cp := c.Copy()
-	assert.Equal(t, inner, cp.(*ContentDoc).Doc)
+	cpDoc := cp.(*ContentDoc).Doc
+	// Copy creates a fresh Doc, not the same pointer
+	assert.NotEqual(t, inner, cpDoc)
+	// but with the same guid and opts
+	assert.Equal(t, "g", cpDoc.GUID())
+	assert.Equal(t, "cid", cpDoc.CollectionID())
 
 	assert.Panics(t, func() { c.Splice(0) })
 }

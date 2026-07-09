@@ -530,10 +530,7 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 			guid = ct.Doc.GUID()
 		}
 		enc.writeString(guid)
-		// opts must be an object, not null — genuine Yjs reads opts.shouldLoad
-		// and crashes on null. ygo doesn't track subdoc opts; emit {}.
-		// (#wire-conformance)
-		enc.restEnc.WriteAny(map[string]any{})
+		enc.restEnc.WriteAny(subdocOpts(ct.Doc))
 	case *ContentMove:
 		enc.restEnc.WriteVarUint(uint64(ct.Target.Client))
 		enc.restEnc.WriteVarUint(ct.Target.Clock)
@@ -1075,10 +1072,11 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, err := dec.readAny(); err != nil { // opts — not yet used
+		optsAny, err := dec.readAny()
+		if err != nil {
 			return nil, err
 		}
-		return NewContentDoc(New(WithGUID(guid))), nil
+		return NewContentDoc(newSubdocFromOpts(guid, optsAny)), nil
 
 	case wireMove:
 		clientU, err := dec.restDec.ReadVarUint()

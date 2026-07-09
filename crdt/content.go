@@ -220,10 +220,25 @@ func (c *ContentType) Splice(_ int) Content       { panic("crdt: ContentType is 
 // ContentDoc holds a reference to a subdocument.
 type ContentDoc struct{ Doc *Doc }
 
-func NewContentDoc(d *Doc) *ContentDoc     { return &ContentDoc{d} }
-func (c *ContentDoc) Len() int             { return 1 }
-func (c *ContentDoc) IsCountable() bool    { return true }
-func (c *ContentDoc) Copy() Content        { return &ContentDoc{c.Doc} }
+func NewContentDoc(d *Doc) *ContentDoc  { return &ContentDoc{d} }
+func (c *ContentDoc) Len() int          { return 1 }
+func (c *ContentDoc) IsCountable() bool { return true }
+
+// Copy returns a ContentDoc wrapping a FRESH Doc with the same guid and opts. A
+// Doc may be embedded only once (its item back-reference is single-valued), so
+// item copies during split/merge must not alias one inner Doc. Mirrors Yjs
+// ContentDoc.copy / createDocFromOpts.
+func (c *ContentDoc) Copy() Content {
+	if c.Doc == nil {
+		return &ContentDoc{nil}
+	}
+	s := c.Doc
+	return &ContentDoc{New(
+		WithGUID(s.guid), WithGC(s.gc), WithAutoLoad(s.autoLoad),
+		WithShouldLoad(s.shouldLoad), WithCollectionID(s.collectionID),
+	)}
+}
+
 func (c *ContentDoc) Splice(_ int) Content { panic("crdt: ContentDoc is not splittable") }
 
 // ContentMove is a CRDT-safe array move marker. It sits at the destination
@@ -266,4 +281,41 @@ func (s *contentSkip) IsCountable() bool { return false }
 func (s *contentSkip) Copy() Content     { return &contentSkip{s.length} }
 func (s *contentSkip) Splice(_ int) Content {
 	panic("crdt: contentSkip is not splittable")
+}
+
+// subdocOpts builds the opts map written after a ContentDoc guid. Yjs: always
+// gc; autoLoad when true; collectionId when non-empty. shouldLoad is NOT on the
+// wire (a decoder derives it from autoLoad). {gc:true} for a nil doc.
+func subdocOpts(d *Doc) map[string]any {
+	if d == nil {
+		return map[string]any{"gc": true}
+	}
+	m := map[string]any{"gc": d.gc}
+	if d.autoLoad {
+		m["autoLoad"] = true
+	}
+	if d.collectionID != "" {
+		m["collectionId"] = d.collectionID
+	}
+	return m
+}
+
+// newSubdocFromOpts builds an embedded Doc from a decoded guid + opts map. Per
+// Yjs, shouldLoad is derived as opts.autoLoad. Unknown keys and a non-map value
+// are ignored (robust decode).
+func newSubdocFromOpts(guid string, optsAny any) *Doc {
+	gc, autoLoad, collectionID := true, false, ""
+	if m, ok := optsAny.(map[string]any); ok {
+		if v, ok := m["gc"].(bool); ok {
+			gc = v
+		}
+		if v, ok := m["autoLoad"].(bool); ok {
+			autoLoad = v
+		}
+		if v, ok := m["collectionId"].(string); ok {
+			collectionID = v
+		}
+	}
+	return New(WithGUID(guid), WithGC(gc), WithAutoLoad(autoLoad),
+		WithShouldLoad(autoLoad), WithCollectionID(collectionID))
 }

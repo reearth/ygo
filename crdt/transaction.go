@@ -27,6 +27,16 @@ type Transaction struct {
 	// transient (no item was inserted between them). Mirrors Yjs JS's
 	// `_mergeStructs` and powers gap #78 H2.
 	mergeStructs []*Item
+	// subdocsAdded/subdocsRemoved/subdocsLoaded track subdocument lifecycle
+	// changes made during this transaction (#63). Populated by Item.integrate
+	// and Item.delete when the item's Content is a *ContentDoc. Reconciled
+	// into Doc.subdocs and turned into a SubdocsEvent by buildPhase2 at commit.
+	// An add followed by a delete of the same doc within the same transaction
+	// cancels out (removed from subdocsAdded/subdocsLoaded, never added to
+	// subdocsRemoved) so no event fires for a net no-op.
+	subdocsAdded   map[*Doc]struct{}
+	subdocsRemoved map[*Doc]struct{}
+	subdocsLoaded  map[*Doc]struct{}
 	// ctx is the context associated with this transaction. Set to
 	// context.Background() by Transact and to the caller's ctx by
 	// TransactContext. Exposed via the Ctx() method so fn can poll for
@@ -191,6 +201,33 @@ func (txn *Transaction) addChanged(t *abstractType, key string) {
 		txn.changed[t] = keys
 	}
 	keys[key] = struct{}{}
+}
+
+// addSubdocAdded records that d was newly embedded (integrated) during this
+// transaction (#63).
+func (t *Transaction) addSubdocAdded(d *Doc) {
+	if t.subdocsAdded == nil {
+		t.subdocsAdded = map[*Doc]struct{}{}
+	}
+	t.subdocsAdded[d] = struct{}{}
+}
+
+// addSubdocLoaded records that d should be reported as loaded in this
+// transaction's SubdocsEvent (#63).
+func (t *Transaction) addSubdocLoaded(d *Doc) {
+	if t.subdocsLoaded == nil {
+		t.subdocsLoaded = map[*Doc]struct{}{}
+	}
+	t.subdocsLoaded[d] = struct{}{}
+}
+
+// addSubdocRemoved records that d was detached (deleted) during this
+// transaction (#63).
+func (t *Transaction) addSubdocRemoved(d *Doc) {
+	if t.subdocsRemoved == nil {
+		t.subdocsRemoved = map[*Doc]struct{}{}
+	}
+	t.subdocsRemoved[d] = struct{}{}
 }
 
 // tryMergeWithLefts walks every right-half produced by splitItem during this

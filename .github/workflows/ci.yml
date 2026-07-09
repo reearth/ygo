@@ -65,8 +65,12 @@ jobs:
         with:
           # Track the latest 1.26 patch so the scan always runs on a toolchain
           # with current standard-library fixes (avoids failing on stdlib CVEs
-          # that are already fixed in a newer patch).
+          # that are already fixed in a newer patch). check-latest fetches the
+          # newest matching patch from the version manifest instead of using the
+          # runner image's cached (often lagging) patch — without it the scan
+          # red-walls on a freshly-published stdlib CVE until the image updates.
           go-version: "1.26"
+          check-latest: true
           cache: true
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...

@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Subdocument lifecycle (#63).** A `Doc` can now embed another `Doc` as a
+  subdocument — its own clock space and GUID, nested inside a parent doc's
+  `YMap` — mirroring Yjs's subdocuments feature. Embedding uses the existing
+  `YMap.Set(txn, key, value)`: pass a `*crdt.Doc` as the value and it is
+  wired up as a `ContentDoc`; `YMap.Get` returns the `*crdt.Doc` back out. A
+  `Doc` may be embedded only once — embedding the same `*Doc` a second time
+  panics with the new `crdt.ErrSubdocAlreadyIntegrated` (create a second
+  `Doc` with the same GUID instead).
+- **`Doc.GetSubdocs()` / `Doc.GetSubdocGUIDs()`** — the subdocuments
+  currently resident on a doc, sorted by GUID. The registry reconciles on
+  every committed transaction regardless of whether anything observes via
+  `OnSubdocs`.
+- **`Doc.OnSubdocs(func(crdt.SubdocsEvent)) func()`** — subscribes to
+  subdocument lifecycle changes; returns an unsubscribe closure (same
+  pattern as `Observe`). Fires at most once per transaction.
+- **`crdt.SubdocsEvent{Added, Removed, Loaded []*Doc}`** — reports docs newly
+  embedded, docs detached (their `YMap` entry deleted), and docs that should
+  now be synced. Embedding and deleting the same doc within one transaction
+  cancels out, so no event fires for a net no-op.
+- **`Doc.Load()`** — signals that a subdocument's data should be synced.
+  Flips `ShouldLoad()` to `true` and, for a doc already embedded in a
+  parent, emits a `Loaded` event on the parent. Idempotent. Must not be
+  called from inside a `Transact` closure — like `GetText`, it acquires a
+  document lock itself (the parent's, not the callee's).
+- **`crdt.WithAutoLoad(bool)`**, **`crdt.WithShouldLoad(bool)`**,
+  **`crdt.WithCollectionID(string)`** — new `DocOption`s for subdocument
+  configuration, plus matching accessors `Doc.AutoLoad()`, `Doc.ShouldLoad()`,
+  and `Doc.CollectionID()`. A doc constructed directly defaults
+  `ShouldLoad()` to `true`; a doc materialized from a decoded update starts
+  `false` (derived from `autoLoad`, matching Yjs) until `Load()` is called.
+- **`crdt.Example_subdocs`** — a runnable godoc example
+  (`crdt/example_subdocs_test.go`) showing embed → `OnSubdocs` → `GetSubdocGUIDs`.
+- **`ContentDoc` opts round-trip on both wire formats.** A subdocument's
+  guid/gc/autoLoad/collectionId opts now survive V1 and V2 encode/decode
+  (previously the V2 encoder wrote an empty opts object) and survive
+  `MergeUpdatesV1`/`MergeUpdatesV2`. Byte-parity with real Yjs is verified by
+  decoding a fixture captured from a genuine `yjs@13.6.30` `Y.Doc` that
+  embeds a subdocument.
+
+### Changed
+
+- **`crdt.New()` now defaults a Doc's `guid` to a random uuidv4** (was `""`).
+  This is Yjs parity (JS Yjs defaults `guid: uuidv4()`) and needed so every
+  locally-created doc has a usable identifier for subdocument embedding. It
+  is an observable change to `Doc.GUID()`: code that previously saw `""` from
+  a `crdt.New()` doc (without `WithGUID`) now sees a random UUID string. Docs
+  constructed with `crdt.WithGUID(...)` are unaffected.
+
+Live cross-peer subdocument sync (a provider recognizing `Added`/`Loaded`
+events and syncing the subdocument's contents over the wire) is a separate,
+tracked follow-up — see [#142](https://github.com/reearth/ygo/issues/142).
+
 ## [1.30.1] — 2026-07-08
 
 ### Fixed

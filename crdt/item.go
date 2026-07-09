@@ -215,6 +215,32 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// Register in the document store.
 	txn.doc.store.Append(item)
 
+	// #63 — register an embedded subdocument (Content has no integrate hook).
+	// This MUST run here, before the ParentSub last-writer-wins block below,
+	// which can call item.delete(txn) on THIS item when it integrates
+	// non-rightmost (losing YATA arbitration for its map key). item.delete's
+	// cancel-in-same-txn logic only cancels a subdoc addition already
+	// recorded in txn.subdocsAdded; if registration instead ran after that
+	// check (as it previously did, at the tail of this function), the
+	// self-delete would find nothing to cancel and route the doc to
+	// subdocsRemoved — and the later, now-unguarded tail registration would
+	// unconditionally re-add it. That corrupts the OnSubdocs event (the same
+	// doc present in both Added and Removed) and, for a same-guid concurrent
+	// embed, evicts the live winner from d.subdocs (registry is keyed by
+	// guid, not by *Doc). Mirrors Yjs, where content.integrate(transaction,
+	// item) runs before the "delete if not the current attribute value"
+	// check in Item.integrate.
+	if cd, ok := item.Content.(*ContentDoc); ok && cd.Doc != nil {
+		if cd.Doc.item != nil && cd.Doc.item != item {
+			panic(ErrSubdocAlreadyIntegrated)
+		}
+		cd.Doc.item = item
+		txn.addSubdocAdded(cd.Doc)
+		if cd.Doc.shouldLoad {
+			txn.addSubdocLoaded(cd.Doc)
+		}
+	}
+
 	// ContentMove priority arbitration: resolve the target item (splitting if
 	// needed so it covers exactly TargetLen elements) and claim it if we are the
 	// winning move. Lower ClientID wins for concurrent moves from different peers;
@@ -330,6 +356,17 @@ func (item *Item) delete(txn *Transaction) {
 			if !child.Deleted {
 				child.delete(txn)
 			}
+		}
+	}
+
+	// #63 — subdocument removal. Cancel an add-in-same-txn; else mark removed.
+	// GC does not remove subdocs (matches Yjs ContentDoc: gc is a no-op).
+	if cd, ok := item.Content.(*ContentDoc); ok && cd.Doc != nil {
+		if _, added := txn.subdocsAdded[cd.Doc]; added {
+			delete(txn.subdocsAdded, cd.Doc)
+			delete(txn.subdocsLoaded, cd.Doc)
+		} else {
+			txn.addSubdocRemoved(cd.Doc)
 		}
 	}
 }

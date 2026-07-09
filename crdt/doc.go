@@ -42,10 +42,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 )
+
+// ErrSubdocAlreadyIntegrated is raised when a Doc already embedded as a
+// subdocument is embedded again. Create a second Doc with the same guid instead.
+var ErrSubdocAlreadyIntegrated = errors.New("ygo/crdt: subdocument already integrated; create a second instance with the same guid")
 
 // DocOption configures a Doc at creation time.
 type DocOption func(*Doc)
@@ -67,6 +72,16 @@ func WithGC(gc bool) DocOption {
 func WithGUID(guid string) DocOption {
 	return func(d *Doc) { d.guid = guid }
 }
+
+// WithAutoLoad marks a subdocument to be auto-loaded by remote peers. Default false.
+func WithAutoLoad(v bool) DocOption { return func(d *Doc) { d.autoLoad = v } }
+
+// WithShouldLoad controls whether a provider should sync this doc now. Default
+// true; a decoded/remote subdocument starts false until Load().
+func WithShouldLoad(v bool) DocOption { return func(d *Doc) { d.shouldLoad = v } }
+
+// WithCollectionID sets an optional subdocument collection identifier.
+func WithCollectionID(id string) DocOption { return func(d *Doc) { d.collectionID = id } }
 
 // defaultMaxPendingItems is the default cap on items parked in the per-doc
 // pending queue waiting for out-of-order dependencies. Matches the per-update
@@ -99,13 +114,33 @@ type transactionSub struct {
 	fn func(*Transaction)
 }
 
+// SubdocsEvent reports subdocument lifecycle changes for one transaction. The
+// slices are freshly allocated per fire; do not retain or mutate them.
+type SubdocsEvent struct {
+	Added   []*Doc
+	Removed []*Doc
+	Loaded  []*Doc
+}
+
+// subdocsSub pairs a unique subscription ID with an OnSubdocs callback.
+type subdocsSub struct {
+	id uint64
+	fn func(SubdocsEvent)
+}
+
 // Doc is the root of a Yjs collaborative document.
 // All shared types (YArray, YMap, YText, …) live inside a Doc.
 type Doc struct {
 	clientID        ClientID
 	gc              bool
-	guid            string // subdocument identifier; empty for root docs
-	maxPendingItems int    // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
+	guid            string // guid identifies this document (for subdocument embedding). Defaults to a random uuidv4 (see New) unless set with WithGUID.
+	shouldLoad      bool
+	autoLoad        bool
+	collectionID    string
+	item            *Item // set on integrate when this Doc is embedded as a subdocument (#63)
+	subdocs         map[string]*Doc
+	onSubdocs       []subdocsSub
+	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -143,9 +178,57 @@ func (d *Doc) ClientID() ClientID {
 	return d.clientID
 }
 
-// GUID returns the document's subdocument identifier (empty for root docs).
+// GUID returns the document's identifier. Every Doc has one — a random uuidv4 by default (Yjs parity), or the value passed to WithGUID.
 func (d *Doc) GUID() string {
 	return d.guid
+}
+
+// AutoLoad returns whether this subdocument should be auto-loaded by remote peers.
+func (d *Doc) AutoLoad() bool {
+	return d.autoLoad
+}
+
+// ShouldLoad returns whether a provider should sync this doc now.
+func (d *Doc) ShouldLoad() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.shouldLoad
+}
+
+// CollectionID returns the optional subdocument collection identifier.
+func (d *Doc) CollectionID() string {
+	return d.collectionID
+}
+
+// Load signals that this subdocument's data should be synced. On a subdocument
+// it sets shouldLoad=true and emits a subdocs "loaded" event on the parent; on a
+// root doc it just sets shouldLoad=true. Safe to call multiple times.
+//
+// Load opens a transaction on the PARENT document, so it MUST NOT be called from
+// inside a Transact closure (re-entrant lock — same footgun as GetText-in-Transact).
+func (d *Doc) Load() {
+	d.mu.Lock()
+	if d.shouldLoad {
+		d.mu.Unlock()
+		return
+	}
+	d.shouldLoad = true
+	item := d.item
+	d.mu.Unlock()
+	if item == nil || item.Parent == nil {
+		return
+	}
+	item.Parent.doc.Transact(func(txn *Transaction) {
+		// A detached/overwritten subdoc leaves item tombstoned but d.item still
+		// pointing at it; reporting it as loaded would be spurious (the doc is
+		// no longer resident in the parent's registry). item.Deleted is read
+		// here — inside the parent's transaction — so the parent lock guards it.
+		// Mirrors Yjs, where a removed subdoc is destroyed and load() is a no-op.
+		if item.Deleted {
+			return
+		}
+		txn.addSubdocLoaded(d)
+	})
 }
 
 // maxPendingItemsLimit returns the effective cap on the pending queue depth.
@@ -154,6 +237,19 @@ func (d *Doc) maxPendingItemsLimit() int {
 		return defaultMaxPendingItems
 	}
 	return d.maxPendingItems
+}
+
+// uuidV4 returns a random RFC-4122 v4 UUID string. Used as the default document
+// guid so every Doc has a stable unique id for subdocument embedding (Yjs
+// parity: Yjs defaults guid to uuidv4()). No external dependency.
+func uuidV4() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Errorf("crypto/rand failed: %w", err))
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // NewClientID generates a fresh ClientID via crypto/rand.
@@ -176,10 +272,13 @@ func NewClientID() ClientID {
 // New creates a new Doc with a randomly generated ClientID.
 func New(opts ...DocOption) *Doc {
 	d := &Doc{
-		clientID: NewClientID(), // uint32 keeps IDs within JS Number.MAX_SAFE_INTEGER
-		gc:       true,
-		store:    newStructStore(),
-		share:    make(map[string]sharedType),
+		clientID:   NewClientID(),
+		gc:         true,
+		guid:       uuidV4(),
+		shouldLoad: true,
+		store:      newStructStore(),
+		share:      make(map[string]sharedType),
+		subdocs:    make(map[string]*Doc),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -363,7 +462,31 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 		onAfterTxnSnap[i] = s.fn
 	}
 
-	if len(fireFns) == 0 && len(deepSnap) == 0 && len(onUpdateSnap) == 0 && len(onAfterTxnSnap) == 0 {
+	// #63 — reconcile the subdoc registry and build the event under the lock.
+	// This runs ABOVE the early-return below so GetSubdocs()/GetSubdocGUIDs()
+	// reflect adds/removes even when there are zero OnSubdocs observers.
+	hasSubdocs := len(txn.subdocsAdded)+len(txn.subdocsRemoved)+len(txn.subdocsLoaded) > 0
+	var subdocsEv SubdocsEvent
+	if hasSubdocs {
+		for sd := range txn.subdocsAdded {
+			d.subdocs[sd.guid] = sd
+			subdocsEv.Added = append(subdocsEv.Added, sd)
+		}
+		for sd := range txn.subdocsRemoved {
+			delete(d.subdocs, sd.guid)
+			subdocsEv.Removed = append(subdocsEv.Removed, sd)
+		}
+		for sd := range txn.subdocsLoaded {
+			subdocsEv.Loaded = append(subdocsEv.Loaded, sd)
+		}
+	}
+	onSubdocsSnap := make([]func(SubdocsEvent), len(d.onSubdocs))
+	for i, s := range d.onSubdocs {
+		onSubdocsSnap[i] = s.fn
+	}
+
+	if len(fireFns) == 0 && len(deepSnap) == 0 && len(onUpdateSnap) == 0 &&
+		len(onAfterTxnSnap) == 0 && (!hasSubdocs || len(onSubdocsSnap) == 0) {
 		return nil
 	}
 
@@ -381,6 +504,11 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 		}
 		for _, fn := range onAfterTxnSnap {
 			fn(txn)
+		}
+		if hasSubdocs {
+			for _, fn := range onSubdocsSnap {
+				fn(subdocsEv)
+			}
 		}
 	}
 }
@@ -575,6 +703,51 @@ func (d *Doc) OnAfterTransaction(fn func(*Transaction)) func() {
 			}
 		}
 	}
+}
+
+// OnSubdocs registers a callback fired once after any transaction that adds,
+// removes, or loads subdocuments. Returns an unsubscribe function. Mirrors
+// OnUpdate (safe concurrent, out-of-order unsubscribe).
+func (d *Doc) OnSubdocs(fn func(SubdocsEvent)) func() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.subIDGen++
+	id := d.subIDGen
+	d.onSubdocs = append(d.onSubdocs, subdocsSub{id: id, fn: fn})
+	return func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		for i, s := range d.onSubdocs {
+			if s.id == id {
+				d.onSubdocs = append(d.onSubdocs[:i], d.onSubdocs[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// GetSubdocs returns the resident subdocuments, sorted by guid.
+func (d *Doc) GetSubdocs() []*Doc {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]*Doc, 0, len(d.subdocs))
+	for _, sd := range d.subdocs {
+		out = append(out, sd)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].guid < out[j].guid })
+	return out
+}
+
+// GetSubdocGUIDs returns the guids of the resident subdocuments, sorted.
+func (d *Doc) GetSubdocGUIDs() []string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]string, 0, len(d.subdocs))
+	for g := range d.subdocs {
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // GetXmlFragment returns the named root YXmlFragment, creating it if it does
