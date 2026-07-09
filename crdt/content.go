@@ -282,3 +282,40 @@ func (s *contentSkip) Copy() Content     { return &contentSkip{s.length} }
 func (s *contentSkip) Splice(_ int) Content {
 	panic("crdt: contentSkip is not splittable")
 }
+
+// subdocOpts builds the opts map written after a ContentDoc guid. Yjs: always
+// gc; autoLoad when true; collectionId when non-empty. shouldLoad is NOT on the
+// wire (a decoder derives it from autoLoad). {gc:true} for a nil doc.
+func subdocOpts(d *Doc) map[string]any {
+	if d == nil {
+		return map[string]any{"gc": true}
+	}
+	m := map[string]any{"gc": d.gc}
+	if d.autoLoad {
+		m["autoLoad"] = true
+	}
+	if d.collectionID != "" {
+		m["collectionId"] = d.collectionID
+	}
+	return m
+}
+
+// newSubdocFromOpts builds an embedded Doc from a decoded guid + opts map. Per
+// Yjs, shouldLoad is derived as opts.autoLoad. Unknown keys and a non-map value
+// are ignored (robust decode).
+func newSubdocFromOpts(guid string, optsAny any) *Doc {
+	gc, autoLoad, collectionID := true, false, ""
+	if m, ok := optsAny.(map[string]any); ok {
+		if v, ok := m["gc"].(bool); ok {
+			gc = v
+		}
+		if v, ok := m["autoLoad"].(bool); ok {
+			autoLoad = v
+		}
+		if v, ok := m["collectionId"].(string); ok {
+			collectionID = v
+		}
+	}
+	return New(WithGUID(guid), WithGC(gc), WithAutoLoad(autoLoad),
+		WithShouldLoad(autoLoad), WithCollectionID(collectionID))
+}

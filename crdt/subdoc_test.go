@@ -193,3 +193,26 @@ func TestSubdocs_DoubleEmbedGuard(t *testing.T) {
 	m := parent.GetMap("root")
 	parent.Transact(func(txn *Transaction) { m.Set(txn, "b", child) })
 }
+
+func TestSubdocs_V1OptsRoundTrip(t *testing.T) {
+	parent := New()
+	embedSubdoc(t, parent, "a", New(WithGUID("c"), WithAutoLoad(true), WithCollectionID("cid")))
+	fresh := New()
+	if err := ApplyUpdateV1(fresh, EncodeStateAsUpdateV1(parent, nil), nil); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	subs := fresh.GetSubdocs()
+	if len(subs) != 1 || subs[0].GUID() != "c" || !subs[0].AutoLoad() || subs[0].CollectionID() != "cid" || !subs[0].ShouldLoad() {
+		t.Fatalf("autoLoad subdoc opts lost: %+v", subs)
+	}
+
+	p2 := New()
+	embedSubdoc(t, p2, "a", New(WithGUID("d"))) // autoLoad false
+	f2 := New()
+	if err := ApplyUpdateV1(f2, EncodeStateAsUpdateV1(p2, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	if f2.GetSubdocs()[0].ShouldLoad() {
+		t.Error("non-autoLoad subdoc should decode shouldLoad=false")
+	}
+}

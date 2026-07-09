@@ -367,11 +367,7 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 			guid = ct.Doc.GUID()
 		}
 		enc.WriteVarString(guid)
-		// Yjs ContentDoc.write emits guid THEN writeAny(opts). opts is always
-		// an object (defaults to {}); omitting it desyncs a Yjs decoder, and a
-		// `null` makes Yjs crash on opts.shouldLoad. ygo doesn't track subdoc
-		// opts, so emit an empty object. (#wire-conformance)
-		enc.WriteAny(map[string]any{})
+		enc.WriteAny(subdocOpts(ct.Doc))
 	case *ContentMove:
 		enc.WriteVarUint(uint64(ct.Target.Client))
 		enc.WriteVarUint(ct.Target.Clock)
@@ -1074,14 +1070,11 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		guid := string(guidBytes)
-		// Consume the opts object Yjs writes after the guid (writeAny). ygo
-		// doesn't use subdoc opts yet, but the bytes MUST be read or the
-		// struct stream desyncs. (#wire-conformance)
-		if _, err := dec.ReadAny(); err != nil {
+		optsAny, err := dec.ReadAny()
+		if err != nil {
 			return nil, err
 		}
-		return NewContentDoc(New(WithGUID(guid))), nil
+		return NewContentDoc(newSubdocFromOpts(string(guidBytes), optsAny)), nil
 
 	case wireMove:
 		clientU, err := dec.ReadVarUint()
