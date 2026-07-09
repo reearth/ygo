@@ -173,6 +173,33 @@ func TestSubdocs_LoadEmitsLoadedForUnloadedChild(t *testing.T) {
 	}
 }
 
+// TestSubdocs_LoadAfterRemoveIsNoOp guards against a spurious "loaded" event on
+// a detached subdoc. After a subdoc's map entry is deleted, its backing item is
+// tombstoned but d.item still points at it. Calling Load() on the now-detached
+// doc (shouldLoad still false) must NOT fire a Loaded event on the former
+// parent — the doc is no longer resident. Mirrors Yjs, where a removed subdoc
+// is destroyed (its _item nulled) so load() is a no-op.
+func TestSubdocs_LoadAfterRemoveIsNoOp(t *testing.T) {
+	parent := New()
+	child := New(WithGUID("c"))
+	child.shouldLoad = false // decoded/remote child, not auto-loaded
+	embedSubdoc(t, parent, "a", child)
+
+	m := parent.GetMap("root")
+	parent.Transact(func(txn *Transaction) { m.Delete(txn, "a") })
+	if len(parent.GetSubdocs()) != 0 {
+		t.Fatalf("precondition: expected empty registry after delete, got %v", parent.GetSubdocGUIDs())
+	}
+
+	fires := 0
+	var ev SubdocsEvent
+	parent.OnSubdocs(func(e SubdocsEvent) { fires++; ev = e })
+	child.Load()
+	if fires != 0 {
+		t.Fatalf("Load() on a removed subdoc must not fire a subdocs event; fired %d (Loaded=%v)", fires, ev.Loaded)
+	}
+}
+
 func TestContentDoc_CopyClonesFreshDoc(t *testing.T) {
 	orig := New(WithGUID("g"), WithAutoLoad(true), WithCollectionID("cid"))
 	cp := (&ContentDoc{orig}).Copy().(*ContentDoc)

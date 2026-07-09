@@ -218,7 +218,17 @@ func (d *Doc) Load() {
 	if item == nil || item.Parent == nil {
 		return
 	}
-	item.Parent.doc.Transact(func(txn *Transaction) { txn.addSubdocLoaded(d) })
+	item.Parent.doc.Transact(func(txn *Transaction) {
+		// A detached/overwritten subdoc leaves item tombstoned but d.item still
+		// pointing at it; reporting it as loaded would be spurious (the doc is
+		// no longer resident in the parent's registry). item.Deleted is read
+		// here — inside the parent's transaction — so the parent lock guards it.
+		// Mirrors Yjs, where a removed subdoc is destroyed and load() is a no-op.
+		if item.Deleted {
+			return
+		}
+		txn.addSubdocLoaded(d)
+	})
 }
 
 // maxPendingItemsLimit returns the effective cap on the pending queue depth.
