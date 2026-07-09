@@ -216,3 +216,40 @@ func TestSubdocs_V1OptsRoundTrip(t *testing.T) {
 		t.Error("non-autoLoad subdoc should decode shouldLoad=false")
 	}
 }
+
+func TestSubdocs_V2AndMergeRoundTrip(t *testing.T) {
+	parent := New()
+	embedSubdoc(t, parent, "a", New(WithGUID("c"), WithAutoLoad(true)))
+
+	f2 := New()
+	if err := ApplyUpdateV2(f2, EncodeStateAsUpdateV2(parent, nil), nil); err != nil {
+		t.Fatalf("apply v2: %v", err)
+	}
+	if s := f2.GetSubdocs(); len(s) != 1 || !s[0].AutoLoad() {
+		t.Fatalf("v2 lost subdoc/opts: %v", s)
+	}
+
+	merged, err := MergeUpdatesV1(EncodeStateAsUpdateV1(parent, nil))
+	if err != nil {
+		t.Fatalf("merge v1: %v", err)
+	}
+	fm := New()
+	if err := ApplyUpdateV1(fm, merged, nil); err != nil {
+		t.Fatalf("apply merged v1: %v", err)
+	}
+	if s := fm.GetSubdocs(); len(s) != 1 || s[0].GUID() != "c" || !s[0].AutoLoad() {
+		t.Fatalf("merge v1 lost subdoc/opts: %v", s)
+	}
+
+	mergedV2, err := MergeUpdatesV2(EncodeStateAsUpdateV2(parent, nil))
+	if err != nil {
+		t.Fatalf("merge v2: %v", err)
+	}
+	fm2 := New()
+	if err := ApplyUpdateV2(fm2, mergedV2, nil); err != nil {
+		t.Fatalf("apply merged v2: %v", err)
+	}
+	if s := fm2.GetSubdocs(); len(s) != 1 || !s[0].AutoLoad() {
+		t.Fatalf("merge v2 lost subdoc/opts: %v", s)
+	}
+}
