@@ -4,8 +4,25 @@ import "testing"
 
 func TestNew_DefaultsGUIDToUUID(t *testing.T) {
 	a, b := New(), New()
-	if a.GUID() == "" || a.GUID() == b.GUID() || len(a.GUID()) != 36 {
-		t.Fatalf("expected distinct uuid guids, got %q / %q", a.GUID(), b.GUID())
+	guidA, guidB := a.GUID(), b.GUID()
+
+	// Check distinctness and basic length
+	if guidA == "" || guidA == guidB || len(guidA) != 36 {
+		t.Fatalf("expected distinct uuid guids, got %q / %q", guidA, guidB)
+	}
+
+	// Validate RFC-4122 v4 format for guidA
+	// Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+	// where y is one of 8, 9, a, b
+	if guidA[14] != '4' {
+		t.Errorf("guid[14] should be '4' (version), got %q", string(guidA[14]))
+	}
+	if guidA[19] != '8' && guidA[19] != '9' && guidA[19] != 'a' && guidA[19] != 'b' {
+		t.Errorf("guid[19] should be one of '8','9','a','b' (variant), got %q", string(guidA[19]))
+	}
+	// Check dashes at the correct positions
+	if guidA[8] != '-' || guidA[13] != '-' || guidA[18] != '-' || guidA[23] != '-' {
+		t.Errorf("guid format broken: dashes expected at 8,13,18,23, got %q", guidA)
 	}
 }
 

@@ -128,7 +128,7 @@ type subdocsSub struct { //nolint:unused // used in subdoc lifecycle tasks
 type Doc struct {
 	clientID        ClientID
 	gc              bool
-	guid            string // subdocument identifier; empty for root docs
+	guid            string // guid identifies this document (for subdocument embedding). Defaults to a random uuidv4 (see New) unless set with WithGUID.
 	shouldLoad      bool
 	autoLoad        bool
 	collectionID    string
@@ -173,7 +173,7 @@ func (d *Doc) ClientID() ClientID {
 	return d.clientID
 }
 
-// GUID returns the document's subdocument identifier (empty for root docs).
+// GUID returns the document's identifier. Every Doc has one — a random uuidv4 by default (Yjs parity), or the value passed to WithGUID.
 func (d *Doc) GUID() string {
 	return d.guid
 }
