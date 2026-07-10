@@ -20,9 +20,32 @@ type YText struct {
 	abstractType
 	subIDGen  uint64
 	observers []textSub
+	// pending buffers mutating operations issued while this text is detached
+	// (Yjs YText._pending parity). They replay in order when the container
+	// item integrates (see prelimFlusher), so the text's items materialise
+	// AFTER the container item's clock — required for wire conformance. (#yxml-wire)
+	pending []func(txn *Transaction)
 }
 
 func (txt *YText) baseType() *abstractType { return &txt.abstractType }
+
+// buffer queues op for replay at attach time. Callers must gate on
+// abstractType.detached() BEFORE constructing the closure — building it
+// unconditionally would add a heap allocation to every attached-path call
+// (measured +1 alloc/op on YText.Insert).
+func (txt *YText) buffer(op func(txn *Transaction)) {
+	txt.pending = append(txt.pending, op)
+}
+
+// flushPrelim replays operations buffered while this text was detached.
+// Called by item.integrate when the container item integrates (prelimFlusher).
+func (txt *YText) flushPrelim(txn *Transaction) {
+	ops := txt.pending
+	txt.pending = nil
+	for _, op := range ops {
+		op(txn)
+	}
+}
 
 // prepareFire snapshots the current observer slice inside the document write
 // lock and returns a closure that fires all snapshotted observers (N-C1).
@@ -262,6 +285,10 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 	if text == "" {
 		return
 	}
+	if txt.abstractType.detached() {
+		txt.buffer(func(txn *Transaction) { txt.Insert(txn, index, text, attrs) })
+		return
+	}
 	t := &txt.abstractType
 	left, offset := t.leftNeighbourAt(index)
 	if offset > 0 {
@@ -459,6 +486,10 @@ func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 //
 // Added in v1.12.0 (#76).
 func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attributes) {
+	if txt.abstractType.detached() {
+		txt.buffer(func(txn *Transaction) { txt.InsertEmbed(txn, index, embed, attrs) })
+		return
+	}
 	t := &txt.abstractType
 	left, offset := t.leftNeighbourAt(index)
 	if offset > 0 {
@@ -567,6 +598,10 @@ func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attr
 // per-Delete cost is O(region size + scope size of any markers found)
 // rather than O(document).
 func (txt *YText) Delete(txn *Transaction, index, length int) {
+	if txt.abstractType.detached() {
+		txt.buffer(func(txn *Transaction) { txt.Delete(txn, index, length) })
+		return
+	}
 	// Capture the anchor immediately before the deletion start so we can
 	// walk forward from there post-deletion. nil means "start of document."
 	var startAnchor *Item
@@ -697,6 +732,10 @@ func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *
 // Full concurrent attribute removal is tracked as a follow-up improvement.
 func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) {
 	if len(attrs) == 0 || length <= 0 {
+		return
+	}
+	if txt.abstractType.detached() {
+		txt.buffer(func(txn *Transaction) { txt.Format(txn, index, length, attrs) })
 		return
 	}
 	t := &txt.abstractType
@@ -1127,6 +1166,10 @@ func (txt *YText) Observe(fn func(YTextEvent)) func() {
 // The cursor starts at position 0. ApplyDelta must be called from inside a
 // Transact callback.
 func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
+	if txt.abstractType.detached() {
+		txt.buffer(func(txn *Transaction) { txt.ApplyDelta(txn, delta) })
+		return
+	}
 	pos := 0
 	for _, d := range delta {
 		switch d.Op {

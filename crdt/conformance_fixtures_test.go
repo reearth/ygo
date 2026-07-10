@@ -12,7 +12,13 @@ import (
 )
 
 type conformanceFixture struct {
-	Name     string          `json:"name"`
+	Name string `json:"name"`
+	// Kind partitions mixed-schema fixture files. yxml_yjs_fixtures.json is
+	// shared with the y-prosemirror wire-conformance suite
+	// (yxml_yjs_conformance_test.go); this file only consumes the
+	// "decode_xmlstring" rows (expected = ToXML string, root "x"). The
+	// yarray/ytext fixture files carry no kind.
+	Kind     string          `json:"kind"`
 	V1       string          `json:"v1"`
 	V2       string          `json:"v2"`
 	Expected json.RawMessage `json:"expected"`
@@ -129,7 +135,14 @@ func TestConformance_YText_DecodeYjsBytes(t *testing.T) {
 }
 
 func TestConformance_YXml_DecodeYjsBytes(t *testing.T) {
+	ran := 0
 	for _, fx := range loadConformanceFixtures(t, "yxml_yjs_fixtures.json") {
+		if fx.Kind != "decode_xmlstring" {
+			// The y-prosemirror wire-conformance rows (kind "decode",
+			// "author", …) are consumed by yxml_yjs_conformance_test.go.
+			continue
+		}
+		ran++
 		fx := fx
 		t.Run(fx.Name, func(t *testing.T) {
 			for _, ver := range []struct {
@@ -157,5 +170,8 @@ func TestConformance_YXml_DecodeYjsBytes(t *testing.T) {
 				}
 			}
 		})
+	}
+	if ran == 0 {
+		t.Fatal("yxml_yjs_fixtures.json: no decode_xmlstring fixtures")
 	}
 }
