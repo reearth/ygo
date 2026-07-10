@@ -655,9 +655,16 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			// which would otherwise graft this keyed item onto an arbitrary map.
 			if item.Parent == nil && item.parentID != nil {
 				if pi := txn.doc.store.Find(*item.parentID); pi != nil {
-					if ct, ok := pi.Content.(*ContentType); ok {
-						item.Parent = ct.Type
+					ct, ok := pi.Content.(*ContentType)
+					if !ok {
+						// Parent-by-ID resolves to a non-container item: corrupt
+						// update. decodeItem errors on this at decode time when the
+						// parent is already integrated; error here too so the outcome
+						// doesn't depend on decode order (kept consistent with the V2
+						// resolve path).
+						return fmt.Errorf("parent item {%d,%d} is not a ContentType", item.parentID.Client, item.parentID.Clock)
 					}
+					item.Parent = ct.Type
 				}
 			}
 			// If the origin is a GC placeholder (no parent), search the

@@ -423,3 +423,58 @@ func TestP0_C3_V2SelfDecodeReloads(t *testing.T) {
 		t.Fatalf("V2 element attribute class=%q ok=%v, want \"hello\"", v, ok)
 	}
 }
+
+// TestP0_C3_V2MergeDiffPreservesParentByID guards the V2 struct-level
+// merge/diff path against dropping a cross-client parent-by-ID child. The
+// "class" attribute item (client 200) references its container element (client
+// 100) purely by item-ID with no origin, so resolveParents (which only follows
+// origins) leaves it as a deferred parentID; it reaches encodeItemV2 with
+// Parent==nil. Before the fix encodeItemV2 GC-orphaned it (content dropped);
+// this asserts it survives both MergeUpdatesV2 and DiffUpdateV2. (#140, Copilot
+// review on #145)
+func TestP0_C3_V2MergeDiffPreservesParentByID(t *testing.T) {
+	dLow := New(WithClientID(100))
+	frag := dLow.GetXmlFragment("f")
+	el := NewYXmlElement("div")
+	dLow.Transact(func(txn *Transaction) { frag.InsertElement(txn, 0, el) })
+
+	dHigh := New(WithClientID(200))
+	if err := ApplyUpdateV1(dHigh, fullState(dLow), nil); err != nil {
+		t.Fatalf("seed dHigh: %v", err)
+	}
+	elH := dHigh.GetXmlFragment("f").Children()[0].(*YXmlElement)
+	dHigh.Transact(func(txn *Transaction) { elH.SetAttribute(txn, "class", "hello") })
+
+	v2 := EncodeStateAsUpdateV2(dHigh, nil)
+
+	check := func(t *testing.T, label string, out []byte) {
+		t.Helper()
+		fresh := New()
+		if err := ApplyUpdateV2(fresh, out, nil); err != nil {
+			t.Fatalf("%s: ApplyUpdateV2 failed: %v", label, err)
+		}
+		fc := fresh.GetXmlFragment("f").Children()
+		if len(fc) != 1 {
+			t.Fatalf("%s: expected 1 child, got %d", label, len(fc))
+		}
+		fel, ok := fc[0].(*YXmlElement)
+		if !ok {
+			t.Fatalf("%s: child is not *YXmlElement: %T", label, fc[0])
+		}
+		if v, ok := fel.GetAttribute("class"); !ok || v != "hello" {
+			t.Fatalf("%s: attribute class=%q ok=%v, want \"hello\" (parent-by-ID child dropped)", label, v, ok)
+		}
+	}
+
+	merged, err := MergeUpdatesV2(v2)
+	if err != nil {
+		t.Fatalf("MergeUpdatesV2: %v", err)
+	}
+	check(t, "MergeUpdatesV2", merged)
+
+	diff, err := DiffUpdateV2(v2, nil)
+	if err != nil {
+		t.Fatalf("DiffUpdateV2: %v", err)
+	}
+	check(t, "DiffUpdateV2", diff)
+}
