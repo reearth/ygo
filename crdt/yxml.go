@@ -375,10 +375,10 @@ func (e *YXmlElement) flushPrelim(txn *Transaction) {
 
 // GetAttribute returns the value of attribute key rendered as a string, and
 // whether the attribute is present. Non-string scalar values (numbers, bools —
-// e.g. a ProseMirror heading's level=1) are formatted like JavaScript's
-// String(value); use GetAttributeValue for the typed value. Previously
-// non-string values were silently dropped, which lost y-prosemirror heading
-// levels on the JS→Go path. (#yxml-wire)
+// e.g. a ProseMirror heading's level=1) get a best-effort string rendering;
+// use GetAttributeValue for the exact typed value. Previously non-string
+// values were silently dropped, which lost y-prosemirror heading levels on
+// the JS→Go path. (#yxml-wire)
 func (e *YXmlElement) GetAttribute(key string) (string, bool) {
 	v, ok := e.GetAttributeValue(key)
 	if !ok {
@@ -402,8 +402,8 @@ func (e *YXmlElement) GetAttributeValue(key string) (any, bool) {
 }
 
 // GetAttributes returns all live attributes as a string-keyed map. Non-string
-// scalar values are formatted like JavaScript's String(value); use
-// GetAttributeValues for typed values. (#yxml-wire)
+// scalar values get a best-effort string rendering; use GetAttributeValues
+// for the exact typed values. (#yxml-wire)
 func (e *YXmlElement) GetAttributes() map[string]string {
 	result := make(map[string]string)
 	for k, v := range e.GetAttributeValues() {
@@ -602,10 +602,12 @@ func deleteChildRange(t *abstractType, txn *Transaction, index, length int) {
 	}
 }
 
-// xmlAttrToString renders an attribute value the way JavaScript's String()
-// does for the scalar types Yjs attribute values can hold: strings unchanged,
-// numbers without a trailing ".0" for integral floats, booleans as
-// "true"/"false".
+// xmlAttrToString is a best-effort scalar rendering for display and the
+// string-typed attribute maps: strings unchanged, integral floats without a
+// trailing ".0", booleans as "true"/"false". It is NOT exact JavaScript
+// String() semantics (exponent thresholds like 1e-7/1e21, negative zero, and
+// non-scalar values differ) — use GetAttributeValue for the exact typed
+// value; the wire always carries the typed value regardless.
 func xmlAttrToString(v any) string {
 	switch x := v.(type) {
 	case string:
