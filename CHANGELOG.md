@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **XML wire conformance with yjs (`Y.XmlFragment`/`Y.XmlElement`/`Y.XmlText`).**
+  Three fixes make ygo's XML types byte-conformant with yjs@13.6 over both V1
+  and V2 updates (the y-prosemirror shapes: element attributes, nested
+  elements, text marks, concurrent merges):
+  - Detached XML subtrees and detached `YText` now **buffer** mutations
+    (Yjs `_prelimContent`/`_prelimAttrs`/`_pending` parity) and materialise
+    items only when the subtree attaches, top-down — children first, then
+    attributes. Building a tree bottom-up previously assigned child clocks
+    below the container's, emitting same-client forward parent references
+    that crash `Y.applyUpdate` in yjs (`findIndexSS` TypeError) and that
+    ygo itself parked forever on re-apply (fragment emptied). Detached
+    nodes read as uniformly EMPTY (`Len`, `Children`, attribute getters,
+    `ToXML`) until attached.
+  - Non-string XML attribute values (e.g. a ProseMirror heading's
+    `level=1`, a number) are no longer dropped by the attribute getters.
+  - The V2 encoder no longer deduplicates keys, matching the yjs reference
+    encoder exactly (yjs ships `writeKey` with dedup deliberately disabled;
+    older yjs clients cannot read deduped updates). The decoder still
+    accepts both shapes.
+
+### Added
+
+- **Typed XML attribute accessors** — `YXmlElement.SetAttributeValue`,
+  `GetAttributeValue`, `GetAttributeValues` preserve the attribute's wire
+  value type end-to-end. The string-typed `GetAttribute`/`GetAttributes`
+  now render non-string scalars best-effort instead of dropping them.
+- **XML JS-fixture conformance suite** — `crdt/yxml_yjs_conformance_test.go`
+  applies genuine yjs@13.6 update bytes (decode, byte-identical re-encode in
+  V1 and V2, byte-identical authoring against pinned clientIDs,
+  diff-vs-state-vector, concurrent merge in both orders), mirroring the
+  existing YMap/YText conformance suites.
+
+### Changed
+
+- **V2 updates can be larger for XML-heavy documents**: with key dedup
+  disabled on encode (yjs parity, see above), every repeated key —
+  `ContentFormat` keys like `strong`, repeated element node names like
+  `paragraph` — is re-emitted rather than back-referenced. This is the size
+  cost of byte-compatibility with the yjs reference encoder.
+
 ## [1.32.0] — 2026-07-17
 
 ### Added
