@@ -70,7 +70,7 @@
 | **Auto-commit on drop** | ✅ `TransactionMut` commits when dropped | ✅ Commit at end of `Transact` callback | — | Different ergonomic shape; same guarantee |
 | **Origin tracking** | ✅ `TransactionMut::origin()` | ✅ `txn.Origin` field | ✅ | — |
 | **Before/after state** | ✅ `before_state()`, `after_state()`, `delete_set()` on txn | ✅ Exposed via `OnAfterTransaction` callback | — | — |
-| **Nested transactions** | ❌ Single active `TransactionMut` per Doc | ❌ Nested `Transact` calls not supported | — | Both match JS Yjs single-lock semantics |
+| **Nested transactions** | ❌ Single active `TransactionMut` per Doc (borrow-checked) | ❌ Nested `Transact` on the same Doc deadlocks (documented); use `txn.GetText`/`GetMap`/`GetArray`/`GetXmlFragment` or pass `*Transaction` to helpers | ❌ Diverges from JS: yjs silently merges nested `transact` calls into the open transaction (single-threaded ambient reuse) | The concurrent ports (yrs, ygo) both require explicit transaction passing; JS-style ambient nesting needs single-threaded ownership that Go/Rust do not expose |
 | **Read-only transactions** | ✅ `Transaction` type (cannot mutate) | ✅ Methods outside `Transact` acquire `RLock` | — | yrs enforces at type level; ygo enforces at runtime |
 | **Context-aware transaction** | ❌ Not present | ✅ `Doc.TransactContext(ctx, ...)` | — | ygo-only; fn polls ctx to exit early; no mid-fn interrupt (matches yrs' no-cancel model) |
 
