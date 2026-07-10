@@ -384,3 +384,42 @@ func TestP0_C3_MergeUpdatesPreservesCrossClientChild(t *testing.T) {
 		t.Fatalf("merged element attribute class=%q ok=%v, want \"hello\"", v, ok)
 	}
 }
+
+// C-3 (V2 decode path) — ApplyUpdateV2 must defer a nested container's first
+// child when that child was authored by a HIGHER-clientID peer. V2 sorts client
+// groups DESCENDING, so the child decodes before its parent; ygo <=v1.31.0
+// hard-failed with "parent item not found". This is the doc_v2 snapshot path
+// (reearth-flow's Load decodes doc_v2 via ApplyUpdateV2). #140.
+func TestP0_C3_V2SelfDecodeReloads(t *testing.T) {
+	dLow := New(WithClientID(100))
+	frag := dLow.GetXmlFragment("f")
+	el := NewYXmlElement("div")
+	dLow.Transact(func(txn *Transaction) { frag.InsertElement(txn, 0, el) })
+
+	dHigh := New(WithClientID(200))
+	if err := ApplyUpdateV1(dHigh, fullState(dLow), nil); err != nil {
+		t.Fatalf("seed dHigh: %v", err)
+	}
+	elH := dHigh.GetXmlFragment("f").Children()[0].(*YXmlElement)
+	dHigh.Transact(func(txn *Transaction) { elH.SetAttribute(txn, "class", "hello") })
+
+	// V2 full-state encode holds both groups; group 200 (the attribute child)
+	// sorts before group 100 (the element it references) under descending order.
+	v2 := EncodeStateAsUpdateV2(dHigh, nil)
+
+	fresh := New()
+	if err := ApplyUpdateV2(fresh, v2, nil); err != nil {
+		t.Fatalf("ApplyUpdateV2 on own V2 encode failed: %v", err)
+	}
+	fc := fresh.GetXmlFragment("f").Children()
+	if len(fc) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(fc))
+	}
+	fel, ok := fc[0].(*YXmlElement)
+	if !ok {
+		t.Fatalf("reconstructed child is not *YXmlElement: %T", fc[0])
+	}
+	if v, ok := fel.GetAttribute("class"); !ok || v != "hello" {
+		t.Fatalf("V2 element attribute class=%q ok=%v, want \"hello\"", v, ok)
+	}
+}

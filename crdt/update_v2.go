@@ -735,7 +735,17 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 					}
 				}
 			}
-			if item.Parent == nil && item.ParentSub != nil {
+			// Parent referenced by container item-ID (C-3): the container may have
+			// integrated in an earlier group this pass. Resolve before the ParentSub
+			// fallback, which would otherwise graft this keyed item onto an arbitrary map.
+			if item.Parent == nil && item.parentID != nil {
+				if pi := txn.doc.store.Find(*item.parentID); pi != nil {
+					if ct, ok := pi.Content.(*ContentType); ok {
+						item.Parent = ct.Type
+					}
+				}
+			}
+			if item.Parent == nil && item.parentID == nil && item.ParentSub != nil {
 				item.Parent = findParentForMapEntry(txn.doc.store)
 			}
 			if item.Parent != nil {
@@ -889,6 +899,7 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 
 	var parent *abstractType
 	var parentSub *string
+	var parentByID *ID // deferred container ref when the parent isn't integrated yet
 
 	cantCopyParentInfo := !hasOrigin && !hasRightOrigin
 	if cantCopyParentInfo {
@@ -905,19 +916,22 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 			parent = doc.getOrCreateType(name)
 		} else {
 			// Parent by item ID.
-			parentID, err := dec.readLeftID()
+			pid, err := dec.readLeftID()
 			if err != nil {
 				return nil, 0, err
 			}
-			parentItem := doc.store.Find(parentID)
+			parentItem := doc.store.Find(pid)
 			if parentItem == nil {
-				return nil, 0, fmt.Errorf("parent item {%d,%d} not found", parentID.Client, parentID.Clock)
+				// Container not integrated yet: V2 sorts client groups descending,
+				// so a higher-clientID child decodes before its lower-clientID
+				// parent. Defer instead of hard-failing; the resolve/drain pass
+				// integrates it once the container arrives (C-3 parity with V1). (#140)
+				parentByID = &pid
+			} else if ct, ok := parentItem.Content.(*ContentType); ok {
+				parent = ct.Type
+			} else {
+				return nil, 0, fmt.Errorf("parent item {%d,%d} is not a ContentType", pid.Client, pid.Clock)
 			}
-			ct, ok := parentItem.Content.(*ContentType)
-			if !ok {
-				return nil, 0, fmt.Errorf("parent item {%d,%d} is not a ContentType", parentID.Client, parentID.Clock)
-			}
-			parent = ct.Type
 		}
 
 		if hasParentSub {
@@ -940,6 +954,7 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 		OriginRight: originRight,
 		Parent:      parent,
 		ParentSub:   parentSub,
+		parentID:    parentByID,
 		Content:     content,
 	}
 
