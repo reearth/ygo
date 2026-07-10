@@ -60,12 +60,12 @@ func (f *YXmlFragment) prepareFire(txn *Transaction, keysChanged map[string]stru
 }
 
 // Len returns the number of non-deleted child nodes (attributes are excluded).
-// On a detached fragment/element it counts the buffered prelim children,
-// mirroring Yjs's YXmlFragment length getter.
+//
+// A DETACHED fragment/element reports 0: buffered prelim children are not
+// visible to any reader (Len, Children, attribute getters, ToXML) until the
+// subtree attaches — uniform with YText, whose detached Len/ToString likewise
+// ignore pending operations.
 func (f *YXmlFragment) Len() int {
-	if f.abstractType.detached() {
-		return len(f.prelimChildren)
-	}
 	count := 0
 	for item := f.start; item != nil; item = item.Right {
 		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == nil {
