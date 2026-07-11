@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.31.1] — 2026-07-11
+
+### Fixed
+
+- **YMap key silently lost on `ApplyUpdateV1` ([#149](https://github.com/reearth/ygo/issues/149)).**
+  When a map-keyed item's origin was authored by a higher-clientID peer, the
+  item decoded before its origin's client group and took the V1 deferred-parent
+  retry path, which resolved the parent but did not inherit `ParentSub`. The
+  item integrated keyless and vanished from the map — a single document's own
+  full-state encode could fail to round-trip, dropping a live key
+  non-deterministically by arrival order. The V1 within-update resolver now
+  inherits `ParentSub` like the sibling sites and the V2 decoder already do.
+  Found by the new randomized convergence fuzzer (#70).
+
 ## [1.31.0] — 2026-07-09
 
 ### Added

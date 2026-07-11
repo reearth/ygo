@@ -1,44 +1,29 @@
-## v1.31.0
+## v1.31.1
 
-Subdocument lifecycle (issue #63): a `Doc` can now embed another `Doc` as a
-subdocument — its own clock space and GUID, nested inside a parent doc's
-`YMap` — mirroring Yjs's subdocuments feature. This is the local half of the
-feature (create, embed, enumerate, observe); live cross-peer subdocument sync
-is a separate, tracked follow-up (see [#142](https://github.com/reearth/ygo/issues/142)).
+A CRDT correctness patch. No API changes.
 
-### Added
+### Fixed
 
-- **Subdocument embedding** — `YMap.Set(txn, key, subdoc)` where `subdoc` is
-  a `*crdt.Doc`; `YMap.Get` returns the `*crdt.Doc` back out. A `Doc` may be
-  embedded only once — a second attempt panics with the new
-  `crdt.ErrSubdocAlreadyIntegrated`.
-- **`Doc.GetSubdocs()` / `Doc.GetSubdocGUIDs()`** — the subdocuments
-  currently resident on a doc, sorted by GUID.
-- **`Doc.OnSubdocs(func(crdt.SubdocsEvent)) func()`** — subscribes to
-  subdocument add/remove/load events; returns an unsubscribe closure.
-- **`crdt.SubdocsEvent{Added, Removed, Loaded []*Doc}`** — reports docs newly
-  embedded, docs detached, and docs that should now be synced.
-- **`Doc.Load()`** — signals a subdocument's data should be synced, flipping
-  `ShouldLoad()` to `true` and emitting a `Loaded` event on the parent.
-- **`crdt.WithAutoLoad`/`WithShouldLoad`/`WithCollectionID`** `DocOption`s,
-  plus accessors `Doc.AutoLoad()`/`Doc.ShouldLoad()`/`Doc.CollectionID()`.
-- **`crdt.Example_subdocs`** — a runnable godoc example
-  (`crdt/example_subdocs_test.go`).
-- `ContentDoc` opts (guid/gc/autoLoad/collectionId) now round-trip on both
-  V1 and V2 wire formats and survive `MergeUpdatesV1`/`MergeUpdatesV2`; byte
-  parity with real Yjs verified against a `yjs@13.6.30` fixture.
+- **YMap key silently lost on `ApplyUpdateV1` ([#149](https://github.com/reearth/ygo/issues/149)).**
+  When a map-keyed item's origin was authored by a higher-clientID peer, the
+  item decoded before its origin's client group within the same update and took
+  the V1 deferred-parent retry path, which resolved the parent but did not
+  inherit `ParentSub`. The item integrated keyless and vanished from the map —
+  a single document's own full-state encode could fail to round-trip
+  (`EncodeStateAsUpdateV1` → `ApplyUpdateV1` dropping a live key), and two peers
+  applying the same updates in different orders could diverge. The V1
+  within-update resolver now inherits `ParentSub`, matching the sibling
+  resolution sites and the V2 decoder.
 
-### Changed
-
-- **`crdt.New()` now defaults a Doc's `guid` to a random uuidv4** (was
-  `""`) — Yjs parity, and an observable change to `Doc.GUID()` for docs
-  created without `WithGUID`. Docs constructed with `crdt.WithGUID(...)` are
-  unaffected.
+This bug was found by ygo's new randomized convergence fuzzer (#70) on its first
+run and confirmed by an independent byte-exact isolation. It affects all V1
+decode paths since the Yjs wire-format work and is present in v1.31.0; upgrading
+is recommended for anyone using `YMap` across concurrent peers.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.31.0
+go get github.com/reearth/ygo@v1.31.1
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
