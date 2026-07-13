@@ -1,34 +1,28 @@
-## v1.31.2
+## v1.31.3
 
-A CRDT convergence patch. No API changes. Both fixes were found by ygo's new
-randomized convergence fuzzer (#70) and confirmed by independent harness-free
-isolation. Upgrading is recommended for anyone syncing via the V2 wire format or
-using `MergeUpdates`/`DiffUpdate`.
+A CRDT convergence patch. No API changes. Found by ygo's randomized convergence
+fuzzer (#70) once nested containers were exercised, and confirmed against real
+Yjs. Recommended for anyone using nested containers (XML elements, or nested
+shared types) with the default `gc:true`.
 
 ### Fixed
 
-- **`ApplyUpdateV2` mis-positioned an item whose `OriginRight` was a
-  not-yet-integrated clock ([#151](https://github.com/reearth/ygo/issues/151)).**
-  V2 decodes client groups in descending client order, so a higher-clientID item
-  could integrate before its lower-clientID right neighbour existed and land at
-  the wrong position — `ApplyUpdateV2` diverging from `ApplyUpdateV1` for an
-  identical logical update. `applyV2Txn` now defers such an item, matching the V1
-  apply path (the C-2 `rightOrigin`-parking fix, #65/#68, that had never been
-  ported to V2).
-
-- **`MergeUpdates`/`DiffUpdate` stripped a real item's origin when its parent was
-  outside the input set — both V1 and V2
-  ([#152](https://github.com/reearth/ygo/issues/152)).** The re-encoders cleared
-  `Origin`/`OriginRight` whenever the referenced neighbour's `Parent` was nil,
-  but that is also true when the neighbour's anchor lives in the receiver's base
-  rather than in the update being merged. Stripping detached the item, so the
-  receiver integrated it at the type head (reorder/loss). The encoders now strip
-  only for genuine GC orphans; the #125 GC-origin handling is preserved.
+- **Deleting a GC'd nested container aborted a concurrent child-merge
+  ([#154](https://github.com/reearth/ygo/issues/154)).** When a nested container
+  (e.g. an XML element) is deleted, auto-GC replaces its `ContentType` with a
+  `ContentDeleted` tombstone. A concurrent remote update still referencing that
+  container by parent-ID then failed a `ContentType` type-assertion and returned
+  a hard "parent item is not a ContentType" error, **aborting the entire
+  update/merge** rather than dropping the single orphaned child. The V1/V2
+  decode and within-update resolve paths now treat a non-ContentType
+  parent-by-ID as an orphan (`parent = nil`) and continue — matching Yjs, which
+  on the identical scenario throws nothing, drops the orphan, and converges.
+  This also reverses the overly-strict resolve-pass error added in v1.31.2.
 
 ## Install
 
 ```
-go get github.com/reearth/ygo@v1.31.2
+go get github.com/reearth/ygo@v1.31.3
 ```
 
 See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
