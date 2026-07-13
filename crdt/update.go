@@ -642,11 +642,23 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			if item.Origin != nil {
 				if oi := txn.doc.store.Find(*item.Origin); oi != nil {
 					item.Parent = oi.Parent
+					// A keyed (map) item with an origin carries no on-wire
+					// ParentSub — it inherits the key from its origin. Without
+					// this, the item integrates keyless (as a sequence element),
+					// vanishes from itemMap, and the map key is silently lost.
+					// Matches decodeItem, the doc-level drain, and the V2 decoder.
+					// (#YMap-wire)
+					if item.ParentSub == nil {
+						item.ParentSub = oi.ParentSub
+					}
 				}
 			}
 			if item.Parent == nil && item.OriginRight != nil {
 				if ori := txn.doc.store.Find(*item.OriginRight); ori != nil {
 					item.Parent = ori.Parent
+					if item.ParentSub == nil {
+						item.ParentSub = ori.ParentSub
+					}
 				}
 			}
 			// Parent referenced by container item-ID (review finding C-3): now

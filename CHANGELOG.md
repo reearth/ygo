@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.31.1] — 2026-07-11
+
+Correctness and performance patch. No API changes. Several of these fixes were
+surfaced by ygo's new randomized convergence fuzzer (#70).
+
+### Fixed
+
+- **YMap key silently lost on `ApplyUpdateV1` ([#149](https://github.com/reearth/ygo/issues/149)).**
+  When a map-keyed item's origin was authored by a higher-clientID peer, the
+  item decoded before its origin's client group and took the V1 deferred-parent
+  retry path, which resolved the parent but did not inherit `ParentSub`. The
+  item integrated keyless and vanished from the map — a single document's own
+  full-state encode could fail to round-trip, dropping a live key
+  non-deterministically by arrival order. The V1 within-update resolver now
+  inherits `ParentSub` like the sibling sites and the V2 decoder already do.
+- **`ApplyUpdateV2` hard-failed on a deferred parent-by-ID child
+  ([#146](https://github.com/reearth/ygo/issues/146)).** When a nested
+  container's first child was authored by a higher-clientID peer, V2's
+  descending client-group order decoded the child before its parent. The V2
+  decoder now defers and resolves it (parity with the V1 `#140` fix) instead of
+  returning `parent item not found`.
+- **V2 struct-level merge/diff dropped a deferred parent-by-ID child.**
+  `MergeUpdatesV2`/`DiffUpdateV2` re-encoded such a child as a GC placeholder,
+  losing its content and parent link. `encodeItemV2` now excludes `parentID`
+  from the GC-orphan path and re-emits the explicit parent-by-ID, and both the
+  V1 and V2 resolve passes return a consistent error on a genuinely corrupt
+  (non-container) parent-by-ID rather than silently orphaning.
+- **`examples/peer-sync` deadlocked ([#138](https://github.com/reearth/ygo/issues/138)).**
+  The example called `GetText`/`GetArray`/`GetMap` inside a `Transact` callback
+  (a re-entrant document-lock hang); the shared-type handles are now resolved
+  before the transaction, matching `examples/http-sync`.
+
+### Performance
+
+- **V2 string-column decode is now O(n), not O(n²).** `ApplyUpdateV2` on
+  string-heavy documents drops roughly 6×, on par with `ApplyUpdateV1`.
+
 ## [1.31.0] — 2026-07-09
 
 ### Added
