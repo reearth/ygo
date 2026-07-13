@@ -688,14 +688,14 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 					}
 				}
 			}
-			// If the origin is a GC placeholder (no parent), search the
-			// entire store for an item with the same ParentSub that does
-			// have a parent. This handles the Yjs wire-format case where
-			// deleted YMap entries become GC structs and the parent type
-			// name is lost.
-			if item.Parent == nil && item.parentID == nil && item.ParentSub != nil {
-				item.Parent = findParentForMapEntry(txn.doc.store)
-			}
+			// A keyed item whose parent is still unresolved here is a genuine
+			// orphan: its origin/container was deleted and GC'd, so the parent
+			// type is gone. Yjs integrates such an item as a no-op (parent=nil)
+			// and drops it on every peer. Do NOT graft it onto some arbitrary
+			// map found by scanning the store — that lands the orphan on a
+			// different (or no) parent depending on integration order and Go map
+			// iteration, causing peers to diverge (#156). Leave Parent nil and
+			// let it fall through to the orphan-Append path below.
 			if item.Parent != nil {
 				// A resolved parent is not sufficient: the item may still depend
 				// on a not-yet-integrated origin/rightOrigin clock (review finding
@@ -1352,11 +1352,11 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 				return false
 			}
 		}
-		if item.Parent == nil && item.parentID == nil && item.ParentSub != nil {
-			item.Parent = findParentForMapEntry(store)
-		}
 		if item.Parent == nil {
-			// Truly unresolvable — orphan store (existing behavior).
+			// A keyed item still unresolved here is a genuine orphan (its
+			// container/origin was deleted and GC'd). Yjs drops it on every
+			// peer; do NOT graft it onto an arbitrary map by scanning the store,
+			// which diverges by integration order (#156). Orphan-store it.
 			store.Append(item)
 			return true
 		}

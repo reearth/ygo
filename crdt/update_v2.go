@@ -776,9 +776,11 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 					}
 				}
 			}
-			if item.Parent == nil && item.parentID == nil && item.ParentSub != nil {
-				item.Parent = findParentForMapEntry(txn.doc.store)
-			}
+			// A keyed item still unresolved here is a genuine orphan (its
+			// container/origin was deleted and GC'd). Yjs drops it on every
+			// peer; do NOT graft it onto an arbitrary map by scanning the store,
+			// which diverges by integration order (#156). Mirrors the V1 loop:
+			// leave Parent nil and let it orphan-Append below.
 			if item.Parent != nil {
 				// A resolved parent is not sufficient: the item may still depend
 				// on a not-yet-integrated origin/rightOrigin clock (C-2).
