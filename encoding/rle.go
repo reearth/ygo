@@ -286,9 +286,9 @@ func (e *StringEncoder) Bytes() []byte {
 
 // StringDecoder reads strings from a pool encoded by StringEncoder.
 type StringDecoder struct {
-	str  string
-	spos int // current position in UTF-16 code units
-	lens *UintOptRleDecoder
+	str     string
+	bytePos int // current byte offset into str; reads are sequential
+	lens    *UintOptRleDecoder
 }
 
 // NewStringDecoder returns a decoder for data produced by StringEncoder.
@@ -317,9 +317,14 @@ func (d *StringDecoder) Read() (string, error) {
 		return "", err
 	}
 	length := int(l)
-	byteStart := utf16ToByteOffset(d.str, d.spos)
-	d.spos += length
-	byteEnd := utf16ToByteOffset(d.str, d.spos)
+	// Reads are sequential, so advance the byte offset from where the last read
+	// ended instead of rescanning from the start of the column string every
+	// time. This makes decoding the whole column O(total length) rather than
+	// O(n^2) — the previous code re-counted UTF-16 units from offset 0 on every
+	// Read, which dominated ApplyUpdateV2 for string-heavy documents.
+	byteStart := d.bytePos
+	byteEnd := advanceUTF16(d.str, byteStart, length)
+	d.bytePos = byteEnd
 	return d.str[byteStart:byteEnd], nil
 }
 
@@ -338,17 +343,19 @@ func utf16CodeUnitLen(s string) int {
 	return n
 }
 
-// utf16ToByteOffset converts a UTF-16 code unit position to the corresponding
-// byte offset in the UTF-8 string s.
-func utf16ToByteOffset(s string, utf16Pos int) int {
-	bytePos := 0
-	u16Counted := 0
-	for u16Counted < utf16Pos && bytePos < len(s) {
+// advanceUTF16 returns the byte offset reached by advancing `units` UTF-16 code
+// units forward from byteStart in s. It scans only the requested span, so a
+// sequential StringDecoder (which remembers its byte position) decodes an entire
+// column in O(total length) instead of O(n^2).
+func advanceUTF16(s string, byteStart, units int) int {
+	bytePos := byteStart
+	counted := 0
+	for counted < units && bytePos < len(s) {
 		r, size := utf8.DecodeRuneInString(s[bytePos:])
 		if r >= 0x10000 {
-			u16Counted += 2
+			counted += 2
 		} else {
-			u16Counted++
+			counted++
 		}
 		bytePos += size
 	}

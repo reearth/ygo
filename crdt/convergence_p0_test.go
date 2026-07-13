@@ -384,3 +384,97 @@ func TestP0_C3_MergeUpdatesPreservesCrossClientChild(t *testing.T) {
 		t.Fatalf("merged element attribute class=%q ok=%v, want \"hello\"", v, ok)
 	}
 }
+
+// C-3 (V2 decode path) — ApplyUpdateV2 must defer a nested container's first
+// child when that child was authored by a HIGHER-clientID peer. V2 sorts client
+// groups DESCENDING, so the child decodes before its parent; ygo <=v1.31.0
+// hard-failed with "parent item not found". This is the doc_v2 snapshot path
+// (reearth-flow's Load decodes doc_v2 via ApplyUpdateV2). #140.
+func TestP0_C3_V2SelfDecodeReloads(t *testing.T) {
+	dLow := New(WithClientID(100))
+	frag := dLow.GetXmlFragment("f")
+	el := NewYXmlElement("div")
+	dLow.Transact(func(txn *Transaction) { frag.InsertElement(txn, 0, el) })
+
+	dHigh := New(WithClientID(200))
+	if err := ApplyUpdateV1(dHigh, fullState(dLow), nil); err != nil {
+		t.Fatalf("seed dHigh: %v", err)
+	}
+	elH := dHigh.GetXmlFragment("f").Children()[0].(*YXmlElement)
+	dHigh.Transact(func(txn *Transaction) { elH.SetAttribute(txn, "class", "hello") })
+
+	// V2 full-state encode holds both groups; group 200 (the attribute child)
+	// sorts before group 100 (the element it references) under descending order.
+	v2 := EncodeStateAsUpdateV2(dHigh, nil)
+
+	fresh := New()
+	if err := ApplyUpdateV2(fresh, v2, nil); err != nil {
+		t.Fatalf("ApplyUpdateV2 on own V2 encode failed: %v", err)
+	}
+	fc := fresh.GetXmlFragment("f").Children()
+	if len(fc) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(fc))
+	}
+	fel, ok := fc[0].(*YXmlElement)
+	if !ok {
+		t.Fatalf("reconstructed child is not *YXmlElement: %T", fc[0])
+	}
+	if v, ok := fel.GetAttribute("class"); !ok || v != "hello" {
+		t.Fatalf("V2 element attribute class=%q ok=%v, want \"hello\"", v, ok)
+	}
+}
+
+// TestP0_C3_V2MergeDiffPreservesParentByID guards the V2 struct-level
+// merge/diff path against dropping a cross-client parent-by-ID child. The
+// "class" attribute item (client 200) references its container element (client
+// 100) purely by item-ID with no origin, so resolveParents (which only follows
+// origins) leaves it as a deferred parentID; it reaches encodeItemV2 with
+// Parent==nil. Before the fix encodeItemV2 GC-orphaned it (content dropped);
+// this asserts it survives both MergeUpdatesV2 and DiffUpdateV2. (#140, Copilot
+// review on #145)
+func TestP0_C3_V2MergeDiffPreservesParentByID(t *testing.T) {
+	dLow := New(WithClientID(100))
+	frag := dLow.GetXmlFragment("f")
+	el := NewYXmlElement("div")
+	dLow.Transact(func(txn *Transaction) { frag.InsertElement(txn, 0, el) })
+
+	dHigh := New(WithClientID(200))
+	if err := ApplyUpdateV1(dHigh, fullState(dLow), nil); err != nil {
+		t.Fatalf("seed dHigh: %v", err)
+	}
+	elH := dHigh.GetXmlFragment("f").Children()[0].(*YXmlElement)
+	dHigh.Transact(func(txn *Transaction) { elH.SetAttribute(txn, "class", "hello") })
+
+	v2 := EncodeStateAsUpdateV2(dHigh, nil)
+
+	check := func(t *testing.T, label string, out []byte) {
+		t.Helper()
+		fresh := New()
+		if err := ApplyUpdateV2(fresh, out, nil); err != nil {
+			t.Fatalf("%s: ApplyUpdateV2 failed: %v", label, err)
+		}
+		fc := fresh.GetXmlFragment("f").Children()
+		if len(fc) != 1 {
+			t.Fatalf("%s: expected 1 child, got %d", label, len(fc))
+		}
+		fel, ok := fc[0].(*YXmlElement)
+		if !ok {
+			t.Fatalf("%s: child is not *YXmlElement: %T", label, fc[0])
+		}
+		if v, ok := fel.GetAttribute("class"); !ok || v != "hello" {
+			t.Fatalf("%s: attribute class=%q ok=%v, want \"hello\" (parent-by-ID child dropped)", label, v, ok)
+		}
+	}
+
+	merged, err := MergeUpdatesV2(v2)
+	if err != nil {
+		t.Fatalf("MergeUpdatesV2: %v", err)
+	}
+	check(t, "MergeUpdatesV2", merged)
+
+	diff, err := DiffUpdateV2(v2, nil)
+	if err != nil {
+		t.Fatalf("DiffUpdateV2: %v", err)
+	}
+	check(t, "DiffUpdateV2", diff)
+}

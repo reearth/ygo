@@ -119,10 +119,17 @@ func main() {
 	// Alice inserts text, array items, and a map entry — all while Bob is
 	// completely unaware. This models the "offline first" scenario: a user
 	// edits a document on a plane, then syncs when they land.
+	// Resolve the shared-type handles BEFORE opening the transaction. The
+	// GetXxx accessors acquire the document lock, and Transact holds that same
+	// lock for the duration of its callback, so calling an accessor inside the
+	// closure would re-enter the lock and deadlock (see #138).
+	aText := alice.doc.GetText("shared")
+	aNums := alice.doc.GetArray("nums")
+	aMeta := alice.doc.GetMap("meta")
 	alice.doc.Transact(func(txn *crdt.Transaction) {
-		alice.doc.GetText("shared").Insert(txn, 0, "Hello from Alice!", nil)
-		alice.doc.GetArray("nums").Insert(txn, 0, []any{1, 2, 3})
-		alice.doc.GetMap("meta").Set(txn, "author", "Alice")
+		aText.Insert(txn, 0, "Hello from Alice!", nil)
+		aNums.Insert(txn, 0, []any{1, 2, 3})
+		aMeta.Set(txn, "author", "Alice")
 	})
 
 	// Alice's state vector now reflects the three insertions she just made.
@@ -145,9 +152,12 @@ func main() {
 	// Neither peer knows about the other's changes yet — this is the "offline /
 	// concurrent" scenario that CRDTs handle. The YATA algorithm will merge
 	// both sets of edits deterministically when they finally exchange updates.
+	// Same re-entrancy rule as above: resolve handles before the transaction.
+	bText := bob.doc.GetText("shared")
+	bMeta := bob.doc.GetMap("meta")
 	bob.doc.Transact(func(txn *crdt.Transaction) {
-		bob.doc.GetText("shared").Insert(txn, 0, "Hello from Bob!", nil)
-		bob.doc.GetMap("meta").Set(txn, "topic", "greeting")
+		bText.Insert(txn, 0, "Hello from Bob!", nil)
+		bMeta.Set(txn, "topic", "greeting")
 	})
 
 	printStateVector("Bob   state vector", bob.doc.StateVector())
@@ -256,9 +266,10 @@ func main() {
 	// minimal delta to send to Bob.
 	svBeforeEdit := alice.doc.StateVector()
 
+	// Resolve the handle before the transaction (re-entrancy rule, #138).
+	text := alice.doc.GetText("shared")
 	alice.doc.Transact(func(txn *crdt.Transaction) {
 		// Append " ✓" to the end of the shared text.
-		text := alice.doc.GetText("shared")
 		text.Insert(txn, text.Len(), " ✓", nil)
 	})
 

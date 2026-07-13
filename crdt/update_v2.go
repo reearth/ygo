@@ -383,7 +383,13 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 	// Parent but a valid Origin/OriginRight — encode it as a normal item, not a
 	// GC placeholder, or its content is lost. Parent info is only written in the
 	// no-origin branch below. (#125 / #57)
-	if item.Parent == nil && item.Origin == nil && item.OriginRight == nil {
+	//
+	// Require no deferred parent-by-ID either: a struct-level-decoded item whose
+	// container is in a later client group has a nil Parent but a valid parentID.
+	// Treat it as a normal item and re-emit the parent-by-ID in the no-origin
+	// branch below; GC-orphaning it here would drop its content. Mirrors the V1
+	// encodeItem fix. (#140)
+	if item.Parent == nil && item.Origin == nil && item.OriginRight == nil && item.parentID == nil {
 		length := item.Content.Len()
 		if offset > 0 {
 			length -= offset
@@ -446,6 +452,15 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 			// Nested type: parent identified by its item's ID.
 			enc.writeParentInfo(false)
 			enc.writeLeftID(item.Parent.item.ID)
+		} else if item.parentID != nil {
+			// Deferred parent-by-ID: decoded but not yet integrated (its container
+			// is in a later client group), so Parent is still nil while parentID
+			// holds the container's ID. Re-emit the explicit parent-by-ID so the
+			// receiver can defer and resolve it too, instead of falling through to
+			// the root-named branch and writing an empty name (silent data loss).
+			// Mirrors the V1 encodeItem fix. (#140)
+			enc.writeParentInfo(false)
+			enc.writeLeftID(*item.parentID)
 		} else {
 			// Root named type.
 			enc.writeParentInfo(true)
@@ -735,7 +750,24 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 					}
 				}
 			}
-			if item.Parent == nil && item.ParentSub != nil {
+			// Parent referenced by container item-ID (C-3): the container may have
+			// integrated in an earlier group this pass. Resolve before the ParentSub
+			// fallback, which would otherwise graft this keyed item onto an arbitrary map.
+			if item.Parent == nil && item.parentID != nil {
+				if pi := txn.doc.store.Find(*item.parentID); pi != nil {
+					ct, ok := pi.Content.(*ContentType)
+					if !ok {
+						// Parent-by-ID resolves to a non-container item: the update
+						// is corrupt. decodeItemV2 errors on this when the parent is
+						// already integrated at decode time; error here too so the
+						// outcome doesn't depend on decode order (a deferred parent
+						// would otherwise be silently orphaned).
+						return fmt.Errorf("parent item {%d,%d} is not a ContentType", item.parentID.Client, item.parentID.Clock)
+					}
+					item.Parent = ct.Type
+				}
+			}
+			if item.Parent == nil && item.parentID == nil && item.ParentSub != nil {
 				item.Parent = findParentForMapEntry(txn.doc.store)
 			}
 			if item.Parent != nil {
@@ -889,6 +921,7 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 
 	var parent *abstractType
 	var parentSub *string
+	var parentByID *ID // deferred container ref when the parent isn't integrated yet
 
 	cantCopyParentInfo := !hasOrigin && !hasRightOrigin
 	if cantCopyParentInfo {
@@ -905,19 +938,22 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 			parent = doc.getOrCreateType(name)
 		} else {
 			// Parent by item ID.
-			parentID, err := dec.readLeftID()
+			pid, err := dec.readLeftID()
 			if err != nil {
 				return nil, 0, err
 			}
-			parentItem := doc.store.Find(parentID)
+			parentItem := doc.store.Find(pid)
 			if parentItem == nil {
-				return nil, 0, fmt.Errorf("parent item {%d,%d} not found", parentID.Client, parentID.Clock)
+				// Container not integrated yet: V2 sorts client groups descending,
+				// so a higher-clientID child decodes before its lower-clientID
+				// parent. Defer instead of hard-failing; the resolve/drain pass
+				// integrates it once the container arrives (C-3 parity with V1). (#140)
+				parentByID = &pid
+			} else if ct, ok := parentItem.Content.(*ContentType); ok {
+				parent = ct.Type
+			} else {
+				return nil, 0, fmt.Errorf("parent item {%d,%d} is not a ContentType", pid.Client, pid.Clock)
 			}
-			ct, ok := parentItem.Content.(*ContentType)
-			if !ok {
-				return nil, 0, fmt.Errorf("parent item {%d,%d} is not a ContentType", parentID.Client, parentID.Clock)
-			}
-			parent = ct.Type
 		}
 
 		if hasParentSub {
@@ -940,6 +976,7 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 		OriginRight: originRight,
 		Parent:      parent,
 		ParentSub:   parentSub,
+		parentID:    parentByID,
 		Content:     content,
 	}
 
