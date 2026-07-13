@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.31.2] — 2026-07-13
+
+CRDT convergence patch. No API changes. Both fixes were found by ygo's new
+randomized convergence fuzzer (#70) and confirmed by independent harness-free
+isolation.
+
+### Fixed
+
+- **`ApplyUpdateV2` mis-positioned an item whose `OriginRight` was a
+  not-yet-integrated clock ([#151](https://github.com/reearth/ygo/issues/151)).**
+  V2 decodes client groups in descending client order, so a higher-clientID
+  item could reach integration before its lower-clientID right neighbour
+  existed and land at the wrong position, diverging from `ApplyUpdateV1` for an
+  identical logical update. `applyV2Txn` now defers such an item (first-pass
+  `OriginRight`-clock guard plus a retry-loop `itemFutureDep` check), matching
+  the V1 apply path — the C-2 `rightOrigin`-parking fix (#65/#68) that had never
+  been ported to V2.
+- **`MergeUpdates`/`DiffUpdate` stripped a real item's origin when its parent
+  was outside the input set, on both V1 and V2
+  ([#152](https://github.com/reearth/ygo/issues/152)).** The re-encoders cleared
+  `Origin`/`OriginRight` whenever the referenced neighbour's `Parent` was nil —
+  but a `Parent` is also nil when its anchor lives in the receiver's base rather
+  than in the merged update. Stripping detached the item, so the receiver
+  integrated it at the type head (reorder/loss). The encoders now strip only
+  when the neighbour is a genuine GC orphan (no `Parent` and no
+  `Origin`/`OriginRight`/`parentID`); genuine GC-origin handling (#125) is
+  preserved.
+
 ## [1.31.1] — 2026-07-11
 
 Correctness and performance patch. No API changes. Several of these fixes were
