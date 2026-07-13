@@ -47,12 +47,13 @@ func oracleScriptDir() (dir, script string, ok bool) {
 
 // RunNode replays every scenario against real Yjs by piping one NDJSON line per
 // scenario into a single persistent node worker and reading one NDJSON reply
-// per scenario back. It returns (nil, false) — signalling the caller should
-// skip — when node is not on PATH, the yjs dependency is not installed, or the
-// worker script is missing. Otherwise it returns one NodeResult per scenario in
-// order; a result whose Err is non-nil means the worker died before producing
-// that scenario's output (its stderr is attached), which the caller surfaces as
-// a failure rather than a skip.
+// per scenario back. It returns ok=false — signalling the caller should skip —
+// ONLY when the environment is genuinely absent: node is not on PATH, the
+// worker script is missing, or the yjs dependency is not installed. Once those
+// checks pass, node+yjs are present, so any later worker setup/spawn or runtime
+// failure is returned with ok=true and a non-nil per-scenario Err, which the
+// caller surfaces as a test failure (not a skip) — otherwise a broken oracle
+// would pass silently in CI. It returns one NodeResult per scenario in order.
 func RunNode(scenarios []Scenario) ([]NodeResult, bool) {
 	nodePath, err := exec.LookPath("node")
 	if err != nil {
@@ -70,20 +71,33 @@ func RunNode(scenarios []Scenario) ([]NodeResult, bool) {
 		return nil, false
 	}
 
+	// Past this point node AND yjs are confirmed present, so a worker
+	// setup/spawn failure is a genuine error — not an "environment absent" skip.
+	// Surface it through per-scenario Err (with ok=true) so the caller reports a
+	// failure instead of silently skipping (which would hide a broken oracle in
+	// CI). fail returns one errored result per scenario.
+	fail := func(err error) ([]NodeResult, bool) {
+		rs := make([]NodeResult, len(scenarios))
+		for i := range rs {
+			rs[i].Err = err
+		}
+		return rs, true
+	}
+
 	cmd := exec.Command(nodePath, script)
 	cmd.Dir = dir
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, false
+		return fail(fmt.Errorf("node worker StdinPipe: %w", err))
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, false
+		return fail(fmt.Errorf("node worker StdoutPipe: %w", err))
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return nil, false
+		return fail(fmt.Errorf("node worker start: %w", err))
 	}
 
 	// Feed scenarios from a goroutine so a full OS pipe buffer can't deadlock

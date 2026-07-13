@@ -38,11 +38,18 @@ func Shrink(s Scenario, stillFails func(Scenario) bool) Scenario {
 	}
 
 	// Phase 2: payload simplification — shorten string values while the failure
-	// persists (never to empty, which would change the op's semantics).
+	// persists (never to empty, which would change the op's semantics). Truncate
+	// by rune, not byte: generated StrVal holds multi-byte UTF-8 (Greek/Japanese/
+	// emoji), and slicing mid-rune would produce invalid UTF-8 and change the
+	// scenario's behaviour rather than shrink it.
 	for i := range steps {
-		for len(steps[i].StrVal) > 1 {
+		for {
+			r := []rune(steps[i].StrVal)
+			if len(r) <= 1 {
+				break
+			}
 			cand := append([]Step(nil), steps...)
-			cand[i].StrVal = cand[i].StrVal[:len(cand[i].StrVal)-1]
+			cand[i].StrVal = string(r[:len(r)-1])
 			if !stillFails(mk(cand)) {
 				break
 			}
