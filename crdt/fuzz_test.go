@@ -1,17 +1,33 @@
 package crdt_test
 
 import (
+	"os"
+	"strconv"
 	"testing"
 
 	"github.com/reearth/ygo/testutil/fuzz"
 )
 
+// fuzzIter is the number of seeds TestFuzzConvergence sweeps. Defaults to 1000
+// (the CI set); override for a heavy soak run, e.g.
+//
+//	FUZZ_ITER=50000 go test ./crdt/ -run TestFuzzConvergence -timeout 30m
+func fuzzIter() uint64 {
+	if v := os.Getenv("FUZZ_ITER"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1000
+}
+
 // TestFuzzConvergence runs the fixed CI seed set; deterministic, no node.
 func TestFuzzConvergence(t *testing.T) {
-	for seed := uint64(0); seed < 1000; seed++ {
+	n := fuzzIter()
+	for seed := uint64(0); seed < n; seed++ {
 		peers, err := fuzz.RunGo(fuzz.Generate(seed))
 		if err != nil {
-			t.Fatalf("seed %d: %v", seed, err)
+			t.Fatalf("seed %d: %v (reproduce: FUZZ_SEED=%d)", seed, err, seed)
 		}
 		if err := fuzz.Converged(peers); err != nil {
 			t.Fatalf("seed %d: %v (reproduce: FUZZ_SEED=%d)", seed, err, seed)
@@ -37,5 +53,46 @@ func TestFuzzCrossImpl(t *testing.T) {
 		if err := fuzz.CrossImplEqual(s, results[i]); err != nil {
 			t.Fatalf("seed %d: %v (reproduce: FUZZ_SEED=%d)", s.Seed, err, s.Seed)
 		}
+	}
+}
+
+// TestFuzzCorpus replays every frozen scenario under testutil/fuzz/corpus,
+// each a minimized reproducer for a bug that once diverged. Node-free.
+func TestFuzzCorpus(t *testing.T) {
+	scen, err := fuzz.LoadCorpus("../testutil/fuzz/corpus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scen) == 0 {
+		t.Fatal("corpus is empty")
+	}
+	for _, s := range scen {
+		peers, err := fuzz.RunGo(s)
+		if err != nil {
+			t.Fatalf("corpus seed %d: %v", s.Seed, err)
+		}
+		if err := fuzz.Converged(peers); err != nil {
+			t.Fatalf("corpus seed %d: %v", s.Seed, err)
+		}
+	}
+}
+
+// TestFuzzSeed replays a single generated scenario for debugging. Set
+// FUZZ_SEED=<n> (the value printed by a TestFuzzConvergence failure).
+func TestFuzzSeed(t *testing.T) {
+	sv := os.Getenv("FUZZ_SEED")
+	if sv == "" {
+		t.Skip("set FUZZ_SEED=<n> to replay one scenario")
+	}
+	n, err := strconv.ParseUint(sv, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers, err := fuzz.RunGo(fuzz.Generate(n))
+	if err != nil {
+		t.Fatalf("seed %d: %v", n, err)
+	}
+	if err := fuzz.Converged(peers); err != nil {
+		t.Fatalf("seed %d: %v", n, err)
 	}
 }

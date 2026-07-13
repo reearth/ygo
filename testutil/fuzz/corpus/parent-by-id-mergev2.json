@@ -1,0 +1,10 @@
+{
+  "seed": 900001,
+  "numPeers": 2,
+  "steps": [
+    {"kind":"op","peer":0,"root":"x","typeKind":"xmlfrag","op":"addchild","posHint":0,"childXml":"elem:div"},
+    {"kind":"sync","from":0,"to":1,"method":"applyv1"},
+    {"kind":"op","peer":1,"root":"x","typeKind":"xmlfrag","op":"setattr","key":"class","strVal":"hello","target":[0]},
+    {"kind":"sync","from":1,"to":0,"method":"mergev2"}
+  ]
+}
