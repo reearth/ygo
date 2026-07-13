@@ -679,16 +679,13 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			// which would otherwise graft this keyed item onto an arbitrary map.
 			if item.Parent == nil && item.parentID != nil {
 				if pi := txn.doc.store.Find(*item.parentID); pi != nil {
-					ct, ok := pi.Content.(*ContentType)
-					if !ok {
-						// Parent-by-ID resolves to a non-container item: corrupt
-						// update. decodeItem errors on this at decode time when the
-						// parent is already integrated; error here too so the outcome
-						// doesn't depend on decode order (kept consistent with the V2
-						// resolve path).
-						return fmt.Errorf("parent item {%d,%d} is not a ContentType", item.parentID.Client, item.parentID.Clock)
+					// A non-ContentType here means the container was tombstoned/
+					// GC'd (its ContentType replaced by a ContentDeleted
+					// placeholder). Leave Parent nil so the item orphan-drops
+					// (Yjs parent=nil) rather than aborting the whole update.
+					if ct, ok := pi.Content.(*ContentType); ok {
+						item.Parent = ct.Type
 					}
-					item.Parent = ct.Type
 				}
 			}
 			// If the origin is a GC placeholder (no parent), search the
@@ -937,7 +934,13 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 			} else if ct, ok := parentItem.Content.(*ContentType); ok {
 				parent = ct.Type
 			} else {
-				return nil, fmt.Errorf("parent item {%d,%d} is not a ContentType", pc, pk)
+				// Parent resolves to a tombstoned/GC'd container (its ContentType
+				// was replaced by a ContentDeleted placeholder). Treat it as a
+				// deferred/orphan reference rather than hard-failing: the item
+				// ends up with no parent and drops from the visible tree, matching
+				// Yjs's parent=nil handling. Aborting the whole update here would
+				// discard unrelated structs in the same batch.
+				parentByID = &ID{Client: ClientID(pc), Clock: pk}
 			}
 		}
 	}

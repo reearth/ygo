@@ -768,16 +768,12 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			// fallback, which would otherwise graft this keyed item onto an arbitrary map.
 			if item.Parent == nil && item.parentID != nil {
 				if pi := txn.doc.store.Find(*item.parentID); pi != nil {
-					ct, ok := pi.Content.(*ContentType)
-					if !ok {
-						// Parent-by-ID resolves to a non-container item: the update
-						// is corrupt. decodeItemV2 errors on this when the parent is
-						// already integrated at decode time; error here too so the
-						// outcome doesn't depend on decode order (a deferred parent
-						// would otherwise be silently orphaned).
-						return fmt.Errorf("parent item {%d,%d} is not a ContentType", item.parentID.Client, item.parentID.Clock)
+					// Non-ContentType => tombstoned/GC'd container. Leave Parent
+					// nil so the item orphan-drops (Yjs parent=nil) rather than
+					// aborting the update. See update.go resolveWithinUpdatePending.
+					if ct, ok := pi.Content.(*ContentType); ok {
+						item.Parent = ct.Type
 					}
-					item.Parent = ct.Type
 				}
 			}
 			if item.Parent == nil && item.parentID == nil && item.ParentSub != nil {
@@ -974,7 +970,9 @@ func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info 
 			} else if ct, ok := parentItem.Content.(*ContentType); ok {
 				parent = ct.Type
 			} else {
-				return nil, 0, fmt.Errorf("parent item {%d,%d} is not a ContentType", pid.Client, pid.Clock)
+				// Tombstoned/GC'd container: defer as an orphan reference instead
+				// of hard-failing (Yjs parent=nil). See update.go decodeItem.
+				parentByID = &pid
 			}
 		}
 
