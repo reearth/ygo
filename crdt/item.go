@@ -183,6 +183,16 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	} else {
 		item.Right = left.Right
 		left.Right = item
+		// Inserting a live item immediately after a deleted left neighbour can
+		// make it the first live item from t.start (or place it before the
+		// cached one) WITHOUT it becoming the list head — so the new-head branch
+		// above didn't fire. Invalidate firstLiveCache so firstLiveFromStart
+		// re-walks; otherwise deleteRange would start from a stale head and
+		// tombstone the wrong indices (#160). O(1); over-invalidation is safe
+		// (the cache self-heals on the next forward walk).
+		if left.Deleted {
+			item.Parent.invalidateFirstLiveCache()
+		}
 	}
 	// Back-pointer: if our right neighbour exists, point it back to us.
 	if item.Right != nil {

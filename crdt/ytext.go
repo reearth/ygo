@@ -268,6 +268,8 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 		splitItem(txn, left, offset)
 		// left is now the left half; left.Right is the right half.
 	}
+	// Anchor after any adjacent tombstones (Yjs text-insert parity, #160).
+	left = t.skipDeletedForTextAnchor(left)
 
 	// Fast path: when caller passed nil/empty attrs, there's nothing to diff,
 	// no markers to emit, and the new text inherits surrounding formatting
@@ -462,6 +464,8 @@ func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attr
 	if offset > 0 {
 		splitItem(txn, left, offset)
 	}
+	// Anchor after any adjacent tombstones (Yjs text-insert parity, #160).
+	left = t.skipDeletedForTextAnchor(left)
 
 	var origin *ID
 	var originRight *ID
@@ -804,6 +808,33 @@ func updateAttr(attrs Attributes, cf *ContentFormat) {
 	} else {
 		attrs[cf.Key] = cf.Val
 	}
+}
+
+// skipDeletedForTextAnchor advances a text/embed insert's left anchor past any
+// adjacent deleted items, so the new run is placed AFTER tombstoned content —
+// matching Yjs, whose text insert advances its cursor past deleted items before
+// anchoring (minimizeAttributeChanges). Without this, originRight would point at
+// a tombstone and a run inserted next to it would anchor BEFORE it; two peers
+// inserting next to the same tombstone would then order their runs differently
+// (a convergence divergence, the text-path mirror of the array Push fix). left
+// is the live neighbour from leftNeighbourAt (nil = document head); the returned
+// anchor is the last adjacent tombstone (or the original left when none).
+//
+// Only deleted items are skipped — not live ContentFormat markers. Yjs's full
+// minimizeAttributeChanges also skips redundant matching markers, but that
+// affects only concurrent *formatted*-text edits (not exercised here) and would
+// entangle the attribute-diff logic; the tombstone skip alone is what the
+// convergence bug requires.
+func (t *abstractType) skipDeletedForTextAnchor(left *Item) *Item {
+	next := t.start
+	if left != nil {
+		next = left.Right
+	}
+	for next != nil && next.Deleted {
+		left = next
+		next = next.Right
+	}
+	return left
 }
 
 // findTextPos returns a cursor at logical position index, splitting the

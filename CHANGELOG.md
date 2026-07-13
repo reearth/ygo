@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.31.6] — 2026-07-13
+
+CRDT convergence + correctness patch. No API changes. Found by ygo's
+cross-implementation convergence fuzzer (#70), which compares ygo's public API
+against live Yjs. Three related, tombstone-triggered fixes
+([#160](https://github.com/reearth/ygo/issues/160)).
+
+### Fixed
+
+- **`YText.Insert` anchored a run before an adjacent tombstone, diverging from
+  Yjs (the text-path mirror of #158).** `Insert`/`InsertEmbed` anchored a new
+  run relative to the last **live** item, leaving `originRight` pointing at an
+  adjacent tombstone, so the run landed *before* it. Yjs's text path advances
+  its cursor past deleted items before anchoring, landing *after* them; two
+  peers inserting next to the same tombstone therefore ordered their runs
+  differently. `Insert`/`InsertEmbed` now advance the anchor past adjacent
+  deleted items. (Only text was affected — Yjs's array path doesn't skip
+  tombstones, so arrays/maps/XML already converged.)
+- **Stale `firstLiveCache` after inserting past leading tombstones.** Inserting
+  a live run after leading tombstones made it the first live item without it
+  becoming the list head, so the only insert-time `firstLiveCache` invalidation
+  (the new-head branch) never fired. A later `Delete` then walked from a stale
+  cached head and tombstoned the wrong indices (it could silently no-op).
+  `integrate` now also invalidates when a live item lands after a deleted left
+  neighbour. (Exposed by the fix above.)
+- **Stale `posCache` after a remote delete-only apply (pre-existing).** Remote
+  applies run with `Local==true`, so `item.delete`'s position-cache
+  invalidation was skipped and the remote delete-set path never cleared it. A
+  remote update that only tombstoned an item left cached `(index → item)`
+  entries for still-live items after it with an index that was too high, so the
+  next local positioned insert resolved the wrong neighbour. The remote
+  delete-set path now invalidates the position cache after deleting a countable
+  item.
+
 ## [1.31.5] — 2026-07-13
 
 CRDT convergence patch. No API changes. Found by ygo's cross-implementation

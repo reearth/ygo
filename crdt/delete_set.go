@@ -144,6 +144,16 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 					end = itemEnd
 				}
 				item.delete(txn)
+				// Remote applies run with txn.Local==true (transactInternal
+				// hardcodes it), so item.delete's own posCache invalidation
+				// (guarded on !txn.Local) is dead here — and unlike local
+				// deleteRange, this path never cleared the cache. A stale
+				// posCache would then mis-resolve the next local positioned
+				// insert, since cached (index→item) entries for still-live items
+				// after the tombstone now carry an index that is too high (#160).
+				if item.Parent != nil && item.Content.IsCountable() {
+					item.Parent.invalidatePosCache()
+				}
 				applied = end - r.Clock
 			}
 			// Park the uncovered suffix of the range, if any.
