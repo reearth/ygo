@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"sort"
 
 	"github.com/reearth/ygo/crdt"
 )
@@ -77,7 +76,7 @@ func applyLocalOp(p *peerState, st Step) {
 			case OpInsert:
 				arr.Insert(txn, clampIndex(st.PosHint, arr.Len(), true), []any{decodeScalar(st.JSONVal)})
 			case OpPush:
-				arr.Insert(txn, arr.Len(), []any{decodeScalar(st.JSONVal)})
+				arr.Push(txn, []any{decodeScalar(st.JSONVal)})
 			case OpDelete:
 				if arr.Len() > 0 {
 					arr.Delete(txn, clampIndex(st.PosHint, arr.Len(), false), minInt(st.LenHint, arr.Len()))
@@ -164,35 +163,6 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// rootsOf returns the (name, kind) roots a scenario touches, sorted by name.
-func rootsOf(s Scenario) []struct {
-	name string
-	kind TypeKind
-} {
-	seen := map[string]TypeKind{}
-	for _, st := range s.Steps {
-		if st.Kind == StepLocalOp {
-			seen[st.Root] = st.TypeKind
-		}
-	}
-	names := make([]string, 0, len(seen))
-	for n := range seen {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	out := make([]struct {
-		name string
-		kind TypeKind
-	}, len(names))
-	for i, n := range names {
-		out[i] = struct {
-			name string
-			kind TypeKind
-		}{n, seen[n]}
-	}
-	return out
 }
 
 // RunGo builds NumPeers peers, replays every step of the scenario against
