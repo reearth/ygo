@@ -717,6 +717,19 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				continue
 			}
 
+			// Defer if the right origin references a not-yet-integrated clock:
+			// V2 decodes client groups descending, so a higher-clientID item can
+			// reach here before its lower-clientID right neighbour exists. Without
+			// this the item integrates at the wrong position (permanent
+			// divergence, review finding C-2). Mirrors the V1 guard in update.go;
+			// only at offset==0 (a split's origins are necessarily satisfied).
+			if offset == 0 && item.OriginRight != nil &&
+				item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
+				pending = append(pending, item)
+				clock = itemEnd
+				continue
+			}
+
 			if offset == 0 && item.Origin != nil {
 				item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
 			}
@@ -771,6 +784,15 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				item.Parent = findParentForMapEntry(txn.doc.store)
 			}
 			if item.Parent != nil {
+				// A resolved parent is not sufficient: the item may still depend
+				// on a not-yet-integrated origin/rightOrigin clock (C-2).
+				// Integrating now would place it at the wrong position. Defer to
+				// `remaining` so the no-progress branch below parks it via
+				// itemFutureDep. Mirrors the V1 retry loop in update.go.
+				if _, _, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
+					remaining = append(remaining, item)
+					continue
+				}
 				if item.Origin != nil {
 					item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
 				}
