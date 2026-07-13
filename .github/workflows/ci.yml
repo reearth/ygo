@@ -34,6 +34,10 @@ jobs:
       - run: go mod download
       - run: go mod verify
       - run: go vet ./...
+      # `./...` includes the #70 convergence fuzzer: TestFuzzConvergence (1000
+      # seeds, Go-vs-Go), TestFuzzCorpus (frozen reproducers), and
+      # TestFuzzCrossImpl (vs real Yjs — runs here because `npm ci` above
+      # installs yjs; it self-skips only when node/yjs are absent).
       - run: go test -race -timeout 120s -coverprofile=coverage.txt -covermode=atomic ./...
       - name: CGo-free build (pure Go)
         run: CGO_ENABLED=0 go build ./persistence/sqlite/... ./cmd/ygo-server/... ./mobile/...

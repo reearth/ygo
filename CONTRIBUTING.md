@@ -188,3 +188,21 @@ Before opening a PR ensure:
 - [ ] Wire-format changes regenerate fixtures (`make fixtures`) and update `TestCompat_` tests
 - [ ] Doc comments updated for any changed public API
 - [ ] PR description links the related issue (`Closes #NNN`)
+
+## Reproducing a convergence fuzz failure (#70)
+
+`testutil/fuzz` runs a randomized, seed-reproducible convergence fuzzer as part
+of `go test ./...` (see `crdt/fuzz_test.go`). On failure it prints a seed. To
+replay that one scenario:
+
+    FUZZ_SEED=<seed> go test ./crdt/ -run TestFuzzSeed -v
+
+To explore more of the space locally (nightly-style), raise the iteration count:
+
+    FUZZ_ITER=50000 go test ./crdt/ -run TestFuzzConvergence -timeout 30m
+
+`TestFuzzCrossImpl` additionally replays each scenario against real Yjs and
+compares the results; it needs Node + `yjs` (`cd testutil && npm ci`) and skips
+automatically when they are absent. A minimized failing scenario (from
+`fuzz.Shrink`) should be saved as a JSON file under `testutil/fuzz/corpus/` so
+it is replayed on every run.

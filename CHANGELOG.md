@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Randomized convergence fuzz framework
+  ([#70](https://github.com/reearth/ygo/issues/70)).** `testutil/fuzz`
+  generates seed-reproducible multi-peer scenarios (random ops across
+  Text/Array/Map/XML, nested containers, delivery via Apply/Merge/Diff on V1 and
+  V2, plus GC), asserts all ygo peers converge, and — when Node + `yjs` are
+  present — checks ygo against real Yjs both logically and by round-trip
+  (`TestFuzzCrossImpl`). Failures print a seed (`FUZZ_SEED=<n>` to replay) and
+  shrink to a minimal scenario (`fuzz.Shrink`); a regression corpus
+  (`testutil/fuzz/corpus`) locks in known cases. CI runs a fixed 1,000-seed set;
+  `FUZZ_ITER=50000` drives heavier local soak runs. This framework found the
+  YArray.Push (#158) and YText tombstone-anchoring + cache-invalidation (#160)
+  divergences fixed in v1.31.5 and v1.31.6.
+
 ## [1.31.6] — 2026-07-13
 
 CRDT convergence + correctness patch. No API changes. Found by ygo's
