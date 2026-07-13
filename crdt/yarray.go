@@ -179,6 +179,16 @@ func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
 		splitItem(txn, left, offset)
 		// left is now the left half; its Right points to the right half.
 	}
+	a.insertAfterItem(txn, left, vals, index)
+}
+
+// insertAfterItem integrates a new item holding vals immediately after left
+// (left == nil means "at the head"). hintIndex is the logical position of the
+// insertion, used only for partial pos-cache invalidation. Shared by Insert
+// and Push; the two differ only in how left is chosen (Insert uses the
+// live-index neighbour, Push uses the physical tail).
+func (a *YArray) insertAfterItem(txn *Transaction, left *Item, vals []any, hintIndex int) {
+	t := &a.abstractType
 
 	var origin *ID
 	var originRight *ID
@@ -203,15 +213,34 @@ func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
 		Content:     NewContentAny(vals...),
 	}
 	// Signal to integrate the logical index for partial cache invalidation.
-	if index > 0 {
-		t.insertHint = index
+	if hintIndex > 0 {
+		t.insertHint = hintIndex
 	}
 	item.integrate(txn, 0)
 }
 
-// Push appends vals to the end of the array.
+// Push appends vals to the end of the array, matching Yjs's push
+// (typeListPushGenerics): the new element anchors after the last PHYSICAL item,
+// tombstones included — NOT after the last live element. Insert(Len()) would
+// use live-index semantics (leftNeighbourAt skips tombstones), so when the tail
+// is a tombstone it anchors the new item before it (origin=nil,
+// rightOrigin=tombstone) whereas Yjs anchors after it (origin=tombstone,
+// rightOrigin=nil). Those are different YATA anchors, so a concurrent push from
+// a Yjs peer would order the two results differently — a convergence divergence
+// surfaced by the #70 cross-impl fuzz oracle.
 func (a *YArray) Push(txn *Transaction, vals []any) {
-	a.Insert(txn, a.Len(), vals)
+	t := &a.abstractType
+	// Start from the last live item (fast, pos-cached) then walk past any
+	// trailing tombstones to the physical tail. When there are no trailing
+	// tombstones this is identical to Insert(Len()) and just as cheap.
+	last, _ := t.leftNeighbourAt(t.length)
+	if last == nil {
+		last = t.start // all items deleted (leading tombstone), or nil if empty
+	}
+	for last != nil && last.Right != nil {
+		last = last.Right
+	}
+	a.insertAfterItem(txn, last, vals, t.length)
 }
 
 // Get returns the element at logical position index, or nil if out of bounds.
