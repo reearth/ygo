@@ -413,12 +413,12 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 	// infer this item's parent from it. Clear the origin so explicit parent
 	// info is encoded instead.
 	if origin != nil {
-		if oi := store.Find(*origin); oi != nil && oi.Parent == nil {
+		if oi := store.Find(*origin); oi != nil && oi.isGCOrphan() {
 			origin = nil
 		}
 	}
 	if originRight != nil {
-		if ori := store.Find(*originRight); ori != nil && ori.Parent == nil {
+		if ori := store.Find(*originRight); ori != nil && ori.isGCOrphan() {
 			originRight = nil
 		}
 	}

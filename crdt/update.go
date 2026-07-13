@@ -181,6 +181,18 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 	})
 }
 
+// isGCOrphan reports whether item carries no positional anchors at all — the
+// shape of a garbage-collected/deleted placeholder decoded from the wire GC
+// format, whose parent a receiver cannot infer. An item with a non-nil Origin,
+// OriginRight, or parentID is NOT an orphan even if its Parent is momentarily
+// unresolved (e.g. its anchor lives outside a merge input set): its origin must
+// be preserved on the wire so the receiver can resolve the parent once it has
+// the dependency. Stripping such an origin detaches the item (#149-class merge
+// corruption).
+func (item *Item) isGCOrphan() bool {
+	return item.Parent == nil && item.Origin == nil && item.OriginRight == nil && item.parentID == nil
+}
+
 func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStore) {
 	// Orphaned items (no parent) came from GC wire format where the parent
 	// type name is lost. Encode them as GC structs so receivers get valid
@@ -250,12 +262,12 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 	// parent info is encoded instead, allowing the receiver to resolve the
 	// parent directly from the named root type or container item ID.
 	if origin != nil {
-		if oi := store.Find(*origin); oi != nil && oi.Parent == nil {
+		if oi := store.Find(*origin); oi != nil && oi.isGCOrphan() {
 			origin = nil
 		}
 	}
 	if originRight != nil {
-		if ori := store.Find(*originRight); ori != nil && ori.Parent == nil {
+		if ori := store.Find(*originRight); ori != nil && ori.isGCOrphan() {
 			originRight = nil
 		}
 	}
