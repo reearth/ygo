@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.31.4] — 2026-07-13
+
+CRDT convergence patch. No API changes. Found by the randomized convergence
+fuzzer (#70) once nested containers were exercised, and confirmed to converge
+in real Yjs where ygo diverged.
+
+### Fixed
+
+- **A deleted-and-GC'd container's orphaned attribute could be mis-grafted onto
+  an unrelated root map, diverging peers
+  ([#156](https://github.com/reearth/ygo/issues/156)).** When an XML element (or
+  other nested container) is deleted, auto-GC (default `gc:true`) replaces its
+  `ContentType` with a `ContentDeleted` tombstone, so a concurrent attribute
+  write on that element arrives as a keyed item whose parent can no longer be
+  resolved. A store-wide fallback (`findParentForMapEntry`) then attached that
+  orphan to the **first** map-type parent it happened to find while scanning the
+  store — a choice that depends on integration order and Go map iteration, so
+  two peers that saw the same updates in different orders ended up with a
+  spurious key (e.g. `"id"`) on the root map on one side only. The fallback is
+  removed at all three resolve sites (V1 within-update, V1 doc-level drain, and
+  V2); such orphans now drop on every peer, matching Yjs, which integrates an
+  item with an unresolved parent as a no-op. The divergence was pre-existing and
+  had been masked by the pre-#154 hard abort; it hit 3 of the first 1000 fuzzer
+  seeds, and all 1000 now converge.
+
 ## [1.31.3] — 2026-07-13
 
 CRDT convergence patch. No API changes. Found by the new randomized convergence
