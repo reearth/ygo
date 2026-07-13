@@ -36,6 +36,23 @@ func TestRunGo_Converges(t *testing.T) {
 	}
 }
 
+// TestRunGo_XmlConverges exercises the "x" (KindXmlFragment) root added in
+// Task 5: nested element/text children plus attribute set/delete, replayed
+// through RunGo's Sync/GC machinery same as every other root, and checked by
+// the shared Converged oracle (which already probes "x" via ToXML()).
+func TestRunGo_XmlConverges(t *testing.T) {
+	for seed := uint64(0); seed < 200; seed++ {
+		s := Generate(seed)
+		peers, err := RunGo(s)
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		if err := Converged(peers); err != nil {
+			t.Fatalf("seed %d XML: %v", seed, err)
+		}
+	}
+}
+
 // TestApplySync_DoesNotMixV1AndV2Inboxes pins the peerState.inboxV1/inboxV2
 // split. Before that split, a single untyped inbox let a DiffV2-staged blob
 // and a later MergeV1 step land in the same MergeUpdatesV1(...) call, which

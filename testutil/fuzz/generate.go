@@ -16,7 +16,7 @@ func Generate(seed uint64) Scenario {
 		name string
 		kind TypeKind
 	}{
-		{"t", KindText}, {"a", KindArray}, {"m", KindMap},
+		{"t", KindText}, {"a", KindArray}, {"m", KindMap}, {"x", KindXmlFragment},
 	}
 	s := Scenario{Seed: seed, NumPeers: numPeers}
 	for i := 0; i < numSteps; i++ {
@@ -67,8 +67,43 @@ func genLocalOp(r *rand.Rand, n int, root string, kind TypeKind) Step {
 		} else {
 			st.Op, st.Key = OpDelKey, randKey(r)
 		}
+	case KindXmlFragment:
+		genXmlOp(r, &st)
 	}
 	return st
+}
+
+var xmlTags = []string{"div", "p", "span"}
+var xmlAttrKeys = []string{"class", "id", "style"}
+
+// genXmlOp populates an XML op on st: insert an element/text child, delete a
+// child, or set/delete an attribute on a (possibly nested, up to depth 3)
+// element addressed by Target.
+func genXmlOp(r *rand.Rand, st *Step) {
+	switch pct := r.Intn(100); {
+	case pct < 50: // 50%: add child (element or text)
+		st.Op, st.PosHint = OpAddChild, r.Intn(20)
+		if r.Intn(3) == 0 {
+			st.ChildXml = "text"
+		} else {
+			st.ChildXml = "elem:" + xmlTags[r.Intn(len(xmlTags))]
+		}
+	case pct < 70: // 20%: delete a child
+		st.Op, st.PosHint = OpDelete, r.Intn(20)
+	default: // 30%: set/del attribute on a nested element (Target path)
+		if r.Intn(5) == 0 {
+			st.Op = OpDelAttr
+		} else {
+			st.Op = OpSetAttr
+			st.StrVal = randRunes(r, "abcXYZ-", 1+r.Intn(6))
+		}
+		st.Key = xmlAttrKeys[r.Intn(len(xmlAttrKeys))]
+		depth := r.Intn(4) // 0..3
+		st.Target = make([]int, depth)
+		for i := range st.Target {
+			st.Target[i] = r.Intn(20)
+		}
+	}
 }
 
 func randRunes(r *rand.Rand, alphabet string, n int) string {

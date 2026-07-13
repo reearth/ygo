@@ -94,7 +94,69 @@ func applyLocalOp(p *peerState, st Step) {
 				m.Delete(txn, st.Key)
 			}
 		})
+	case KindXmlFragment:
+		frag := p.doc.GetXmlFragment(st.Root)
+		p.doc.Transact(func(txn *crdt.Transaction) {
+			switch st.Op {
+			case OpAddChild:
+				idx := clampIndex(st.PosHint, frag.Len(), true)
+				if st.ChildXml == "text" {
+					frag.InsertText(txn, idx, crdt.NewYXmlText())
+				} else { // "elem:<tag>"
+					tag := "div"
+					if len(st.ChildXml) > 5 {
+						tag = st.ChildXml[5:]
+					}
+					frag.InsertElement(txn, idx, crdt.NewYXmlElement(tag))
+				}
+			case OpDelete:
+				if frag.Len() > 0 {
+					frag.Delete(txn, clampIndex(st.PosHint, frag.Len(), false), 1)
+				}
+			case OpSetAttr, OpDelAttr:
+				if el := resolveXmlElem(frag, st.Target); el != nil {
+					if st.Op == OpSetAttr {
+						el.SetAttribute(txn, st.Key, st.StrVal)
+					} else {
+						el.DeleteAttribute(txn, st.Key)
+					}
+				}
+			}
+		})
 	}
+}
+
+// resolveXmlElem walks target (a 0-3-deep child-index path) from frag's
+// top-level children down through nested elements, returning the element at
+// the end of the path. Returns nil if target is empty, frag has no children,
+// or the path steps into a non-element (e.g. a YXmlText) child — in which
+// case the caller treats the op as a no-op rather than panicking.
+//
+// YXmlElement embeds YXmlFragment (verified in crdt/yxml.go), so
+// (*crdt.YXmlElement).Children() is promoted from YXmlFragment.Children() —
+// nesting is walked uniformly at every depth, capped at len(target) by the
+// generator (genXmlOp caps depth at 3).
+func resolveXmlElem(frag *crdt.YXmlFragment, target []int) *crdt.YXmlElement {
+	children := frag.Children()
+	if len(children) == 0 || len(target) == 0 {
+		return nil
+	}
+	el, ok := children[target[0]%len(children)].(*crdt.YXmlElement)
+	if !ok {
+		return nil
+	}
+	for _, idx := range target[1:] {
+		cc := el.Children()
+		if len(cc) == 0 {
+			return el
+		}
+		next, ok := cc[idx%len(cc)].(*crdt.YXmlElement)
+		if !ok {
+			return el
+		}
+		el = next
+	}
+	return el
 }
 
 func minInt(a, b int) int {
