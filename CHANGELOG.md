@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.31.3] — 2026-07-13
+
+CRDT convergence patch. No API changes. Found by the new randomized convergence
+fuzzer (#70) once nested containers were exercised, and confirmed against real
+Yjs.
+
+### Fixed
+
+- **Deleting a GC'd nested container aborted a concurrent child-merge
+  ([#154](https://github.com/reearth/ygo/issues/154)).** When a nested container
+  (e.g. an XML element) is deleted, auto-GC (default `gc:true`) replaces its
+  `ContentType` with a `ContentDeleted` tombstone. A concurrent remote update
+  that still referenced that container by parent-ID then failed a
+  `ContentType` type-assertion and returned a hard "parent item is not a
+  ContentType" error, aborting the **entire** update/merge instead of dropping
+  the one orphaned child. All four sites (V1/V2 decode and within-update
+  resolve) now treat a non-ContentType parent-by-ID as an orphan
+  (`parent = nil`) and continue, matching Yjs. This also reverses the
+  overly-strict resolve-pass error introduced in v1.31.2.
+
 ## [1.31.2] — 2026-07-13
 
 CRDT convergence patch. No API changes. Both fixes were found by ygo's new
