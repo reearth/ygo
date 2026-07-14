@@ -127,3 +127,35 @@ func TestConformance_YText_DecodeYjsBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestConformance_YXml_DecodeYjsBytes(t *testing.T) {
+	for _, fx := range loadConformanceFixtures(t, "yxml_yjs_fixtures.json") {
+		fx := fx
+		t.Run(fx.Name, func(t *testing.T) {
+			for _, ver := range []struct {
+				tag   string
+				hexed string
+				apply func(*crdt.Doc, []byte, any) error
+			}{
+				{"v1", fx.V1, crdt.ApplyUpdateV1},
+				{"v2", fx.V2, crdt.ApplyUpdateV2},
+			} {
+				raw, err := hex.DecodeString(ver.hexed)
+				if err != nil {
+					t.Fatalf("%s/%s bad hex: %v", fx.Name, ver.tag, err)
+				}
+				doc := crdt.New()
+				if err := ver.apply(doc, raw, nil); err != nil {
+					t.Fatalf("%s/%s decode error: %v", fx.Name, ver.tag, err)
+				}
+				var want string
+				if err := json.Unmarshal(fx.Expected, &want); err != nil {
+					t.Fatalf("expected: %v", err)
+				}
+				if got := doc.GetXmlFragment("x").ToXML(); got != want {
+					t.Errorf("%s/%s mismatch: got %q want %q", fx.Name, ver.tag, got, want)
+				}
+			}
+		})
+	}
+}

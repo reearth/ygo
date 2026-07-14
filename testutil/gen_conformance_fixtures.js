@@ -53,3 +53,13 @@ writeFixtures('ytext', [
 	one('hello_delete', 't', 'text', (t) => { t.insert(0, 'Hello, world!'); t.delete(5, 7) }),
 	one('bold_prefix', 't', 'text', (t) => { t.insert(0, 'Hello'); t.format(0, 5, { bold: true }) }),
 ])
+
+// ---- XML: a fragment with an element carrying an attribute + text child ----
+writeFixtures('yxml', [
+	one('div_attr_text', 'x', 'xmlfrag', (f) => {
+		const el = new Y.XmlElement('div')
+		f.insert(0, [el])
+		el.setAttribute('class', 'a')
+		el.insert(0, [new Y.XmlText('hi')])
+	}),
+])
