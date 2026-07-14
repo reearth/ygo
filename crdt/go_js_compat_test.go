@@ -18,10 +18,7 @@ import (
 // Requires node to be available on PATH. The test is skipped when node is absent
 // so it does not break headless CI environments without Node.js.
 func TestCompat_GoToJS(t *testing.T) {
-	nodePath, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not found on PATH — skipping Go→JS interop test")
-	}
+	nodePath, _ := requireConformance(t, "yjs")
 
 	fixtureDir := filepath.Join("..", "testutil", "go_fixtures")
 	require.NoError(t, os.MkdirAll(fixtureDir, 0755))
