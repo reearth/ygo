@@ -103,3 +103,27 @@ func TestConformance_YArray_DecodeYjsBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestConformance_YText_DecodeYjsBytes(t *testing.T) {
+	for _, fx := range loadConformanceFixtures(t, "ytext_yjs_fixtures.json") {
+		fx := fx
+		t.Run(fx.Name, func(t *testing.T) {
+			v1json, v2json := decodeConformance(t, fx, "t", func(d *crdt.Doc) ([]byte, error) {
+				return d.GetText("t").ToJSON() // YText.ToJSON returns the JSON-quoted string
+			})
+			var want string
+			if err := json.Unmarshal(fx.Expected, &want); err != nil {
+				t.Fatalf("expected: %v", err)
+			}
+			for tag, j := range map[string][]byte{"v1": v1json, "v2": v2json} {
+				var got string
+				if err := json.Unmarshal(j, &got); err != nil {
+					t.Fatalf("%s: unmarshal got: %v", tag, err)
+				}
+				if got != want {
+					t.Errorf("%s/%s mismatch: got %q want %q", fx.Name, tag, got, want)
+				}
+			}
+		})
+	}
+}

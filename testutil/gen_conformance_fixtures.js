@@ -45,3 +45,11 @@ writeFixtures('yarray', [
 	one('mixed_push', 'a', 'array', (a) => a.push([1, 'two', true, null, 3.5])),
 	one('insert_then_delete', 'a', 'array', (a) => { a.insert(0, ['x', 'y', 'z']); a.delete(1, 1) }),
 ])
+
+// ---- Text (plain + one format mark; the `expected` is the visible string,
+//      which does not include formatting markers — that keeps the assertion on
+//      text content, matching YText.ToString) ----
+writeFixtures('ytext', [
+	one('hello_delete', 't', 'text', (t) => { t.insert(0, 'Hello, world!'); t.delete(5, 7) }),
+	one('bold_prefix', 't', 'text', (t) => { t.insert(0, 'Hello'); t.format(0, 5, { bold: true }) }),
+])
