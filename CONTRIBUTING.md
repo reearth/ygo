@@ -213,11 +213,16 @@ Cross-impl tests compare ygo against real Yjs. In CI they are hard-gated:
 `YGO_REQUIRE_NODE=1` makes them **fail** (not skip) if Node/yjs is unavailable,
 so coverage can never silently vanish. Locally they skip cleanly without Node.
 
-Checked-in fixtures under `crdt/testdata/*_yjs_fixtures.json` and
-`testutil/fixtures/` are generated from the pinned `yjs@13.6.30`. After an
-intentional wire change, regenerate and commit:
+Checked-in fixtures under `crdt/testdata/*_yjs_fixtures.json` are generated
+from the pinned `yjs@13.6.30`. After an intentional wire change, regenerate
+and commit:
 
     cd testutil && npm ci && cd .. && make fixtures
+
+`make fixtures` regenerates only the conformance JSON fixtures under
+`crdt/testdata/`; it does not touch `testutil/fixtures/*.bin`, which are
+produced separately by `gen_fixtures.js`/`gen_fixtures_v2.js` and are not
+drift-gated.
 
 The `Conformance fixture drift` CI job fails if committed fixtures don't match a
 fresh generation. (Attribution / `yjs14` fixtures are excluded until yjs v14 is

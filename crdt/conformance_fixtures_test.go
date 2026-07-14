@@ -51,7 +51,7 @@ func normalizeJSON(t *testing.T, v any) any {
 
 // decodeConformance decodes the fixture's V1 and V2 bytes into fresh docs and
 // returns the ToJSON of the named root for each, plus asserts no error/panic.
-func decodeConformance(t *testing.T, fx conformanceFixture, root string, toJSON func(*crdt.Doc) ([]byte, error)) (v1json, v2json []byte) {
+func decodeConformance(t *testing.T, fx conformanceFixture, toJSON func(*crdt.Doc) ([]byte, error)) (v1json, v2json []byte) {
 	t.Helper()
 	for _, ver := range []struct {
 		tag   string
@@ -83,7 +83,7 @@ func TestConformance_YArray_DecodeYjsBytes(t *testing.T) {
 	for _, fx := range loadConformanceFixtures(t, "yarray_yjs_fixtures.json") {
 		fx := fx
 		t.Run(fx.Name, func(t *testing.T) {
-			v1json, v2json := decodeConformance(t, fx, "a", func(d *crdt.Doc) ([]byte, error) {
+			v1json, v2json := decodeConformance(t, fx, func(d *crdt.Doc) ([]byte, error) {
 				return d.GetArray("a").ToJSON()
 			})
 			var want any
@@ -108,7 +108,7 @@ func TestConformance_YText_DecodeYjsBytes(t *testing.T) {
 	for _, fx := range loadConformanceFixtures(t, "ytext_yjs_fixtures.json") {
 		fx := fx
 		t.Run(fx.Name, func(t *testing.T) {
-			v1json, v2json := decodeConformance(t, fx, "t", func(d *crdt.Doc) ([]byte, error) {
+			v1json, v2json := decodeConformance(t, fx, func(d *crdt.Doc) ([]byte, error) {
 				return d.GetText("t").ToJSON() // YText.ToJSON returns the JSON-quoted string
 			})
 			var want string
