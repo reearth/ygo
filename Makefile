@@ -32,8 +32,13 @@ bench:
 	@mkdir -p benchmarks
 	go test -bench=. -benchmem -count=3 $(PACKAGES) | tee benchmarks/latest.txt
 
+# Regenerates the deterministic cross-impl conformance fixtures
+# (crdt/testdata/*_yjs_fixtures.json) from the pinned yjs. The legacy
+# testutil/fixtures/*.bin are generated separately by gen_fixtures.js /
+# gen_fixtures_v2.js and are NOT drift-gated (they use a random clientID and
+# are not yet deterministic — see #99 follow-up).
 fixtures:
-	node testutil/gen_fixtures.js
+	node testutil/gen_conformance_fixtures.js
 
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
