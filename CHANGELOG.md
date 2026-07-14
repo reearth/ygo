@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FUZZ_ITER=50000` drives heavier local soak runs. This framework found the
   YArray.Push (#158) and YText tombstone-anchoring + cache-invalidation (#160)
   divergences fixed in v1.31.5 and v1.31.6.
+- **Cross-language Yjs conformance is now enforced in CI
+  ([#99](https://github.com/reearth/ygo/issues/99)).** Cross-impl tests hard-fail
+  (no silent skip) under `YGO_REQUIRE_NODE=1`; a symmetric Map/Array/Text/XML
+  fixture matrix (V1+V2) decodes genuine `yjs@13.6.30` bytes node-free; and a
+  fixture-drift CI job regenerates from the pinned yjs and fails on divergence.
 
 ## [1.31.6] — 2026-07-13
 

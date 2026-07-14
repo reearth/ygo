@@ -206,3 +206,19 @@ compares the results; it needs Node + `yjs` (`cd testutil && npm ci`) and skips
 automatically when they are absent. A minimized failing scenario (from
 `fuzz.Shrink`) should be saved as a JSON file under `testutil/fuzz/corpus/` so
 it is replayed on every run.
+
+## Cross-language conformance (#99)
+
+Cross-impl tests compare ygo against real Yjs. In CI they are hard-gated:
+`YGO_REQUIRE_NODE=1` makes them **fail** (not skip) if Node/yjs is unavailable,
+so coverage can never silently vanish. Locally they skip cleanly without Node.
+
+Checked-in fixtures under `crdt/testdata/*_yjs_fixtures.json` and
+`testutil/fixtures/` are generated from the pinned `yjs@13.6.30`. After an
+intentional wire change, regenerate and commit:
+
+    cd testutil && npm ci && cd .. && make fixtures
+
+The `Conformance fixture drift` CI job fails if committed fixtures don't match a
+fresh generation. (Attribution / `yjs14` fixtures are excluded until yjs v14 is
+final.)
