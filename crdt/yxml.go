@@ -160,7 +160,7 @@ func (f *YXmlFragment) InsertText(txn *Transaction, index int, txt *YXmlText) {
 // detached fragment/element it splices the buffered prelim children, exactly
 // like Yjs's YXmlFragment.delete on _prelimContent.
 func (f *YXmlFragment) Delete(txn *Transaction, index, length int) {
-	if f.abstractType.detached() {
+	if f.detached() {
 		if index < 0 || index >= len(f.prelimChildren) || length <= 0 {
 			return
 		}
