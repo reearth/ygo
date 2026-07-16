@@ -285,7 +285,7 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 	if text == "" {
 		return
 	}
-	if txt.abstractType.detached() {
+	if txt.detached() {
 		txt.buffer(func(txn *Transaction) { txt.Insert(txn, index, text, attrs) })
 		return
 	}
@@ -486,7 +486,7 @@ func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 //
 // Added in v1.12.0 (#76).
 func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attributes) {
-	if txt.abstractType.detached() {
+	if txt.detached() {
 		txt.buffer(func(txn *Transaction) { txt.InsertEmbed(txn, index, embed, attrs) })
 		return
 	}
@@ -598,7 +598,7 @@ func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attr
 // per-Delete cost is O(region size + scope size of any markers found)
 // rather than O(document).
 func (txt *YText) Delete(txn *Transaction, index, length int) {
-	if txt.abstractType.detached() {
+	if txt.detached() {
 		txt.buffer(func(txn *Transaction) { txt.Delete(txn, index, length) })
 		return
 	}
@@ -734,7 +734,7 @@ func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) 
 	if len(attrs) == 0 || length <= 0 {
 		return
 	}
-	if txt.abstractType.detached() {
+	if txt.detached() {
 		txt.buffer(func(txn *Transaction) { txt.Format(txn, index, length, attrs) })
 		return
 	}
@@ -1166,7 +1166,7 @@ func (txt *YText) Observe(fn func(YTextEvent)) func() {
 // The cursor starts at position 0. ApplyDelta must be called from inside a
 // Transact callback.
 func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
-	if txt.abstractType.detached() {
+	if txt.detached() {
 		txt.buffer(func(txn *Transaction) { txt.ApplyDelta(txn, delta) })
 		return
 	}
