@@ -5,10 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.32.0] — 2026-07-17
 
 ### Added
 
+- **Transaction-scoped root accessors** — `Transaction.GetText`, `GetMap`,
+  `GetArray`, `GetXmlFragment` resolve (and create on first use) root types from
+  inside a `Transact` callback without re-locking, reusing the lock the
+  transaction already holds. Previously the natural `doc.GetText(...)` call
+  inside a callback self-deadlocked the non-reentrant document lock, silently
+  and permanently ([#138](https://github.com/reearth/ygo/issues/138)). The
+  accessors are valid only inside the callback that received the transaction and
+  **panic once the transaction has committed** (e.g. from an
+  `OnAfterTransaction` observer or a retained `*Transaction`) instead of
+  silently touching document state without the lock.
 - **Randomized convergence fuzz framework
   ([#70](https://github.com/reearth/ygo/issues/70)).** `testutil/fuzz`
   generates seed-reproducible multi-peer scenarios (random ops across
@@ -26,21 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (no silent skip) under `YGO_REQUIRE_NODE=1`; a symmetric Map/Array/Text/XML
   fixture matrix (V1+V2) decodes genuine `yjs@13.6.30` bytes node-free; and a
   fixture-drift CI job regenerates from the pinned yjs and fails on divergence.
-
-### Added
-
-- **Transaction-scoped root accessors** — `Transaction.GetText`,
-  `GetMap`, `GetArray`, `GetXmlFragment` resolve (and create on first
-  use) root types from inside a `Transact` callback without re-locking,
-  reusing the lock the transaction already holds. Previously the natural
-  `doc.GetText(...)` call inside a callback self-deadlocked the
-  non-reentrant document lock, silently and permanently (#138). The
-  `examples/peer-sync` example did exactly that on every run; it now uses
-  the transaction accessors and completes. The accessors are valid only
-  inside the callback that received the transaction and **panic once the
-  transaction has committed** (e.g. from an `OnAfterTransaction` observer
-  or a retained `*Transaction`) instead of silently touching document
-  state without the lock.
 
 ### Changed
 
