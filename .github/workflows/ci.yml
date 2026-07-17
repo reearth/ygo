@@ -18,6 +18,8 @@ jobs:
         # Minimum supported (go.mod floor) + latest stable. Keep the upper bound
         # in step with the govulncheck job below as new Go releases land.
         go: ["1.23", "1.26"]
+    env:
+      YGO_REQUIRE_NODE: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
@@ -78,3 +80,26 @@ jobs:
           cache: true
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...
+
+  conformance-fixtures:
+    name: Conformance fixture drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: testutil/package-lock.json
+      - run: npm ci
+        working-directory: testutil
+      - run: make fixtures
+      # Regenerated conformance fixtures must match what's committed. `git add -A`
+      # first so NEW/untracked or deleted files are caught, not just edits.
+      - run: |
+          git add -A -- crdt/testdata/'*_yjs_fixtures.json'
+          git diff --cached --exit-code -- crdt/testdata/'*_yjs_fixtures.json'

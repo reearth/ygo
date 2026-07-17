@@ -23,10 +23,7 @@ import (
 //
 // Requires node; skipped when absent so headless CI stays green.
 func TestCompat_RoundTrip_GoJSGo(t *testing.T) {
-	nodePath, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not found on PATH — skipping ygo→JS→ygo round-trip")
-	}
+	nodePath, _ := requireConformance(t, "yjs")
 
 	// content extracts the canonical JSON of the scenario's root, via ygo's
 	// own ToJSON — so we compare ygo-before vs ygo-after through the same lens.
@@ -164,10 +161,7 @@ func TestCompat_RoundTrip_GoJSGo(t *testing.T) {
 // Go-origin round-trip can't reach. node does the gen + verify hops; ygo is the
 // middle hop here in Go. Requires node; skipped when absent.
 func TestCompat_RoundTrip_JSGoJS(t *testing.T) {
-	nodePath, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not found on PATH — skipping yjs→ygo→yjs round-trip")
-	}
+	nodePath, _ := requireConformance(t, "yjs")
 
 	dir := t.TempDir()
 	scriptDir := filepath.Join("..", "testutil")

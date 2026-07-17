@@ -47,6 +47,9 @@ func TestFuzzCrossImpl(t *testing.T) {
 	}
 	results, ok := fuzz.RunNode(scen)
 	if !ok {
+		if os.Getenv("YGO_REQUIRE_NODE") == "1" {
+			t.Fatal("YGO_REQUIRE_NODE=1 but fuzz cross-impl oracle could not run (node/yjs unavailable)")
+		}
 		t.Skip("node/yjs unavailable — skipping cross-impl oracle")
 	}
 	for i, s := range scen {

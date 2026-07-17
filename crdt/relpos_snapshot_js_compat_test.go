@@ -16,16 +16,10 @@ import (
 // real Yjs reference implementation: Go encodes, Node/Yjs decodes and resolves.
 // Skipped when node is unavailable (headless CI).
 func TestCompat_RelPosAndSnapshot_GoToJS(t *testing.T) {
-	nodePath, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not found on PATH — skipping Go→JS interop test")
-	}
+	nodePath, _ := requireConformance(t, "yjs")
 	yjsPath, err := filepath.Abs(filepath.Join("..", "testutil", "node_modules", "yjs"))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Stat(yjsPath); err != nil {
-		t.Skip("yjs not installed under testutil/node_modules — skipping")
 	}
 
 	// Build a doc: YText "t" = "hello" (client 1).

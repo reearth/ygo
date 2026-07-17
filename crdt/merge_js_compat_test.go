@@ -17,16 +17,10 @@ import (
 // update). Go merges the two updates; Yjs applies the single merged update and
 // must see "AB". Skipped when node/yjs are unavailable.
 func TestCompat_MergeUpdates_GoToJS(t *testing.T) {
-	nodePath, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not found on PATH — skipping Go→JS interop test")
-	}
+	nodePath, _ := requireConformance(t, "yjs")
 	yjsPath, err := filepath.Abs(filepath.Join("..", "testutil", "node_modules", "yjs"))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Stat(yjsPath); err != nil {
-		t.Skip("yjs not installed under testutil/node_modules — skipping")
 	}
 
 	build := func() (updA, diffB []byte, svA crdt.StateVector) {
