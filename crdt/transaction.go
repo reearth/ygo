@@ -37,6 +37,17 @@ type Transaction struct {
 	subdocsAdded   map[*Doc]struct{}
 	subdocsRemoved map[*Doc]struct{}
 	subdocsLoaded  map[*Doc]struct{}
+	// done is set (under d.mu, just before the commit releases it) once this
+	// transaction has committed. The transaction-scoped root accessors check
+	// it and fail loudly instead of silently mutating d.share without the
+	// lock: the realistic misuses — an OnAfterTransaction observer (which
+	// receives the *Transaction after unlock) or code retaining the txn past
+	// its callback — run on the same goroutine that committed, so program
+	// order guarantees they observe done == true. A transaction smuggled to
+	// another goroutine while still live is unaffected (that is already
+	// undefined for every txn method); for one used cross-goroutine after
+	// commit the check is best-effort.
+	done bool
 	// ctx is the context associated with this transaction. Set to
 	// context.Background() by Transact and to the caller's ctx by
 	// TransactContext. Exposed via the Ctx() method so fn can poll for
@@ -54,6 +65,60 @@ type Transaction struct {
 // and reconcile via sync or recreate the doc from persistence.
 func (t *Transaction) Ctx() context.Context {
 	return t.ctx
+}
+
+// Transaction-scoped root accessors (issue #138).
+//
+// The Doc-level GetText/GetMap/GetArray/GetXmlFragment take the document
+// lock, which Transact already holds for the whole callback — calling them
+// inside fn self-deadlocks a non-reentrant lock. These methods resolve (and
+// create-on-miss) the same root types WITHOUT re-locking, reusing the lock
+// the transaction holds — so the natural in-transaction call simply works,
+// mirroring yrs, where root handles are resolved through the transaction.
+//
+// They are valid ONLY inside the Transact callback that received this
+// Transaction (the same lifetime rule as passing txn to Insert/Set/Delete).
+// After the transaction commits — in an observer, or via a retained txn —
+// they PANIC instead of mutating d.share without the lock.
+
+// assertLive panics when the transaction has already committed. See the
+// Transaction.done field for why this is deterministic for the realistic
+// (same-goroutine) misuses.
+func (t *Transaction) assertLive(method string) {
+	if t.done {
+		panic("crdt: Transaction." + method + " used after commit (inside an observer or " +
+			"retained past the Transact callback) — resolve root types via doc." + method +
+			" there (issue #138)")
+	}
+}
+
+// GetText returns the named root YText, creating it if it does not exist.
+// Safe to call inside the Transact callback; see the section comment above.
+func (t *Transaction) GetText(name string) *YText {
+	t.assertLive("GetText")
+	return t.doc.getTextLocked(name)
+}
+
+// GetMap returns the named root YMap, creating it if it does not exist.
+// Safe to call inside the Transact callback; see the section comment above.
+func (t *Transaction) GetMap(name string) *YMap {
+	t.assertLive("GetMap")
+	return t.doc.getMapLocked(name)
+}
+
+// GetArray returns the named root YArray, creating it if it does not exist.
+// Safe to call inside the Transact callback; see the section comment above.
+func (t *Transaction) GetArray(name string) *YArray {
+	t.assertLive("GetArray")
+	return t.doc.getArrayLocked(name)
+}
+
+// GetXmlFragment returns the named root YXmlFragment, creating it if it does
+// not exist. Safe to call inside the Transact callback; see the section
+// comment above.
+func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
+	t.assertLive("GetXmlFragment")
+	return t.doc.getXmlFragmentLocked(name)
 }
 
 // squashRuns merges adjacent ContentString items that were both created in this

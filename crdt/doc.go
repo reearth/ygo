@@ -3,11 +3,14 @@
 // The central concept is the Item: a node in a per-type doubly-linked list
 // that carries content and origin pointers enabling conflict-free merging (YATA).
 //
-// Start with Doc, which is the root of a collaborative document:
+// Start with Doc, which is the root of a collaborative document. Inside a
+// transaction, resolve root types through the Transaction (the Doc-level
+// accessors take the document lock Transact already holds and would
+// deadlock; see issue #138):
 //
 //	doc := crdt.New()
 //	doc.Transact(func(txn *crdt.Transaction) {
-//	    doc.GetText("content").Insert(txn, 0, "Hello", nil)
+//	    txn.GetText("content").Insert(txn, 0, "Hello", nil)
 //	})
 //	update := doc.EncodeStateAsUpdate()
 //
@@ -328,10 +331,9 @@ func upgradeRawType(raw *rawType, dst sharedType, name string, share map[string]
 	share[name] = dst
 }
 
-// GetArray returns the named root YArray, creating it if it does not exist.
-func (d *Doc) GetArray(name string) *YArray {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// getArrayLocked is the lock-free body of GetArray. Callers must hold d.mu —
+// either Doc.GetArray (takes it) or Transaction.GetArray (Transact holds it).
+func (d *Doc) getArrayLocked(name string) *YArray {
 	if t, ok := d.share[name]; ok {
 		if arr, ok := t.(*YArray); ok {
 			return arr
@@ -351,10 +353,18 @@ func (d *Doc) GetArray(name string) *YArray {
 	return arr
 }
 
-// GetMap returns the named root YMap, creating it if it does not exist.
-func (d *Doc) GetMap(name string) *YMap {
+// GetArray returns the named root YArray, creating it if it does not exist.
+// It takes the document lock — inside a Transact callback use txn.GetArray
+// instead (see Transact and GetText for the locking contract; issue #138).
+func (d *Doc) GetArray(name string) *YArray {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.getArrayLocked(name)
+}
+
+// getMapLocked is the lock-free body of GetMap. Callers must hold d.mu —
+// either Doc.GetMap (takes it) or Transaction.GetMap (Transact holds it).
+func (d *Doc) getMapLocked(name string) *YMap {
 	if t, ok := d.share[name]; ok {
 		if m, ok := t.(*YMap); ok {
 			return m
@@ -374,10 +384,18 @@ func (d *Doc) GetMap(name string) *YMap {
 	return m
 }
 
-// GetText returns the named root YText, creating it if it does not exist.
-func (d *Doc) GetText(name string) *YText {
+// GetMap returns the named root YMap, creating it if it does not exist.
+// It takes the document lock — inside a Transact callback use txn.GetMap
+// instead (see Transact and GetText for the locking contract; issue #138).
+func (d *Doc) GetMap(name string) *YMap {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.getMapLocked(name)
+}
+
+// getTextLocked is the lock-free body of GetText. Callers must hold d.mu —
+// either Doc.GetText (takes it) or Transaction.GetText (Transact holds it).
+func (d *Doc) getTextLocked(name string) *YText {
 	if t, ok := d.share[name]; ok {
 		if txt, ok := t.(*YText); ok {
 			return txt
@@ -395,6 +413,21 @@ func (d *Doc) GetText(name string) *YText {
 	txt.name = name
 	d.share[name] = txt
 	return txt
+}
+
+// GetText returns the named root YText, creating it if it does not exist.
+//
+// GetText takes the document lock and therefore MUST NOT be called from
+// inside a Transact callback — that self-deadlocks a non-reentrant lock,
+// silently (issue #138). Inside a transaction use txn.GetText, or resolve
+// the handle first:
+//
+//	txt := doc.GetText("t")
+//	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "hi", nil) })
+func (d *Doc) GetText(name string) *YText {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.getTextLocked(name)
 }
 
 // buildPhase2 runs under d.mu (called from Transact while the lock is held)
@@ -587,6 +620,11 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			gcTxnDeleteSet(d, txn)
 		}
 
+		// Mark the transaction committed BEFORE releasing the lock so the
+		// txn-scoped accessors fail loudly from observers (which receive the
+		// *Transaction after unlock) or from a retained txn, instead of
+		// mutating d.share unsynchronized. See Transaction.done.
+		txn.done = true
 		d.mu.Unlock()
 
 		if phase2 != nil {
@@ -612,6 +650,31 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 
 // Transact executes fn inside a transaction. All insertions and deletions made
 // during fn are batched; observers fire once after fn returns.
+//
+// Transact holds the document write lock for the duration of fn. Anything
+// that takes that same non-reentrant lock MUST NOT be called from inside fn
+// — it deadlocks silently, and Go exposes no goroutine identity with which
+// to detect it (issue #138). That includes the Doc-level root accessors
+// (GetMap, GetText, GetArray, GetXmlFragment), Doc.Load, observer
+// registration (Observe, ObserveDeep, OnUpdate, OnAfterTransaction,
+// OnSubdocs), and — notably — nested Transact on the same Doc, which
+// remains an undetected deadlock.
+//
+// Inside fn, resolve root types through the Transaction instead — its
+// accessors reuse the lock the transaction already holds — or resolve
+// handles before the transaction:
+//
+//	doc.Transact(func(txn *crdt.Transaction) {
+//	    txn.GetMap("m").Set(txn, "k", 1) // in-transaction accessor: works
+//	})
+//
+//	m := doc.GetMap("m") // or: resolve outside...
+//	doc.Transact(func(txn *crdt.Transaction) {
+//	    m.Set(txn, "k", 1) // ...and use the handle inside
+//	})
+//
+// (Observer callbacks are NOT affected — they fire after the lock is
+// released and may call any Doc method; see below.)
 //
 // Observers are intentionally fired OUTSIDE the document lock. This means:
 //   - Observer callbacks may safely call back into any Doc method (Transact,
@@ -750,11 +813,10 @@ func (d *Doc) GetSubdocGUIDs() []string {
 	return out
 }
 
-// GetXmlFragment returns the named root YXmlFragment, creating it if it does
-// not exist.
-func (d *Doc) GetXmlFragment(name string) *YXmlFragment {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// getXmlFragmentLocked is the lock-free body of GetXmlFragment. Callers must
+// hold d.mu — either Doc.GetXmlFragment (takes it) or
+// Transaction.GetXmlFragment (Transact holds it).
+func (d *Doc) getXmlFragmentLocked(name string) *YXmlFragment {
 	if t, ok := d.share[name]; ok {
 		if f, ok := t.(*YXmlFragment); ok {
 			return f
@@ -772,6 +834,16 @@ func (d *Doc) GetXmlFragment(name string) *YXmlFragment {
 	f.name = name
 	d.share[name] = f
 	return f
+}
+
+// GetXmlFragment returns the named root YXmlFragment, creating it if it does
+// not exist. It takes the document lock — inside a Transact callback use
+// txn.GetXmlFragment instead (see Transact and GetText for the locking
+// contract; issue #138).
+func (d *Doc) GetXmlFragment(name string) *YXmlFragment {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.getXmlFragmentLocked(name)
 }
 
 // StateVector returns the current state vector of the document.

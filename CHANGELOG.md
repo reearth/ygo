@@ -22,6 +22,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   YArray.Push (#158) and YText tombstone-anchoring + cache-invalidation (#160)
   divergences fixed in v1.31.5 and v1.31.6.
 
+### Added
+
+- **Transaction-scoped root accessors** — `Transaction.GetText`,
+  `GetMap`, `GetArray`, `GetXmlFragment` resolve (and create on first
+  use) root types from inside a `Transact` callback without re-locking,
+  reusing the lock the transaction already holds. Previously the natural
+  `doc.GetText(...)` call inside a callback self-deadlocked the
+  non-reentrant document lock, silently and permanently (#138). The
+  `examples/peer-sync` example did exactly that on every run; it now uses
+  the transaction accessors and completes. The accessors are valid only
+  inside the callback that received the transaction and **panic once the
+  transaction has committed** (e.g. from an `OnAfterTransaction` observer
+  or a retained `*Transaction`) instead of silently touching document
+  state without the lock.
+
+### Changed
+
+- **Documented the locking contract honestly** on `Transact` and the
+  Doc-level accessors: anything that takes the document lock —
+  `Doc.GetText`/`GetMap`/`GetArray`/`GetXmlFragment`, `Doc.Load`,
+  observer registration, and nested `Transact` on the same `Doc` — still
+  deadlocks silently when called inside a `Transact` callback (Go exposes
+  no goroutine identity with which to detect it). Use the transaction
+  accessors or resolve handles before the transaction.
+
 ## [1.31.6] — 2026-07-13
 
 CRDT convergence + correctness patch. No API changes. Found by ygo's
@@ -184,7 +209,6 @@ surfaced by ygo's new randomized convergence fuzzer (#70).
 
 - **V2 string-column decode is now O(n), not O(n²).** `ApplyUpdateV2` on
   string-heavy documents drops roughly 6×, on par with `ApplyUpdateV1`.
-
 ## [1.31.0] — 2026-07-09
 
 ### Added
