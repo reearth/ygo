@@ -72,14 +72,14 @@ func TestDoc_ReadAccessors(t *testing.T) {
 	if err != nil || string(aj) != `[1,"two"]` {
 		t.Fatalf("GetArrayJSON = %q err=%v", aj, err)
 	}
-	// GetTextJSON must return the rich-text delta (insert op + formatting
-	// attributes), NOT the plain-string JSON. This assertion fails if
+	// GetTextJSON must return the idiomatic Yjs rich-text delta (insert op +
+	// formatting attributes), NOT the plain-string JSON. This assertion fails if
 	// formatting is dropped, because it references the bold attribute.
 	tj, err := d.GetTextJSON("t")
 	if err != nil {
 		t.Fatalf("GetTextJSON err=%v", err)
 	}
-	if want := `[{"Op":0,"Insert":"hi","Delete":0,"Retain":0,"Attributes":{"bold":true}}]`; string(tj) != want {
+	if want := `[{"insert":"hi","attributes":{"bold":true}}]`; !jsonEqual(t, tj, []byte(want)) {
 		t.Fatalf("GetTextJSON = %q, want %q", tj, want)
 	}
 

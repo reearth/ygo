@@ -93,7 +93,9 @@ func (w *Awareness) LocalStateJSON() ([]byte, error) {
 	return json.Marshal(w.a.GetLocalState())
 }
 
-// StatesJSON returns all known client states as a JSON object keyed by client ID.
+// StatesJSON returns all active client states as a JSON object keyed by stringy
+// client ID, each value being that client's raw state object (the internal clock
+// is not exposed), e.g. `{"1":{"user":"alice"}}`. An empty set returns `{}`.
 // Returns ErrClosed after Close.
 func (w *Awareness) StatesJSON() ([]byte, error) {
 	w.mu.RLock()
@@ -101,7 +103,7 @@ func (w *Awareness) StatesJSON() ([]byte, error) {
 	if w.a == nil {
 		return nil, ErrClosed
 	}
-	return json.Marshal(w.a.GetStates())
+	return statesToIdiomaticJSON(w.a.GetStates())
 }
 
 // EncodeAll encodes the full awareness state for all known clients. nil after Close.

@@ -1,7 +1,6 @@
 package mobile
 
 import (
-	"encoding/json"
 	"sync"
 
 	"github.com/reearth/ygo/crdt"
@@ -96,28 +95,19 @@ func (m *Doc) GetText(name string) string {
 	return m.d.GetText(name).ToString()
 }
 
-// GetTextJSON returns the named YText root's formatted content as JSON.
-//
-// NOTE: the current shape is ygo's internal crdt.Delta struct marshaled
-// directly — an array of ops with capitalized Go field names, e.g.
-// [{"Op":0,"Insert":"hi","Attributes":{"bold":true}}] — NOT the idiomatic Yjs
-// delta shape ([{"insert":"hi","attributes":{...}}]). Emitting the idiomatic
-// shape is tracked in https://github.com/reearth/ygo/issues/109; consumers
-// should not hard-code against this shape long-term. Returns ErrClosed after Close.
+// GetTextJSON returns the named YText root's formatted content as an idiomatic
+// Yjs delta: a JSON array of ops shaped `[{"insert":...,"attributes":{...}}]`,
+// where each op carries exactly one of insert/retain/delete plus optional
+// attributes (a full-content read yields insert ops only). An absent/empty root
+// returns `[]` (never `null`), so a JS consumer can iterate it unconditionally.
+// Returns ErrClosed after Close.
 func (m *Doc) GetTextJSON(name string) ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
 		return nil, ErrClosed
 	}
-	delta := m.d.GetText(name).ToDelta()
-	if delta == nil {
-		// ToDelta returns a nil slice for an absent/empty text root, which
-		// json.Marshal emits as `null` — a JS consumer doing delta.forEach(...)
-		// on null would crash. Emit `[]` instead.
-		delta = []crdt.Delta{}
-	}
-	return json.Marshal(delta)
+	return deltaToIdiomaticJSON(m.d.GetText(name).ToDelta())
 }
 
 // GetMapJSON returns the named YMap root as JSON.
