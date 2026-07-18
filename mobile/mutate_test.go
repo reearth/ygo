@@ -163,6 +163,134 @@ func TestMutators_AfterClose(t *testing.T) {
 	if err := m.FormatText("t", 0, 1, []byte(`{"b":true}`)); err != ErrClosed {
 		t.Errorf("FormatText after Close = %v, want ErrClosed", err)
 	}
+	if err := m.InsertArray("a", 0, []byte(`[1]`)); err != ErrClosed {
+		t.Errorf("InsertArray after Close = %v, want ErrClosed", err)
+	}
+	if err := m.DeleteArray("a", 0, 1); err != ErrClosed {
+		t.Errorf("DeleteArray after Close = %v, want ErrClosed", err)
+	}
+	if err := m.SetMap("m", "k", []byte(`1`)); err != ErrClosed {
+		t.Errorf("SetMap after Close = %v, want ErrClosed", err)
+	}
+	if err := m.DeleteMapKey("m", "k"); err != ErrClosed {
+		t.Errorf("DeleteMapKey after Close = %v, want ErrClosed", err)
+	}
+}
+
+// TestInsertArray_RoundTripConvergence inserts a heterogeneous array on docA,
+// syncs the full state to docB, and asserts docB's YArray JSON matches docA's
+// (shape-normalized: JSON numbers decode to float64 on both sides).
+func TestInsertArray_RoundTripConvergence(t *testing.T) {
+	a := NewDoc()
+	if err := a.InsertArray("a", 0, []byte(`[1,"x",true]`)); err != nil {
+		t.Fatalf("InsertArray: %v", err)
+	}
+	aJSON, err := a.GetArrayJSON("a")
+	if err != nil {
+		t.Fatalf("docA GetArrayJSON: %v", err)
+	}
+	if !jsonEqual(t, aJSON, []byte(`[1,"x",true]`)) {
+		t.Fatalf("docA GetArrayJSON = %s, want [1,\"x\",true]", aJSON)
+	}
+
+	b := NewDoc()
+	if err := b.ApplyUpdate(a.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("docB ApplyUpdate: %v", err)
+	}
+	bJSON, err := b.GetArrayJSON("a")
+	if err != nil {
+		t.Fatalf("docB GetArrayJSON: %v", err)
+	}
+	if !jsonEqual(t, aJSON, bJSON) {
+		t.Fatalf("convergence mismatch:\n  docA: %s\n  docB: %s", aJSON, bJSON)
+	}
+}
+
+// TestDeleteArray_SubRange deletes an interior sub-range and asserts the
+// surviving elements are exactly those outside the range.
+func TestDeleteArray_SubRange(t *testing.T) {
+	m := NewDoc()
+	if err := m.InsertArray("a", 0, []byte(`[0,1,2,3,4]`)); err != nil {
+		t.Fatalf("InsertArray: %v", err)
+	}
+	if err := m.DeleteArray("a", 1, 2); err != nil { // remove elements 1,2
+		t.Fatalf("DeleteArray: %v", err)
+	}
+	got, err := m.GetArrayJSON("a")
+	if err != nil {
+		t.Fatalf("GetArrayJSON: %v", err)
+	}
+	if !jsonEqual(t, got, []byte(`[0,3,4]`)) {
+		t.Fatalf("GetArrayJSON = %s, want [0,3,4]", got)
+	}
+}
+
+// TestSetMap_And_DeleteMapKey sets a key to a JSON object, asserts the map JSON
+// carries it, then deletes the key and asserts the map is empty.
+func TestSetMap_And_DeleteMapKey(t *testing.T) {
+	m := NewDoc()
+	if err := m.SetMap("m", "k", []byte(`{"n":1}`)); err != nil {
+		t.Fatalf("SetMap: %v", err)
+	}
+	got, err := m.GetMapJSON("m")
+	if err != nil {
+		t.Fatalf("GetMapJSON: %v", err)
+	}
+	if !jsonEqual(t, got, []byte(`{"k":{"n":1}}`)) {
+		t.Fatalf("GetMapJSON = %s, want {\"k\":{\"n\":1}}", got)
+	}
+
+	if err := m.DeleteMapKey("m", "k"); err != nil {
+		t.Fatalf("DeleteMapKey: %v", err)
+	}
+	got, err = m.GetMapJSON("m")
+	if err != nil {
+		t.Fatalf("GetMapJSON (after delete): %v", err)
+	}
+	if !jsonEqual(t, got, []byte(`{}`)) {
+		t.Fatalf("GetMapJSON (after delete) = %s, want {}", got)
+	}
+}
+
+// TestArrayMapMutators_Validation asserts every bad-argument path on the
+// YArray/YMap mutators returns a non-nil error (no panic) and leaves the doc
+// unmutated. Each case runs on an empty doc: array "a" stays [], map "m" stays {}.
+func TestArrayMapMutators_Validation(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(m *Doc) error
+	}{
+		{"insertarray malformed json", func(m *Doc) error { return m.InsertArray("a", 0, []byte("[")) }},
+		{"insertarray index past end", func(m *Doc) error { return m.InsertArray("a", 1, []byte(`[1]`)) }},
+		{"insertarray negative index", func(m *Doc) error { return m.InsertArray("a", -1, []byte(`[1]`)) }},
+		{"insertarray huge index", func(m *Doc) error { return m.InsertArray("a", math.MaxInt32+1, []byte(`[1]`)) }},
+		{"deletearray range past end", func(m *Doc) error { return m.DeleteArray("a", 0, 5) }},
+		{"deletearray negative index", func(m *Doc) error { return m.DeleteArray("a", -1, 1) }},
+		{"deletearray negative length", func(m *Doc) error { return m.DeleteArray("a", 0, -1) }},
+		{"setmap malformed json", func(m *Doc) error { return m.SetMap("m", "k", []byte("{")) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewDoc() // empty doc: Len("a") == 0
+			if err := tc.call(m); err == nil {
+				t.Fatalf("%s: expected non-nil error, got nil", tc.name)
+			}
+			gotA, err := m.GetArrayJSON("a")
+			if err != nil {
+				t.Fatalf("GetArrayJSON: %v", err)
+			}
+			if !jsonEqual(t, gotA, []byte(`[]`)) {
+				t.Fatalf("%s: array mutated by invalid op: %s", tc.name, gotA)
+			}
+			gotM, err := m.GetMapJSON("m")
+			if err != nil {
+				t.Fatalf("GetMapJSON: %v", err)
+			}
+			if !jsonEqual(t, gotM, []byte(`{}`)) {
+				t.Fatalf("%s: map mutated by invalid op: %s", tc.name, gotM)
+			}
+		})
+	}
 }
 
 // TestMutators_YjsInterop performs the same YText edits (insert "hi", bold the

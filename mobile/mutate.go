@@ -154,3 +154,86 @@ func (m *Doc) FormatText(name string, index, length int64, attrsJSON []byte) err
 		return nil
 	}, mobileLocalOrigin)
 }
+
+// InsertArray inserts the JSON array valuesJSON's elements at the given index of
+// the named YArray root. valuesJSON must decode to a JSON array; index must be in
+// [0, Len]. JSON numbers become float64. Returns ErrClosed after Close.
+func (m *Doc) InsertArray(name string, index int64, valuesJSON []byte) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.d == nil {
+		return ErrClosed
+	}
+	idx, err := toIndex(index)
+	if err != nil {
+		return err
+	}
+	var vals []any
+	if err := json.Unmarshal(valuesJSON, &vals); err != nil {
+		return err
+	}
+	return m.d.TransactE(func(txn *crdt.Transaction) error {
+		a := txn.GetArray(name)
+		if idx > a.Len() {
+			return fmt.Errorf("ygo/mobile: index %d out of range [0, %d]", idx, a.Len())
+		}
+		a.Insert(txn, idx, vals)
+		return nil
+	}, mobileLocalOrigin)
+}
+
+// DeleteArray removes length elements starting at index from the named YArray
+// root. index and length must be >= 0 and index+length must be <= Len. Returns
+// ErrClosed after Close.
+func (m *Doc) DeleteArray(name string, index, length int64) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.d == nil {
+		return ErrClosed
+	}
+	idx, l, err := toRange(index, length)
+	if err != nil {
+		return err
+	}
+	return m.d.TransactE(func(txn *crdt.Transaction) error {
+		a := txn.GetArray(name)
+		// idx and l are both <= MaxInt32, so idx+l cannot overflow int.
+		if idx+l > a.Len() {
+			return fmt.Errorf("ygo/mobile: delete range [%d, %d) out of bounds (len %d)", idx, idx+l, a.Len())
+		}
+		a.Delete(txn, idx, l)
+		return nil
+	}, mobileLocalOrigin)
+}
+
+// SetMap sets key on the named YMap root to the decoded JSON value valueJSON
+// (any JSON value; numbers become float64). Returns ErrClosed after Close.
+func (m *Doc) SetMap(name string, key string, valueJSON []byte) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.d == nil {
+		return ErrClosed
+	}
+	var v any
+	if err := json.Unmarshal(valueJSON, &v); err != nil {
+		return err
+	}
+	return m.d.TransactE(func(txn *crdt.Transaction) error {
+		txn.GetMap(name).Set(txn, key, v)
+		return nil
+	}, mobileLocalOrigin)
+}
+
+// DeleteMapKey removes key from the named YMap root (a no-op if absent).
+// Returns ErrClosed after Close.
+func (m *Doc) DeleteMapKey(name string, key string) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.d == nil {
+		return ErrClosed
+	}
+	return m.d.TransactE(func(txn *crdt.Transaction) error {
+		txn.GetMap(name).Delete(txn, key)
+		return nil
+	}, mobileLocalOrigin)
+}
