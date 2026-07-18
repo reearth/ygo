@@ -95,6 +95,27 @@ type abstractType struct {
 	hasFormatting bool
 }
 
+// prelimFlusher is implemented by types that buffer mutations while detached
+// (not yet part of a document tree) and replay them when their container item
+// integrates — Yjs's "prelim content" semantics (_prelimContent/_prelimAttrs
+// on YXmlFragment/YXmlElement, _pending on YText). item.integrate invokes it
+// via the type's owner right after setting the container back-pointer, so
+// buffered subtrees materialise top-down with parent-first clocks. (#yxml-wire)
+type prelimFlusher interface {
+	flushPrelim(txn *Transaction)
+}
+
+// detached reports whether this type is not (yet) part of a document tree:
+// neither a named root type nor wrapped by an integrated container item.
+// Mutations on detached types must be buffered (see prelimFlusher): creating
+// items for them immediately would assign child clocks BELOW the future
+// container item's clock — an ordering genuine Yjs never produces and cannot
+// decode (Item.getMissing skips the missing-struct check for same-client
+// parents, so Y.applyUpdate crashes on such an update). (#yxml-wire)
+func (t *abstractType) detached() bool {
+	return t.item == nil && t.name == ""
+}
+
 // firstLiveFromStart returns the first non-deleted item reachable from t.start
 // by walking Right, or nil if every item is tombstoned. The result is memoised
 // in t.firstLiveCache: subsequent calls advance the cache past any tombstones

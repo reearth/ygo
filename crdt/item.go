@@ -280,9 +280,28 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	}
 
 	// If this item wraps a nested type, set the back-pointer so the type
-	// can identify its containing item during update encoding.
+	// can identify its containing item during update encoding, then flush any
+	// operations that were buffered while the type was detached (prelim
+	// content — children/attributes/text queued before the subtree was
+	// attached to the document). Yjs parity: ContentType.integrate calls
+	// type._integrate, which replays _prelimContent/_prelimAttrs/_pending at
+	// this exact point. Flushing here — not at buffer time — is what
+	// guarantees the wire invariant that a container item's clock is always
+	// LOWER than its children's clocks (for the same client). Yjs's
+	// Item.getMissing deliberately skips the missing-struct check for
+	// same-client parent references, so an update carrying a forward
+	// (child-before-parent) reference crashes Y.applyUpdate in findIndexSS;
+	// ygo's own decoder parked such items in store.pending forever. Types
+	// decoded from remote updates have empty prelim buffers, so this is a
+	// no-op on the apply path. (#yxml-wire)
 	if ct, ok := item.Content.(*ContentType); ok {
 		ct.Type.item = item
+		if ct.Type.doc == nil {
+			ct.Type.doc = txn.doc
+		}
+		if pf, ok := ct.Type.owner.(prelimFlusher); ok {
+			pf.flushPrelim(txn)
+		}
 	}
 
 	// For map-keyed items, maintain last-write-wins semantics. The winner for a

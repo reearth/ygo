@@ -33,6 +33,11 @@ type YXmlFragment struct {
 	abstractType
 	subIDGen  uint64
 	observers []xmlSub
+	// prelimChildren buffers child nodes inserted while this fragment/element
+	// is detached (Yjs _prelimContent parity). They are materialised as items
+	// only when the subtree attaches to the document — top-down, so container
+	// clocks always precede child clocks on the wire. (#yxml-wire)
+	prelimChildren []xmlNode
 }
 
 func (f *YXmlFragment) baseType() *abstractType    { return &f.abstractType }
@@ -55,6 +60,11 @@ func (f *YXmlFragment) prepareFire(txn *Transaction, keysChanged map[string]stru
 }
 
 // Len returns the number of non-deleted child nodes (attributes are excluded).
+//
+// A DETACHED fragment/element reports 0: buffered prelim children are not
+// visible to any reader (Len, Children, attribute getters, ToXML) until the
+// subtree attaches — uniform with YText, whose detached Len/ToString likewise
+// ignore pending operations.
 func (f *YXmlFragment) Len() int {
 	count := 0
 	for item := f.start; item != nil; item = item.Right {
@@ -66,8 +76,23 @@ func (f *YXmlFragment) Len() int {
 }
 
 // Insert inserts XML nodes at child position index (0 = prepend).
+//
+// While the fragment/element is detached the nodes are only buffered
+// (prelimChildren) and materialised when the subtree attaches — see
+// prelimFlusher. (#yxml-wire)
 func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 	t := &f.abstractType
+	if t.detached() {
+		if index < 0 || index > len(f.prelimChildren) {
+			index = len(f.prelimChildren)
+		}
+		buf := make([]xmlNode, 0, len(f.prelimChildren)+len(nodes))
+		buf = append(buf, f.prelimChildren[:index]...)
+		buf = append(buf, nodes...)
+		buf = append(buf, f.prelimChildren[index:]...)
+		f.prelimChildren = buf
+		return
+	}
 	left, offset := leftChildAt(t, index)
 	if offset > 0 {
 		splitItem(txn, left, offset)
@@ -131,9 +156,29 @@ func (f *YXmlFragment) InsertText(txn *Transaction, index int, txt *YXmlText) {
 	f.Insert(txn, index, txt)
 }
 
-// Delete removes length child nodes starting at child position index.
+// Delete removes length child nodes starting at child position index. On a
+// detached fragment/element it splices the buffered prelim children, exactly
+// like Yjs's YXmlFragment.delete on _prelimContent.
 func (f *YXmlFragment) Delete(txn *Transaction, index, length int) {
+	if f.detached() {
+		if index < 0 || index >= len(f.prelimChildren) || length <= 0 {
+			return
+		}
+		end := min(index+length, len(f.prelimChildren))
+		f.prelimChildren = append(f.prelimChildren[:index], f.prelimChildren[end:]...)
+		return
+	}
 	deleteChildRange(&f.abstractType, txn, index, length)
+}
+
+// flushPrelim materialises children buffered while this fragment was detached.
+// Called by item.integrate when the container item integrates (prelimFlusher).
+func (f *YXmlFragment) flushPrelim(txn *Transaction) {
+	kids := f.prelimChildren
+	f.prelimChildren = nil
+	if len(kids) > 0 {
+		f.Insert(txn, 0, kids...)
+	}
 }
 
 // Children returns all non-deleted child XML nodes in document order.
@@ -213,6 +258,19 @@ type YXmlElement struct {
 	NodeName   string
 	elemSubGen uint64
 	elemObs    []xmlSub
+	// prelimAttrs buffers attributes set while the element is detached (Yjs
+	// _prelimAttrs parity). Order-preserving with in-place upsert, matching a
+	// JS Map: re-setting a key keeps its original position. Flushed AFTER
+	// prelim children when the element attaches — Yjs's YXmlElement._integrate
+	// runs super._integrate (children) first, then applies _prelimAttrs, and
+	// the resulting clock layout is part of the wire byte-identity. (#yxml-wire)
+	prelimAttrs []prelimAttr
+}
+
+// prelimAttr is one buffered (key, value) attribute on a detached element.
+type prelimAttr struct {
+	key   string
+	value any
 }
 
 // baseType and baseXMLType both route to the single embedded abstractType.
@@ -245,9 +303,29 @@ func (e *YXmlElement) InsertText(txn *Transaction, index int, txt *YXmlText) {
 	e.Insert(txn, index, txt)
 }
 
-// SetAttribute sets the XML attribute key to value.
+// SetAttribute sets the XML attribute key to a string value. For non-string
+// values (numbers, booleans — e.g. a ProseMirror heading's level) use
+// SetAttributeValue; Yjs stores attribute values typed, and y-prosemirror
+// round-trips them typed.
 func (e *YXmlElement) SetAttribute(txn *Transaction, key, value string) {
+	e.SetAttributeValue(txn, key, value)
+}
+
+// SetAttributeValue sets the XML attribute key to an arbitrary scalar value
+// (string, number, bool, …), preserving the value type on the wire exactly as
+// Yjs's YXmlElement.setAttribute does.
+func (e *YXmlElement) SetAttributeValue(txn *Transaction, key string, value any) {
 	t := &e.abstractType
+	if t.detached() {
+		for i := range e.prelimAttrs {
+			if e.prelimAttrs[i].key == key {
+				e.prelimAttrs[i].value = value
+				return
+			}
+		}
+		e.prelimAttrs = append(e.prelimAttrs, prelimAttr{key: key, value: value})
+		return
+	}
 	var left *Item
 	var origin *ID
 	if existing, ok := t.itemMap[key]; ok {
@@ -269,38 +347,82 @@ func (e *YXmlElement) SetAttribute(txn *Transaction, key, value string) {
 // DeleteAttribute removes the attribute with the given key if it exists.
 func (e *YXmlElement) DeleteAttribute(txn *Transaction, key string) {
 	t := &e.abstractType
+	if t.detached() {
+		for i := range e.prelimAttrs {
+			if e.prelimAttrs[i].key == key {
+				e.prelimAttrs = append(e.prelimAttrs[:i], e.prelimAttrs[i+1:]...)
+				return
+			}
+		}
+		return
+	}
 	if item, ok := t.itemMap[key]; ok && !item.Deleted {
 		item.delete(txn)
 	}
 }
 
-// GetAttribute returns the value of attribute key and whether it is present.
+// flushPrelim materialises the children and attributes buffered while this
+// element was detached: children first, then attributes — the same order as
+// Yjs's YXmlElement._integrate, and therefore the same clock/wire layout.
+func (e *YXmlElement) flushPrelim(txn *Transaction) {
+	e.YXmlFragment.flushPrelim(txn)
+	attrs := e.prelimAttrs
+	e.prelimAttrs = nil
+	for _, kv := range attrs {
+		e.SetAttributeValue(txn, kv.key, kv.value)
+	}
+}
+
+// GetAttribute returns the value of attribute key rendered as a string, and
+// whether the attribute is present. Non-string scalar values (numbers, bools —
+// e.g. a ProseMirror heading's level=1) get a best-effort string rendering;
+// use GetAttributeValue for the exact typed value. Previously non-string
+// values were silently dropped, which lost y-prosemirror heading levels on
+// the JS→Go path. (#yxml-wire)
 func (e *YXmlElement) GetAttribute(key string) (string, bool) {
+	v, ok := e.GetAttributeValue(key)
+	if !ok {
+		return "", false
+	}
+	return xmlAttrToString(v), true
+}
+
+// GetAttributeValue returns the typed value of attribute key (string, int64,
+// float64, bool, … — whatever the CRDT holds) and whether it is present.
+func (e *YXmlElement) GetAttributeValue(key string) (any, bool) {
 	t := &e.abstractType
 	item, ok := t.itemMap[key]
 	if !ok || item.Deleted {
-		return "", false
+		return nil, false
 	}
 	if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-		if s, ok := ca.Vals[0].(string); ok {
-			return s, true
-		}
+		return ca.Vals[0], true
 	}
-	return "", false
+	return nil, false
 }
 
-// GetAttributes returns all live attributes as a string-keyed map.
+// GetAttributes returns all live attributes as a string-keyed map. Non-string
+// scalar values get a best-effort string rendering; use GetAttributeValues
+// for the exact typed values. (#yxml-wire)
 func (e *YXmlElement) GetAttributes() map[string]string {
-	t := &e.abstractType
 	result := make(map[string]string)
+	for k, v := range e.GetAttributeValues() {
+		result[k] = xmlAttrToString(v)
+	}
+	return result
+}
+
+// GetAttributeValues returns all live attributes with their typed values,
+// mirroring Yjs's YXmlElement.getAttributes().
+func (e *YXmlElement) GetAttributeValues() map[string]any {
+	t := &e.abstractType
+	result := make(map[string]any)
 	for k, item := range t.itemMap {
 		if item.Deleted {
 			continue
 		}
 		if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-			if s, ok := ca.Vals[0].(string); ok {
-				result[k] = s
-			}
+			result[k] = ca.Vals[0]
 		}
 	}
 	return result
@@ -477,6 +599,23 @@ func deleteChildRange(t *abstractType, txn *Transaction, index, length int) {
 			item.delete(txn)
 			length = 0
 		}
+	}
+}
+
+// xmlAttrToString is a best-effort scalar rendering for display and the
+// string-typed attribute maps: strings unchanged, integral floats without a
+// trailing ".0", booleans as "true"/"false". It is NOT exact JavaScript
+// String() semantics (exponent thresholds like 1e-7/1e21, negative zero, and
+// non-scalar values differ) — use GetAttributeValue for the exact typed
+// value; the wire always carries the typed value regardless.
+func xmlAttrToString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", x)
 	}
 }
 
