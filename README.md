@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/assets/ygo-product-card.png" alt="ygo — a pure-Go CRDT library" width="100%">
+</p>
+
 # ygo
 
 [![CI](https://github.com/reearth/ygo/actions/workflows/ci.yml/badge.svg)](https://github.com/reearth/ygo/actions/workflows/ci.yml)
