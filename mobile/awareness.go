@@ -12,6 +12,13 @@ import (
 type Awareness struct {
 	mu sync.RWMutex
 	a  *awareness.Awareness // nil after Close
+
+	// subsMu guards the presence-change-observer registry. It is DISTINCT from
+	// mu on purpose: mu.RLock is shared, so mutating subs under it would
+	// data-race a concurrent Observe. Never take subsMu while holding mu for
+	// writing and vice-versa in a way that could invert lock order.
+	subsMu sync.Mutex
+	subs   map[*Subscription]struct{}
 }
 
 // NewAwareness creates an awareness instance for clientID (in [0, 2^53 - 1],
@@ -134,13 +141,36 @@ func (w *Awareness) ApplyUpdate(update []byte) error {
 }
 
 // Close releases the underlying awareness state (stopping any background work).
-// Idempotent. Close blocks until any in-flight operation completes, so it never
-// tears down mid-call.
+// Idempotent. After Close, methods return ErrClosed / zero values.
+//
+// Close destroys the awareness and nils a under the write lock FIRST, then
+// detaches every presence-change subscription (unsubscribing the awareness
+// bridge and signalling each drain goroutine to stop). Ordering matters: an
+// in-flight Observe holds w.mu.RLock for its whole body and registers itself
+// only near the end, so taking the write lock first guarantees every such
+// Observe has finished registering before we snapshot w.subs (no missed
+// subscription → no leaked drain goroutine). Any Observe starting after this
+// sees a == nil and returns the closed stub without launching a drain.
+//
+// Close does not join drain goroutines: one may be inside OnChange re-entering a
+// mobile method that needs w.mu, so joining under a lock would deadlock. s.Close
+// never takes w.mu, so detaching after releasing the write lock keeps the
+// signal-don't-join / no-lock-across-callback property. No callback starts after
+// Close — the bridge is unsubscribed and each drain sees stopped.
 func (w *Awareness) Close() {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.a != nil {
 		w.a.Destroy()
 		w.a = nil
+	}
+	w.mu.Unlock()
+	w.subsMu.Lock()
+	subs := make([]*Subscription, 0, len(w.subs))
+	for s := range w.subs {
+		subs = append(subs, s)
+	}
+	w.subsMu.Unlock()
+	for _, s := range subs {
+		s.Close()
 	}
 }

@@ -2,8 +2,11 @@ package mobile
 
 import (
 	"bytes"
+	"encoding/json"
+	"sort"
 	"sync"
 
+	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/crdt"
 )
 
@@ -175,4 +178,156 @@ func (m *Doc) detachSub(s *Subscription) {
 	m.subsMu.Lock()
 	delete(m.subs, s)
 	m.subsMu.Unlock()
+}
+
+// AwarenessObserver receives the changed client-id sets after each presence
+// change. changesJSON is `{"added":[..],"updated":[..],"removed":[..]}` with the
+// three id arrays sorted ascending and always present (`[]` never `null`). The
+// sets are advisory: the app reads StatesJSON for the authoritative presence
+// snapshot, so an over-notified id is harmless. OnChange runs on a background
+// goroutine — never the UI thread, never under a lock.
+type AwarenessObserver interface {
+	OnChange(changesJSON []byte)
+}
+
+// awarenessChanges is the JSON payload delivered to an AwarenessObserver. The
+// slices are always non-nil so each field marshals to `[]` (never `null`).
+type awarenessChanges struct {
+	Added   []uint64 `json:"added"`
+	Updated []uint64 `json:"updated"`
+	Removed []uint64 `json:"removed"`
+}
+
+// awarenessPending coalesces presence changes under backpressure by UNION-ing
+// the id sets. The sets are advisory (the app reads StatesJSON for truth), so
+// over-notifying an id is safe and needs no net-effect reconciliation — unlike
+// the Doc bridge there is no per-op payload to merge losslessly, only ids to
+// accumulate. The queue therefore never grows: it is a single coalesced batch.
+type awarenessPending struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	added   map[uint64]struct{}
+	updated map[uint64]struct{}
+	removed map[uint64]struct{}
+	dirty   bool
+	stopped bool
+}
+
+// Observe registers obs to be notified after each presence change on this
+// Awareness (a local SetLocalState/ClearLocalState or a remote ApplyUpdate).
+// Notifications are delivered on a dedicated background goroutine with no locks
+// held, carrying the sorted added/updated/removed client-id sets as JSON. The
+// returned Subscription detaches the observer when Closed. If the Awareness is
+// already Closed, a non-nil already-closed Subscription is returned (its Close
+// is a no-op).
+func (w *Awareness) Observe(obs AwarenessObserver) *Subscription {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.a == nil {
+		return closedSubscription()
+	}
+	p := &awarenessPending{
+		added:   map[uint64]struct{}{},
+		updated: map[uint64]struct{}{},
+		removed: map[uint64]struct{}{},
+	}
+	p.cond = sync.NewCond(&p.mu)
+
+	// Bridge callback: fires SYNCHRONOUSLY from inside SetLocalState /
+	// ClearLocalState / ApplyUpdate while the calling mobile method holds
+	// w.mu.RLock. It must be cheap — it only unions the id sets under p.mu. It
+	// never takes w.mu, never calls the observer, never blocks.
+	unsub := w.a.OnChange(func(ev awareness.ChangeEvent) {
+		if len(ev.Added)+len(ev.Updated)+len(ev.Removed) == 0 {
+			return // never wake the app for a no-op change
+		}
+		p.mu.Lock()
+		if p.stopped {
+			p.mu.Unlock()
+			return
+		}
+		for _, id := range ev.Added {
+			p.added[id] = struct{}{}
+		}
+		for _, id := range ev.Updated {
+			p.updated[id] = struct{}{}
+		}
+		for _, id := range ev.Removed {
+			p.removed[id] = struct{}{}
+		}
+		p.dirty = true
+		p.cond.Signal()
+		p.mu.Unlock()
+	})
+
+	sub := &Subscription{
+		unsubscribe: unsub,
+		stopFn: func() {
+			p.mu.Lock()
+			p.stopped = true
+			p.cond.Broadcast()
+			p.mu.Unlock()
+		},
+	}
+	sub.detach = func() { w.detachSub(sub) }
+
+	go awarenessDrain(p, obs)
+
+	w.subsMu.Lock()
+	if w.subs == nil {
+		w.subs = make(map[*Subscription]struct{})
+	}
+	w.subs[sub] = struct{}{}
+	w.subsMu.Unlock()
+	return sub
+}
+
+// awarenessDrain delivers coalesced presence changes to obs, one batch at a
+// time, with no locks held. It exits when the subscription is stopped,
+// abandoning any still-pending batch (no callback after Close).
+func awarenessDrain(p *awarenessPending, obs AwarenessObserver) {
+	for {
+		p.mu.Lock()
+		for !p.dirty && !p.stopped {
+			p.cond.Wait()
+		}
+		if p.stopped { // abandon the pending batch; no callback after Close
+			p.mu.Unlock()
+			return
+		}
+		ch := awarenessChanges{
+			Added:   sortedIDs(p.added),
+			Updated: sortedIDs(p.updated),
+			Removed: sortedIDs(p.removed),
+		}
+		// Reset the batch. Fresh maps (rather than clearing) keep the drained
+		// snapshot's slices independent of the next accumulation.
+		p.added = map[uint64]struct{}{}
+		p.updated = map[uint64]struct{}{}
+		p.removed = map[uint64]struct{}{}
+		p.dirty = false
+		p.mu.Unlock()
+
+		// Marshaling id slices never fails, so the error is ignored. Delivery is
+		// off all locks.
+		b, _ := json.Marshal(ch)
+		obs.OnChange(b)
+	}
+}
+
+// sortedIDs returns the map's keys as a NON-nil ascending slice (empty → an
+// empty non-nil slice) so the JSON marshals to `[]`, never `null`.
+func sortedIDs(m map[uint64]struct{}) []uint64 {
+	out := make([]uint64, 0, len(m))
+	for id := range m {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func (w *Awareness) detachSub(s *Subscription) {
+	w.subsMu.Lock()
+	delete(w.subs, s)
+	w.subsMu.Unlock()
 }

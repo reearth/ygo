@@ -39,7 +39,9 @@ func isMobileSafe(t reflect.Type) bool {
 	case reflect.Pointer:
 		return t == reflect.TypeOf((*Doc)(nil)) || t == reflect.TypeOf((*Awareness)(nil)) || t == reflect.TypeOf((*Subscription)(nil))
 	case reflect.Interface:
-		return t == reflect.TypeOf((*error)(nil)).Elem() || t == reflect.TypeOf((*DocObserver)(nil)).Elem()
+		return t == reflect.TypeOf((*error)(nil)).Elem() ||
+			t == reflect.TypeOf((*DocObserver)(nil)).Elem() ||
+			t == reflect.TypeOf((*AwarenessObserver)(nil)).Elem()
 	default:
 		return false
 	}
