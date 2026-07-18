@@ -9,10 +9,12 @@ import (
 )
 
 // mobileLocalOrigin tags transactions started by mobile mutators so the Doc
-// change-observer (added in a later task) can report local=true. Unique pointer.
+// change-observer (Doc.Observe) can report local=true. Unique pointer.
 var mobileLocalOrigin = &struct{ name string }{"ygo/mobile.local"}
 
-// toIndex converts a mobile int64 index/length to a validated int (>=0, fits int).
+// toIndex converts a mobile int64 index/length to a validated int: it must be
+// >= 0 and <= math.MaxInt32 (the cap keeps indices in range on 32-bit gomobile
+// targets, and is far above any realistic document length).
 func toIndex(v int64) (int, error) {
 	if v < 0 {
 		return 0, fmt.Errorf("ygo/mobile: index/length must be >= 0, got %d", v)

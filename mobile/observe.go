@@ -32,7 +32,8 @@ type Subscription struct {
 // call from any goroutine. Close signals the drain goroutine to stop but does
 // NOT join it: the drain goroutine may be inside OnChange (which can re-enter a
 // mobile method needing the Doc lock), so joining while a lock is held would
-// deadlock. After Close, no further OnChange calls occur.
+// deadlock. After Close returns, no further updates are queued for delivery; a
+// callback already dequeued and in flight may still run to completion.
 func (s *Subscription) Close() {
 	if s == nil {
 		return
@@ -151,14 +152,15 @@ func (m *Doc) Observe(obs DocObserver) *Subscription {
 
 // docDrain delivers coalesced updates to obs, one at a time, in commit order,
 // with no locks held. It exits when the subscription is stopped, abandoning any
-// still-queued update (no callback after Close).
+// still-queued updates. No new delivery begins once stopped is observed, though
+// an update already dequeued before Close ran is still delivered.
 func docDrain(p *docPending, obs DocObserver) {
 	for {
 		p.mu.Lock()
 		for len(p.updates) == 0 && !p.stopped {
 			p.cond.Wait()
 		}
-		if p.stopped { // abandon the whole queue; no callback after Close
+		if p.stopped { // stopped observed before popping: abandon the queue
 			p.mu.Unlock()
 			return
 		}
@@ -284,14 +286,15 @@ func (w *Awareness) Observe(obs AwarenessObserver) *Subscription {
 
 // awarenessDrain delivers coalesced presence changes to obs, one batch at a
 // time, with no locks held. It exits when the subscription is stopped,
-// abandoning any still-pending batch (no callback after Close).
+// abandoning any still-pending batch. No new delivery begins once stopped is
+// observed, though a batch already dequeued before Close ran is still delivered.
 func awarenessDrain(p *awarenessPending, obs AwarenessObserver) {
 	for {
 		p.mu.Lock()
 		for !p.dirty && !p.stopped {
 			p.cond.Wait()
 		}
-		if p.stopped { // abandon the pending batch; no callback after Close
+		if p.stopped { // stopped observed before draining: abandon the batch
 			p.mu.Unlock()
 			return
 		}
