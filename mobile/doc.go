@@ -10,6 +10,13 @@ import (
 type Doc struct {
 	mu sync.RWMutex
 	d  *crdt.Doc // nil after Close
+
+	// subsMu guards the change-observer registry. It is DISTINCT from mu on
+	// purpose: mu.RLock is shared, so mutating subs under it would data-race a
+	// concurrent Observe. Never take subsMu while holding mu for writing and
+	// vice-versa in a way that could invert lock order.
+	subsMu sync.Mutex
+	subs   map[*Subscription]struct{}
 }
 
 // NewDoc creates a document with a random client ID.
@@ -44,12 +51,35 @@ func (m *Doc) ClientID() int64 {
 }
 
 // Close releases the underlying document for prompt Go-side collection.
-// Idempotent. After Close, methods return ErrClosed / zero values. Close blocks
-// until any in-flight operation completes, so it never tears down mid-call.
+// Idempotent. After Close, methods return ErrClosed / zero values.
+//
+// Close nils d under the write lock FIRST, then detaches every change-observer
+// subscription (unsubscribing the crdt bridge and signalling each drain
+// goroutine to stop). Ordering matters: an in-flight Observe holds m.mu.RLock
+// for its whole body and registers itself only near the end, so taking the
+// write lock first guarantees every such Observe has finished registering
+// before we snapshot m.subs (no missed subscription → no leaked drain
+// goroutine). Any Observe starting after this sees d == nil and returns the
+// closed stub without launching a drain.
+//
+// Close does not join drain goroutines: one may be inside OnChange re-entering
+// a mobile method that needs m.mu, so joining under a lock would deadlock.
+// s.Close never takes m.mu, so detaching after releasing the write lock keeps
+// the signal-don't-join / no-lock-across-callback property. No callback starts
+// after Close — the bridge is unsubscribed and each drain sees stopped.
 func (m *Doc) Close() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.d = nil
+	m.mu.Unlock()
+	m.subsMu.Lock()
+	subs := make([]*Subscription, 0, len(m.subs))
+	for s := range m.subs {
+		subs = append(subs, s)
+	}
+	m.subsMu.Unlock()
+	for _, s := range subs {
+		s.Close()
+	}
 }
 
 // ApplyUpdate merges a V1 update from a peer. Returns ErrClosed after Close.
