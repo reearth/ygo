@@ -61,11 +61,15 @@ func (f *YXmlFragment) prepareFire(txn *Transaction, keysChanged map[string]stru
 
 // Len returns the number of non-deleted child nodes (attributes are excluded).
 //
-// A DETACHED fragment/element reports 0: buffered prelim children are not
-// visible to any reader (Len, Children, attribute getters, ToXML) until the
-// subtree attaches — uniform with YText, whose detached Len/ToString likewise
-// ignore pending operations.
+// A DETACHED fragment/element reports its buffered prelim child count, matching
+// yjs's _prelimContent-aware length. This keeps index math consistent across
+// attach — in particular Insert(txn, Len(), node) appends rather than
+// prepending. (Nested TEXT content stays opaque until attach: a detached
+// YXmlText reports Len 0, mirroring yjs — see YText.) (#yxml-wire)
 func (f *YXmlFragment) Len() int {
+	if f.detached() {
+		return len(f.prelimChildren)
+	}
 	count := 0
 	for item := f.start; item != nil; item = item.Right {
 		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == nil {
@@ -181,8 +185,17 @@ func (f *YXmlFragment) flushPrelim(txn *Transaction) {
 	}
 }
 
-// Children returns all non-deleted child XML nodes in document order.
+// Children returns all non-deleted child XML nodes in document order. A
+// DETACHED fragment/element returns a copy of its buffered prelim children (the
+// same node values that were inserted), so iteration and ToXML reflect the
+// subtree before it attaches. As everywhere in this package, buffer only FRESH
+// nodes into a detached parent: inserting an already-attached node is the usual
+// re-parenting misuse, and reading the detached parent's ToXML would then
+// recurse into that attached child's lock-taking serialisation. (#yxml-wire)
 func (f *YXmlFragment) Children() []xmlNode {
+	if f.detached() {
+		return append([]xmlNode(nil), f.prelimChildren...)
+	}
 	var result []xmlNode
 	for item := f.start; item != nil; item = item.Right {
 		if item.Deleted || item.ParentSub != nil {
@@ -317,6 +330,11 @@ func (e *YXmlElement) SetAttribute(txn *Transaction, key, value string) {
 func (e *YXmlElement) SetAttributeValue(txn *Transaction, key string, value any) {
 	t := &e.abstractType
 	if t.detached() {
+		// Store the wire-normalised value (int -> int64, the same transform
+		// NewContentAny applies below) so a detached GetAttributeValue reads
+		// back the exact type it would after attach. flushPrelim re-applies
+		// this value, so the encoded bytes are unaffected.
+		value = normalizeAnyScalar(value)
 		for i := range e.prelimAttrs {
 			if e.prelimAttrs[i].key == key {
 				e.prelimAttrs[i].value = value
@@ -388,9 +406,19 @@ func (e *YXmlElement) GetAttribute(key string) (string, bool) {
 }
 
 // GetAttributeValue returns the typed value of attribute key (string, int64,
-// float64, bool, … — whatever the CRDT holds) and whether it is present.
+// float64, bool, … — whatever the CRDT holds) and whether it is present. On a
+// DETACHED element it reads the buffered prelim attribute, already normalised
+// to its wire type, so the result is identical before and after attach.
 func (e *YXmlElement) GetAttributeValue(key string) (any, bool) {
 	t := &e.abstractType
+	if t.detached() {
+		for i := range e.prelimAttrs {
+			if e.prelimAttrs[i].key == key {
+				return e.prelimAttrs[i].value, true
+			}
+		}
+		return nil, false
+	}
 	item, ok := t.itemMap[key]
 	if !ok || item.Deleted {
 		return nil, false
@@ -413,9 +441,20 @@ func (e *YXmlElement) GetAttributes() map[string]string {
 }
 
 // GetAttributeValues returns all live attributes with their typed values,
-// mirroring Yjs's YXmlElement.getAttributes().
+// mirroring Yjs's YXmlElement.getAttributes(). A DETACHED element returns its
+// buffered prelim attributes (normalised to their wire types). Note this is
+// intentionally MORE complete than yjs, whose getAttribute does not surface
+// _prelimAttrs until integrate — ygo keeps detached reads consistent with the
+// attached view. Wire bytes are unaffected. (#yxml-wire)
 func (e *YXmlElement) GetAttributeValues() map[string]any {
 	t := &e.abstractType
+	if t.detached() {
+		result := make(map[string]any, len(e.prelimAttrs))
+		for _, kv := range e.prelimAttrs {
+			result[kv.key] = kv.value
+		}
+		return result
+	}
 	result := make(map[string]any)
 	for k, item := range t.itemMap {
 		if item.Deleted {

@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.33.0] — 2026-07-18
 
 ### Fixed
 
@@ -19,9 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     attributes. Building a tree bottom-up previously assigned child clocks
     below the container's, emitting same-client forward parent references
     that crash `Y.applyUpdate` in yjs (`findIndexSS` TypeError) and that
-    ygo itself parked forever on re-apply (fragment emptied). Detached
-    nodes read as uniformly EMPTY (`Len`, `Children`, attribute getters,
-    `ToXML`) until attached.
+    ygo itself parked forever on re-apply (fragment emptied). A detached
+    fragment/element **reflects its buffered prelim content** to readers
+    (`Len`, `Children`, attribute getters, `ToXML`), matching yjs's
+    `_prelimContent`-aware `length`/`toArray()` — so `Insert(txn, Len(),
+    node)` appends rather than prepending, and iteration sees what was
+    inserted before attach. Nested `YXmlText` content stays opaque until
+    attach (`Len` 0, empty `ToString`), mirroring yjs. (Reflecting prelim
+    *attributes* on read is intentionally more complete than yjs, which
+    hides `_prelimAttrs` until integrate; ygo keeps detached reads
+    consistent with the attached view. Wire bytes are unaffected either way.)
   - Non-string XML attribute values (e.g. a ProseMirror heading's
     `level=1`, a number) are no longer dropped by the attribute getters.
   - The V2 encoder no longer deduplicates keys, matching the yjs reference

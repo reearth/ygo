@@ -1,3 +1,54 @@
+## v1.33.0
+
+A minor release that makes ygo's XML types (`Y.XmlFragment`/`Y.XmlElement`/
+`Y.XmlText`) **byte-conformant with yjs@13.6** over both V1 and V2 updates — the
+`y-prosemirror` shapes now round-trip and converge with real yjs — plus new
+typed XML attribute accessors. No breaking changes.
+
+### Fixed
+
+- **XML wire conformance with yjs**
+  ([#147](https://github.com/reearth/ygo/pull/147), thanks @frodex). Three fixes
+  make ygo's XML types byte-identical to the yjs reference over both update
+  formats: detached subtrees now buffer their mutations and materialise
+  top-down at attach (container-before-child clocks, so bottom-up authored
+  updates apply in yjs instead of crashing `Y.applyUpdate` in `findIndexSS`);
+  non-string attribute values (e.g. a ProseMirror heading's `level=1`) are no
+  longer dropped by the getters; and the V2 encoder no longer deduplicates keys,
+  matching yjs exactly (yjs ships `writeKey` with dedup disabled — older yjs
+  clients cannot read deduped updates). The decoder still accepts both shapes.
+
+- **Detached XML nodes reflect their buffered content on read**
+  ([#170](https://github.com/reearth/ygo/pull/170)). A detached fragment/element
+  now reports its true `Len()`/`Children()`/attributes (and `ToXML`), matching
+  yjs's `_prelimContent`-aware `length`/`toArray()` — so `Insert(txn, Len(),
+  node)` appends instead of prepending, and iteration sees what was inserted
+  before attach. Nested `YXmlText` content stays opaque until attach, mirroring
+  yjs. Detached `YText` op buffering also snapshots caller-provided attribute
+  maps / delta slices, so a later caller mutation can't diverge the replayed op
+  from the attached path.
+
+### Added
+
+- **Typed XML attribute accessors** — `YXmlElement.SetAttributeValue`,
+  `GetAttributeValue`, `GetAttributeValues` preserve the attribute's wire value
+  type end-to-end. The string-typed `GetAttribute`/`GetAttributes` now render
+  non-string scalars best-effort instead of dropping them.
+- **XML JS-fixture conformance suite** — `crdt/yxml_yjs_conformance_test.go`
+  applies genuine yjs@13.6 update bytes (decode, byte-identical re-encode in V1
+  and V2, byte-identical authoring against pinned clientIDs, diff-vs-state-vector,
+  concurrent merge in both orders), mirroring the existing Map/Text suites.
+
+### Changed
+
+- **V2 updates can be larger for XML-heavy documents**: with key dedup disabled
+  on encode (yjs parity), every repeated key — `ContentFormat` keys like
+  `strong`, repeated element node names like `paragraph` — is re-emitted rather
+  than back-referenced. This is the size cost of byte-compatibility with the yjs
+  reference encoder.
+
+---
+
 ## v1.32.0
 
 A minor release: one new public API for working inside transactions, plus two
