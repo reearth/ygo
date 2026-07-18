@@ -36,7 +36,7 @@ The current release is **v1.31.0**. See [CHANGELOG.md](CHANGELOG.md) for the per
 - **Awareness** — presence, cursor sharing, ephemeral state.
 - **Snapshots** — point-in-time document history and restore.
 - **Transport-agnostic** — core logic has no transport dependency; WebSocket and HTTP handlers are addons.
-- **Mobile bindings** — embed natively in iOS/Android via `gomobile bind` (the [`mobile/`](mobile/) subpackage). Pure Go, no CGO; v1 is sync + render.
+- **Mobile bindings** — embed natively in iOS/Android via `gomobile bind` (the [`mobile/`](mobile/) subpackage). Pure Go, no CGO; full on-device editing, sync, presence, and change-notification observers.
 
 Post-v1.0 hardening:
 
@@ -449,14 +449,14 @@ subdocument) is a separate, not-yet-implemented layer, tracked in
 
 ## Mobile (iOS / Android)
 
-The [`mobile/`](mobile/) subpackage is a [`gomobile bind`](https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile)-able façade over `crdt` and `awareness`, so you can embed ygo natively in iOS and Android apps — **no JavaScript runtime and no CGO**. v1 scope is **sync + render**: a Swift/Kotlin app can receive, merge, and display a collaboratively-edited document and exchange presence (on-device editing is a planned follow-up).
+The [`mobile/`](mobile/) subpackage is a [`gomobile bind`](https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile)-able façade over `crdt` and `awareness`, so you can embed ygo natively in iOS and Android apps — **no JavaScript runtime and no CGO**. It is a **full on-device editor**: a Swift/Kotlin app can edit locally, sync, render, exchange presence, and subscribe to push change-notifications — not just receive and display.
 
 ```
 gomobile bind -target=ios                ./mobile   # → Mobile.xcframework
 gomobile bind -target=android -androidapi 21 ./mobile  # → mobile.aar
 ```
 
-`Doc` exposes sync (`ApplyUpdate`, `EncodeStateAsUpdate`, `EncodeStateVector`, `EncodeDiff`) and read accessors (`GetText`, `GetTextJSON`, `GetMapJSON`, `GetArrayJSON`); `Awareness` exposes presence (`SetLocalState`, `StatesJSON`, `EncodeAll`, `ApplyUpdate`). Every exported signature uses only gomobile-safe types (`string` / `int64` / `bool` / `[]byte` / `error`), and `Close()` releases the native state. `gomobile` is a build-time tool, not a dependency — `go.mod` is unchanged. See [`mobile/README.md`](mobile/README.md) for the build matrix, threading and lifecycle guidance, binary size / ABI notes, and Kotlin / Swift snippets.
+`Doc` exposes sync (`ApplyUpdate`, `EncodeStateAsUpdate`, `EncodeStateVector`, `EncodeDiff`), read accessors (`GetText`, `GetTextJSON`, `GetMapJSON`, `GetArrayJSON`), on-device mutators (`InsertText`, `FormatText`, `DeleteText`, `InsertArray`, `DeleteArray`, `SetMap`, `DeleteMapKey`, …), and change observers (`Observe`); `Awareness` exposes presence (`SetLocalState`, `StatesJSON`, `EncodeAll`, `ApplyUpdate`) plus its own `Observe`. Every exported signature uses only gomobile-safe types (`string` / `int64` / `bool` / `[]byte` / `error`, plus the bound `*Doc` / `*Awareness` / `*Subscription` and observer interfaces), and `Close()` releases the native state. `gomobile` is a build-time tool, not a dependency — `go.mod` is unchanged. See [`mobile/README.md`](mobile/README.md) for the build matrix, threading and lifecycle guidance, binary size / ABI notes, and Kotlin / Swift snippets.
 
 ## Running in production
 
