@@ -88,4 +88,16 @@ func TestExportedAPIIsMobileSafe(t *testing.T) {
 	for name, fn := range ctors {
 		checkFuncSafe(t, name, reflect.TypeOf(fn), false)
 	}
+	// Bound observer interfaces: the foreign side implements them and Go calls
+	// them across the boundary, so their method signatures must be gomobile-safe
+	// too. (Interface methods carry no receiver, so skipReceiver is false.)
+	for _, iface := range []reflect.Type{
+		reflect.TypeOf((*DocObserver)(nil)).Elem(),
+		reflect.TypeOf((*AwarenessObserver)(nil)).Elem(),
+	} {
+		for i := 0; i < iface.NumMethod(); i++ {
+			mth := iface.Method(i)
+			checkFuncSafe(t, iface.Name()+"."+mth.Name, mth.Type, false)
+		}
+	}
 }
