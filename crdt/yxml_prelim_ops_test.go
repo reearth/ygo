@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -225,4 +226,48 @@ func TestUnit_YXmlText_DetachedBufferedOpsMatchAttached(t *testing.T) {
 	assert.Equal(t, att.ToString(), det.ToString())
 	assert.Equal(t, att.ToDelta(), det.ToDelta(),
 		"detached buffering must be semantically transparent")
+}
+
+// Detached YText buffering must SNAPSHOT caller-provided Attributes (and delta
+// slices): mutating the map/slice after the buffered call but before attach
+// must not change the replayed op — matching the attached path, which consumes
+// them during the call. (#170, Copilot review)
+func TestUnit_YText_DetachedBufferingSnapshotsAttrs(t *testing.T) {
+	doc := newTestDoc(9)
+	frag := doc.GetXmlFragment("root")
+	ins, fmtT, delT := NewYXmlText(), NewYXmlText(), NewYXmlText()
+
+	insAttrs := Attributes{"bold": true}
+	fmtAttrs := Attributes{"em": true}
+	delta := []Delta{{Op: DeltaOpInsert, Insert: "x", Attributes: Attributes{"code": true}}}
+
+	doc.Transact(func(txn *Transaction) {
+		// Buffer while detached...
+		ins.Insert(txn, 0, "hi", insAttrs)
+		fmtT.Insert(txn, 0, "hi", nil)
+		fmtT.Format(txn, 0, 2, fmtAttrs)
+		delT.ApplyDelta(txn, delta)
+
+		// ...then mutate the caller's maps/slice BEFORE attach/flush.
+		insAttrs["bold"] = false
+		insAttrs["italic"] = true
+		fmtAttrs["em"] = false
+		delta[0].Attributes["code"] = false
+		delta[0].Insert = "MUT"
+
+		frag.InsertText(txn, 0, ins)
+		frag.InsertText(txn, 1, fmtT)
+		frag.InsertText(txn, 2, delT)
+	})
+
+	// Replays must reflect the snapshot at call time, not the later mutations.
+	if d := ins.ToDelta(); len(d) != 1 || !reflect.DeepEqual(d[0].Attributes, Attributes{"bold": true}) {
+		t.Errorf("Insert attrs = %+v, want {bold:true} (snapshot, not mutated)", d)
+	}
+	if d := fmtT.ToDelta(); len(d) != 1 || !reflect.DeepEqual(d[0].Attributes, Attributes{"em": true}) {
+		t.Errorf("Format attrs = %+v, want {em:true} (snapshot, not mutated)", d)
+	}
+	if d := delT.ToDelta(); len(d) != 1 || d[0].Insert != "x" || !reflect.DeepEqual(d[0].Attributes, Attributes{"code": true}) {
+		t.Errorf("ApplyDelta op = %+v, want insert=x attrs={code:true} (snapshot)", d)
+	}
 }
