@@ -136,17 +136,27 @@ func (c *ContentBinary) Splice(_ int) Content { panic("crdt: ContentBinary is no
 // Used by YArray when storing heterogeneous elements.
 type ContentAny struct{ Vals []any }
 
+// normalizeAnyScalar maps a Go scalar to the type it will hold once it has
+// round-tripped through a V1/V2 update: Go int becomes int64 (ReadAny returns
+// int64 for VarInt-encoded integers). Everything else is returned unchanged.
+// It is the single source of truth for this normalisation so that values
+// buffered locally (e.g. detached XML prelim attributes) read back with the
+// exact same type as values that were actually encoded — see NewContentAny and
+// YXmlElement.SetAttributeValue.
+func normalizeAnyScalar(v any) any {
+	if n, ok := v.(int); ok {
+		return int64(n)
+	}
+	return v
+}
+
 // NewContentAny creates a ContentAny, normalising Go int values to int64 so
 // that locally-stored integers are wire-compatible with values decoded from
 // V1/V2 updates (ReadAny returns int64 for VarInt-encoded integers).
 func NewContentAny(vals ...any) *ContentAny {
 	normalized := make([]any, len(vals))
 	for i, v := range vals {
-		if n, ok := v.(int); ok {
-			normalized[i] = int64(n)
-		} else {
-			normalized[i] = v
-		}
+		normalized[i] = normalizeAnyScalar(v)
 	}
 	return &ContentAny{normalized}
 }
