@@ -68,11 +68,72 @@ func TestServer_Logger_FallsBackToDefault(t *testing.T) {
 func TestServer_PeerWriteQueueSize_ConfigurableDefault(t *testing.T) {
 	// Default: zero in config means use the defaultPeerWriteQueueSize constant.
 	s := &Server{}
-	assert.Equal(t, defaultPeerWriteQueueSize, s.peerWriteQueueSize(), "default is 256")
+	assert.Equal(t, defaultPeerWriteQueueSize, s.peerWriteQueueSize(), "default is 512")
+	assert.Equal(t, 512, s.peerWriteQueueSize(), "default bumped from 256 to 512")
 
 	// Configured: positive value overrides default.
 	s2 := &Server{PeerWriteQueueSize: 16}
 	assert.Equal(t, 16, s2.peerWriteQueueSize(), "configured value used")
+}
+
+func TestServer_SlowPeerPolicy_DefaultsToDisconnect(t *testing.T) {
+	// The zero value must be the backward-compatible disconnect behaviour, so a
+	// Server that never sets the field keeps evicting slow peers.
+	s := &Server{}
+	assert.Equal(t, SlowPeerDisconnect, s.SlowPeerPolicy, "zero value is disconnect")
+}
+
+func TestPeer_Broadcast_ResyncPolicy_FlagsSlowPeerWithoutClosing(t *testing.T) {
+	// Under SlowPeerResync a full write queue must flag the peer for an in-place
+	// resync and drop the stale delta, NOT close the connection. This drives the
+	// overflow branch directly by pre-filling writeCh with no runWriter draining
+	// it, so no fake conn is needed (the resync branch never touches conn).
+	var buf bytes.Buffer
+	srv := &Server{SlowPeerPolicy: SlowPeerResync, Logger: captureDebugLogger(&buf)}
+	rm := &room{peers: map[*peer]struct{}{}}
+
+	target := &peer{server: srv, roomName: "r", writeCh: make(chan []byte, 1)}
+	target.writeCh <- []byte{0x00} // fill to capacity
+
+	src := &peer{server: srv, room: rm}
+	rm.peers[target] = struct{}{}
+	rm.peers[src] = struct{}{}
+
+	src.broadcast([]byte{0x01}, true)
+
+	target.wmu.Lock()
+	needsResync, closed := target.needsResync, target.closed
+	target.wmu.Unlock()
+
+	assert.True(t, needsResync, "overflow under SlowPeerResync should flag the peer for resync")
+	assert.False(t, closed, "overflow under SlowPeerResync must not disconnect the peer")
+	assert.Len(t, target.writeCh, 1, "the stale delta is dropped, not enqueued")
+	assert.Contains(t, buf.String(), "in-place resync", "expected a resync-scheduling log line")
+}
+
+func TestPeer_MaybeResync_GatingWithoutConn(t *testing.T) {
+	// maybeResync's decision branches must be reachable without a live conn: it
+	// only performs a write once the peer is flagged AND the backlog has drained.
+
+	t.Run("not flagged is a no-op", func(t *testing.T) {
+		p := &peer{server: &Server{}, writeCh: make(chan []byte, 1)}
+		assert.True(t, p.maybeResync(), "an un-flagged, open peer keeps its writer alive")
+	})
+
+	t.Run("closed peer stops the writer", func(t *testing.T) {
+		p := &peer{server: &Server{}, writeCh: make(chan []byte, 1), closed: true, needsResync: true}
+		assert.False(t, p.maybeResync(), "a closed peer signals runWriter to exit")
+	})
+
+	t.Run("deferred while queue is non-empty", func(t *testing.T) {
+		p := &peer{server: &Server{}, writeCh: make(chan []byte, 2), needsResync: true}
+		p.writeCh <- []byte{0x01} // backlog not yet drained
+		assert.True(t, p.maybeResync(), "resync waits until the queue drains")
+		p.wmu.Lock()
+		still := p.needsResync
+		p.wmu.Unlock()
+		assert.True(t, still, "needsResync stays set until the backlog clears")
+	})
 }
 
 func TestPeer_Broadcast_DisconnectsSlowPeer(t *testing.T) {

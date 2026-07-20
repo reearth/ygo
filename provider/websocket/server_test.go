@@ -2,6 +2,7 @@ package websocket_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -462,6 +463,7 @@ func TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow(t *testing.T) {
 		})
 		update := crdt.EncodeStateAsUpdateV1(fastDoc, nil)
 		enc := encoding.NewEncoder()
+		enc.WriteVarUint(0) // outer msgSync wrapper
 		enc.WriteVarUint(ygsync.MsgUpdate)
 		enc.WriteVarBytes(update)
 		if err := fastConn.WriteMessage(gws.BinaryMessage, enc.Bytes()); err != nil {
@@ -470,10 +472,121 @@ func TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow(t *testing.T) {
 		time.Sleep(5 * time.Millisecond) // let the server process + broadcast each message
 	}
 
-	// slowConn should get an error because the server closed its connection.
-	_ = slowConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	// slowConn should get an error because the SERVER closed its connection, not
+	// because the client's own read deadline expired. Give a generous deadline and
+	// assert the error is a real close (not a timeout): if the overflow branch did
+	// not fire, the read would sit idle until the deadline and return a timeout,
+	// failing this assertion.
+	_ = slowConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	start := time.Now()
 	_, _, readErr := slowConn.ReadMessage()
-	assert.Error(t, readErr, "slow peer should be disconnected by the server after queue overflow")
+	require.Error(t, readErr, "slow peer should be disconnected by the server after queue overflow")
+	assert.False(t, isTimeout(readErr),
+		"disconnect must be a server-initiated close, not a client read-deadline timeout (got %v after %s)",
+		readErr, time.Since(start))
+}
+
+// isTimeout reports whether err is a deadline-exceeded (i/o timeout) error, used
+// to distinguish a client-side read-deadline expiry from a server-initiated close.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+func TestServer_SlowPeer_ResyncPolicy_StaysConnectedAndConverges(t *testing.T) {
+	// Same overflow setup as the disconnect test, but with SlowPeerResync: the
+	// overflow must NOT close the connection. The stale delta is dropped, the peer
+	// is flagged, and once it resumes reading runWriter delivers a full-state
+	// SyncStep2 so it converges in place without a reconnect.
+	srv := ygws.NewServer()
+	srv.PeerWriteQueueSize = 4
+	srv.SlowPeerPolicy = ygws.SlowPeerResync
+
+	ln := newPipeListener()
+	ts := httptest.NewUnstartedServer(srv)
+	ts.Listener = ln
+	ts.Start()
+	defer ts.Close()
+
+	dialer := pipeDialer(ln)
+	const wsBase = "ws://pipe"
+
+	// Fast peer: connects, drains handshake, keeps draining in the background.
+	fastConn, _, err := dialer.Dial(wsBase+"/resync-room", nil)
+	require.NoError(t, err)
+	defer fastConn.Close()
+	fastDoc := crdt.New(crdt.WithClientID(1))
+	_ = fastConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for i := 0; i < 3; i++ {
+		if _, _, e := fastConn.ReadMessage(); e != nil {
+			break
+		}
+	}
+	_ = fastConn.SetReadDeadline(time.Time{})
+	go func() {
+		for {
+			if _, _, e := fastConn.ReadMessage(); e != nil {
+				return
+			}
+		}
+	}()
+
+	// Slow peer: connects, drains its 3-message handshake, then stops reading so
+	// the server-side write queue overflows.
+	slowConn, _, err := dialer.Dial(wsBase+"/resync-room", nil)
+	require.NoError(t, err)
+	defer slowConn.Close()
+	slowDoc := crdt.New(crdt.WithClientID(2))
+	_ = slowConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for i := 0; i < 3; i++ {
+		if _, data, e := slowConn.ReadMessage(); e == nil {
+			dec := encoding.NewDecoder(data)
+			if ot, e2 := dec.ReadVarUint(); e2 == nil && ot == 0 {
+				_, _ = ygsync.ApplySyncMessage(slowDoc, dec.RemainingBytes(), nil)
+			}
+		}
+	}
+	_ = slowConn.SetReadDeadline(time.Time{}) // stop reading — writes now overflow
+
+	// Fast peer bursts updates; broadcasts to the slow peer overflow its queue.
+	const inserts = 20
+	fastTxt := fastDoc.GetText("t")
+	for i := 0; i < inserts; i++ {
+		fastDoc.Transact(func(txn *crdt.Transaction) {
+			fastTxt.Insert(txn, 0, "x", nil)
+		})
+		update := crdt.EncodeStateAsUpdateV1(fastDoc, nil)
+		enc := encoding.NewEncoder()
+		enc.WriteVarUint(0) // outer msgSync wrapper
+		enc.WriteVarUint(ygsync.MsgUpdate)
+		enc.WriteVarBytes(update)
+		if err := fastConn.WriteMessage(gws.BinaryMessage, enc.Bytes()); err != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	want := fastTxt.ToString()
+
+	// Resume reading. The peer must NOT have been disconnected, and applying the
+	// frames it now receives (queued deltas + the full-state resync) must bring
+	// slowDoc up to the fast peer's state.
+	deadline := time.Now().Add(5 * time.Second)
+	for slowDoc.GetText("t").ToString() != want {
+		_ = slowConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, readErr := slowConn.ReadMessage()
+		require.NoError(t, readErr, "slow peer must stay connected under SlowPeerResync")
+		dec := encoding.NewDecoder(data)
+		if ot, e := dec.ReadVarUint(); e == nil && ot == 0 {
+			_, _ = ygsync.ApplySyncMessage(slowDoc, dec.RemainingBytes(), nil)
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+	}
+	_ = slowConn.SetReadDeadline(time.Time{})
+
+	assert.Equal(t, want, slowDoc.GetText("t").ToString(),
+		"slow peer should converge to the fast peer's state via in-place resync")
 }
 
 func TestServer_RunWriter_NoLeakOnConnectChurn(t *testing.T) {

@@ -116,6 +116,23 @@ func (s *Server) peerWriteQueueSize() int {
 	return defaultPeerWriteQueueSize
 }
 
+// SlowPeerPolicy selects how the server reacts when a peer's broadcast write
+// queue overflows.
+type SlowPeerPolicy int
+
+const (
+	// SlowPeerDisconnect closes the slow peer's connection, forcing a
+	// reconnect-and-resync. Default; preserves the original behavior.
+	SlowPeerDisconnect SlowPeerPolicy = iota
+	// SlowPeerResync keeps the connection open: only the overflowing update is
+	// dropped and the peer is flagged. Its existing backlog is left to drain
+	// normally; once the write queue is empty the peer is re-synced in place with
+	// a full-state SyncStep2 (plus current awareness), which supersedes any stale
+	// deltas that were still queued. Avoids reconnect churn for transiently-slow
+	// peers while still converging.
+	SlowPeerResync
+)
+
 // maxAwarenessClientsPerPeer caps the number of awareness clientIDs one peer
 // may claim ownership of. Without this cap an attacker can send an awareness
 // update listing 1,000,000 clientIDs and cause an OOM when handleDisconnect
@@ -123,8 +140,10 @@ func (s *Server) peerWriteQueueSize() int {
 const maxAwarenessClientsPerPeer = 10_000
 
 // defaultPeerWriteQueueSize is the default capacity of each peer's broadcast
-// write channel when PeerWriteQueueSize is not set.
-const defaultPeerWriteQueueSize = 256
+// write channel when PeerWriteQueueSize is not set. 512 gives transiently-slow
+// peers more slack before the queue overflows (matching the yrs shared broadcast
+// ring), reducing how often the slow-peer path is hit at all.
+const defaultPeerWriteQueueSize = 512
 
 // PersistenceAdapter is implemented by storage backends that want to persist
 // room state across server restarts. It is called on every committed update so
@@ -420,8 +439,16 @@ type Server struct {
 	// CRDT's pending-structs machinery. Matches yrs-warp's bounded-broadcast
 	// pattern.
 	//
-	// Zero (the default) uses 256, sized for typical sync workloads.
+	// Zero (the default) uses 512, sized for typical sync workloads.
 	PeerWriteQueueSize int
+
+	// SlowPeerPolicy selects the reaction when a peer's broadcast write queue
+	// overflows: SlowPeerDisconnect (default) closes the connection; SlowPeerResync
+	// keeps it open and re-syncs the peer in place. See SlowPeerPolicy. Like the
+	// other config fields, set it before serving; it is read without
+	// synchronisation and must not be mutated while the server is handling
+	// connections.
+	SlowPeerPolicy SlowPeerPolicy
 
 	// MaxPendingItems caps the per-document pending-items queue depth. The
 	// queue holds items whose dependencies have not yet arrived, waiting for
