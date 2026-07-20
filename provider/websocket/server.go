@@ -116,6 +116,22 @@ func (s *Server) peerWriteQueueSize() int {
 	return defaultPeerWriteQueueSize
 }
 
+// SlowPeerPolicy selects how the server reacts when a peer's broadcast write
+// queue overflows.
+type SlowPeerPolicy int
+
+const (
+	// SlowPeerDisconnect closes the slow peer's connection, forcing a
+	// reconnect-and-resync. Default; preserves the original behavior.
+	SlowPeerDisconnect SlowPeerPolicy = iota
+	// SlowPeerResync keeps the connection open: the now-stale backlog is dropped
+	// and the peer is re-synced in place with a full-state SyncStep2 (plus current
+	// awareness) once its write queue drains. Avoids reconnect churn for
+	// transiently-slow peers while still converging (the full state supersedes the
+	// dropped incremental updates).
+	SlowPeerResync
+)
+
 // maxAwarenessClientsPerPeer caps the number of awareness clientIDs one peer
 // may claim ownership of. Without this cap an attacker can send an awareness
 // update listing 1,000,000 clientIDs and cause an OOM when handleDisconnect
@@ -422,6 +438,11 @@ type Server struct {
 	//
 	// Zero (the default) uses 256, sized for typical sync workloads.
 	PeerWriteQueueSize int
+
+	// SlowPeerPolicy selects the reaction when a peer's broadcast write queue
+	// overflows: SlowPeerDisconnect (default) closes the connection; SlowPeerResync
+	// keeps it open and re-syncs the peer in place. See SlowPeerPolicy.
+	SlowPeerPolicy SlowPeerPolicy
 
 	// MaxPendingItems caps the per-document pending-items queue depth. The
 	// queue holds items whose dependencies have not yet arrived, waiting for

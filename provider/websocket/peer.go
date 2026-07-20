@@ -9,6 +9,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/reearth/ygo/awareness"
+	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
 )
@@ -26,8 +27,12 @@ type peer struct {
 	cidMu      sync.Mutex
 	writeCh    chan []byte   // buffered queue drained by runWriter goroutine
 	writerDone chan struct{} // closed when runWriter exits
-	limiter    *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
-	readOnly   bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
+	// needsResync is set (under wmu) when a broadcast is dropped because writeCh
+	// was full under SlowPeerResync. runWriter clears it and sends a full-state
+	// resync once the queue drains, so the peer converges without a reconnect.
+	needsResync bool
+	limiter     *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
+	readOnly    bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -447,13 +452,22 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 		case other.writeCh <- data:
 			// queued
 		default:
-			// Queue full — disconnect the slow peer.
-			p.server.log().Warn("peer write queue full; closing slow peer",
-				"room", other.roomName,
-				"queueSize", cap(other.writeCh))
-			_ = other.conn.Close()
-			// The peer's read loop will detect the close and run
-			// handleDisconnect to clean up room state.
+			// Queue full.
+			if p.server.SlowPeerPolicy == SlowPeerResync {
+				// Drop this stale delta and flag an in-place resync; runWriter
+				// sends a full-state SyncStep2 once the queue drains, so the peer
+				// converges without a reconnect.
+				other.needsResync = true
+				p.server.log().Debug("peer write queue full; scheduling in-place resync",
+					"room", other.roomName,
+					"queueSize", cap(other.writeCh))
+			} else {
+				// Disconnect the slow peer; the read loop runs handleDisconnect.
+				p.server.log().Warn("peer write queue full; closing slow peer",
+					"room", other.roomName,
+					"queueSize", cap(other.writeCh))
+				_ = other.conn.Close()
+			}
 		}
 		other.wmu.Unlock()
 	}
@@ -513,5 +527,62 @@ func (p *peer) runWriter() {
 			return
 		}
 		p.wmu.Unlock()
+
+		// SlowPeerResync: if a broadcast was dropped while this peer was behind,
+		// resync it now that the backlog has drained.
+		if !p.maybeResync() {
+			return
+		}
 	}
+}
+
+// maybeResync sends a one-shot full-state resync (SyncStep2 + current awareness)
+// when a broadcast was dropped under SlowPeerResync and the write queue has since
+// drained. The full state supersedes the dropped incremental updates, so the peer
+// converges without a reconnect. Returns false if the connection is dead and the
+// writer goroutine should exit.
+//
+// This runs only in the runWriter goroutine, so the direct conn writes here do not
+// race other writers; wmu still guards the closed flag and serialises with teardown.
+func (p *peer) maybeResync() bool {
+	p.wmu.Lock()
+	// Wait until the backlog has fully drained so the resync is not immediately
+	// followed by now-stale queued deltas.
+	if p.closed || !p.needsResync || len(p.writeCh) > 0 {
+		notClosed := !p.closed
+		p.wmu.Unlock()
+		return notClosed
+	}
+	p.needsResync = false
+	p.wmu.Unlock()
+
+	// Build resync frames without holding wmu: crdt.Doc and Awareness are
+	// internally synchronised (mirrors the initial-sync path).
+	step2 := encodeSyncStep2Msg(crdt.EncodeStateAsUpdateV1(p.room.doc, nil))
+	syncFrame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgSync)
+		enc.WriteRaw(step2)
+	})
+	awFrame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgAwareness)
+		enc.WriteVarBytes(p.room.awareness.EncodeUpdate(nil))
+	})
+
+	p.wmu.Lock()
+	defer p.wmu.Unlock()
+	if p.closed {
+		return false
+	}
+	for _, frame := range [][]byte{syncFrame, awFrame} {
+		if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+			p.server.log().Debug("set write deadline failed", "err", err)
+			return false
+		}
+		if err := p.conn.WriteMessage(gws.BinaryMessage, frame); err != nil {
+			p.server.log().Warn("resync write to peer failed; closing", "room", p.roomName, "err", err)
+			return false
+		}
+	}
+	p.server.log().Debug("sent in-place resync to recovered slow peer", "room", p.roomName)
+	return true
 }
