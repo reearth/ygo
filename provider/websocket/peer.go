@@ -511,22 +511,9 @@ func (p *peer) write(data []byte) {
 func (p *peer) runWriter() {
 	defer close(p.writerDone)
 	for data := range p.writeCh {
-		p.wmu.Lock()
-		if p.closed {
-			p.wmu.Unlock()
+		if !p.writeToConn(data) {
 			return
 		}
-		if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-			p.server.log().Debug("set write deadline failed", "err", err)
-			p.wmu.Unlock()
-			return
-		}
-		if err := p.conn.WriteMessage(gws.BinaryMessage, data); err != nil {
-			p.server.log().Warn("write to peer failed; closing", "room", p.roomName, "err", err)
-			p.wmu.Unlock()
-			return
-		}
-		p.wmu.Unlock()
 
 		// SlowPeerResync: if a broadcast was dropped while this peer was behind,
 		// resync it now that the backlog has drained.
@@ -536,14 +523,41 @@ func (p *peer) runWriter() {
 	}
 }
 
+// writeToConn performs one conn write for the runWriter goroutine. wmu is held
+// only long enough to read the closed flag; the (possibly blocking) WriteMessage
+// runs WITHOUT wmu so that a slow peer cannot stall broadcast(), which must take
+// the same wmu to enqueue frames for OTHER peers. This is safe because runWriter
+// is the sole goroutine that ever calls conn.WriteMessage (all sends funnel
+// through writeCh), and gorilla/websocket permits conn.Close() — used by the
+// disconnect path and teardown — to run concurrently with a write. Returns false
+// when the writer goroutine should exit.
+func (p *peer) writeToConn(data []byte) bool {
+	p.wmu.Lock()
+	closed := p.closed
+	p.wmu.Unlock()
+	if closed {
+		return false
+	}
+	if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		p.server.log().Debug("set write deadline failed", "err", err)
+		return false
+	}
+	if err := p.conn.WriteMessage(gws.BinaryMessage, data); err != nil {
+		p.server.log().Warn("write to peer failed; closing", "room", p.roomName, "err", err)
+		return false
+	}
+	return true
+}
+
 // maybeResync sends a one-shot full-state resync (SyncStep2 + current awareness)
 // when a broadcast was dropped under SlowPeerResync and the write queue has since
 // drained. The full state supersedes the dropped incremental updates, so the peer
 // converges without a reconnect. Returns false if the connection is dead and the
 // writer goroutine should exit.
 //
-// This runs only in the runWriter goroutine, so the direct conn writes here do not
-// race other writers; wmu still guards the closed flag and serialises with teardown.
+// This runs only in the runWriter goroutine, so the frame writes here cannot race
+// another conn writer; wmu is taken only to read the closed/needsResync flags,
+// never held across a write (see writeToConn for why).
 func (p *peer) maybeResync() bool {
 	p.wmu.Lock()
 	// Wait until the backlog has fully drained so the resync is not immediately
@@ -568,18 +582,10 @@ func (p *peer) maybeResync() bool {
 		enc.WriteVarBytes(p.room.awareness.EncodeUpdate(nil))
 	})
 
-	p.wmu.Lock()
-	defer p.wmu.Unlock()
-	if p.closed {
-		return false
-	}
+	// Send the frames via the same wmu-free write path as normal broadcasts, so a
+	// slow peer cannot stall broadcast() during the resync either.
 	for _, frame := range [][]byte{syncFrame, awFrame} {
-		if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-			p.server.log().Debug("set write deadline failed", "err", err)
-			return false
-		}
-		if err := p.conn.WriteMessage(gws.BinaryMessage, frame); err != nil {
-			p.server.log().Warn("resync write to peer failed; closing", "room", p.roomName, "err", err)
+		if !p.writeToConn(frame) {
 			return false
 		}
 	}
