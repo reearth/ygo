@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.33.0] — 2026-07-18
+## [1.34.0] — 2026-07-18
 
 ### Added
 
@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Awareness.Observe` delivers `{added,updated,removed}` client-id sets. Delivery
   is on a background goroutine; `Subscription.Close()` unsubscribes and all
   observers detach on `Doc`/`Awareness` `Close`.
+- **`Awareness.PurgeTombstones(grace)` reclaims aged removal tombstones**
+  ([#166](https://github.com/reearth/ygo/issues/166)). When a client is removed
+  or expires, its entry is kept as a null-state tombstone so its clock can still
+  encode removals and reject stale re-adds. These tombstones were never
+  reclaimed: because they count toward `SetMaxClients` (deliberately, to bound a
+  peer inventing null-state client IDs), a high-churn room's entry count grew
+  monotonically and could eventually **refuse new, legitimate clients** — and
+  every full `EncodeUpdate(nil)` kept re-broadcasting them. `PurgeTombstones`
+  drops tombstones older than `grace` (a non-positive `grace` is a no-op; the
+  local client is never purged; no observer event fires). `StartAutoExpiry` now
+  runs it automatically each tick as a second stage — `RemoveExpired(timeout)`
+  then `PurgeTombstones(2*timeout)` — so `grace` outlives normal update
+  reordering before a tombstone's clock is forgotten. Callers driving expiry
+  manually should pair `RemoveExpired` with `PurgeTombstones`.
 
 ### Changed
 
@@ -30,6 +44,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Awareness.StatesJSON` emits `{"<clientID>": <state>}` without the internal
   clock. These reshape two mobile read accessors whose output was pre-stable
   (`GetTextJSON` was explicitly documented as unstable); no core-library change.
+
+## [1.33.0] — 2026-07-18
+
+### Fixed
+
+- **XML wire conformance with yjs (`Y.XmlFragment`/`Y.XmlElement`/`Y.XmlText`).**
+  Three fixes make ygo's XML types byte-conformant with yjs@13.6 over both V1
+  and V2 updates (the y-prosemirror shapes: element attributes, nested
+  elements, text marks, concurrent merges):
+  - Detached XML subtrees and detached `YText` now **buffer** mutations
+    (Yjs `_prelimContent`/`_prelimAttrs`/`_pending` parity) and materialise
+    items only when the subtree attaches, top-down — children first, then
+    attributes. Building a tree bottom-up previously assigned child clocks
+    below the container's, emitting same-client forward parent references
+    that crash `Y.applyUpdate` in yjs (`findIndexSS` TypeError) and that
+    ygo itself parked forever on re-apply (fragment emptied). A detached
+    fragment/element **reflects its buffered prelim content** to readers
+    (`Len`, `Children`, attribute getters, `ToXML`), matching yjs's
+    `_prelimContent`-aware `length`/`toArray()` — so `Insert(txn, Len(),
+    node)` appends rather than prepending, and iteration sees what was
+    inserted before attach. Nested `YXmlText` content stays opaque until
+    attach (`Len` 0, empty `ToString`), mirroring yjs. (Reflecting prelim
+    *attributes* on read is intentionally more complete than yjs, which
+    hides `_prelimAttrs` until integrate; ygo keeps detached reads
+    consistent with the attached view. Wire bytes are unaffected either way.)
+  - Non-string XML attribute values (e.g. a ProseMirror heading's
+    `level=1`, a number) are no longer dropped by the attribute getters.
+  - The V2 encoder no longer deduplicates keys, matching the yjs reference
+    encoder exactly (yjs ships `writeKey` with dedup deliberately disabled;
+    older yjs clients cannot read deduped updates). The decoder still
+    accepts both shapes.
+
+### Added
+
+- **Typed XML attribute accessors** — `YXmlElement.SetAttributeValue`,
+  `GetAttributeValue`, `GetAttributeValues` preserve the attribute's wire
+  value type end-to-end. The string-typed `GetAttribute`/`GetAttributes`
+  now render non-string scalars best-effort instead of dropping them.
+- **XML JS-fixture conformance suite** — `crdt/yxml_yjs_conformance_test.go`
+  applies genuine yjs@13.6 update bytes (decode, byte-identical re-encode in
+  V1 and V2, byte-identical authoring against pinned clientIDs,
+  diff-vs-state-vector, concurrent merge in both orders), mirroring the
+  existing YMap/YText conformance suites.
+
+### Changed
+
+- **V2 updates can be larger for XML-heavy documents**: with key dedup
+  disabled on encode (yjs parity, see above), every repeated key —
+  `ContentFormat` keys like `strong`, repeated element node names like
+  `paragraph` — is re-emitted rather than back-referenced. This is the size
+  cost of byte-compatibility with the yjs reference encoder.
 
 ## [1.32.0] — 2026-07-17
 

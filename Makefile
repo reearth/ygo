@@ -39,6 +39,7 @@ bench:
 # are not yet deterministic — see #99 follow-up).
 fixtures:
 	node testutil/gen_conformance_fixtures.js
+	node testutil/gen_fixtures_yxml.js
 
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest

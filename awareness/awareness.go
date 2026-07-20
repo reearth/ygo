@@ -124,6 +124,12 @@ type Awareness struct {
 	activeBytes int64 // sum of wireBytes values
 	maxBytes    int64 // 0 = unlimited (default; backward compatible)
 	maxClients  int   // 0 = unlimited (default; backward compatible)
+	// removedAt records when each REMOTE client became a null-state tombstone,
+	// so PurgeTombstones can reclaim ones older than a grace period. The local
+	// client is never tracked here (its "leaving" tombstone must persist). An
+	// entry exists iff states[id] is a remote tombstone; it is cleared when the
+	// client reactivates and deleted when the tombstone is purged.
+	removedAt map[uint64]time.Time
 }
 
 // New creates an Awareness instance for the given client.
@@ -133,6 +139,7 @@ func New(clientID uint64) *Awareness {
 		states:    make(map[uint64]ClientState),
 		meta:      make(map[uint64]time.Time),
 		wireBytes: make(map[uint64]int),
+		removedAt: make(map[uint64]time.Time),
 	}
 }
 
@@ -537,6 +544,13 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 			// Store nil state with incoming clock to prevent stale re-application.
 			a.states[e.clientID] = ClientState{Clock: e.clock, State: nil}
 			delete(a.meta, e.clientID)
+			// Record the tombstone's age so PurgeTombstones can reclaim it later.
+			// Remote clients only — the local client's leaving-tombstone must
+			// persist (it is never counted here). A non-null remote update for our
+			// own clientID that gets nulled by a resource cap must not add us.
+			if e.clientID != a.clientID {
+				a.removedAt[e.clientID] = time.Now()
+			}
 			// Release any wire-bytes the previous active state held for this client.
 			if oldSize > 0 {
 				a.activeBytes -= int64(oldSize)
@@ -551,6 +565,9 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 				State: state,
 			}
 			a.meta[e.clientID] = time.Now()
+			// The client is live again — drop any tombstone-age record so a later
+			// purge won't reclaim it. No-op if it was never a tombstone.
+			delete(a.removedAt, e.clientID)
 			// Update byte accounting: replace the old size with the new size.
 			a.activeBytes += int64(newSize - oldSize)
 			a.wireBytes[e.clientID] = newSize
@@ -584,9 +601,12 @@ func (a *Awareness) ApplyUpdateContext(ctx context.Context, update []byte, origi
 	return a.ApplyUpdate(update, origin)
 }
 
-// StartAutoExpiry starts a background goroutine that periodically calls
-// RemoveExpired(timeout). The goroutine ticks at timeout/2 so that clients
-// are expired within one tick period after their deadline. The returned
+// StartAutoExpiry starts a background goroutine that periodically runs both
+// awareness-cleanup stages: RemoveExpired(timeout) to tombstone silent clients,
+// then PurgeTombstones(2*timeout) to reclaim tombstones whose removal has aged
+// out (so a high-churn room does not accumulate tombstones against the client
+// cap). The goroutine ticks at timeout/2 so that clients are expired within one
+// tick period after their deadline. The returned
 // function stops the goroutine; it must be called to avoid a goroutine leak.
 // The stop function is also stored internally and will be called by Destroy.
 func (a *Awareness) StartAutoExpiry(timeout time.Duration) func() {
@@ -615,6 +635,10 @@ func (a *Awareness) StartAutoExpiry(timeout time.Duration) func() {
 			select {
 			case <-ticker.C:
 				a.RemoveExpired(timeout)
+				// Second stage: reclaim tombstones once their clock has outlived
+				// normal update reordering. 2*timeout keeps a removal encodable
+				// and gate-effective well past propagation before it is forgotten.
+				a.PurgeTombstones(2 * timeout)
 			case <-done:
 				return
 			}
@@ -649,6 +673,11 @@ func (a *Awareness) Destroy() {
 // silent, so it's our job to broadcast presence via SetLocalState or
 // Heartbeat. Self-expiry would create false offline signals on quiet rooms.
 // Matches y-protocols / yrs behavior (#73 vector C4).
+//
+// Expiring a client converts it to a retained null-state tombstone (its clock
+// is kept for removal encoding and the clock gate); it does NOT free the entry.
+// Callers driving expiry manually should pair this with PurgeTombstones to
+// reclaim aged tombstones, or use StartAutoExpiry, which runs both stages.
 func (a *Awareness) RemoveExpired(timeout time.Duration) {
 	now := time.Now()
 	a.mu.Lock()
@@ -658,10 +687,13 @@ func (a *Awareness) RemoveExpired(timeout time.Duration) {
 			continue // never self-expire
 		}
 		if now.Sub(t) >= timeout {
-			// Mark as removed (keep clock for future clock comparisons).
+			// Mark as removed (keep clock for future clock comparisons) and
+			// record the tombstone's age for PurgeTombstones. id is always
+			// remote here (the local client is skipped above).
 			if cs, ok := a.states[id]; ok {
 				a.states[id] = ClientState{Clock: cs.Clock, State: nil}
 			}
+			a.removedAt[id] = now
 			delete(a.meta, id)
 			// Release any wire-bytes the expired client held (#48 vector B).
 			if size, ok := a.wireBytes[id]; ok {
@@ -678,4 +710,50 @@ func (a *Awareness) RemoveExpired(timeout time.Duration) {
 		evt := ChangeEvent{Removed: removed}
 		fireObservers(obs, evt)
 	}
+}
+
+// PurgeTombstones reclaims removal tombstones (clients with a null State) that
+// became tombstones longer than grace ago, freeing both their slot against
+// SetMaxClients and their memory. Without it, a high-churn room accumulates
+// tombstones without bound — each retained entry counts toward the client cap,
+// so the room can eventually refuse new, legitimate clients — and every full
+// EncodeUpdate(nil) keeps re-broadcasting them as null.
+//
+// grace MUST exceed the RemoveExpired timeout (and the provider's full-state
+// re-broadcast interval): a tombstone's clock is what encodes removals and
+// rejects stale re-adds, so it must outlive normal update reordering before it
+// is forgotten. A non-positive grace is a no-op. The local client is never
+// purged. Purging fires no observer event — a purged tombstone was either
+// already signalled removed or never signalled present, so no consumer is
+// tracking it (GetStates already hides tombstones).
+//
+// Cross-peer note: after a tombstone is forgotten, a delayed low-clock update
+// for that id is accepted as a new client, whereas a peer that has not yet
+// purged would drop it. This transient divergence self-heals on the next
+// broadcast and matches y-protocols' "forget after outdatedTimeout" semantics;
+// awareness is best-effort presence, not a convergent CRDT.
+//
+// Returns the number of tombstones reclaimed.
+func (a *Awareness) PurgeTombstones(grace time.Duration) int {
+	if grace <= 0 {
+		return 0
+	}
+	now := time.Now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	purged := 0
+	for id, t := range a.removedAt {
+		if id == a.clientID {
+			continue // never purge the local client's own tombstone
+		}
+		if now.Sub(t) < grace {
+			continue
+		}
+		delete(a.states, id)
+		delete(a.removedAt, id)
+		delete(a.meta, id)      // defensive: tombstones carry no meta entry
+		delete(a.wireBytes, id) // defensive: released when the tombstone formed
+		purged++
+	}
+	return purged
 }

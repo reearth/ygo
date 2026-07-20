@@ -76,11 +76,18 @@ func newFakeSinkClient(room string, relay cluster.Relay, clientID uint64) *fakeS
 func (s *fakeSink) Inject(_ context.Context, in cluster.Inbound) error {
 	switch in.Kind {
 	case cluster.KindSync:
+		// Apply BEFORE bumping the counter. Tests wait on the counter and then
+		// read the doc/awareness, so the counter must be the happens-before
+		// signal that the state is already applied. Bumping first let a test
+		// observe count>=1 while ApplyUpdate was still in flight on the relay
+		// goroutine, racing GetStates()/ToString() (flaky NoEcho tests).
+		err := crdt.ApplyUpdateV1(s.doc, in.Data, relaySentinel)
 		s.injectedSync.Add(1)
-		return crdt.ApplyUpdateV1(s.doc, in.Data, relaySentinel)
+		return err
 	case cluster.KindAwareness:
+		err := s.aw.ApplyUpdate(in.Data, relaySentinel)
 		s.injectedAwareness.Add(1)
-		return s.aw.ApplyUpdate(in.Data, relaySentinel)
+		return err
 	}
 	return nil
 }

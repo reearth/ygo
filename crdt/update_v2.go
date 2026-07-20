@@ -16,7 +16,6 @@ const maxV2Items = uint64(1 << 20) // 1 million items
 
 type v2Encoder struct {
 	keyClock int
-	keyMap   map[string]int
 
 	keyClockEnc   encoding.IntDiffOptRleEncoder
 	clientEnc     encoding.UintOptRleEncoder
@@ -34,7 +33,6 @@ type v2Encoder struct {
 
 func newV2Encoder() *v2Encoder {
 	return &v2Encoder{
-		keyMap:  make(map[string]int),
 		restEnc: encoding.NewEncoder(),
 	}
 }
@@ -94,15 +92,22 @@ func (e *v2Encoder) writeLen(l int) {
 	e.lenEnc.Write(uint64(l))
 }
 
+// writeKey mirrors Yjs UpdateEncoderV2.writeKey EXACTLY — including its
+// deliberately-disabled key deduplication. In yjs the `keyMap.set(key,
+// keyClock)` line is commented out ("I forgot to set the keyclock. So
+// everything was working fine."), so the reference encoder writes a fresh
+// keyClock + string for EVERY occurrence of a key (ContentFormat keys,
+// XmlElement node names, parentSub). Populating the map here made ygo emit
+// back-references the yjs encoder never produces: V2 bytes drifted from the
+// reference for any repeated key (e.g. two `strong` format items, repeated
+// `paragraph` node names), and — per the yjs source comment — older yjs
+// clients decode ContentFormat keys with readString and cannot read deduped
+// updates at all. The DECODER (readKey) keeps dedup support, exactly like
+// Yjs's readKey. (#yxml-wire)
 func (e *v2Encoder) writeKey(key string) {
-	if clock, ok := e.keyMap[key]; ok {
-		e.keyClockEnc.Write(int64(clock))
-	} else {
-		e.keyClockEnc.Write(int64(e.keyClock))
-		e.stringEnc.Write(key)
-		e.keyMap[key] = e.keyClock
-		e.keyClock++
-	}
+	e.keyClockEnc.Write(int64(e.keyClock))
+	e.keyClock++
+	e.stringEnc.Write(key)
 }
 
 func (e *v2Encoder) resetDsCurVal() { e.dsCurrVal = 0 }
