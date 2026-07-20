@@ -124,11 +124,12 @@ const (
 	// SlowPeerDisconnect closes the slow peer's connection, forcing a
 	// reconnect-and-resync. Default; preserves the original behavior.
 	SlowPeerDisconnect SlowPeerPolicy = iota
-	// SlowPeerResync keeps the connection open: the now-stale backlog is dropped
-	// and the peer is re-synced in place with a full-state SyncStep2 (plus current
-	// awareness) once its write queue drains. Avoids reconnect churn for
-	// transiently-slow peers while still converging (the full state supersedes the
-	// dropped incremental updates).
+	// SlowPeerResync keeps the connection open: only the overflowing update is
+	// dropped and the peer is flagged. Its existing backlog is left to drain
+	// normally; once the write queue is empty the peer is re-synced in place with
+	// a full-state SyncStep2 (plus current awareness), which supersedes any stale
+	// deltas that were still queued. Avoids reconnect churn for transiently-slow
+	// peers while still converging.
 	SlowPeerResync
 )
 

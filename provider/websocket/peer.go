@@ -516,8 +516,11 @@ func (p *peer) runWriter() {
 		}
 
 		// SlowPeerResync: if a broadcast was dropped while this peer was behind,
-		// resync it now that the backlog has drained.
-		if !p.maybeResync() {
+		// resync it now that the backlog has drained. Gated on the policy so the
+		// default SlowPeerDisconnect path takes no extra lock per write.
+		// SlowPeerPolicy is set once at construction and never mutated, so this
+		// read needs no lock.
+		if p.server.SlowPeerPolicy == SlowPeerResync && !p.maybeResync() {
 			return
 		}
 	}
