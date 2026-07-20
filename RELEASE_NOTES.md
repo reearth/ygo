@@ -1,3 +1,45 @@
+## v1.35.0
+
+A minor release hardening the websocket broadcast path against slow peers. It
+fixes head-of-line blocking in the writer and adds an opt-in in-place resync
+policy so a transiently-slow peer recovers without reconnect churn. No breaking
+changes; the default behaviour is unchanged.
+
+### Fixed
+
+- **Head-of-line blocking in the websocket broadcast writer**
+  ([#172](https://github.com/reearth/ygo/issues/172)): the per-peer write mutex
+  (`wmu`) was held across the blocking `conn.WriteMessage`, so a single slow or
+  stalled peer could block broadcasts to every other peer for up to
+  `writeTimeout`, and the queue-overflow branch could never fire while a write
+  was in flight. The write path now holds `wmu` only to read the `closed` flag,
+  then writes without it.
+
+### Added
+
+- **`SlowPeerResync` policy for graceful slow-peer recovery**
+  ([#172](https://github.com/reearth/ygo/issues/172)): new
+  `Server.SlowPeerPolicy`. `SlowPeerDisconnect` (default) closes a peer whose
+  broadcast queue overflows; `SlowPeerResync` keeps the connection open, drops
+  the stale delta, and sends a full-state resync once the queue drains, so the
+  peer converges in place without a reconnect.
+
+### Changed
+
+- **Default `PeerWriteQueueSize` bumped 256 → 512**: more slack before a
+  transiently-slow peer overflows (matching the yrs broadcast ring of 512);
+  override via `Server.PeerWriteQueueSize`.
+
+## Install
+
+```
+go get github.com/reearth/ygo@v1.35.0
+```
+
+See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
+
+---
+
 ## v1.34.0
 
 A minor release bundling a full mobile on-device editor with an awareness
