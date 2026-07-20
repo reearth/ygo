@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.35.0] — 2026-07-20
+
+### Fixed
+
+- **Head-of-line blocking in the websocket broadcast writer**
+  ([#172](https://github.com/reearth/ygo/issues/172)): `runWriter` held the
+  per-peer write mutex (`wmu`) across the blocking `conn.WriteMessage`. Because
+  `broadcast()` takes the same `wmu` to enqueue frames for *other* peers, a
+  single slow or stalled peer could block the broadcasting peer for up to
+  `writeTimeout`, and the write-queue-overflow branch could never be reached
+  while a write was in flight. The write path now holds `wmu` only long enough to
+  read the `closed` flag, then runs `SetWriteDeadline` + `WriteMessage` without
+  it — safe because `runWriter` is the sole goroutine that calls
+  `conn.WriteMessage`, and gorilla/websocket permits `conn.Close()` concurrently
+  with a write. This also fixes a false-positive slow-peer test that only ever
+  passed on its own client read-deadline expiring.
+
+### Added
+
+- **`SlowPeerResync` policy for graceful slow-peer recovery**
+  ([#172](https://github.com/reearth/ygo/issues/172)): new
+  `provider/websocket.Server.SlowPeerPolicy` field of type `SlowPeerPolicy`.
+  `SlowPeerDisconnect` (default) is unchanged — it closes a peer whose bounded
+  broadcast queue (`PeerWriteQueueSize`) overflows, forcing reconnect-and-resync.
+  `SlowPeerResync` instead keeps the connection open: it drops the now-stale
+  delta, flags the peer, and has `runWriter` send a full-state `SyncStep2` (plus
+  current awareness) once the write queue drains, so a transiently-slow peer (a
+  brief GC pause, a busy tab, a burst of large updates) converges in place
+  without reconnect churn. Set it before the server starts serving.
+
+### Changed
+
+- **Default `PeerWriteQueueSize` bumped 256 → 512**: a larger per-peer broadcast
+  queue gives transiently-slow peers more slack before overflowing (matching the
+  yrs shared broadcast ring of 512), so the slow-peer path is hit less often;
+  the `SlowPeerResync` policy then handles the overflows that still occur.
+  Callers can still override via `Server.PeerWriteQueueSize`.
+
 ## [1.34.0] — 2026-07-18
 
 ### Added
