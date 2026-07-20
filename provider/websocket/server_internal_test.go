@@ -68,7 +68,8 @@ func TestServer_Logger_FallsBackToDefault(t *testing.T) {
 func TestServer_PeerWriteQueueSize_ConfigurableDefault(t *testing.T) {
 	// Default: zero in config means use the defaultPeerWriteQueueSize constant.
 	s := &Server{}
-	assert.Equal(t, defaultPeerWriteQueueSize, s.peerWriteQueueSize(), "default is 256")
+	assert.Equal(t, defaultPeerWriteQueueSize, s.peerWriteQueueSize(), "default is 512")
+	assert.Equal(t, 512, s.peerWriteQueueSize(), "default bumped from 256 to 512")
 
 	// Configured: positive value overrides default.
 	s2 := &Server{PeerWriteQueueSize: 16}

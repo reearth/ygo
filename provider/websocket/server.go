@@ -139,8 +139,10 @@ const (
 const maxAwarenessClientsPerPeer = 10_000
 
 // defaultPeerWriteQueueSize is the default capacity of each peer's broadcast
-// write channel when PeerWriteQueueSize is not set.
-const defaultPeerWriteQueueSize = 256
+// write channel when PeerWriteQueueSize is not set. 512 gives transiently-slow
+// peers more slack before the queue overflows (matching the yrs shared broadcast
+// ring), reducing how often the slow-peer path is hit at all.
+const defaultPeerWriteQueueSize = 512
 
 // PersistenceAdapter is implemented by storage backends that want to persist
 // room state across server restarts. It is called on every committed update so
@@ -436,7 +438,7 @@ type Server struct {
 	// CRDT's pending-structs machinery. Matches yrs-warp's bounded-broadcast
 	// pattern.
 	//
-	// Zero (the default) uses 256, sized for typical sync workloads.
+	// Zero (the default) uses 512, sized for typical sync workloads.
 	PeerWriteQueueSize int
 
 	// SlowPeerPolicy selects the reaction when a peer's broadcast write queue
