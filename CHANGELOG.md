@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **On-device editing for the mobile bindings**
+  ([#118](https://github.com/reearth/ygo/issues/118)): `mobile.Doc` gains
+  gomobile-safe mutators — `InsertText`, `InsertTextWithAttributes`, `DeleteText`,
+  `FormatText`, `InsertArray`, `DeleteArray`, `SetMap`, `DeleteMapKey` — each
+  validated and transaction-wrapped, returning an error (never panicking) on bad
+  input. A Swift/Kotlin app is now a full editor, not just a viewer.
+- **Push change-notifications for the mobile bindings**
+  ([#119](https://github.com/reearth/ygo/issues/119)): `Doc.Observe` delivers the
+  V1 update bytes plus a `local` flag after each committed transaction;
+  `Awareness.Observe` delivers `{added,updated,removed}` client-id sets. Delivery
+  is on a background goroutine; `Subscription.Close()` unsubscribes and all
+  observers detach on `Doc`/`Awareness` `Close`.
 - **`Awareness.PurgeTombstones(grace)` reclaims aged removal tombstones**
   ([#166](https://github.com/reearth/ygo/issues/166)). When a client is removed
   or expires, its entry is kept as a null-state tombstone so its clock can still
@@ -23,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then `PurgeTombstones(2*timeout)` — so `grace` outlives normal update
   reordering before a tombstone's clock is forgotten. Callers driving expiry
   manually should pair `RemoveExpired` with `PurgeTombstones`.
+
+### Changed
+
+- **Idiomatic Yjs JSON from the mobile read accessors**
+  ([#109](https://github.com/reearth/ygo/issues/109)): `Doc.GetTextJSON` now emits
+  idiomatic single-op Yjs delta (`[{"insert":"hi","attributes":{...}}]`) and
+  `Awareness.StatesJSON` emits `{"<clientID>": <state>}` without the internal
+  clock. These reshape two mobile read accessors whose output was pre-stable
+  (`GetTextJSON` was explicitly documented as unstable); no core-library change.
 
 ## [1.33.0] — 2026-07-18
 

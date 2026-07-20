@@ -1,7 +1,6 @@
 package mobile
 
 import (
-	"encoding/json"
 	"sync"
 
 	"github.com/reearth/ygo/crdt"
@@ -11,6 +10,13 @@ import (
 type Doc struct {
 	mu sync.RWMutex
 	d  *crdt.Doc // nil after Close
+
+	// subsMu guards the change-observer registry. It is DISTINCT from mu on
+	// purpose: mu.RLock is shared, so mutating subs under it would data-race a
+	// concurrent Observe. Never take subsMu while holding mu for writing and
+	// vice-versa in a way that could invert lock order.
+	subsMu sync.Mutex
+	subs   map[*Subscription]struct{}
 }
 
 // NewDoc creates a document with a random client ID.
@@ -45,12 +51,35 @@ func (m *Doc) ClientID() int64 {
 }
 
 // Close releases the underlying document for prompt Go-side collection.
-// Idempotent. After Close, methods return ErrClosed / zero values. Close blocks
-// until any in-flight operation completes, so it never tears down mid-call.
+// Idempotent. After Close, methods return ErrClosed / zero values.
+//
+// Close nils d under the write lock FIRST, then detaches every change-observer
+// subscription (unsubscribing the crdt bridge and signalling each drain
+// goroutine to stop). Ordering matters: an in-flight Observe holds m.mu.RLock
+// for its whole body and registers itself only near the end, so taking the
+// write lock first guarantees every such Observe has finished registering
+// before we snapshot m.subs (no missed subscription → no leaked drain
+// goroutine). Any Observe starting after this sees d == nil and returns the
+// closed stub without launching a drain.
+//
+// Close does not join drain goroutines: one may be inside OnChange re-entering
+// a mobile method that needs m.mu, so joining under a lock would deadlock.
+// s.Close never takes m.mu, so detaching after releasing the write lock keeps
+// the signal-don't-join / no-lock-across-callback property. No callback starts
+// after Close — the bridge is unsubscribed and each drain sees stopped.
 func (m *Doc) Close() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.d = nil
+	m.mu.Unlock()
+	m.subsMu.Lock()
+	subs := make([]*Subscription, 0, len(m.subs))
+	for s := range m.subs {
+		subs = append(subs, s)
+	}
+	m.subsMu.Unlock()
+	for _, s := range subs {
+		s.Close()
+	}
 }
 
 // ApplyUpdate merges a V1 update from a peer. Returns ErrClosed after Close.
@@ -96,28 +125,19 @@ func (m *Doc) GetText(name string) string {
 	return m.d.GetText(name).ToString()
 }
 
-// GetTextJSON returns the named YText root's formatted content as JSON.
-//
-// NOTE: the current shape is ygo's internal crdt.Delta struct marshaled
-// directly — an array of ops with capitalized Go field names, e.g.
-// [{"Op":0,"Insert":"hi","Attributes":{"bold":true}}] — NOT the idiomatic Yjs
-// delta shape ([{"insert":"hi","attributes":{...}}]). Emitting the idiomatic
-// shape is tracked in https://github.com/reearth/ygo/issues/109; consumers
-// should not hard-code against this shape long-term. Returns ErrClosed after Close.
+// GetTextJSON returns the named YText root's formatted content as an idiomatic
+// Yjs delta: a JSON array of ops shaped `[{"insert":...,"attributes":{...}}]`,
+// where each op carries exactly one of insert/retain/delete plus optional
+// attributes (a full-content read yields insert ops only). An absent/empty root
+// returns `[]` (never `null`), so a JS consumer can iterate it unconditionally.
+// Returns ErrClosed after Close.
 func (m *Doc) GetTextJSON(name string) ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
 		return nil, ErrClosed
 	}
-	delta := m.d.GetText(name).ToDelta()
-	if delta == nil {
-		// ToDelta returns a nil slice for an absent/empty text root, which
-		// json.Marshal emits as `null` — a JS consumer doing delta.forEach(...)
-		// on null would crash. Emit `[]` instead.
-		delta = []crdt.Delta{}
-	}
-	return json.Marshal(delta)
+	return deltaToIdiomaticJSON(m.d.GetText(name).ToDelta())
 }
 
 // GetMapJSON returns the named YMap root as JSON.

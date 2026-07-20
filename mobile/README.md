@@ -3,9 +3,10 @@
 `mobile/` is a [gomobile](https://pkg.go.dev/golang.org/x/mobile)-bindable façade
 over ygo's `crdt` and `awareness` packages. It lets you embed ygo's Yjs-compatible
 CRDT engine directly in native iOS and Android apps via `gomobile bind` — no
-JavaScript runtime and no CGo. **v1 scope is sync + render**: apply peer updates,
-encode state and incremental diffs, and read the current document and presence.
-On-device editing (mutators) is a planned follow-up.
+JavaScript runtime and no CGo. It is a **full on-device editor**: apply peer
+updates, encode state and incremental diffs, read the current document and
+presence, **mutate** text/array/map roots locally, and **observe** committed
+changes to drive the UI.
 
 ## gomobile-safe type constraint
 
@@ -23,10 +24,17 @@ The bound surface is:
 
 - **`Doc`** — `NewDoc`, `NewDocWithClientID(int64)`, `ClientID`, `ApplyUpdate`,
   `EncodeStateAsUpdate`, `EncodeStateVector`, `EncodeDiff`, `GetText`,
-  `GetTextJSON`, `GetMapJSON`, `GetArrayJSON`, `Close`.
+  `GetTextJSON`, `GetMapJSON`, `GetArrayJSON`, the on-device mutators
+  `InsertText`, `InsertTextWithAttributes`, `DeleteText`, `FormatText`,
+  `InsertArray`, `DeleteArray`, `SetMap`, `DeleteMapKey`, plus
+  `Observe(DocObserver)` and `Close`.
 - **`Awareness`** — `NewAwareness(int64)`, `ClientID`, `SetLocalState`,
   `ClearLocalState`, `LocalStateJSON`, `StatesJSON`, `EncodeAll`, `ApplyUpdate`,
-  `Close`.
+  `Observe(AwarenessObserver)`, and `Close`.
+- **Observing** — `Observe` returns a `*Subscription` (`Close()` detaches it);
+  `DocObserver.OnChange(updateV1 []byte, local bool)` and
+  `AwarenessObserver.OnChange(changesJSON []byte)` are the callback interfaces
+  your app implements.
 
 ## Building the bindings
 
@@ -109,47 +117,122 @@ try {
 }
 ```
 
-## Change notifications (pull model)
+## Editing
 
-This package does **not** push change events across the boundary (an
-observer/Flow callback is a planned follow-up — callbacks aren't part of the
-gomobile-safe surface). The app owns the apply call site, so the recommended
-pattern is a **pull model**:
+`Doc` is a full editor: mutate its text, array, and map roots on-device and the
+changes flow out through `EncodeStateAsUpdate` / `EncodeDiff` (and to observers)
+like any other update. Each mutator **validates its arguments, wraps the change in
+a single transaction, and returns an `error`** on bad input (out-of-range index,
+malformed JSON) — it never panics, so a bad edit surfaces as a thrown exception in
+Kotlin/Swift rather than a crash. Like every other blocking call, **run mutators
+off the UI thread**.
 
-1. Apply the incoming update on an IO/background thread (`doc.applyUpdate(...)`).
-2. Emit a signal to the UI layer — a Kotlin `StateFlow` / Swift `@Published`.
-3. The UI re-reads the document via `GetText` / `GetMapJSON` / `GetArrayJSON`.
+- **Text** — `insertText(name, index, text)`,
+  `insertTextWithAttributes(name, index, text, attrsJSON)`,
+  `deleteText(name, index, length)`, `formatText(name, index, length, attrsJSON)`.
+  `attrsJSON` is a JSON object (`{"bold":true}`); a `null` attribute value follows
+  Yjs's formatting-removal convention.
+- **Array** — `insertArray(name, index, valuesJSON)` (`valuesJSON` is a JSON
+  array of elements), `deleteArray(name, index, length)`.
+- **Map** — `setMap(name, key, valueJSON)` (`valueJSON` is any JSON value),
+  `deleteMapKey(name, key)`.
 
-## JSON shapes (known limitation)
+```kotlin
+// Off the UI thread — e.g. inside withContext(Dispatchers.IO).
+try {
+    doc.insertText("content", 0, "Hello")
+    doc.formatText("content", 0, 5, """{"bold":true}""".toByteArray())
+    doc.setMap("meta", "title", "\"Untitled\"".toByteArray())
+} catch (e: Exception) {
+    Log.w("ygo", "rejected edit", e)   // bad index / malformed JSON — never a crash
+}
+```
 
-The JSON-returning methods currently expose **ygo's internal Go struct shapes**,
-not idiomatic Yjs JSON:
+> **Limitation:** JSON objects/arrays passed to `setMap` / `insertArray` decode to
+> **plain values**, not nested `YMap` / `YText` / `YArray` shared types — the
+> mobile layer cannot construct nested shared types across the bind boundary. A
+> `{"a":1}` value is stored as a plain JSON object, not a live nested `YMap`.
 
-- **`GetTextJSON`** returns ygo's `crdt.Delta` struct shape — Go field names —
-  e.g.
+## Observing changes
+
+Rather than polling, subscribe for **push notifications** after every committed
+change. `Doc.Observe` and `Awareness.Observe` each take an observer and return a
+`*Subscription`; call `subscription.close()` to detach one, and `Doc.Close()` /
+`Awareness.Close()` detach every observer automatically.
+
+**Callbacks arrive on a background goroutine** — never the UI thread, and never
+under a lock. Marshal to the main thread before touching UI (a Kotlin
+`StateFlow` / Swift `@Published`); do not assume `onChange` runs on the main
+thread.
+
+- **`DocObserver.onChange(updateV1, local)`** fires after each committed
+  transaction. `updateV1` is the incremental V1 update (feed it straight to your
+  server/peers); `local == true` marks a change that originated from a mobile
+  mutator on this `Doc` (vs a remote `applyUpdate`), so you can **skip
+  re-broadcasting your own edits** and avoid echo loops when also syncing to a
+  server.
+- **`AwarenessObserver.onChange(changesJSON)`** fires after each presence change
+  with `{"added":[…],"updated":[…],"removed":[…]}` (client-id arrays, sorted,
+  always present). The sets are **advisory** — re-read `statesJSON()` for the
+  authoritative presence snapshot.
+
+```kotlin
+class DocBridge(private val doc: Doc, private val scope: CoroutineScope) {
+    private val _text = MutableStateFlow(doc.getText("content"))
+    val text: StateFlow<String> = _text
+
+    private val sub = doc.observe(object : DocObserver {
+        override fun onChange(updateV1: ByteArray, local: Boolean) {
+            // Background goroutine → hop to the main thread before touching UI.
+            scope.launch(Dispatchers.Main) { _text.value = doc.getText("content") }
+            if (local) scope.launch(Dispatchers.IO) { server.send(updateV1) } // push our own edits out
+        }
+    })
+
+    fun dispose() { sub.close(); doc.close() }  // sub.close() also implied by doc.close()
+}
+```
+
+For Swift, implement the same `DocObserver` protocol and publish via `@Published`,
+hopping to `DispatchQueue.main` inside `onChange` before touching any observable
+state.
+
+You can still use a **pull model** instead (apply on a background thread, signal
+the UI, re-read via `GetText` / `GetMapJSON` / `GetArrayJSON`) where that fits
+better — observers are additive, not required.
+
+## JSON shapes
+
+The JSON-returning accessors emit **idiomatic Yjs JSON**, safe to hand straight to
+a JS/Quill consumer or decode natively:
+
+- **`GetTextJSON`** returns an idiomatic Yjs **delta** — a JSON array of ops, each
+  carrying exactly one of `insert` / `retain` / `delete` plus optional
+  `attributes` (a full-content read yields `insert` ops only), e.g.
 
   ```json
-  [{ "Op": 0, "Insert": "hi", "Delete": 0, "Retain": 0, "Attributes": { "bold": true } }]
+  [{ "insert": "hi", "attributes": { "bold": true } }]
   ```
 
-  not the idiomatic Yjs delta `[{ "insert": "hi", "attributes": { "bold": true } }]`.
+  An absent/empty root returns `[]` (never `null`), so you can iterate it
+  unconditionally.
 
-- **`StatesJSON`** returns a map keyed by client ID whose values expose the
-  internal clock and capitalized keys — e.g.
+- **`StatesJSON`** returns a JSON object keyed by stringy client ID whose value is
+  that client's raw state object (the internal clock is not exposed), e.g.
 
   ```json
-  { "12345": { "Clock": 7, "State": { "user": "alice" } } }
+  { "12345": { "user": "alice" } }
   ```
 
-These are functional but **not stable/idiomatic**, and idiomatic shapes are a
-**planned follow-up**. Consumers should **not hard-code against these shapes
-long-term**. (`GetText`, `GetMapJSON`, and `GetArrayJSON` return the plain text
-and the natural JSON of the map/array contents and are unaffected.)
+  An empty set returns `{}`.
 
 - **`LocalStateJSON`** yields JSON `null` when there is no local presence yet
   (freshly constructed, or after `ClearLocalState`), which is **distinct from
   `{}`** (a present-but-empty state set via `SetLocalState`). Treat `null` vs
   `{}` as a meaningful absent/present distinction, not interchangeable.
+
+(`GetText`, `GetMapJSON`, and `GetArrayJSON` return the plain text and the natural
+JSON of the map/array contents.)
 
 ## Examples
 
@@ -183,7 +266,7 @@ var awareness: Awareness? = null
 try {
     awareness = Mobile.newAwareness(doc.clientID())
     awareness.setLocalState("""{"user":"alice"}""".toByteArray())
-    val states = String(awareness.statesJSON())  // { "<id>": { "Clock": N, "State": {...} } }
+    val states = String(awareness.statesJSON())  // { "<id>": { ...state } }
 } catch (e: Exception) {
     Log.w("ygo", "awareness setup failed", e)
 }
