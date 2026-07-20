@@ -444,7 +444,10 @@ type Server struct {
 
 	// SlowPeerPolicy selects the reaction when a peer's broadcast write queue
 	// overflows: SlowPeerDisconnect (default) closes the connection; SlowPeerResync
-	// keeps it open and re-syncs the peer in place. See SlowPeerPolicy.
+	// keeps it open and re-syncs the peer in place. See SlowPeerPolicy. Like the
+	// other config fields, set it before serving; it is read without
+	// synchronisation and must not be mutated while the server is handling
+	// connections.
 	SlowPeerPolicy SlowPeerPolicy
 
 	// MaxPendingItems caps the per-document pending-items queue depth. The
