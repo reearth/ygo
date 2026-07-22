@@ -108,7 +108,7 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				for {
 					select {
 					case update := <-r.persistCh:
-						store(ctx, update)
+						_ = store(ctx, update)
 					default:
 						return
 					}
@@ -117,7 +117,7 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 			for {
 				select {
 				case update := <-r.persistCh:
-					store(ctx, update)
+					_ = store(ctx, update)
 				case <-r.persistStop:
 					drain()
 					return
