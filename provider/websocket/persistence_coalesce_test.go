@@ -209,6 +209,79 @@ func TestPersistCoalesce_ShutdownFlushesWithLiveCtx(t *testing.T) {
 	assert.NoError(t, a.ctxErrs[0], "shutdown flush must use a non-cancelled context")
 }
 
+// failFirstAdapter fails the FIRST StoreUpdateContext call and succeeds on every
+// call after, recording each attempted update. Models a transient store failure
+// (or the ctx-cancelled-at-shutdown case) so the worker's retain-and-reflush path
+// can be exercised deterministically.
+type failFirstAdapter struct {
+	mu     sync.Mutex
+	calls  [][]byte
+	failed bool
+}
+
+func (a *failFirstAdapter) LoadDoc(string) ([]byte, error) { return nil, nil }
+func (a *failFirstAdapter) StoreUpdate(_ string, u []byte) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, append([]byte(nil), u...))
+	return nil
+}
+func (a *failFirstAdapter) StoreUpdateContext(_ context.Context, _ string, u []byte) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, append([]byte(nil), u...))
+	if !a.failed {
+		a.failed = true
+		return errors.New("transient store failure")
+	}
+	return nil
+}
+func (a *failFirstAdapter) count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.calls)
+}
+
+// A flush that does not fully persist (transient error, or ctx cancelled by a
+// shutdown that races the timer) must RETAIN the batch so it is re-flushed — not
+// silently dropped. Guards the shutdown-handoff durability fix.
+func TestPersistCoalesce_RetainsBatchOnFailedFlush(t *testing.T) {
+	a := &failFirstAdapter{}
+	fc := newFakeClock()
+	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
+	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	require.NoError(t, err)
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		applyEdit(r, "r", 0)
+	}
+	var last *fakeTimer
+	for i := 0; i < n; i++ {
+		last = fc.nextTimerOfDur(t, 50*time.Millisecond)
+	}
+	last.fire() // window flush attempts one merged store — which fails.
+
+	// Observing the first (failing) store call proves the timer flush ran; the
+	// batch must have been retained (flush returned false), not niled.
+	assert.Eventually(t, func() bool { return a.count() == 1 }, time.Second, 5*time.Millisecond,
+		"first flush should attempt exactly one merged store (which fails)")
+
+	require.NoError(t, s.Shutdown(context.Background()))
+
+	// Shutdown re-flushes the retained batch with a live (background) ctx: a
+	// SECOND store call. If the batch had been dropped, count would stay at 1.
+	require.Equal(t, 2, a.count(), "retained batch must be re-flushed on shutdown (no data loss)")
+
+	// The re-flushed update decodes to the full n-char state — nothing lost.
+	a.mu.Lock()
+	reflushed := a.calls[len(a.calls)-1]
+	a.mu.Unlock()
+	got := crdt.New()
+	require.NoError(t, crdt.ApplyUpdateV1(got, reflushed, nil))
+	assert.Equal(t, n, got.GetText("t").Len())
+}
+
 // Merge failure falls back to storing each update individually (no loss).
 func TestPersistCoalesce_MergeFailureFallsBack(t *testing.T) {
 	a := &recordAdapter{}

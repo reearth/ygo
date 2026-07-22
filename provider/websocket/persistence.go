@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -53,14 +54,15 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 		}()
 
 		// store issues one backing-store write for a single update using the
-		// given ctx. Panics are contained; errors logged (no retry).
-		store := func(ctx context.Context, update []byte) {
+		// given ctx and returns whether it failed. Panics are contained and
+		// reported as a non-nil error; errors are logged (no retry).
+		store := func(ctx context.Context, update []byte) (err error) {
 			defer func() {
 				if rv := recover(); rv != nil {
 					log.Printf("ygo/websocket: StoreUpdate panic for room %q: %v", name, rv)
+					err = fmt.Errorf("StoreUpdate panic for room %q: %v", name, rv)
 				}
 			}()
-			var err error
 			if pac, ok := s.persistence.(PersistenceAdapterContext); ok {
 				err = pac.StoreUpdateContext(ctx, name, update)
 			} else {
@@ -69,27 +71,35 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 			if err != nil {
 				log.Printf("ygo/websocket: StoreUpdate for room %q: %v", name, err)
 			}
+			return err
 		}
 
 		// flush merges batch into one update and stores it. On merge failure it
-		// stores each update individually so a bad merge never drops data.
-		flush := func(ctx context.Context, batch [][]byte) {
+		// stores each update individually so a bad merge never drops data. It
+		// returns true only if the batch is fully persisted and therefore safe to
+		// discard; a false result (e.g. ctx cancelled at shutdown, or a transient
+		// store error) means the caller must RETAIN the batch so it can be
+		// re-flushed — otherwise a batch could be lost if a timer flush races with
+		// shutdown cancelling the worker ctx.
+		flush := func(ctx context.Context, batch [][]byte) bool {
 			if len(batch) == 0 {
-				return
+				return true
 			}
 			if len(batch) == 1 {
-				store(ctx, batch[0])
-				return
+				return store(ctx, batch[0]) == nil
 			}
 			merged, err := mergeFn(batch...)
 			if err != nil {
 				log.Printf("ygo/websocket: merge of %d updates for room %q failed (%v); storing individually", len(batch), name, err)
+				ok := true
 				for _, u := range batch {
-					store(ctx, u)
+					if store(ctx, u) != nil {
+						ok = false
+					}
 				}
-				return
+				return ok
 			}
-			store(ctx, merged)
+			return store(ctx, merged) == nil
 		}
 
 		// Strict per-update path (coalescing disabled): unchanged behaviour.
@@ -168,12 +178,18 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 					windowT = clock.newTimer(window)
 				}
 			case <-windowC:
-				flush(ctx, batch)
-				batch = nil
+				// Retain the batch if the flush did not fully persist: a timer
+				// flush can race with shutdown cancelling ctx, and niling an
+				// unpersisted batch would lose it. Timers are cleared regardless;
+				// a retained batch re-flushes on the next update or at exit.
+				if flush(ctx, batch) {
+					batch = nil
+				}
 				clearTimers()
 			case <-maxC:
-				flush(ctx, batch)
-				batch = nil
+				if flush(ctx, batch) {
+					batch = nil
+				}
 				clearTimers()
 			case <-r.persistStop:
 				drainBuffered()
