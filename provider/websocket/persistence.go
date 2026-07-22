@@ -3,6 +3,9 @@ package websocket
 import (
 	"context"
 	"log"
+	"time"
+
+	"github.com/reearth/ygo/crdt"
 )
 
 // startPersistenceWorker spawns the goroutine that drains r.persistCh and
@@ -13,17 +16,34 @@ import (
 // draining any buffered updates before returning so that no committed
 // transaction is silently lost.
 //
+// When coalescing is enabled (see resolveCoalesceConfig / Server.PersistCoalesceWindow),
+// bursts of updates are debounced into a single merged write: each new update
+// restarts the window timer, and a per-batch maxWait timer bounds staleness.
+// When disabled (window < 0), each update is stored individually.
+//
 // If s.persistence implements PersistenceAdapterContext, store calls are made
 // via StoreUpdateContext with a ctx that is cancelled when shutdown or stop
-// fires. Otherwise falls back to StoreUpdate (existing behaviour).
+// fires — EXCEPT the final stop/shutdown flush, which uses context.Background()
+// so the last batched write is not aborted by the very signal that triggers it.
+// Otherwise falls back to StoreUpdate (existing behaviour).
 func (s *Server) startPersistenceWorker(r *room, name string) {
+	clock := s.clock
+	if clock == nil {
+		clock = realClock{}
+	}
+	mergeFn := s.mergeFn
+	if mergeFn == nil {
+		mergeFn = crdt.MergeUpdatesV1
+	}
+	enabled, window, maxWait := resolveCoalesceConfig(s.PersistCoalesceWindow, s.PersistCoalesceMaxWait)
+
 	go func() {
 		defer close(r.persistDone)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		// Cancel the persistence-adapter ctx when shutdown or stop fires.
+		// Cancel the adapter ctx when shutdown or stop fires.
 		go func() {
 			select {
 			case <-s.shutdownCh:
@@ -32,7 +52,9 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 			cancel()
 		}()
 
-		store := func(update []byte) {
+		// store issues one backing-store write for a single update using the
+		// given ctx. Panics are contained; errors logged (no retry).
+		store := func(ctx context.Context, update []byte) {
 			defer func() {
 				if rv := recover(); rv != nil {
 					log.Printf("ygo/websocket: StoreUpdate panic for room %q: %v", name, rv)
@@ -48,30 +70,119 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				log.Printf("ygo/websocket: StoreUpdate for room %q: %v", name, err)
 			}
 		}
+
+		// flush merges batch into one update and stores it. On merge failure it
+		// stores each update individually so a bad merge never drops data.
+		flush := func(ctx context.Context, batch [][]byte) {
+			if len(batch) == 0 {
+				return
+			}
+			if len(batch) == 1 {
+				store(ctx, batch[0])
+				return
+			}
+			merged, err := mergeFn(batch...)
+			if err != nil {
+				log.Printf("ygo/websocket: merge of %d updates for room %q failed (%v); storing individually", len(batch), name, err)
+				for _, u := range batch {
+					store(ctx, u)
+				}
+				return
+			}
+			store(ctx, merged)
+		}
+
+		// Strict per-update path (coalescing disabled): unchanged behaviour.
+		if !enabled {
+			drain := func() {
+				for {
+					select {
+					case update := <-r.persistCh:
+						store(ctx, update)
+					default:
+						return
+					}
+				}
+			}
+			for {
+				select {
+				case update := <-r.persistCh:
+					store(ctx, update)
+				case <-r.persistStop:
+					drain()
+					return
+				case <-s.shutdownCh:
+					drain()
+					return
+				}
+			}
+		}
+
+		// Coalescing path.
+		var batch [][]byte
+		var windowT, maxT wsTimer
+
+		clearTimers := func() {
+			if windowT != nil {
+				windowT.stop()
+				windowT = nil
+			}
+			if maxT != nil {
+				maxT.stop()
+				maxT = nil
+			}
+		}
+		// drainBuffered pulls everything currently queued into batch without
+		// blocking. Used on stop/shutdown before the final flush.
+		drainBuffered := func() {
+			for {
+				select {
+				case update := <-r.persistCh:
+					batch = append(batch, update)
+				default:
+					return
+				}
+			}
+		}
+
 		for {
+			var windowC, maxC <-chan time.Time
+			if windowT != nil {
+				windowC = windowT.ch()
+			}
+			if maxT != nil {
+				maxC = maxT.ch()
+			}
 			select {
 			case update := <-r.persistCh:
-				store(update)
+				batch = append(batch, update)
+				if windowT == nil {
+					// First update of a new batch: arm both timers.
+					windowT = clock.newTimer(window)
+					maxT = clock.newTimer(maxWait)
+				} else {
+					// Debounce: restart the window timer; leave maxWait (it is
+					// measured from the batch's first update). Create-new avoids
+					// any Reset/drain hazard.
+					windowT.stop()
+					windowT = clock.newTimer(window)
+				}
+			case <-windowC:
+				flush(ctx, batch)
+				batch = nil
+				clearTimers()
+			case <-maxC:
+				flush(ctx, batch)
+				batch = nil
+				clearTimers()
 			case <-r.persistStop:
-				// Drain buffered updates before exiting.
-				for {
-					select {
-					case update := <-r.persistCh:
-						store(update)
-					default:
-						return
-					}
-				}
+				drainBuffered()
+				flush(context.Background(), batch) // non-cancelled: survive shutdown
+				return
 			case <-s.shutdownCh:
-				// Server is shutting down; drain any remaining buffered updates.
-				for {
-					select {
-					case update := <-r.persistCh:
-						store(update)
-					default:
-						return
-					}
-				}
+				drainBuffered()
+				flush(context.Background(), batch)
+				return
 			}
 		}
 	}()
