@@ -478,9 +478,12 @@ type Server struct {
 	// flushed, measured from the batch's first update (Hocuspocus maxDebounce).
 	// Under sustained editing the debounce window keeps resetting, so flushes
 	// occur every PersistCoalesceMaxWait and durable state can lag live state by
-	// up to this duration. 0 uses the default (10s); the effective value is
-	// clamped to be at least PersistCoalesceWindow. Ignored when coalescing is
-	// disabled.
+	// up to this duration. 0 uses the default (10s). The effective value is
+	// clamped to be at least the effective PersistCoalesceWindow, so any value
+	// below the window — including a negative one — resolves to the window
+	// rather than the 10s default (a negative maxWait is NOT a disable switch;
+	// only a negative PersistCoalesceWindow disables coalescing). Ignored when
+	// coalescing is disabled.
 	PersistCoalesceMaxWait time.Duration
 
 	// clock creates timers for the persistence worker. nil in production

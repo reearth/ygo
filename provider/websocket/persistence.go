@@ -24,8 +24,11 @@ import (
 //
 // If s.persistence implements PersistenceAdapterContext, store calls are made
 // via StoreUpdateContext with a ctx that is cancelled when shutdown or stop
-// fires — EXCEPT the final stop/shutdown flush, which uses context.Background()
-// so the last batched write is not aborted by the very signal that triggers it.
+// fires. On the coalescing path the final stop/shutdown flush is the exception:
+// it uses context.Background() so the last batched write is not aborted by the
+// very signal that triggers it. On the disabled (per-update) path the final
+// drain uses the cancellable ctx — matching pre-v1.36 behaviour — so a
+// context-aware adapter may still see cancellation during that drain.
 // Otherwise falls back to StoreUpdate (existing behaviour).
 func (s *Server) startPersistenceWorker(r *room, name string) {
 	clock := s.clock
@@ -197,10 +200,12 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 			case <-r.persistStop:
 				drainBuffered()
 				flush(context.Background(), batch) // non-cancelled: survive shutdown
+				clearTimers()                      // release any pending timers before exit
 				return
 			case <-s.shutdownCh:
 				drainBuffered()
 				flush(context.Background(), batch)
+				clearTimers() // release any pending timers before exit
 				return
 			}
 		}
