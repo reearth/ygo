@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.36.0] — 2026-07-22
+
+### Changed
+
+- **Websocket persistence writes are now coalesced by default (behaviour
+  change)** ([#175](https://github.com/reearth/ygo/issues/175)): the per-room
+  persistence worker debounces backing-store writes — a 2s window that resets
+  on every new update, capped by a 10s max wait measured from the batch's
+  first update — and merges each coalesced burst into a single `StoreUpdate`
+  call, instead of writing once per committed transaction. This cuts
+  persistence latency and version churn under load (Hocuspocus parity). Only
+  servers with a `PersistenceAdapter` configured (`NewServerWithPersistence`
+  or an explicit persistence set) are affected; a plain `NewServer()` has no
+  persistence and is unaffected. Restore the previous strict per-update
+  behaviour with `Server.PersistCoalesceWindow = -1`.
+
+### Added
+
+- **`Server.PersistCoalesceWindow` and `Server.PersistCoalesceMaxWait`**
+  ([#175](https://github.com/reearth/ygo/issues/175)): new `time.Duration`
+  fields to tune or disable persistence coalescing. Zero uses the defaults
+  (2s window, 10s max wait); a negative `PersistCoalesceWindow` (e.g. `-1`)
+  disables coalescing entirely, reverting to strict one-`StoreUpdate`-per-update
+  writes; `PersistCoalesceMaxWait` is clamped to be at least
+  `PersistCoalesceWindow`.
+
 ## [1.35.0] — 2026-07-20
 
 ### Fixed

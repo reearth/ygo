@@ -50,6 +50,10 @@ func TestLegacyAdapter_LoadDoc_StoreUpdate(t *testing.T) {
 func TestLegacyAdapter_PluggedIntoServer(t *testing.T) {
 	store := persistence.NewMemoryPersistence()
 	srv := ygws.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
+	// Disable persistence coalescing (default-on as of v1.36.0, #175) so the
+	// seeded edit is persisted immediately rather than after the debounce
+	// window — this test exercises the shim + reload path, not write timing.
+	srv.PersistCoalesceWindow = -1
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 

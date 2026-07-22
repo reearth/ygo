@@ -1,3 +1,41 @@
+## v1.36.0
+
+A minor release that changes the default persistence behaviour for the
+websocket server: backing-store writes are now debounce-coalesced (2s window,
+10s max wait) into a single merged `StoreUpdate` per burst, instead of one
+write per committed transaction, cutting persistence latency and version
+churn under load. This only affects servers with a `PersistenceAdapter`
+configured (`NewServerWithPersistence`); plain `NewServer()` is unaffected.
+Set `Server.PersistCoalesceWindow = -1` to opt back into the previous strict
+per-update behaviour.
+
+### Changed
+
+- **Websocket persistence writes are coalesced by default (behaviour
+  change)** ([#175](https://github.com/reearth/ygo/issues/175)): the
+  per-room persistence worker debounces writes and merges each burst into a
+  single `StoreUpdate` call rather than writing once per update
+  (Hocuspocus parity). Only servers with a `PersistenceAdapter` configured
+  are affected.
+
+### Added
+
+- **`Server.PersistCoalesceWindow` and `Server.PersistCoalesceMaxWait`**
+  ([#175](https://github.com/reearth/ygo/issues/175)): tune or disable
+  persistence coalescing. Defaults are 2s and 10s; a negative
+  `PersistCoalesceWindow` (e.g. `-1`) disables coalescing and restores strict
+  per-update writes.
+
+## Install
+
+```
+go get github.com/reearth/ygo@v1.36.0
+```
+
+See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
+
+---
+
 ## v1.35.0
 
 A minor release hardening the websocket broadcast path against slow peers. It

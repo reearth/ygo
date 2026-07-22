@@ -149,6 +149,10 @@ const defaultPeerWriteQueueSize = 512
 // room state across server restarts. It is called on every committed update so
 // implementations should be efficient (e.g. append-only log rather than full
 // re-encode on every write).
+//
+// By default the server coalesces bursts of updates and calls StoreUpdate once
+// per debounced batch (a single merged V1 update) rather than once per
+// transaction; see Server.PersistCoalesceWindow.
 type PersistenceAdapter interface {
 	// LoadDoc returns the full binary V1 update representing stored state for
 	// the room, or (nil, nil) if no state exists yet.
@@ -449,6 +453,46 @@ type Server struct {
 	// synchronisation and must not be mutated while the server is handling
 	// connections.
 	SlowPeerPolicy SlowPeerPolicy
+
+	// PersistCoalesceWindow controls debounced coalescing of persistence
+	// writes. Buffered updates are merged into a single StoreUpdate rather than
+	// written one-per-update. The window is a debounce: each new update resets
+	// it; see PersistCoalesceMaxWait for the hard ceiling.
+	//
+	//   0  — default (2s): coalescing ON (matches Hocuspocus).
+	//   <0 — disabled: strict one StoreUpdate per update (pre-v1.36 behaviour).
+	//   >0 — debounce window of this duration.
+	//
+	// Only affects servers with a PersistenceAdapter configured. Like the other
+	// config fields, set it before serving; it is read without synchronisation
+	// and must not be mutated while the server is handling connections.
+	//
+	// When disabled (<0), the strict per-update path — like the pre-v1.36
+	// behaviour — uses the cancellable worker context for its shutdown drain,
+	// so a context-respecting adapter may abort the final buffered writes on
+	// shutdown; the default coalescing path flushes the final batch with a
+	// background context and is more durable at shutdown.
+	PersistCoalesceWindow time.Duration
+
+	// PersistCoalesceMaxWait bounds how long a buffered update waits before it is
+	// flushed, measured from the batch's first update (Hocuspocus maxDebounce).
+	// Under sustained editing the debounce window keeps resetting, so flushes
+	// occur every PersistCoalesceMaxWait and durable state can lag live state by
+	// up to this duration. 0 uses the default (10s). The effective value is
+	// clamped to be at least the effective PersistCoalesceWindow, so any value
+	// below the window — including a negative one — resolves to the window
+	// rather than the 10s default (a negative maxWait is NOT a disable switch;
+	// only a negative PersistCoalesceWindow disables coalescing). Ignored when
+	// coalescing is disabled.
+	PersistCoalesceMaxWait time.Duration
+
+	// clock creates timers for the persistence worker. nil in production
+	// (resolves to realClock). Tests inject a fake for deterministic debounce.
+	clock wsClock
+
+	// mergeFn merges a batch of V1 updates. nil in production (resolves to
+	// crdt.MergeUpdatesV1). Tests inject a failing merge to exercise fallback.
+	mergeFn func(...[]byte) ([]byte, error)
 
 	// MaxPendingItems caps the per-document pending-items queue depth. The
 	// queue holds items whose dependencies have not yet arrived, waiting for

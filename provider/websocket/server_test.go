@@ -706,6 +706,10 @@ func (a *captureCtxAdapter) StoreUpdateContext(ctx context.Context, room string,
 func TestServer_PersistenceAdapterContext_PreferredOverLegacy(t *testing.T) {
 	a := &captureCtxAdapter{}
 	s := ygws.NewServerWithPersistence(a)
+	// This test asserts the ctx-aware adapter variant is preferred over the
+	// legacy one for a single write; disable coalescing so the store happens
+	// per-update (coalescing is exercised separately in persistence_coalesce_test.go).
+	s.PersistCoalesceWindow = -1
 	defer s.Shutdown(context.Background())
 
 	// Trigger a persistence write by calling Apply.
@@ -746,6 +750,9 @@ func (a *legacyAdapter) StoreUpdate(room string, update []byte) error {
 func TestServer_LegacyPersistenceAdapter_StillWorks(t *testing.T) {
 	a := &legacyAdapter{}
 	s := ygws.NewServerWithPersistence(a)
+	// Disable coalescing so the legacy StoreUpdate fires per-update within the
+	// sleep window; coalescing is exercised in persistence_coalesce_test.go.
+	s.PersistCoalesceWindow = -1
 	defer s.Shutdown(context.Background())
 
 	err := s.Apply(context.Background(), "room2", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
