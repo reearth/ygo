@@ -18,6 +18,7 @@ func TestResolveCoalesceConfig(t *testing.T) {
 		{"custom window default wait", 500 * time.Millisecond, 0, true, 500 * time.Millisecond, 10 * time.Second},
 		{"custom both", time.Second, 3 * time.Second, true, time.Second, 3 * time.Second},
 		{"maxwait clamped up to window", 5 * time.Second, time.Second, true, 5 * time.Second, 5 * time.Second},
+		{"negative maxwait clamped up to window", time.Second, -5 * time.Second, true, time.Second, time.Second},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

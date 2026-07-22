@@ -182,6 +182,9 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				// flush can race with shutdown cancelling ctx, and niling an
 				// unpersisted batch would lose it. Timers are cleared regardless;
 				// a retained batch re-flushes on the next update or at exit.
+				// A batch retained here has no self-driven retry timer in steady
+				// state; it is re-flushed at the stop/shutdown exit case below
+				// with a background context.
 				if flush(ctx, batch) {
 					batch = nil
 				}

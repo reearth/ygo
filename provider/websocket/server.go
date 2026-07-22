@@ -466,6 +466,12 @@ type Server struct {
 	// Only affects servers with a PersistenceAdapter configured. Like the other
 	// config fields, set it before serving; it is read without synchronisation
 	// and must not be mutated while the server is handling connections.
+	//
+	// When disabled (<0), the strict per-update path — like the pre-v1.36
+	// behaviour — uses the cancellable worker context for its shutdown drain,
+	// so a context-respecting adapter may abort the final buffered writes on
+	// shutdown; the default coalescing path flushes the final batch with a
+	// background context and is more durable at shutdown.
 	PersistCoalesceWindow time.Duration
 
 	// PersistCoalesceMaxWait bounds how long a buffered update waits before it is

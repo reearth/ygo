@@ -32,7 +32,7 @@ const (
 // resolveCoalesceConfig turns the raw Server fields into effective values.
 // window<0 disables coalescing (strict per-update). window==0 uses the default.
 // maxWait==0 uses the default and is clamped to be at least the window.
-func resolveCoalesceConfig(window, maxWait time.Duration) (enabled bool, win, max time.Duration) {
+func resolveCoalesceConfig(window, maxWait time.Duration) (enabled bool, win, maxW time.Duration) {
 	if window < 0 {
 		return false, 0, 0
 	}
@@ -40,12 +40,12 @@ func resolveCoalesceConfig(window, maxWait time.Duration) (enabled bool, win, ma
 	if win == 0 {
 		win = defaultCoalesceWindow
 	}
-	max = maxWait
-	if max == 0 {
-		max = defaultCoalesceMaxWait
+	maxW = maxWait
+	if maxW == 0 {
+		maxW = defaultCoalesceMaxWait
 	}
-	if max < win {
-		max = win
+	if maxW < win {
+		maxW = win
 	}
-	return true, win, max
+	return true, win, maxW
 }
