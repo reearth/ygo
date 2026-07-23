@@ -56,6 +56,38 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 			cancel()
 		}()
 
+		compactor, _ := s.persistence.(CompactableAdapter)
+		compactEvery := s.CompactEvery
+		flushCount := 0
+
+		// maybeCompact calls the adapter's Compact (if any) with a background
+		// ctx, contained by recover; errors/panics are logged, never fatal.
+		maybeCompact := func() {
+			if compactor == nil {
+				return
+			}
+			defer func() {
+				if rv := recover(); rv != nil {
+					log.Printf("ygo/websocket: Compact panic for room %q: %v", name, rv)
+				}
+			}()
+			if err := compactor.Compact(context.Background(), name); err != nil {
+				log.Printf("ygo/websocket: Compact for room %q: %v", name, err)
+			}
+		}
+
+		// onFlushed records a non-empty flush and triggers count-based compaction.
+		onFlushed := func(wrote bool) {
+			if !wrote || compactEvery <= 0 || compactor == nil {
+				return
+			}
+			flushCount++
+			if flushCount >= compactEvery {
+				flushCount = 0
+				maybeCompact()
+			}
+		}
+
 		// store issues one backing-store write for a single update using the
 		// given ctx and returns whether it failed. Panics are contained and
 		// reported as a non-nil error; errors are logged (no retry).
@@ -123,9 +155,11 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 					_ = store(ctx, update)
 				case <-r.persistStop:
 					drain()
+					maybeCompact()
 					return
 				case <-s.shutdownCh:
 					drain()
+					maybeCompact()
 					return
 				}
 			}
@@ -188,24 +222,30 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				// A batch retained here has no self-driven retry timer in steady
 				// state; it is re-flushed at the stop/shutdown exit case below
 				// with a background context.
+				wrote := len(batch) > 0
 				if flush(ctx, batch) {
 					batch = nil
 				}
 				clearTimers()
+				onFlushed(wrote)
 			case <-maxC:
+				wrote := len(batch) > 0
 				if flush(ctx, batch) {
 					batch = nil
 				}
 				clearTimers()
+				onFlushed(wrote)
 			case <-r.persistStop:
 				drainBuffered()
 				flush(context.Background(), batch) // non-cancelled: survive shutdown
 				clearTimers()                      // release any pending timers before exit
+				maybeCompact()
 				return
 			case <-s.shutdownCh:
 				drainBuffered()
 				flush(context.Background(), batch)
 				clearTimers() // release any pending timers before exit
+				maybeCompact()
 				return
 			}
 		}

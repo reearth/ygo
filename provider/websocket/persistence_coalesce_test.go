@@ -283,6 +283,88 @@ func TestPersistCoalesce_RetainsBatchOnFailedFlush(t *testing.T) {
 	assert.Equal(t, n, got.GetText("t").Len())
 }
 
+// compactAdapter is a recordAdapter that also implements CompactableAdapter.
+type compactAdapter struct {
+	recordAdapter
+	mu       sync.Mutex
+	compacts []string // room per Compact call
+}
+
+func (a *compactAdapter) Compact(_ context.Context, room string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.compacts = append(a.compacts, room)
+	return nil
+}
+func (a *compactAdapter) compactCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.compacts)
+}
+
+// CompactEvery=N → Compact after every N non-empty window flushes.
+func TestPersistCompact_CountTrigger(t *testing.T) {
+	a := &compactAdapter{}
+	fc := newFakeClock()
+	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
+	s.CompactEvery = 2
+	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	require.NoError(t, err)
+
+	// 2 separate flushes: edit → window fire → edit → window fire.
+	for i := 0; i < 2; i++ {
+		applyEdit(r, "x", 0)
+		fc.nextTimerOfDur(t, 50*time.Millisecond).fire()
+		// wait for the store from this flush to land
+		want := i + 1
+		assert.Eventually(t, func() bool { return a.count() == want }, time.Second, 5*time.Millisecond)
+	}
+	assert.Eventually(t, func() bool { return a.compactCount() == 1 }, time.Second, 5*time.Millisecond,
+		"Compact should fire once after 2 flushes")
+}
+
+// CompactEvery=0 → no count-based Compact (only on unload).
+func TestPersistCompact_ZeroNoCountTrigger(t *testing.T) {
+	a := &compactAdapter{}
+	fc := newFakeClock()
+	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond) // CompactEvery=0
+	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	require.NoError(t, err)
+	applyEdit(r, "x", 0)
+	fc.nextTimerOfDur(t, 50*time.Millisecond).fire()
+	assert.Eventually(t, func() bool { return a.count() == 1 }, time.Second, 5*time.Millisecond)
+	// Give any erroneous compaction a chance, then assert none.
+	assert.Never(t, func() bool { return a.compactCount() > 0 }, 100*time.Millisecond, 10*time.Millisecond)
+}
+
+// On room unload (Shutdown), Compact fires once after the final flush.
+func TestPersistCompact_OnUnload(t *testing.T) {
+	a := &compactAdapter{}
+	fc := newFakeClock()
+	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
+	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	require.NoError(t, err)
+	applyEdit(r, "x", 0)
+	fc.nextTimerOfDur(t, 50*time.Millisecond) // batched, do not fire
+	require.NoError(t, s.Shutdown(context.Background()))
+	assert.Equal(t, 1, a.compactCount(), "Compact fires once on unload")
+	assert.GreaterOrEqual(t, a.count(), 1, "batch flushed before compact")
+}
+
+// Adapter without CompactableAdapter → no panic, no calls.
+func TestPersistCompact_NonCompactableAdapterSafe(t *testing.T) {
+	a := &recordAdapter{} // no Compact method
+	fc := newFakeClock()
+	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
+	s.CompactEvery = 1
+	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	require.NoError(t, err)
+	applyEdit(r, "x", 0)
+	fc.nextTimerOfDur(t, 50*time.Millisecond).fire()
+	assert.Eventually(t, func() bool { return a.count() == 1 }, time.Second, 5*time.Millisecond)
+	require.NoError(t, s.Shutdown(context.Background())) // must not panic
+}
+
 // Merge failure falls back to storing each update individually (no loss).
 func TestPersistCoalesce_MergeFailureFallsBack(t *testing.T) {
 	a := &recordAdapter{}
