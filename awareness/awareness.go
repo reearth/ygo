@@ -88,6 +88,12 @@ type ClientState struct {
 	State map[string]any // nil means the client was removed
 }
 
+// ClientMeta is the per-client metadata returned by Meta.
+type ClientMeta struct {
+	Clock       uint64
+	LastUpdated time.Time
+}
+
 // ChangeEvent is delivered to observers when states change.
 type ChangeEvent struct {
 	Added   []uint64 // client IDs newly seen
@@ -326,6 +332,27 @@ func (a *Awareness) GetStates() map[uint64]ClientState {
 		}
 	}
 	return out
+}
+
+// Meta returns the clock and last-updated time for a known client, including
+// remote tombstones (Yjs/yrs retain meta for removed clients). LastUpdated is
+// the last-applied time for an active client, or the tombstone time for a
+// remote tombstone; a local tombstone (our own leaving state) has a valid
+// Clock with a zero LastUpdated. Returns ok=false only for never-seen clients.
+func (a *Awareness) Meta(clientID uint64) (ClientMeta, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	cs, ok := a.states[clientID]
+	if !ok {
+		return ClientMeta{}, false
+	}
+	m := ClientMeta{Clock: cs.Clock}
+	if t, active := a.meta[clientID]; active {
+		m.LastUpdated = t
+	} else if t, tomb := a.removedAt[clientID]; tomb {
+		m.LastUpdated = t
+	}
+	return m, true
 }
 
 // OnChange registers a callback invoked whenever any state changes.

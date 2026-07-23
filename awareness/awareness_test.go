@@ -916,3 +916,28 @@ func TestUnit_OnUpdate_FiresOnApply(t *testing.T) {
 	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
 	require.Len(t, got, 1, "no events after unsubscribe")
 }
+
+func TestUnit_Meta_ActiveAndTombstone(t *testing.T) {
+	a := awareness.New(1)
+	b := awareness.New(99)
+
+	// unknown client
+	_, ok := a.Meta(99)
+	require.False(t, ok)
+
+	// active client
+	b.SetLocalState(map[string]any{"k": "v"})
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+	m, ok := a.Meta(99)
+	require.True(t, ok)
+	require.Greater(t, m.Clock, uint64(0))
+	require.False(t, m.LastUpdated.IsZero())
+
+	// tombstone (remote removal): Meta still returns clock + a timestamp
+	b.SetLocalState(nil)
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+	m2, ok := a.Meta(99)
+	require.True(t, ok, "tombstone still known (Yjs/yrs parity)")
+	require.Greater(t, m2.Clock, m.Clock)
+	require.False(t, m2.LastUpdated.IsZero())
+}
