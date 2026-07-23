@@ -183,6 +183,21 @@ type PersistenceAdapterContext interface {
 	StoreUpdateContext(ctx context.Context, room string, update []byte) error
 }
 
+// CompactableAdapter is an optional extension to PersistenceAdapter. When the
+// adapter implements it, the server calls Compact to signal a good time to
+// collapse stored updates for a room into a compact form (e.g. merge the update
+// log into a snapshot, prune old versions) — on room unload, and, when
+// Server.CompactEvery > 0, after every N persistence flushes.
+//
+// Compact is invoked from the room's persistence worker goroutine, serialised
+// with StoreUpdate for that room, so implementations need no extra locking
+// against concurrent writes to the same room. It is best-effort: a returned
+// error (or panic) is logged and does not abort persistence. Retention policy
+// (how much history to keep) is the adapter's concern.
+type CompactableAdapter interface {
+	Compact(ctx context.Context, room string) error
+}
+
 // MemoryPersistence is a thread-safe in-memory PersistenceAdapter that merges
 // all updates into a single V1 snapshot per room. It is the default adapter
 // used when no external persistence is configured and is primarily useful in
@@ -485,6 +500,16 @@ type Server struct {
 	// only a negative PersistCoalesceWindow disables coalescing). Ignored when
 	// coalescing is disabled.
 	PersistCoalesceMaxWait time.Duration
+
+	// CompactEvery, when > 0, asks a CompactableAdapter to Compact a room after
+	// every N successful (non-empty) persistence flushes, bounding version
+	// growth for long-lived, always-connected documents. 0 (default) compacts
+	// only on room unload. Ignored when the adapter does not implement
+	// CompactableAdapter, and on the disabled (PersistCoalesceWindow < 0) path
+	// (which has no flush cycle — those deployments get on-unload compaction
+	// only). Like the other config fields, set it before serving; it is read
+	// without synchronisation.
+	CompactEvery int
 
 	// clock creates timers for the persistence worker. nil in production
 	// (resolves to realClock). Tests inject a fake for deterministic debounce.

@@ -20,6 +20,13 @@ import "context"
 type LegacyAdapter struct {
 	store VersionedPersistence
 	ctx   context.Context
+
+	// KeepVersions bounds retained history when the websocket server asks the
+	// adapter to compact (see the provider's CompactableAdapter / CompactEvery).
+	// 0 (default) keeps all history — Compact becomes a cheap no-op. Set > 0 to
+	// trim to the newest KeepVersions updates on each compaction. Adapter-side
+	// retention policy; set before serving.
+	KeepVersions int
 }
 
 // NewLegacyAdapter wraps store. The provider's LoadDoc/StoreUpdate are
@@ -62,6 +69,14 @@ func (a *LegacyAdapter) StoreUpdate(room string, update []byte) error {
 // in-flight writes on shutdown.
 func (a *LegacyAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
 	_, err := a.store.AppendUpdate(ctx, room, update)
+	return err
+}
+
+// Compact satisfies the provider's optional CompactableAdapter interface. It
+// forwards to the wrapped VersionedPersistence.Compact with the configured
+// KeepVersions retention (0 = keep all). The deleted count is dropped.
+func (a *LegacyAdapter) Compact(ctx context.Context, room string) error {
+	_, err := a.store.Compact(ctx, room, a.KeepVersions)
 	return err
 }
 
