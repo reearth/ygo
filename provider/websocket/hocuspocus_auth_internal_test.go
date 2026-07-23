@@ -170,3 +170,169 @@ func TestInbandAuth_PermissionDenied_Then4401(t *testing.T) {
 	require.True(t, gws.IsCloseError(closeErr, wsCodeUnauthorized),
 		"connection must close with 4401, got %v", closeErr)
 }
+
+// TestInbandAuth_NilHook_Ignored verifies backward compatibility (#104): when
+// Server.OnTokenAuth is nil, an inbound Auth (tag 2) frame is silently
+// ignored — no reply, no close — and the connection keeps working normally,
+// matching the legacy y-websocket behavior where tag 2 has no handler at all.
+func TestInbandAuth_NilHook_Ignored(t *testing.T) {
+	srv := NewServer()
+	srv.HocuspocusFraming = true
+	// OnTokenAuth intentionally left nil.
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	room := "r1"
+	c := dialRoomInternal(t, ts, room)
+	defer c.Close()
+
+	frame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarString(room)
+		enc.WriteVarUint(msgAuth)
+		enc.WriteVarUint(authTypeToken)
+		enc.WriteVarString("whatever")
+	})
+	require.NoError(t, c.WriteMessage(gws.BinaryMessage, frame))
+
+	// Connection must stay open (no auth reply, no close): a follow-up
+	// QueryAwareness still gets answered.
+	q := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarString(room)
+		enc.WriteVarUint(msgQueryAwareness)
+	})
+	require.NoError(t, c.WriteMessage(gws.BinaryMessage, q))
+
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := c.ReadMessage()
+	require.NoError(t, err, "connection stays open with nil OnTokenAuth")
+}
+
+// TestInbandAuth_ReadonlyScope verifies that an OnTokenAuth hook returning
+// ConnectionConfig{ReadOnly: true} results in an Authenticated (sub-type 2)
+// reply carrying the "readonly" scope string (#104).
+func TestInbandAuth_ReadonlyScope(t *testing.T) {
+	srv := NewServer()
+	srv.HocuspocusFraming = true
+	srv.OnTokenAuth = func(room, token string) (ConnectionConfig, error) {
+		return ConnectionConfig{ReadOnly: true}, nil
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	room := "r1"
+	c := dialRoomInternal(t, ts, room)
+	defer c.Close()
+
+	frame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarString(room)
+		enc.WriteVarUint(msgAuth)
+		enc.WriteVarUint(authTypeToken)
+		enc.WriteVarString("t")
+	})
+	require.NoError(t, c.WriteMessage(gws.BinaryMessage, frame))
+
+	require.Eventually(t, func() bool {
+		_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		_, data, err := c.ReadMessage()
+		if err != nil {
+			return false
+		}
+		dec := encoding.NewDecoder(data)
+		_, _ = dec.ReadVarString() // docName
+		if tag, _ := dec.ReadVarUint(); tag != msgAuth {
+			return false
+		}
+		sub, _ := dec.ReadVarUint()
+		scope, _ := dec.ReadVarString()
+		return sub == authTypeAuthenticated && scope == "readonly"
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+// TestInbandAuth_HookPanic_Denied verifies that a panicking OnTokenAuth hook
+// is converted into a denial by safeTokenAuth's recover, rather than
+// crashing the read-loop goroutine: the connection must be closed (a
+// PermissionDenied frame followed by a close, or at minimum a read error),
+// never left silently open or the process taken down (#104 Task 7 review).
+func TestInbandAuth_HookPanic_Denied(t *testing.T) {
+	srv := NewServer()
+	srv.HocuspocusFraming = true
+	srv.OnTokenAuth = func(room, token string) (ConnectionConfig, error) {
+		panic("boom")
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	room := "r1"
+	c := dialRoomInternal(t, ts, room)
+	defer c.Close()
+
+	frame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarString(room)
+		enc.WriteVarUint(msgAuth)
+		enc.WriteVarUint(authTypeToken)
+		enc.WriteVarString("nope")
+	})
+	require.NoError(t, c.WriteMessage(gws.BinaryMessage, frame))
+
+	// Read frames until the connection closes; a panicking hook must never
+	// leave the connection silently open. A PermissionDenied data frame may
+	// or may not be observed depending on timing, but a close must follow.
+	var closeErr error
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _, err := c.ReadMessage()
+		if err != nil {
+			closeErr = err
+			break
+		}
+	}
+	require.Error(t, closeErr, "connection must close after a panicking OnTokenAuth hook")
+	require.True(t, gws.IsCloseError(closeErr, wsCodeUnauthorized),
+		"connection must close with 4401 after a panicking hook, got %v", closeErr)
+}
+
+// TestInbandAuth_WrongSubType_Ignored verifies that an Auth frame carrying a
+// sub-type other than Token(0) — e.g. Authenticated(2), a server->client-only
+// sub-type — is ignored by the server: no reply, no close, and the
+// connection keeps working (#104 Task 7 review).
+func TestInbandAuth_WrongSubType_Ignored(t *testing.T) {
+	srv := NewServer()
+	srv.HocuspocusFraming = true
+	srv.OnTokenAuth = func(room, token string) (ConnectionConfig, error) {
+		return ConnectionConfig{ReadOnly: false}, nil
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	room := "r1"
+	c := dialRoomInternal(t, ts, room)
+	defer c.Close()
+
+	frame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarString(room)
+		enc.WriteVarUint(msgAuth)
+		enc.WriteVarUint(authTypeAuthenticated) // wrong sub-type: not Token(0)
+		enc.WriteVarString("irrelevant")
+	})
+	require.NoError(t, c.WriteMessage(gws.BinaryMessage, frame))
+
+	// Connection must stay open: a follow-up QueryAwareness still gets
+	// answered, and it must not be an Auth reply.
+	q := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarString(room)
+		enc.WriteVarUint(msgQueryAwareness)
+	})
+	require.NoError(t, c.WriteMessage(gws.BinaryMessage, q))
+
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := c.ReadMessage()
+	require.NoError(t, err, "connection stays open after a non-Token Auth sub-type")
+	dec := encoding.NewDecoder(data)
+	_, _ = dec.ReadVarString() // docName
+	tag, _ := dec.ReadVarUint()
+	require.NotEqual(t, msgAuth, tag, "wrong sub-type Auth frame must not produce an Auth reply")
+}
