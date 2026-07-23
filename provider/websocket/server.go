@@ -76,6 +76,16 @@ const (
 	msgPong               = uint64(10) // liveness reply to a server-sent Ping; no-op
 )
 
+// Hocuspocus in-band Auth (tag 2) sub-protocol types (see #104).
+const (
+	authTypeToken            = uint64(0)
+	authTypePermissionDenied = uint64(1)
+	authTypeAuthenticated    = uint64(2)
+
+	// wsCodeUnauthorized is Hocuspocus's WS close code for failed auth.
+	wsCodeUnauthorized = 4401
+)
+
 // maxWSMessageBytes is the maximum size of a single WebSocket frame accepted
 // by the server. Frames larger than this are rejected before being buffered,
 // preventing OOM from a single crafted large message.
@@ -293,6 +303,15 @@ type Server struct {
 	// AuthFunc grants read-write access. To grant read-only access, use Authorize
 	// instead — when Authorize is set it takes precedence and AuthFunc is ignored.
 	AuthFunc func(r *http.Request) bool
+
+	// HocuspocusFraming, when true, makes this server read and write the
+	// Hocuspocus docName-prefixed framing: every frame is
+	// VarString(docName) + <y-websocket frame>. Enables real @hocuspocus/provider
+	// interop. One room per connection is still enforced (no multi-document
+	// multiplexing); the inbound docName is read and used only for logging.
+	// Leave false (default) for native y-websocket clients — the two framings
+	// cannot be auto-detected on one endpoint.
+	HocuspocusFraming bool
 
 	// Authorize, if non-nil, is the richer alternative to AuthFunc: it both
 	// accepts/rejects the connection (second return value; false → 401) and
@@ -955,16 +974,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(s.maxMessageBytes())
 
 	p := &peer{
-		conn:       ws,
-		room:       rm,
-		roomName:   name,
-		server:     s,
-		done:       make(chan struct{}),
-		clientIDs:  make(map[uint64]struct{}),
-		writeCh:    make(chan []byte, s.peerWriteQueueSize()),
-		writerDone: make(chan struct{}),
-		limiter:    s.newPeerLimiter(),
-		readOnly:   readOnly,
+		conn:              ws,
+		room:              rm,
+		roomName:          name,
+		server:            s,
+		done:              make(chan struct{}),
+		clientIDs:         make(map[uint64]struct{}),
+		writeCh:           make(chan []byte, s.peerWriteQueueSize()),
+		writerDone:        make(chan struct{}),
+		limiter:           s.newPeerLimiter(),
+		readOnly:          readOnly,
+		hocuspocusFraming: s.HocuspocusFraming,
 	}
 
 	// Verify the room is still in the server map before adding the peer.

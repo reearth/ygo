@@ -30,9 +30,10 @@ type peer struct {
 	// needsResync is set (under wmu) when a broadcast is dropped because writeCh
 	// was full under SlowPeerResync. runWriter clears it and sends a full-state
 	// resync once the queue drains, so the peer converges without a reconnect.
-	needsResync bool
-	limiter     *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
-	readOnly    bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
+	needsResync       bool
+	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
+	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
+	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
