@@ -30,6 +30,10 @@ import (
 // drain uses the cancellable ctx — matching pre-v1.36 behaviour — so a
 // context-aware adapter may still see cancellation during that drain.
 // Otherwise falls back to StoreUpdate (existing behaviour).
+//
+// When s.persistence also implements CompactableAdapter, Compact is invoked
+// on room unload (including server shutdown) and, when s.CompactEvery > 0,
+// after every N persistence flushes on the coalescing path.
 func (s *Server) startPersistenceWorker(r *room, name string) {
 	clock := s.clock
 	if clock == nil {

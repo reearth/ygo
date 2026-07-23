@@ -28,7 +28,7 @@ ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (
 - Native iOS/Android embedding via `gomobile` (the `mobile/` subpackage) — no JS runtime, no CGO
 - Snapshots, garbage collection, undo manager, persistence adapters
 
-The current release is **v1.36.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
+The current release is **v1.37.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
 
 ## Features
 
@@ -71,6 +71,7 @@ Post-v1.0 hardening:
 - **Attribution API** (v1.30.0). `IDSet`/`IDMap`/`ContentMap` + wire codec tracking yjs v14-rc `14.0.0-16` — stamp CRDT content with per-item authorship (`userid`, `ts`, …) and exchange it with JS. Non-goals documented (no storage integration; `diffDocsToDelta` deferred). See [Attribution](#attribution) below.
 - **Subdocument lifecycle** (#63). A `Doc` can embed another `Doc` as a subdocument via `YMap.Set(txn, key, subdoc)`; `GetSubdocs`/`GetSubdocGUIDs`/`OnSubdocs`/`Load` plus `WithAutoLoad`/`WithShouldLoad`/`WithCollectionID` track and drive the add/remove/load lifecycle — the local half of Yjs's subdocuments feature. Also: `New()` now defaults a Doc's `guid` to a random uuidv4 instead of `""` (Yjs parity). Live cross-peer subdoc sync is a separate, tracked follow-up (#142). See [Subdocuments](#subdocuments) below.
 - **Coalesced persistence** (v1.36.0). The websocket server's persistence worker now debounces backing-store writes by default — a 2s window, capped by a 10s max wait — merging bursts into a single `StoreUpdate` instead of one write per update (Hocuspocus parity). This is a behaviour change for servers with a `PersistenceAdapter` configured; set `Server.PersistCoalesceWindow = -1` to restore strict per-update writes (#175).
+- **Persistence durability + compaction** (v1.37.0). The room-teardown paths now flush a pending coalesced batch durably before evicting the room, closing a gap where a fast reconnect could reload stale state and miss the just-made edit. Adapters can also bound stored-version growth by implementing `CompactableAdapter`, driven by `Server.CompactEvery` (`persistence.LegacyAdapter` supports this via its new `KeepVersions` field) (#175).
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release picture.
 
@@ -380,6 +381,8 @@ type PersistenceAdapter interface {
 `LoadDoc` is called once when the first peer connects to a room; the result seeds the in-memory doc. `StoreUpdate` is called on every committed transaction. Writes run on a per-room worker goroutine — slow storage doesn't block peers. Wire an adapter in via `NewServerWithPersistence(adapter)`.
 
 By default (v1.36.0) these writes are coalesced: the worker debounces bursts of updates into a single merged `StoreUpdate` call using a 2s window (reset on each new update) capped by a 10s max wait, matching Hocuspocus's default debounce behaviour. Tune it via `Server.PersistCoalesceWindow` / `Server.PersistCoalesceMaxWait`, or set `PersistCoalesceWindow` to a negative value (e.g. `-1`) to disable coalescing and restore strict one-write-per-update persistence.
+
+A room's pending coalesced batch is flushed durably before the room unloads (v1.37.0), so a peer that reconnects during a quick refresh reuses the live document instead of racing a stale reload from the backing store. Adapters that also want to bound stored-version growth can implement `CompactableAdapter` (`Compact(ctx, room) error`); the server invokes it on room unload and, when `Server.CompactEvery > 0`, after every N persistence flushes. `persistence.LegacyAdapter` implements this via its `KeepVersions` field.
 
 For a ready-made durable backend, [`persistence/sqlite`](persistence/sqlite/) provides a pure-Go (CGO-free, `modernc.org/sqlite`) `VersionedPersistence` store with WAL mode, full versioned history, and a crash-safe two-phase prune. Open it with `sqlite.Open("data.db")`.
 
