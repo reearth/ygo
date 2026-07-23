@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.37.0] — 2026-07-23
+
+### Fixed
+
+- **Lost edits on quick refresh with coalesced persistence**: the websocket
+  server evicted a room from its in-memory map before the pending coalesced
+  batch was flushed, so a fast reconnect could reload stale state from the
+  backing store and miss the just-made edit. The room-teardown paths
+  (`handleDisconnect`, `CloseRoom`) now flush the batch durably — and await it —
+  while the room is still discoverable, then re-check and evict; a peer that
+  reconnects during the flush reuses the live in-memory document. Follow-up to
+  the v1.36.0 coalescing work ([#175](https://github.com/reearth/ygo/issues/175)).
+
+### Added
+
+- **`CompactableAdapter`** (optional `PersistenceAdapter` extension) and
+  **`Server.CompactEvery`** ([#175](https://github.com/reearth/ygo/issues/175)):
+  the server calls `Compact(ctx, room)` on room unload, and — when
+  `CompactEvery > 0` — after every N persistence flushes, letting an adapter
+  bound stored-version growth. `persistence.LegacyAdapter` implements it (new
+  `KeepVersions` field) by forwarding to the existing
+  `VersionedPersistence.Compact`.
+
 ## [1.36.0] — 2026-07-22
 
 ### Changed

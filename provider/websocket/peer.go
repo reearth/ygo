@@ -262,30 +262,11 @@ func (p *peer) handleDisconnect() {
 		rm.mu.Lock()
 		delete(rm.peers, p)
 		empty := len(rm.peers) == 0
-		// roomEvicted distinguishes "we were the path that removed rm from
-		// s.rooms" from "rm was already gone (CloseRoom won the race)".
-		// Only the evicting path fires OnUnloadDocument — without this
-		// guard a concurrent CloseRoom + last-peer-disconnect double-fires
-		// the hook on the same room name. (#93 self-review B1.)
-		roomEvicted := false
-		if empty {
-			if current, stillIn := p.server.rooms[p.roomName]; stillIn && current == rm {
-				delete(p.server.rooms, p.roomName)
-				roomEvicted = true
-			}
-			if rm.persistStop != nil {
-				select {
-				case <-rm.persistStop:
-					// already closed by CloseRoom
-				default:
-					close(rm.persistStop)
-				}
-			}
-		}
 		rm.mu.Unlock()
 		p.server.rmu.Unlock()
 
-		// Release semaphore slots now that the peer has left.
+		// Release semaphore slots now that the peer has left. These run
+		// regardless of the eviction decision below.
 		if rm.peerSem != nil {
 			rm.peerSem.Release(1)
 		}
@@ -293,10 +274,81 @@ func (p *peer) handleDisconnect() {
 			sem.Release(1)
 		}
 
-		// Wait for the persistence goroutine to drain buffered writes before the
-		// room reference becomes garbage. This runs outside the locks above.
-		if empty && rm.persistDone != nil {
-			<-rm.persistDone
+		// roomEvicted distinguishes "we were the path that removed rm from
+		// s.rooms" from "rm was already gone (CloseRoom won the race)".
+		// Only the evicting path fires OnUnloadDocument — without this
+		// guard a concurrent CloseRoom + last-peer-disconnect double-fires
+		// the hook on the same room name. (#93 self-review B1.)
+		roomEvicted := false
+
+		// FLUSH-BEFORE-EVICT (#175 follow-up). When the room is now empty, make
+		// the pending coalesced batch durable BEFORE evicting the room from
+		// s.rooms — while the worker is still alive and the room is still
+		// discoverable. A quick reconnect then either finds this warm room or
+		// reads an up-to-date store, never a stale one. We must NOT close
+		// persistStop for this flush: closing it triggers the worker's own
+		// exit-flush, but a reconnect can beat that; the flushReq path is what
+		// guarantees durability-while-discoverable. Guard against a worker that
+		// already exited (e.g. CloseRoom raced us) via the persistDone branch.
+		//
+		// The ack is a real durability barrier: flushOK is true only if the batch
+		// was actually persisted. On failure we ABORT eviction below — keeping the
+		// room + worker alive so the retained batch is retried on the next teardown
+		// / Shutdown, and a reconnect meanwhile finds the warm in-memory doc rather
+		// than reloading a stale store (which would silently lose the edit).
+		// CRITICAL: no lock (rmu / rm.mu) may be held across the send/ack; the ack
+		// is buffered (cap 1) so the worker never blocks reporting the result.
+		flushOK := true
+		if empty && rm.flushReq != nil {
+			ack := make(chan bool, 1)
+			select {
+			case rm.flushReq <- ack:
+				flushOK = <-ack
+			case <-rm.persistDone:
+				// Worker already gone (raced by CloseRoom/shutdown); its exit-flush
+				// handled durability best-effort. Leave flushOK true so eviction can
+				// still finish tearing down this defunct room.
+			}
+		}
+
+		// Re-check emptiness under the locks and evict only if still empty AND the
+		// flush persisted: a peer may have reconnected during the (possibly slow)
+		// flush above, or the flush may have failed. evict gates both the
+		// persistStop close and the persistDone wait so they stay consistent —
+		// when we abort (flush failed) the worker stays alive and we must NOT wait
+		// on persistDone (it would block forever).
+		stillEmpty := false
+		evict := false
+		if empty {
+			p.server.rmu.Lock()
+			rm.mu.Lock()
+			stillEmpty = len(rm.peers) == 0
+			evict = stillEmpty && flushOK
+			if evict {
+				if current, stillIn := p.server.rooms[p.roomName]; stillIn && current == rm {
+					delete(p.server.rooms, p.roomName)
+					roomEvicted = true
+				}
+				if rm.persistStop != nil {
+					select {
+					case <-rm.persistStop:
+						// already closed by CloseRoom
+					default:
+						close(rm.persistStop)
+					}
+				}
+			}
+			rm.mu.Unlock()
+			p.server.rmu.Unlock()
+
+			// Wait for the persistence goroutine to drain and exit before the
+			// room reference becomes garbage. Only wait when we actually evicted
+			// (closed persistStop, or found it already closed by CloseRoom):
+			// otherwise the worker is still running (a peer rejoined, or we aborted
+			// on flush failure) and this would block forever.
+			if evict && rm.persistDone != nil {
+				<-rm.persistDone
+			}
 		}
 
 		// #60 — Fire lifecycle hooks AFTER locks released and persistence
