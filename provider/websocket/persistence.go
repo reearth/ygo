@@ -153,6 +153,9 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				select {
 				case update := <-r.persistCh:
 					_ = store(ctx, update)
+				case ack := <-r.flushReq:
+					drain() // store everything currently buffered
+					close(ack)
 				case <-r.persistStop:
 					drain()
 					maybeCompact()
@@ -235,6 +238,17 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				}
 				clearTimers()
 				onFlushed(wrote)
+			case ack := <-r.flushReq:
+				// The just-arrived edit may still be in persistCh, not yet in
+				// batch — drain first so an on-demand flush never misses it.
+				drainBuffered()
+				wrote := len(batch) > 0
+				if flush(context.Background(), batch) {
+					batch = nil
+				}
+				clearTimers()
+				onFlushed(wrote)
+				close(ack)
 			case <-r.persistStop:
 				drainBuffered()
 				flush(context.Background(), batch) // non-cancelled: survive shutdown

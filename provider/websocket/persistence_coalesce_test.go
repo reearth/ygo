@@ -365,6 +365,61 @@ func TestPersistCompact_NonCompactableAdapterSafe(t *testing.T) {
 	require.NoError(t, s.Shutdown(context.Background())) // must not panic
 }
 
+// flushRoom sends a flush request and waits for the ack (test helper mirroring
+// what teardown will do).
+func flushRoom(t *testing.T, r *room) {
+	t.Helper()
+	ack := make(chan struct{})
+	select {
+	case r.flushReq <- ack:
+		select {
+		case <-ack:
+		case <-time.After(2 * time.Second):
+			t.Fatal("flush ack timed out")
+		}
+	case <-r.persistDone:
+		// worker already gone
+	case <-time.After(2 * time.Second):
+		t.Fatal("flushReq send timed out")
+	}
+}
+
+// A pending batch (window timer NOT fired) is made durable by flushReq.
+func TestPersistFlushReq_MakesPendingBatchDurable(t *testing.T) {
+	a := &recordAdapter{}
+	fc := newFakeClock()
+	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
+	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	require.NoError(t, err)
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		applyEdit(r, "x", 0)
+	}
+	for i := 0; i < n; i++ {
+		fc.nextTimerOfDur(t, 50*time.Millisecond) // ensure all batched, do NOT fire
+	}
+	flushRoom(t, r) // force durable flush without firing the timer
+
+	require.Equal(t, 1, a.count(), "flushReq should flush the pending batch exactly once")
+	got := crdt.New()
+	require.NoError(t, crdt.ApplyUpdateV1(got, a.stores[0], nil))
+	assert.Equal(t, n, got.GetText("t").Len())
+}
+
+// flushReq works on the disabled path too.
+func TestPersistFlushReq_DisabledPath(t *testing.T) {
+	a := &recordAdapter{}
+	fc := newFakeClock()
+	s := newCoalesceServer(a, fc, -1, 0) // disabled
+	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	require.NoError(t, err)
+	applyEdit(r, "y", 0)
+	assert.Eventually(t, func() bool { return a.count() == 1 }, time.Second, 5*time.Millisecond)
+	flushRoom(t, r) // no pending data; must still ack, no deadlock, no extra store
+	assert.Equal(t, 1, a.count())
+}
+
 // Merge failure falls back to storing each update individually (no loss).
 func TestPersistCoalesce_MergeFailureFallsBack(t *testing.T) {
 	a := &recordAdapter{}

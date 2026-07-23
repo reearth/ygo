@@ -252,6 +252,12 @@ type room struct {
 	persistStop chan struct{} // closed to signal goroutine to drain and exit
 	persistDone chan struct{} // closed when persistence goroutine exits
 
+	// flushReq requests an on-demand durable flush of the pending batch without
+	// stopping the worker. The worker drains persistCh, flushes with a
+	// background ctx, and closes the sent ack channel. nil when no
+	// PersistenceAdapter is configured.
+	flushReq chan chan struct{}
+
 	// relayUnsub holds the doc.OnUpdate / awareness.OnChange unsubscribe
 	// functions registered when a Relay is attached. nil when no relay. Called
 	// once when the room is evicted so the relay observers don't leak. Guarded
@@ -883,6 +889,7 @@ func (s *Server) getOrCreateRoomLocked(ctx context.Context, name string) (*room,
 		r.persistCh = make(chan []byte, 256)
 		r.persistStop = make(chan struct{})
 		r.persistDone = make(chan struct{})
+		r.flushReq = make(chan chan struct{})
 		s.startPersistenceWorker(r, name)
 		r.doc.OnUpdate(func(update []byte, _ any) {
 			select {
