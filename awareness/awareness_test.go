@@ -1008,3 +1008,39 @@ func TestUnit_ReactivatedTombstone_ClassifiedUpdated(t *testing.T) {
 	require.Equal(t, []uint64{99}, ev.Updated, "reactivated tombstone is 'updated' (Yjs/yrs parity)")
 	require.Empty(t, ev.Added)
 }
+
+func TestUnit_LocalHeartbeat_FiresOnUpdateNotOnChange(t *testing.T) {
+	a := awareness.New(1)
+	a.SetLocalState(map[string]any{"name": "me"})
+	var chg, upd int
+	a.OnChange(func(awareness.ChangeEvent) { chg++ })
+	a.OnUpdate(func(awareness.UpdateEvent) { upd++ })
+
+	a.Heartbeat()
+	require.Equal(t, 0, chg, "local heartbeat: OnChange must not fire")
+	require.Equal(t, 1, upd, "local heartbeat: OnUpdate must fire")
+}
+
+func TestUnit_SetLocalState_SameContent_OnUpdateOnly(t *testing.T) {
+	a := awareness.New(1)
+	a.SetLocalState(map[string]any{"name": "me"})
+	var chg, upd int
+	a.OnChange(func(awareness.ChangeEvent) { chg++ })
+	a.OnUpdate(func(awareness.UpdateEvent) { upd++ })
+
+	a.SetLocalState(map[string]any{"name": "me"}) // identical content
+	require.Equal(t, 0, chg, "identical local re-set: OnChange must not fire (Yjs parity)")
+	require.Equal(t, 1, upd)
+}
+
+func TestUnit_RemoveExpired_FiresOnUpdate(t *testing.T) {
+	a := awareness.New(1)
+	b := awareness.New(99)
+	b.SetLocalState(map[string]any{"k": "v"})
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+
+	var upd int
+	a.OnUpdate(func(awareness.UpdateEvent) { upd++ })
+	a.RemoveExpired(0) // everything older than 0 => expire client 99
+	require.Equal(t, 1, upd)
+}

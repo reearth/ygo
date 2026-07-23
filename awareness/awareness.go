@@ -236,7 +236,7 @@ func (a *Awareness) SetLocalState(state map[string]any) {
 	if a.clock < math.MaxUint64 {
 		a.clock++
 	}
-	var added, updated, removed []uint64
+	var added, updated, changedUpdated, removed []uint64
 
 	prev, exists := a.states[a.clientID]
 	// "exists and active" means prev.State != nil
@@ -250,21 +250,27 @@ func (a *Awareness) SetLocalState(state map[string]any) {
 			removed = []uint64{a.clientID}
 		}
 	} else {
-		a.states[a.clientID] = ClientState{Clock: a.clock, State: state}
-		a.meta[a.clientID] = time.Now()
 		if wasActive {
 			updated = []uint64{a.clientID}
+			if !reflect.DeepEqual(prev.State, state) {
+				changedUpdated = []uint64{a.clientID}
+			}
 		} else {
 			added = []uint64{a.clientID}
 		}
+		a.states[a.clientID] = ClientState{Clock: a.clock, State: state}
+		a.meta[a.clientID] = time.Now()
 	}
 
 	obs := a.copyObservers()
+	updObs := a.copyUpdateObservers()
 	a.mu.Unlock()
 
+	if len(added) > 0 || len(changedUpdated) > 0 || len(removed) > 0 {
+		fireObservers(obs, ChangeEvent{Added: added, Updated: changedUpdated, Removed: removed})
+	}
 	if len(added) > 0 || len(updated) > 0 || len(removed) > 0 {
-		evt := ChangeEvent{Added: added, Updated: updated, Removed: removed}
-		fireObservers(obs, evt)
+		fireUpdateObservers(updObs, UpdateEvent{Added: added, Updated: updated, Removed: removed})
 	}
 }
 
@@ -278,8 +284,9 @@ func (a *Awareness) SetLocalState(state map[string]any) {
 // haven't. Matches Yjs JS's constructor interval which re-emits local
 // state every outdatedTimeout/2.
 //
-// Observers are NOT fired — the state itself didn't change, only the
-// clock advanced. Peers will pick up the new clock via EncodeUpdate.
+// OnUpdate observers ARE fired (the clock advanced); OnChange observers are
+// not (the state content is unchanged). Matches Yjs, whose interval re-emits
+// local state via setLocalState and emits `update` but not `change`.
 //
 // Added in v1.11.0 (#73 vector C5).
 func (a *Awareness) Heartbeat() {
@@ -297,7 +304,11 @@ func (a *Awareness) Heartbeat() {
 	}
 	a.states[a.clientID] = ClientState{Clock: a.clock, State: cs.State}
 	a.meta[a.clientID] = time.Now()
+	updObs := a.copyUpdateObservers()
 	a.mu.Unlock()
+
+	// Content unchanged (only the clock advanced) -> OnUpdate only, never OnChange.
+	fireUpdateObservers(updObs, UpdateEvent{Updated: []uint64{a.clientID}})
 }
 
 // SetLocalStateContext is the context-aware variant of SetLocalState.
@@ -362,7 +373,9 @@ func (a *Awareness) Meta(clientID uint64) (ClientMeta, bool) {
 	return m, true
 }
 
-// OnChange registers a callback invoked whenever any state changes.
+// OnChange registers a callback invoked whenever client state content
+// changes (added, removed, or content-differing update). For an event on
+// every applied entry including heartbeats, use OnUpdate.
 // Returns an unsubscribe function.
 func (a *Awareness) OnChange(fn func(ChangeEvent)) func() {
 	if fn == nil {
@@ -814,11 +827,12 @@ func (a *Awareness) RemoveExpired(timeout time.Duration) {
 		}
 	}
 	obs := a.copyObservers()
+	updObs := a.copyUpdateObservers()
 	a.mu.Unlock()
 
 	if len(removed) > 0 {
-		evt := ChangeEvent{Removed: removed}
-		fireObservers(obs, evt)
+		fireObservers(obs, ChangeEvent{Removed: removed})
+		fireUpdateObservers(updObs, UpdateEvent{Removed: removed})
 	}
 }
 
