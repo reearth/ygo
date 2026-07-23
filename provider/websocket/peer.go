@@ -46,6 +46,18 @@ type peer struct {
 // handleMessage decodes the outer message type and dispatches accordingly.
 func (p *peer) handleMessage(data []byte) {
 	dec := encoding.NewDecoder(data)
+	if p.hocuspocusFraming {
+		docName, err := dec.ReadVarString()
+		if err != nil {
+			p.server.log().Debug("discarded malformed hocuspocus frame: unreadable docName",
+				"room", p.roomName, "err", err)
+			return
+		}
+		if docName != p.roomName {
+			p.server.log().Debug("hocuspocus frame docName mismatch (processing anyway)",
+				"room", p.roomName, "docName", docName)
+		}
+	}
 	outerType, err := dec.ReadVarUint()
 	if err != nil {
 		// Debug, not Warn: the rate is attacker-controlled, so a noisier level
@@ -542,6 +554,12 @@ func (p *peer) writeToConn(data []byte) bool {
 	p.wmu.Unlock()
 	if closed {
 		return false
+	}
+	if p.hocuspocusFraming {
+		data = encoding.EncodeBytes(func(enc *encoding.Encoder) {
+			enc.WriteVarString(p.roomName)
+			enc.WriteRaw(data)
+		})
 	}
 	if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 		p.server.log().Debug("set write deadline failed", "err", err)
