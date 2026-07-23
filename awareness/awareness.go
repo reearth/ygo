@@ -96,10 +96,27 @@ type ChangeEvent struct {
 	Origin  any
 }
 
+// UpdateEvent is delivered to OnUpdate observers on every applied awareness
+// entry, including same-content heartbeat re-emits at a bumped clock. Same
+// shape as ChangeEvent; a distinct type prevents accidentally crossing the two
+// callback kinds.
+type UpdateEvent struct {
+	Added   []uint64
+	Updated []uint64
+	Removed []uint64
+	Origin  any
+}
+
 // observer wraps a callback with an active flag so it can be unsubscribed
 // without shifting the slice.
 type observer struct {
 	fn     func(ChangeEvent)
+	active bool
+}
+
+// updateObserver wraps an OnUpdate callback with an active flag.
+type updateObserver struct {
+	fn     func(UpdateEvent)
 	active bool
 }
 
@@ -110,11 +127,12 @@ type Awareness struct {
 	// states stores all known clients including those with nil State (removed).
 	// Clients with nil State have been removed but their clock is retained so
 	// removal messages can be properly encoded with an up-to-date clock.
-	states     map[uint64]ClientState
-	meta       map[uint64]time.Time // last update time, for expiry (only active clients)
-	clock      uint64               // local client's clock
-	observers  []*observer
-	stopExpiry func() // set by StartAutoExpiry; stopped by Destroy
+	states          map[uint64]ClientState
+	meta            map[uint64]time.Time // last update time, for expiry (only active clients)
+	clock           uint64               // local client's clock
+	observers       []*observer
+	updateObservers []*updateObserver
+	stopExpiry      func() // set by StartAutoExpiry; stopped by Destroy
 	// wireBytes tracks the JSON byte length of the last ApplyUpdate-accepted
 	// state per client. Used to enforce maxBytes (issue #48 vector B). Only
 	// entries that arrived via ApplyUpdate are counted; SetLocalState is
@@ -342,6 +360,44 @@ func (a *Awareness) copyObservers() []func(ChangeEvent) {
 
 // fireObservers calls each observer function in turn.
 func fireObservers(fns []func(ChangeEvent), evt ChangeEvent) {
+	for _, fn := range fns {
+		fn(evt)
+	}
+}
+
+// OnUpdate registers a callback invoked on every applied awareness entry,
+// including heartbeats (where OnChange does not fire). Returns an unsubscribe
+// function. Observers are not cleared by Destroy (matches OnChange).
+func (a *Awareness) OnUpdate(fn func(UpdateEvent)) func() {
+	if fn == nil {
+		return func() {}
+	}
+	obs := &updateObserver{fn: fn, active: true}
+	a.mu.Lock()
+	a.updateObservers = append(a.updateObservers, obs)
+	a.mu.Unlock()
+
+	return func() {
+		a.mu.Lock()
+		obs.active = false
+		a.mu.Unlock()
+	}
+}
+
+// copyUpdateObservers returns a snapshot of active OnUpdate callbacks.
+// Must be called while holding a.mu (read or write).
+func (a *Awareness) copyUpdateObservers() []func(UpdateEvent) {
+	fns := make([]func(UpdateEvent), 0, len(a.updateObservers))
+	for _, o := range a.updateObservers {
+		if o.active {
+			fns = append(fns, o.fn)
+		}
+	}
+	return fns
+}
+
+// fireUpdateObservers calls each OnUpdate callback in turn.
+func fireUpdateObservers(fns []func(UpdateEvent), evt UpdateEvent) {
 	for _, fn := range fns {
 		fn(evt)
 	}
@@ -580,11 +636,12 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 	}
 
 	obs := a.copyObservers()
+	updObs := a.copyUpdateObservers()
 	a.mu.Unlock()
 
 	if len(added) > 0 || len(updated) > 0 || len(removed) > 0 {
-		evt := ChangeEvent{Added: added, Updated: updated, Removed: removed, Origin: origin}
-		fireObservers(obs, evt)
+		fireObservers(obs, ChangeEvent{Added: added, Updated: updated, Removed: removed, Origin: origin})
+		fireUpdateObservers(updObs, UpdateEvent{Added: added, Updated: updated, Removed: removed, Origin: origin})
 	}
 
 	return nil

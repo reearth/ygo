@@ -899,3 +899,20 @@ func TestUnit_Awareness_C5_Heartbeat_PreservesMonotonicity_AcrossMixedUpdates(t 
 			i, clocks[i], clocks[i-1])
 	}
 }
+
+func TestUnit_OnUpdate_FiresOnApply(t *testing.T) {
+	a := awareness.New(1)
+	b := awareness.New(99)
+	b.SetLocalState(map[string]any{"name": "x"})
+
+	var got []awareness.UpdateEvent
+	unsub := a.OnUpdate(func(e awareness.UpdateEvent) { got = append(got, e) })
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+	require.Len(t, got, 1)
+	require.Equal(t, []uint64{99}, got[0].Added)
+
+	unsub()
+	b.SetLocalState(map[string]any{"name": "y"})
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+	require.Len(t, got, 1, "no events after unsubscribe")
+}
