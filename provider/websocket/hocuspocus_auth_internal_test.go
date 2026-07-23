@@ -8,6 +8,7 @@ package websocket
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -115,4 +116,57 @@ func TestInbandAuth_Authenticated_ReadWrite(t *testing.T) {
 
 	require.Equal(t, room, gotRoom)
 	require.Equal(t, "secret-token", gotToken)
+}
+
+// TestInbandAuth_PermissionDenied_Then4401 verifies the G1 fix (#104): a
+// PermissionDenied (tag msgAuth, sub authTypePermissionDenied) data frame must
+// be observed by the client BEFORE the connection closes, and the close must
+// carry the Hocuspocus 4401 (wsCodeUnauthorized) code. Both the data frame and
+// the close are funneled through the single per-peer writer goroutine via
+// enqueueClose's nil-sentinel, so ordering is guaranteed even though the tag-2
+// auth handler runs on the read-loop goroutine.
+func TestInbandAuth_PermissionDenied_Then4401(t *testing.T) {
+	srv := NewServer()
+	srv.HocuspocusFraming = true
+	srv.OnTokenAuth = func(room, token string) (ConnectionConfig, error) {
+		return ConnectionConfig{}, fmt.Errorf("bad token")
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	room := "r1"
+	c := dialRoomInternal(t, ts, room)
+	defer c.Close()
+
+	frame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarString(room)
+		enc.WriteVarUint(msgAuth)
+		enc.WriteVarUint(authTypeToken)
+		enc.WriteVarString("nope")
+	})
+	require.NoError(t, c.WriteMessage(gws.BinaryMessage, frame))
+
+	// Read frames until the connection closes; we must observe the
+	// PermissionDenied data frame before the close error.
+	sawDenied := false
+	var closeErr error
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := c.ReadMessage()
+		if err != nil {
+			closeErr = err
+			break
+		}
+		dec := encoding.NewDecoder(data)
+		_, _ = dec.ReadVarString() // docName
+		if tag, _ := dec.ReadVarUint(); tag == msgAuth {
+			if sub, _ := dec.ReadVarUint(); sub == authTypePermissionDenied {
+				sawDenied = true
+			}
+		}
+	}
+	require.True(t, sawDenied, "PermissionDenied must arrive before close")
+	require.True(t, gws.IsCloseError(closeErr, wsCodeUnauthorized),
+		"connection must close with 4401, got %v", closeErr)
 }

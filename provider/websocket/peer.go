@@ -32,6 +32,8 @@ type peer struct {
 	// was full under SlowPeerResync. runWriter clears it and sends a full-state
 	// resync once the queue drains, so the peer converges without a reconnect.
 	needsResync       bool
+	closeCode         int           // #104: WS close code queued via enqueueClose (0 = none)
+	closeReason       string        // #104: WS close reason accompanying closeCode
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
 	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
@@ -268,12 +270,43 @@ func encodeAuthMessage(subType uint64, s string) []byte {
 	})
 }
 
-// enqueueClose is fully implemented in Task 8 (graceful queued close with
-// WS close code + reason). This is a TEMPORARY stub for Task 7 so the
-// success path compiles and is testable; it ignores code/reason and just
-// force-closes the underlying connection. DO NOT extend this — Task 8
-// replaces it wholesale.
-func (p *peer) enqueueClose(code int, reason string) { _ = code; _ = reason; _ = p.conn.Close() }
+// enqueueClose queues a WS close (with an application close code) AFTER any
+// frames already in writeCh. The close control frame is emitted by runWriter
+// on the writer goroutine, preserving ordering (a preceding PermissionDenied
+// data frame is flushed first) and the single-writer invariant. A nil sentinel
+// on writeCh signals runWriter to close.
+func (p *peer) enqueueClose(code int, reason string) {
+	p.wmu.Lock()
+	if p.closed {
+		p.wmu.Unlock()
+		return
+	}
+	p.closeCode = code
+	p.closeReason = reason
+	p.wmu.Unlock()
+
+	select {
+	case p.writeCh <- nil:
+	default:
+		// Queue full: best-effort direct close (ordering already at risk).
+		p.sendCloseFrame()
+	}
+}
+
+// sendCloseFrame writes the queued WS close control frame then closes the
+// connection. Called only from the writer goroutine (via runWriter) or the
+// enqueueClose full-queue fallback.
+func (p *peer) sendCloseFrame() {
+	p.wmu.Lock()
+	code, reason := p.closeCode, p.closeReason
+	p.wmu.Unlock()
+	if code != 0 {
+		_ = p.conn.WriteControl(gws.CloseMessage,
+			gws.FormatCloseMessage(code, reason),
+			time.Now().Add(writeTimeout))
+	}
+	_ = p.conn.Close()
+}
 
 // trackAwarenessClients records which awareness clientIDs this peer owns
 // so they can be removed when the peer disconnects.
@@ -586,6 +619,12 @@ func (p *peer) write(data []byte) {
 func (p *peer) runWriter() {
 	defer close(p.writerDone)
 	for data := range p.writeCh {
+		if data == nil {
+			// close-directive sentinel (#104 G1): flush is done; emit the WS
+			// close control frame on this goroutine, then stop.
+			p.sendCloseFrame()
+			return
+		}
 		if !p.writeToConn(data) {
 			return
 		}
