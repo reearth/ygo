@@ -275,6 +275,16 @@ func encodeAuthMessage(subType uint64, s string) []byte {
 // on the writer goroutine, preserving ordering (a preceding PermissionDenied
 // data frame is flushed first) and the single-writer invariant. A nil sentinel
 // on writeCh signals runWriter to close.
+//
+// Callers MUST invoke enqueueClose only from the peer's own read-loop
+// goroutine (the same goroutine that runs the deferred handleDisconnect).
+// Unlike write()/broadcast(), which hold wmu across both the closed-check and
+// the writeCh send, enqueueClose releases wmu before the send below: its
+// full-queue fallback calls sendCloseFrame(), which re-locks wmu, and
+// sync.Mutex is not reentrant, so holding wmu across the send would deadlock
+// on that path. Because handleDisconnect (the sole close(p.writeCh) site)
+// runs sequentially after enqueueClose's caller on the same goroutine, this
+// send can never race the channel close today.
 func (p *peer) enqueueClose(code int, reason string) {
 	p.wmu.Lock()
 	if p.closed {
@@ -285,12 +295,22 @@ func (p *peer) enqueueClose(code int, reason string) {
 	p.closeReason = reason
 	p.wmu.Unlock()
 
-	select {
-	case p.writeCh <- nil:
-	default:
-		// Queue full: best-effort direct close (ordering already at risk).
-		p.sendCloseFrame()
-	}
+	func() {
+		defer func() {
+			if recover() != nil {
+				// writeCh already closed by handleDisconnect (a future
+				// cross-goroutine misuse) — close directly instead of
+				// panicking.
+				p.sendCloseFrame()
+			}
+		}()
+		select {
+		case p.writeCh <- nil:
+		default:
+			// Queue full: best-effort direct close (ordering already at risk).
+			p.sendCloseFrame()
+		}
+	}()
 }
 
 // sendCloseFrame writes the queued WS close control frame then closes the
