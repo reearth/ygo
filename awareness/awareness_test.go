@@ -941,3 +941,19 @@ func TestUnit_Meta_ActiveAndTombstone(t *testing.T) {
 	require.Greater(t, m2.Clock, m.Clock)
 	require.False(t, m2.LastUpdated.IsZero())
 }
+
+func TestUnit_Meta_LocalTombstone(t *testing.T) {
+	a := awareness.New(1)
+	a.SetLocalState(map[string]any{"k": "v"})
+	m, ok := a.Meta(1)
+	require.True(t, ok)
+	require.False(t, m.LastUpdated.IsZero())
+
+	// Local client leaves: its own tombstone keeps a valid clock but no
+	// meta/removedAt entry, so LastUpdated is zero (documented behavior).
+	a.SetLocalState(nil)
+	m2, ok := a.Meta(1)
+	require.True(t, ok, "local tombstone still known")
+	require.Greater(t, m2.Clock, m.Clock)
+	require.True(t, m2.LastUpdated.IsZero(), "local tombstone has zero LastUpdated")
+}
