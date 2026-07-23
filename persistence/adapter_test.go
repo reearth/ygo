@@ -115,7 +115,8 @@ func TestLegacyAdapter_CompactKeepZeroIsNoop(t *testing.T) {
 	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "x", nil) })
 	require.NoError(t, ad.StoreUpdate("room", crdt.EncodeStateAsUpdateV1(doc, nil)))
 	require.NoError(t, ad.Compact(context.Background(), "room")) // keep=0 → keep all, no error
-	metas, _ := store.ListVersions(context.Background(), "room")
+	metas, err := store.ListVersions(context.Background(), "room")
+	require.NoError(t, err)
 	assert.Len(t, metas, 1)
 }
 

@@ -375,7 +375,7 @@ func TestPersistCompact_NonCompactableAdapterSafe(t *testing.T) {
 // what teardown will do).
 func flushRoom(t *testing.T, r *room) {
 	t.Helper()
-	ack := make(chan struct{})
+	ack := make(chan bool, 1)
 	select {
 	case r.flushReq <- ack:
 		select {
@@ -600,6 +600,88 @@ func TestPersistTeardown_RejoinDuringFlushKeepsRoom(t *testing.T) {
 
 	assert.Equal(t, "hi", docB.GetText("t").ToString())
 	assert.Equal(t, int32(0), atomic.LoadInt32(&unloaded), "room must not unload when a peer rejoined")
+}
+
+// alwaysFailAdapter fails every StoreUpdate, modelling a persistent backing-store
+// outage. LoadDoc returns empty so that IF the room were (wrongly) evicted, a
+// reconnect would reload an empty doc — surfacing the lost edit. Implements only
+// StoreUpdate (not the Context variant) so both worker paths call it directly.
+type alwaysFailAdapter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (a *alwaysFailAdapter) LoadDoc(string) ([]byte, error) { return nil, nil }
+func (a *alwaysFailAdapter) StoreUpdate(_ string, _ []byte) error {
+	a.mu.Lock()
+	a.calls++
+	a.mu.Unlock()
+	return errors.New("backing store down")
+}
+func (a *alwaysFailAdapter) storeCalls() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls
+}
+
+// When the last peer disconnects and the pending flush FAILS, eviction MUST be
+// aborted: the room stays in s.rooms with its worker alive so the retained batch
+// is retried on the next teardown, and a reconnect meanwhile finds the warm
+// in-memory doc rather than reloading a stale (empty) store. The flushReq ack
+// must therefore be a real durability barrier, not a signal that fires
+// regardless of flush success. Asserts OnUnloadDocument did NOT fire and the
+// reconnect still sees the edit. (#175 follow-up, comment 1.)
+func TestPersistTeardown_FlushFailureAbortsEviction(t *testing.T) {
+	a := &alwaysFailAdapter{}
+	s := NewServerWithPersistence(a)
+	s.PersistCoalesceWindow = 5 * time.Second // long window: edit stays batched
+	var unloaded int32
+	s.OnUnloadDocument = func(_ context.Context, _ string) {
+		atomic.AddInt32(&unloaded, 1)
+	}
+	// OnLastPeer fires in BOTH the evict and the flush-failed-abort paths, after
+	// the eviction decision is made and (if evicted) persistDone drained. Use it
+	// to synchronise: once signalled, the teardown has finished deciding, so a
+	// reconnect deterministically observes the post-decision room state — no
+	// sleeps. Non-blocking send so a later 1→0 (connB during Shutdown) can't stall
+	// the hook goroutine.
+	lastPeer := make(chan struct{}, 1)
+	s.OnLastPeer = func(_ context.Context, _ string) {
+		select {
+		case lastPeer <- struct{}{}:
+		default:
+		}
+	}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	// Peer A edits, then disconnects. The pending batch flush on teardown fails.
+	docA := crdt.New(crdt.WithClientID(1))
+	connA := dialWS(t, ts, "room")
+	drainWS(t, connA, docA)
+	txtA := docA.GetText("t")
+	docA.Transact(func(txn *crdt.Transaction) { txtA.Insert(txn, 0, "hello", nil) })
+	sendV1Update(t, connA, crdt.EncodeStateAsUpdateV1(docA, nil))
+
+	_ = connA.Close()
+	<-lastPeer // teardown reached its eviction decision (and drained if it evicted)
+
+	// The flush must have been attempted (and failed) at least once.
+	assert.GreaterOrEqual(t, a.storeCalls(), 1, "teardown must attempt the flush")
+
+	// Reconnect for the same room. With the fix the warm room survived, so this
+	// finds the live in-memory doc carrying the edit. Without the fix the room was
+	// evicted, a fresh room reloads the empty store, and the edit is lost.
+	docB := crdt.New(crdt.WithClientID(2))
+	connB := dialWS(t, ts, "room")
+	drainWS(t, connB, docB)
+
+	assert.Equal(t, "hello", docB.GetText("t").ToString(),
+		"reconnect must see the edit from the warm in-memory doc — flush failure must not evict")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&unloaded),
+		"OnUnloadDocument must NOT fire when the flush failed (room not evicted)")
+
+	require.NoError(t, s.Shutdown(context.Background()))
 }
 
 // discoverabilityProbeAdapter records, at the moment StoreUpdate runs, whether

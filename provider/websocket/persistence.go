@@ -143,13 +143,18 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 
 		// Strict per-update path (coalescing disabled): unchanged behaviour.
 		if !enabled {
-			drain := func() {
+			// drain stores everything currently buffered and reports whether every
+			// store succeeded, so an on-demand flush can act as a durability barrier.
+			drain := func() bool {
+				ok := true
 				for {
 					select {
 					case update := <-r.persistCh:
-						_ = store(ctx, update)
+						if store(ctx, update) != nil {
+							ok = false
+						}
 					default:
-						return
+						return ok
 					}
 				}
 			}
@@ -158,8 +163,8 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				case update := <-r.persistCh:
 					_ = store(ctx, update)
 				case ack := <-r.flushReq:
-					drain() // store everything currently buffered
-					close(ack)
+					ok := drain() // store everything currently buffered
+					ack <- ok
 				case <-r.persistStop:
 					drain()
 					maybeCompact()
@@ -255,7 +260,10 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				}
 				clearTimers()
 				onFlushed(wrote && ok)
-				close(ack)
+				// Report success so teardown can gate eviction on real durability.
+				// On failure the batch is retained (not niled) for a later retry.
+				// ack is buffered (cap 1) by every caller, so this never blocks.
+				ack <- ok
 			case <-r.persistStop:
 				drainBuffered()
 				flush(context.Background(), batch) // non-cancelled: survive shutdown

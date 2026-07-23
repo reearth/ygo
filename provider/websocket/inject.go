@@ -494,12 +494,21 @@ func (s *Server) CloseRoom(name string, force bool) error {
 	// Guard against a worker that already exited: a last-peer handleDisconnect
 	// forced above may have already evicted the room and closed persistStop, in
 	// which case the persistDone branch is taken and the flush is a harmless
-	// no-op. No lock is held across the send/ack.
+	// no-op. No lock is held across the send/ack; the ack is buffered (cap 1) so
+	// the worker never blocks reporting the result.
+	//
+	// Unlike handleDisconnect, CloseRoom is a FORCED admin removal: it proceeds to
+	// evict regardless of flush success. The close(persistStop) below drives the
+	// worker's exit-flush as the retry, so a false result here is not fatal — we
+	// only log it (best effort) and do not abort.
 	if rm.flushReq != nil {
-		ack := make(chan struct{})
+		ack := make(chan bool, 1)
 		select {
 		case rm.flushReq <- ack:
-			<-ack
+			if !<-ack {
+				s.log().Warn("CloseRoom flush did not fully persist; relying on exit-flush retry",
+					"room", name)
+			}
 		case <-rm.persistDone:
 		}
 	}
