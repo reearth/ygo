@@ -195,9 +195,12 @@ type PersistenceAdapterContext interface {
 // error (or panic) is logged and does not abort persistence. Retention policy
 // (how much history to keep) is the adapter's concern.
 //
-// On room unload, Compact runs synchronously in the worker's exit path, so a
-// slow or hanging implementation delays that room's teardown; the only bound
-// on it is the ctx passed to Server.Shutdown by its caller.
+// On room unload, Compact runs synchronously in the worker's exit path.
+// Compact is invoked with context.Background() (it is not cancelled by
+// Server.Shutdown), so a slow or hanging Compact delays that room's teardown
+// and its worker goroutine can outlive Shutdown's return (Shutdown stops
+// waiting when its caller's ctx fires, but the worker keeps running until
+// Compact returns).
 type CompactableAdapter interface {
 	Compact(ctx context.Context, room string) error
 }

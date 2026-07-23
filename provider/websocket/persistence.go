@@ -230,28 +230,31 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				// state; it is re-flushed at the stop/shutdown exit case below
 				// with a background context.
 				wrote := len(batch) > 0
-				if flush(ctx, batch) {
+				ok := flush(ctx, batch)
+				if ok {
 					batch = nil
 				}
 				clearTimers()
-				onFlushed(wrote)
+				onFlushed(wrote && ok)
 			case <-maxC:
 				wrote := len(batch) > 0
-				if flush(ctx, batch) {
+				ok := flush(ctx, batch)
+				if ok {
 					batch = nil
 				}
 				clearTimers()
-				onFlushed(wrote)
+				onFlushed(wrote && ok)
 			case ack := <-r.flushReq:
 				// The just-arrived edit may still be in persistCh, not yet in
 				// batch — drain first so an on-demand flush never misses it.
 				drainBuffered()
 				wrote := len(batch) > 0
-				if flush(context.Background(), batch) {
+				ok := flush(context.Background(), batch)
+				if ok {
 					batch = nil
 				}
 				clearTimers()
-				onFlushed(wrote)
+				onFlushed(wrote && ok)
 				close(ack)
 			case <-r.persistStop:
 				drainBuffered()
