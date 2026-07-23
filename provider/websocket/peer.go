@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -115,8 +116,7 @@ func (p *peer) handleMessage(data []byte) {
 		p.broadcastAwareness(awBytes)
 
 	case msgAuth:
-		// Auth messages (type 2) are defined by y-websocket but not used by
-		// this server. Silently ignore.
+		p.handleAuth(dec)
 
 	case msgQueryAwareness:
 		p.sendAwareness(p.room.awareness.EncodeUpdate(nil))
@@ -212,6 +212,68 @@ func (p *peer) handleMessage(data []byte) {
 		// just keeps the dispatcher from dropping the frame.
 	}
 }
+
+// handleAuth processes a Hocuspocus in-band Auth (tag 2) sub-message. No-op
+// when Server.OnTokenAuth is nil (backward compatible with the legacy
+// silent-ignore behavior).
+func (p *peer) handleAuth(dec *encoding.Decoder) {
+	hook := p.server.OnTokenAuth
+	if hook == nil {
+		return
+	}
+	subType, err := dec.ReadVarUint()
+	if err != nil || subType != authTypeToken {
+		return // only client Token(0) sub-messages are actionable
+	}
+	token, err := dec.ReadVarString()
+	if err != nil {
+		p.server.log().Debug("discarded malformed auth token frame", "room", p.roomName, "err", err)
+		return
+	}
+
+	cfg, authErr := p.safeTokenAuth(hook, token)
+	if authErr != nil {
+		p.write(encodeAuthMessage(authTypePermissionDenied, authErr.Error()))
+		p.enqueueClose(wsCodeUnauthorized, authErr.Error())
+		return
+	}
+
+	p.readOnly = cfg.ReadOnly // safe: only read on this read-loop goroutine
+	scope := "read-write"
+	if cfg.ReadOnly {
+		scope = "readonly"
+	}
+	p.write(encodeAuthMessage(authTypeAuthenticated, scope))
+}
+
+// safeTokenAuth calls the hook, converting a panic into a denial.
+func (p *peer) safeTokenAuth(hook func(string, string) (ConnectionConfig, error), token string) (cfg ConnectionConfig, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.server.log().Warn("OnTokenAuth panicked; denying", "room", p.roomName, "panic", r)
+			cfg = ConnectionConfig{}
+			err = fmt.Errorf("authentication error")
+		}
+	}()
+	return hook(p.roomName, token)
+}
+
+// encodeAuthMessage builds a tag-2 auth reply: VarUint(msgAuth) VarUint(sub)
+// VarString(s). docName framing (if enabled) is applied later in writeToConn.
+func encodeAuthMessage(subType uint64, s string) []byte {
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgAuth)
+		enc.WriteVarUint(subType)
+		enc.WriteVarString(s)
+	})
+}
+
+// enqueueClose is fully implemented in Task 8 (graceful queued close with
+// WS close code + reason). This is a TEMPORARY stub for Task 7 so the
+// success path compiles and is testable; it ignores code/reason and just
+// force-closes the underlying connection. DO NOT extend this — Task 8
+// replaces it wholesale.
+func (p *peer) enqueueClose(code int, reason string) { _ = code; _ = reason; _ = p.conn.Close() }
 
 // trackAwarenessClients records which awareness clientIDs this peer owns
 // so they can be removed when the peer disconnects.

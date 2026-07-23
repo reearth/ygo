@@ -369,6 +369,19 @@ type Server struct {
 	// to the embedding application.
 	OnStateless StatelessHook
 
+	// OnTokenAuth, if non-nil, validates the token from a Hocuspocus in-band
+	// Auth message (tag 2). A nil error accepts the connection and replies
+	// Authenticated (scope from the returned ConnectionConfig.ReadOnly); a
+	// non-nil error replies PermissionDenied(err) and closes with WS 4401.
+	// When nil, tag-2 frames are silently ignored (unchanged legacy behavior).
+	//
+	// OnTokenAuth complements the HTTP-boundary AuthFunc/Authorize; it does not
+	// replace them. IMPORTANT: it is NOT a document-confidentiality gate — the
+	// initial sync is served before any PermissionDenied, so deployments that
+	// must withhold document contents from unauthenticated clients must reject
+	// them at the boundary via AuthFunc/Authorize.
+	OnTokenAuth func(room, token string) (ConnectionConfig, error)
+
 	// OnLoadDocument, if non-nil, is called once per room immediately
 	// after the document has been bootstrapped from the PersistenceAdapter
 	// (or freshly constructed when no adapter is configured) but before
