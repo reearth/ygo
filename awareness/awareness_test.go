@@ -957,3 +957,54 @@ func TestUnit_Meta_LocalTombstone(t *testing.T) {
 	require.Greater(t, m2.Clock, m.Clock)
 	require.True(t, m2.LastUpdated.IsZero(), "local tombstone has zero LastUpdated")
 }
+
+func TestUnit_Heartbeat_OnUpdateNotOnChange(t *testing.T) {
+	a := awareness.New(1)
+	b := awareness.New(99)
+	b.SetLocalState(map[string]any{"name": "x"})
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+
+	var chg, upd int
+	a.OnChange(func(awareness.ChangeEvent) { chg++ })
+	a.OnUpdate(func(awareness.UpdateEvent) { upd++ })
+
+	// remote heartbeat: same content, bumped clock
+	b.Heartbeat()
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+
+	require.Equal(t, 0, chg, "OnChange must NOT fire on a content-identical heartbeat")
+	require.Equal(t, 1, upd, "OnUpdate must fire on the heartbeat")
+}
+
+func TestUnit_ContentChange_FiresBoth(t *testing.T) {
+	a := awareness.New(1)
+	b := awareness.New(99)
+	b.SetLocalState(map[string]any{"name": "x"})
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+
+	var chg, upd int
+	a.OnChange(func(awareness.ChangeEvent) { chg++ })
+	a.OnUpdate(func(awareness.UpdateEvent) { upd++ })
+
+	b.SetLocalState(map[string]any{"name": "y"})
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+	require.Equal(t, 1, chg)
+	require.Equal(t, 1, upd)
+}
+
+func TestUnit_ReactivatedTombstone_ClassifiedUpdated(t *testing.T) {
+	a := awareness.New(1)
+	b := awareness.New(99)
+	b.SetLocalState(map[string]any{"n": 1})
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+	b.SetLocalState(nil) // remove -> tombstone on a
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+
+	var ev awareness.UpdateEvent
+	a.OnUpdate(func(e awareness.UpdateEvent) { ev = e })
+	b.SetLocalState(map[string]any{"n": 2}) // reactivate
+	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
+
+	require.Equal(t, []uint64{99}, ev.Updated, "reactivated tombstone is 'updated' (Yjs/yrs parity)")
+	require.Empty(t, ev.Added)
+}

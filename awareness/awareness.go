@@ -1,10 +1,12 @@
 package awareness
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"math"
+	"reflect"
 	"sync"
 	"time"
 
@@ -144,7 +146,11 @@ type Awareness struct {
 	// entries that arrived via ApplyUpdate are counted; SetLocalState is
 	// excluded because the local client's state is set by trusted embedder
 	// code, not adversarial wire input.
-	wireBytes   map[uint64]int
+	wireBytes map[uint64]int
+	// priorJSON stores the last ApplyUpdate-accepted non-null wire bytes per
+	// client, for the OnChange content-change fast-path (bytes.Equal). Same
+	// lifecycle as wireBytes: written on non-null accept, deleted on tombstone.
+	priorJSON   map[uint64][]byte
 	activeBytes int64 // sum of wireBytes values
 	maxBytes    int64 // 0 = unlimited (default; backward compatible)
 	maxClients  int   // 0 = unlimited (default; backward compatible)
@@ -163,6 +169,7 @@ func New(clientID uint64) *Awareness {
 		states:    make(map[uint64]ClientState),
 		meta:      make(map[uint64]time.Time),
 		wireBytes: make(map[uint64]int),
+		priorJSON: make(map[uint64][]byte),
 		removedAt: make(map[uint64]time.Time),
 	}
 }
@@ -520,7 +527,7 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 	}
 
 	a.mu.Lock()
-	var added, updated, removed []uint64
+	var added, updated, changedUpdated, removed []uint64
 
 	for _, e := range entries {
 		current, exists := a.states[e.clientID]
@@ -642,7 +649,19 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 			if wasActive {
 				removed = append(removed, e.clientID)
 			}
+			delete(a.priorJSON, e.clientID)
 		} else {
+			// Content-change detection (pre-update values: oldSize, current.State,
+			// priorJSON[e.clientID] are all read before the overwrites below).
+			changed := true
+			if oldSize == newSize {
+				if prev, ok := a.priorJSON[e.clientID]; ok && bytes.Equal(prev, e.jsonBytes) {
+					changed = false
+				} else if current.State != nil && reflect.DeepEqual(current.State, state) {
+					changed = false
+				}
+			}
+
 			a.states[e.clientID] = ClientState{
 				Clock: e.clock,
 				State: state,
@@ -654,8 +673,13 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 			// Update byte accounting: replace the old size with the new size.
 			a.activeBytes += int64(newSize - oldSize)
 			a.wireBytes[e.clientID] = newSize
-			if wasActive {
+			a.priorJSON[e.clientID] = append([]byte(nil), e.jsonBytes...)
+
+			if exists {
 				updated = append(updated, e.clientID)
+				if changed {
+					changedUpdated = append(changedUpdated, e.clientID)
+				}
 			} else {
 				added = append(added, e.clientID)
 			}
@@ -666,8 +690,10 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 	updObs := a.copyUpdateObservers()
 	a.mu.Unlock()
 
+	if len(added) > 0 || len(changedUpdated) > 0 || len(removed) > 0 {
+		fireObservers(obs, ChangeEvent{Added: added, Updated: changedUpdated, Removed: removed, Origin: origin})
+	}
 	if len(added) > 0 || len(updated) > 0 || len(removed) > 0 {
-		fireObservers(obs, ChangeEvent{Added: added, Updated: updated, Removed: removed, Origin: origin})
 		fireUpdateObservers(updObs, UpdateEvent{Added: added, Updated: updated, Removed: removed, Origin: origin})
 	}
 
