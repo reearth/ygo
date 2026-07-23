@@ -3,14 +3,20 @@ package websocket
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
+	ygsync "github.com/reearth/ygo/sync"
 )
 
 // --- fake clock -----------------------------------------------------------
@@ -441,4 +447,215 @@ func TestPersistCoalesce_MergeFailureFallsBack(t *testing.T) {
 
 	assert.Eventually(t, func() bool { return a.count() == n }, time.Second, 5*time.Millisecond,
 		"merge failure should fall back to individual stores")
+}
+
+// --- flush-before-evict teardown (Task 4 / #175 follow-up) ------------------
+//
+// These tests exercise the real disconnect/reconnect path end-to-end through an
+// httptest server so the teardown reorder in handleDisconnect + CloseRoom is
+// covered against a live worker. They live in the internal package, so the
+// external dial/handshake helpers in server_test.go are not reachable — the
+// minimal local equivalents below dial a gws client, run the sync handshake,
+// and apply received sync frames into a local *crdt.Doc.
+
+// dialWS opens a WebSocket connection to the test server for the given room.
+func dialWS(t *testing.T, ts *httptest.Server, room string) *gws.Conn {
+	t.Helper()
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/" + room
+	conn, _, err := gws.DefaultDialer.Dial(u, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// drainWS reads the three handshake frames the server always sends on connect
+// (sync step-1, sync step-2, awareness) and applies any sync frames into doc.
+// A fixed read count is used because gorilla's reader is permanently broken by a
+// deadline expiry; the server contract is exactly three frames.
+func drainWS(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
+	t.Helper()
+	for i := 0; i < 3; i++ {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := conn.ReadMessage()
+		_ = conn.SetReadDeadline(time.Time{})
+		require.NoError(t, err)
+		dec := encoding.NewDecoder(data)
+		outer, err := dec.ReadVarUint()
+		require.NoError(t, err)
+		if outer == msgSync {
+			if _, err := ygsync.ApplySyncMessage(doc, dec.RemainingBytes(), nil); err != nil {
+				t.Fatalf("apply sync frame: %v", err)
+			}
+		}
+	}
+}
+
+// sendV1Update frames a full V1 update as an outer msgSync + inner MsgUpdate
+// (VarBytes-wrapped) and sends it to the server.
+func sendV1Update(t *testing.T, conn *gws.Conn, update []byte) {
+	t.Helper()
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(msgSync)
+	enc.WriteVarUint(ygsync.MsgUpdate)
+	enc.WriteVarBytes(update)
+	require.NoError(t, conn.WriteMessage(gws.BinaryMessage, enc.Bytes()))
+}
+
+// blockingAdapter blocks StoreUpdate until released, so a flush is in-flight
+// during the reconnect window. close(blocked) signals the first store attempt.
+type blockingAdapter struct {
+	mu      sync.Mutex
+	docs    map[string][]byte
+	release chan struct{}
+	blocked chan struct{}
+	once    sync.Once
+}
+
+func newBlockingAdapter() *blockingAdapter {
+	return &blockingAdapter{docs: map[string][]byte{}, release: make(chan struct{}), blocked: make(chan struct{})}
+}
+
+func (a *blockingAdapter) LoadDoc(room string) ([]byte, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.docs[room], nil
+}
+
+func (a *blockingAdapter) StoreUpdate(room string, update []byte) error {
+	a.once.Do(func() { close(a.blocked) })
+	<-a.release // block until the test releases
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.docs[room]) == 0 {
+		a.docs[room] = append([]byte(nil), update...)
+	} else {
+		merged, err := crdt.MergeUpdatesV1(a.docs[room], update)
+		if err != nil {
+			return err
+		}
+		a.docs[room] = merged
+	}
+	return nil
+}
+
+// A peer edits then disconnects; while the flush is blocked, a reconnect must
+// NOT lose the edit (it finds the still-warm room, or reads a durable store).
+func TestPersistTeardown_NoLossOnQuickRefresh(t *testing.T) {
+	a := newBlockingAdapter()
+	// Real server (real clock) so the disconnect/reconnect path runs end-to-end.
+	s := NewServerWithPersistence(a)
+	s.PersistCoalesceWindow = 5 * time.Second // long window: edit stays in batch
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	// Peer A edits.
+	docA := crdt.New(crdt.WithClientID(1))
+	connA := dialWS(t, ts, "room")
+	drainWS(t, connA, docA)
+	txtA := docA.GetText("t")
+	docA.Transact(func(txn *crdt.Transaction) { txtA.Insert(txn, 0, "hello", nil) })
+	sendV1Update(t, connA, crdt.EncodeStateAsUpdateV1(docA, nil))
+
+	// Disconnect A -> teardown starts flush (blocks in StoreUpdate).
+	_ = connA.Close()
+	<-a.blocked // flush is now in-flight and blocked
+
+	// Reconnect (fresh peer) for the same room while the flush is blocked.
+	go func() { time.Sleep(50 * time.Millisecond); close(a.release) }()
+	docB := crdt.New(crdt.WithClientID(2))
+	connB := dialWS(t, ts, "room")
+	drainWS(t, connB, docB)
+
+	assert.Equal(t, "hello", docB.GetText("t").ToString(),
+		"reconnect must see the edit — no loss on quick refresh")
+}
+
+// A peer rejoining during the flush keeps the room alive (no reload, no unload
+// hook). Uses the blocking adapter to hold the flush open across the rejoin.
+func TestPersistTeardown_RejoinDuringFlushKeepsRoom(t *testing.T) {
+	a := newBlockingAdapter()
+	s := NewServerWithPersistence(a)
+	s.PersistCoalesceWindow = 5 * time.Second
+	var unloaded int32
+	s.OnUnloadDocument = func(_ context.Context, _ string) {
+		atomic.AddInt32(&unloaded, 1)
+	}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	docA := crdt.New(crdt.WithClientID(1))
+	connA := dialWS(t, ts, "room")
+	drainWS(t, connA, docA)
+	txtA := docA.GetText("t")
+	docA.Transact(func(txn *crdt.Transaction) { txtA.Insert(txn, 0, "hi", nil) })
+	sendV1Update(t, connA, crdt.EncodeStateAsUpdateV1(docA, nil))
+
+	_ = connA.Close()
+	<-a.blocked
+	// Rejoin while flush blocked, then release.
+	docB := crdt.New(crdt.WithClientID(2))
+	connB := dialWS(t, ts, "room")
+	go func() { time.Sleep(50 * time.Millisecond); close(a.release) }()
+	drainWS(t, connB, docB)
+
+	assert.Equal(t, "hi", docB.GetText("t").ToString())
+	assert.Equal(t, int32(0), atomic.LoadInt32(&unloaded), "room must not unload when a peer rejoined")
+}
+
+// discoverabilityProbeAdapter records, at the moment StoreUpdate runs, whether
+// the room is still present in the server map (discoverable via GetDoc). It
+// implements only StoreUpdate (not the Context variant) so the worker calls
+// this method directly. GetDoc takes s.rmu.RLock; the flush send/ack in the
+// teardown paths never holds rmu, so no deadlock.
+type discoverabilityProbeAdapter struct {
+	mu          sync.Mutex
+	s           *Server
+	room        string
+	stores      [][]byte
+	liveAtStore bool
+}
+
+func (a *discoverabilityProbeAdapter) LoadDoc(string) ([]byte, error) { return nil, nil }
+func (a *discoverabilityProbeAdapter) StoreUpdate(_ string, u []byte) error {
+	live := a.s != nil && a.s.GetDoc(a.room) != nil
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if live {
+		a.liveAtStore = true
+	}
+	a.stores = append(a.stores, append([]byte(nil), u...))
+	return nil
+}
+
+// CloseRoom must flush the pending coalesced batch WHILE the room is still
+// discoverable in s.rooms (via flushReq), not after evicting it. If the flush
+// happened after the delete, a racing reconnect would create a fresh room and
+// read a stale store. We probe the ordering directly: the store must observe
+// the room still present. Also asserts the flushed bytes carry the edit.
+func TestPersistTeardown_CloseRoomFlushesBeforeEvict(t *testing.T) {
+	a := &discoverabilityProbeAdapter{room: "room"}
+	s := NewServerWithPersistence(a)
+	a.s = s
+	s.PersistCoalesceWindow = 5 * time.Second
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	// Server-side edit via Apply auto-creates a peerless room and batches the
+	// update behind the 5s window (never flushed by a timer within the test).
+	require.NoError(t, s.Apply(context.Background(), "room",
+		func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := doc.GetText("t")
+			transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "persisted", nil) })
+		}))
+
+	require.NoError(t, s.CloseRoom("room", false))
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	require.NotEmpty(t, a.stores, "CloseRoom must flush the pending batch before evicting")
+	assert.True(t, a.liveAtStore,
+		"the flush must happen while the room is still discoverable (before delete)")
+	got := crdt.New()
+	require.NoError(t, crdt.ApplyUpdateV1(got, a.stores[len(a.stores)-1], nil))
+	assert.Equal(t, "persisted", got.GetText("t").ToString())
 }

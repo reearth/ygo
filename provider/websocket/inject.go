@@ -486,6 +486,24 @@ func (s *Server) CloseRoom(name string, force bool) error {
 		<-d
 	}
 
+	// FLUSH-BEFORE-EVICT (#175 follow-up). Make the pending coalesced batch
+	// durable while rm is still in s.rooms — before re-acquiring s.rmu to
+	// delete it — so a concurrent GetDoc / reconnect reads up-to-date state
+	// rather than a stale store. Uses the flushReq path (worker stays alive,
+	// room discoverable) instead of relying on close(persistStop)'s exit-flush.
+	// Guard against a worker that already exited: a last-peer handleDisconnect
+	// forced above may have already evicted the room and closed persistStop, in
+	// which case the persistDone branch is taken and the flush is a harmless
+	// no-op. No lock is held across the send/ack.
+	if rm.flushReq != nil {
+		ack := make(chan struct{})
+		select {
+		case rm.flushReq <- ack:
+			<-ack
+		case <-rm.persistDone:
+		}
+	}
+
 	// Re-acquire locks to delete the room. Compare pointer identity so we
 	// don't delete a REPLACEMENT room that was created at the same key:
 	//   - handleDisconnect may have already deleted the original.
