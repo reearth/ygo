@@ -165,10 +165,23 @@ func (t *abstractType) leftNeighbourAt(index int) (*Item, int) {
 
 	item, start := t.findMarkerMut(index)
 	if item == nil {
-		// index > total rendered length: append after the last countable item.
+		// index > total rendered length (append / insert-beyond-end): anchor
+		// after the last item that actually RENDERS, using the shared move-aware
+		// renderedStep — NOT the raw `!Deleted && IsCountable` test the old
+		// fallback used, which is move-blind. A winning ContentMove is
+		// non-countable yet renders its target here (so it IS the rendered tail
+		// and the correct physical anchor); a moved-away item is countable but
+		// renders elsewhere (so it must NOT be chosen). Picking the physical
+		// last-countable item instead would make append incoherent with the
+		// move-aware Get/Slice/deleteRange: when an element is moved TO the end,
+		// the ContentMove is the physical tail and the last plain item is not the
+		// rendered tail, so the old walk anchored the new element BEFORE the moved
+		// one (#181/#190). For move-free content renderedStep's countable branch
+		// is exactly `!Deleted && IsCountable`, so this is byte-identical without
+		// moves.
 		var last *Item
 		for it := t.start; it != nil; it = it.Right {
-			if !it.Deleted && it.Content.IsCountable() {
+			if countable, _, _ := t.renderedStep(it); countable {
 				last = it
 			}
 		}
@@ -176,11 +189,19 @@ func (t *abstractType) leftNeighbourAt(index int) (*Item, int) {
 	}
 
 	// findMarkerMut (like the cold oracle) always returns an item whose
-	// rendered start is strictly < index, so offset ∈ [1, len]. offset == len
+	// rendered start is strictly < index, so offset ∈ [1, n]. offset == n
 	// means index is exactly at the item's end → insert right after it;
-	// otherwise the item must be split at offset.
+	// otherwise the item must be split at offset. Use renderedStep's n (not
+	// item.Content.Len()) for the same move-aware notion of "how wide is this
+	// item" that findMarkerMut used to bracket index — keeping Insert's split
+	// point consistent with the position walk. For a winning ContentMove n is
+	// the moved target's width (==1, since Move forces single-element targets
+	// and ContentMove.Len()==1), and for any plain item n==Content.Len(), so
+	// this is a no-op relative to the old check; it only closes a latent gap if
+	// the two notions of width could ever disagree for the returned item.
+	_, n, _ := t.renderedStep(item)
 	offset := index - start
-	if offset >= item.Content.Len() {
+	if offset >= n {
 		return item, 0
 	}
 	return item, offset

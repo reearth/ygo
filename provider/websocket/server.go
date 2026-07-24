@@ -316,9 +316,12 @@ type room struct {
 	// handleDisconnect's teardown path when the room goes empty and the
 	// durable flush succeeds; cleared at peer REGISTRATION (ServeHTTP) — not at
 	// room lookup — so it tracks true occupancy, and by the immediate-mutation
-	// relay/admin callers via clearIdle. Guarded by mu. The background sweeper
-	// that evicts rooms whose idleSince has aged past RoomIdleTimeout is a
-	// separate piece of work (#183 follow-up); this field only records the stamp.
+	// relay/admin callers via clearIdle. Guarded by mu. Rooms stamped idle here
+	// are reclaimed by the background sweeper (idle_sweep.go, started lazily via
+	// ensureIdleSweeper when RoomIdleTimeout > 0): it evicts any room idle longer
+	// than RoomIdleTimeout and, when MaxResidentRooms > 0, the least-recently-idle
+	// rooms in excess of that bound (LRU). This field only records the stamp; the
+	// sweeper acts on it.
 	idleSince time.Time
 }
 
