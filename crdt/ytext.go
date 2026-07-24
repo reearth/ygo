@@ -495,8 +495,7 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 // once any formatting exists, the exact walk resumes so scattered markers
 // anywhere before anchor are still picked up correctly (search markers only
 // track rendered position, not accumulated attribute state, so they cannot
-// safely shortcut this in general — see the abstractType.hasMoves comment
-// for the parallel reasoning on the Move side). Gated on t.disableMarkers too
+	// safely shortcut this in general). Gated on t.disableMarkers too
 // so the force-cold test seam still exercises the full walk.
 func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 	t := &txt.abstractType

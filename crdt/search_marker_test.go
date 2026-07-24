@@ -450,15 +450,14 @@ func TestSearchMarker_ArraySlice_MatchesCold(t *testing.T) {
 	}
 }
 
-// TestSearchMarker_ArrayGetSlice_MoveGated_MatchesCold guards the hasMoves
-// gate added alongside this task's Get/Slice routing: search_marker.go's
-// renderedStep counts items by PHYSICAL position and doesn't yet know how to
-// render a ContentMove's target at its destination or skip an item that
-// moved away (that move-awareness is deferred to a later task), so an array
-// that has ever used Move must keep taking the original fully move-aware
-// walk regardless of disableMarkers. Without the gate this would silently
-// return wrong values instead of merely being slow.
-func TestSearchMarker_ArrayGetSlice_MoveGated_MatchesCold(t *testing.T) {
+// TestSearchMarker_ArrayGetSlice_Move_MatchesCold checks that the move-aware
+// search-marker walk (G5) returns the same values via markers as via a full
+// cold walk for an array that uses Move. renderedStep now renders a winning
+// ContentMove's target at its destination and skips a moved-away item at its
+// origin, so YArray.Get/Slice route move-containing arrays through the marker
+// fast path (the earlier hasMoves bypass is gone). Independent oracle:
+// [b c d a e].
+func TestSearchMarker_ArrayGetSlice_Move_MatchesCold(t *testing.T) {
 	build := func(cold bool) ([]any, []any) {
 		d := New(WithClientID(1))
 		arr := d.GetArray("a")
@@ -483,6 +482,176 @@ func TestSearchMarker_ArrayGetSlice_MoveGated_MatchesCold(t *testing.T) {
 	if !reflect.DeepEqual(gotGet, want) {
 		t.Fatalf("Get(0..4) got %v want %v", gotGet, want)
 	}
+}
+
+// TestSearchMarker_WithMove_MatchesCold is the move-awareness oracle (G5): a
+// document containing an active ContentMove must return the same rendered order
+// via the marker fast path as via a full cold walk (disableMarkers), across
+// every index. Covers three ContentMove shapes — a move that WINS (renders its
+// target at the destination), a move that LOSES concurrent arbitration (present
+// in the linked list but renders nothing), and a move whose element is later
+// DELETED (renders nothing). renderedStep must count a moved-away item at its
+// rendered destination, not its physical list position, or markers diverge from
+// cold.
+func TestSearchMarker_WithMove_MatchesCold(t *testing.T) {
+	// Scenario 1: single winning move. [0 1 2 3 4], Move(4→1) => [0 4 1 2 3].
+	t.Run("winning", func(t *testing.T) {
+		build := func(cold bool) []any {
+			d := New(WithClientID(1))
+			arr := d.GetArray("a")
+			arr.baseType().disableMarkers = cold
+			d.Transact(func(tr *Transaction) {
+				for _, v := range []int{0, 1, 2, 3, 4} {
+					arr.Insert(tr, arr.Len(), []any{v})
+				}
+			})
+			d.Transact(func(tr *Transaction) { arr.Move(tr, 4, 1) })
+			out := make([]any, 0, arr.Len())
+			for i := 0; i < arr.Len(); i++ {
+				out = append(out, arr.Get(i))
+			}
+			return out
+		}
+		got, cold := build(false), build(true)
+		if !reflect.DeepEqual(got, cold) {
+			t.Fatalf("winning move: markers=%v cold=%v", got, cold)
+		}
+		want := []any{int64(0), int64(4), int64(1), int64(2), int64(3)}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("winning move: got %v want %v (independent oracle)", got, want)
+		}
+	})
+
+	// Scenario 2: a losing ContentMove. Two peers move the same element to
+	// different destinations; after merge both docs hold two ContentMove items
+	// targeting the same item — one wins, one loses (renders nothing). The
+	// lower ClientID wins, so doc1's destination is authoritative.
+	t.Run("losing", func(t *testing.T) {
+		build := func(cold bool) []any {
+			doc1 := newTestDoc(1)
+			doc2 := newTestDoc(2)
+			arr1 := doc1.GetArray("list")
+			arr2 := doc2.GetArray("list")
+			arr1.baseType().disableMarkers = cold
+			doc1.Transact(func(txn *Transaction) { arr1.Push(txn, []any{"a", "b", "c", "d"}) })
+			if err := ApplyUpdateV1(doc2, EncodeStateAsUpdateV1(doc1, nil), nil); err != nil {
+				t.Fatal(err)
+			}
+			doc1.Transact(func(txn *Transaction) { arr1.Move(txn, 0, 1) }) // [b a c d]
+			doc2.Transact(func(txn *Transaction) { arr2.Move(txn, 0, 3) }) // [b c d a]
+			sv1, sv2 := doc1.store.StateVector(), doc2.store.StateVector()
+			if err := ApplyUpdateV1(doc1, EncodeStateAsUpdateV1(doc2, sv1), nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyUpdateV1(doc2, EncodeStateAsUpdateV1(doc1, sv2), nil); err != nil {
+				t.Fatal(err)
+			}
+			out := make([]any, 0, arr1.Len())
+			for i := 0; i < arr1.Len(); i++ {
+				out = append(out, arr1.Get(i))
+			}
+			return out
+		}
+		got, cold := build(false), build(true)
+		if !reflect.DeepEqual(got, cold) {
+			t.Fatalf("losing move: markers=%v cold=%v", got, cold)
+		}
+	})
+
+	// Scenario 3: warm markers across a move — after the move, further
+	// positioned inserts build/refresh markers under move presence (exercising
+	// markPositionAt's move-aware counting and findMarkerRO reading from a
+	// move-aware marker), then Get across all indices must equal cold and the
+	// independent oracle. Inserting into a move-containing array also exercises
+	// leftNeighbourAt on a move-aware bracket.
+	t.Run("warm-inserts-after-move", func(t *testing.T) {
+		build := func(cold bool) []any {
+			d := New(WithClientID(1))
+			arr := d.GetArray("a")
+			arr.baseType().disableMarkers = cold
+			d.Transact(func(tr *Transaction) {
+				for i := 0; i < 30; i++ {
+					arr.Insert(tr, arr.Len(), []any{i})
+				}
+				arr.Move(tr, 29, 5) // move last elem to index 5 (a ContentMove there)
+				// Positioned inserts after the move rebuild markers move-aware.
+				// Index 6 brackets the moved element's ContentMove in
+				// leftNeighbourAt, exercising the offset path on a move bracket.
+				arr.Insert(tr, 6, []any{99})
+				arr.Insert(tr, 3, []any{100})
+				arr.Insert(tr, 10, []any{101})
+				arr.Insert(tr, 20, []any{102})
+			})
+			out := make([]any, 0, arr.Len())
+			for i := 0; i < arr.Len(); i++ {
+				out = append(out, arr.Get(i))
+			}
+			return out
+		}
+		got, cold := build(false), build(true)
+		if !reflect.DeepEqual(got, cold) {
+			t.Fatalf("warm inserts after move: markers=%v cold=%v", got, cold)
+		}
+	})
+
+	// Scenario 4: a winning move whose element is then deleted — the
+	// ContentMove and its target both render nothing.
+	t.Run("deleted", func(t *testing.T) {
+		build := func(cold bool) []any {
+			d := New(WithClientID(1))
+			arr := d.GetArray("a")
+			arr.baseType().disableMarkers = cold
+			d.Transact(func(tr *Transaction) {
+				for _, v := range []int{0, 1, 2, 3, 4} {
+					arr.Insert(tr, arr.Len(), []any{v})
+				}
+			})
+			d.Transact(func(tr *Transaction) { arr.Move(tr, 4, 1) }) // [0 4 1 2 3]
+			d.Transact(func(tr *Transaction) { arr.Delete(tr, 1, 1) })
+			out := make([]any, 0, arr.Len())
+			for i := 0; i < arr.Len(); i++ {
+				out = append(out, arr.Get(i))
+			}
+			return out
+		}
+		got, cold := build(false), build(true)
+		if !reflect.DeepEqual(got, cold) {
+			t.Fatalf("deleted move: markers=%v cold=%v", got, cold)
+		}
+	})
+
+	// Scenario 5: many deletes at varied positions on a move-containing array.
+	// deleteRange positions its start via findMarkerMut (now move-aware) and
+	// then walks; markers ON vs force-cold must yield the identical document,
+	// guaranteeing the marker cache never changes which element a delete
+	// resolves to even when moves are present.
+	t.Run("delete-positions-after-move", func(t *testing.T) {
+		build := func(cold bool) []any {
+			d := New(WithClientID(1))
+			arr := d.GetArray("a")
+			arr.baseType().disableMarkers = cold
+			d.Transact(func(tr *Transaction) {
+				for i := 0; i < 40; i++ {
+					arr.Insert(tr, arr.Len(), []any{i})
+				}
+				arr.Move(tr, 39, 4)
+				arr.Move(tr, 10, 30)
+				arr.Delete(tr, 5, 3)
+				arr.Delete(tr, 0, 2)
+				arr.Delete(tr, 20, 4)
+				arr.Delete(tr, 15, 1)
+			})
+			out := make([]any, 0, arr.Len())
+			for i := 0; i < arr.Len(); i++ {
+				out = append(out, arr.Get(i))
+			}
+			return out
+		}
+		got, cold := build(false), build(true)
+		if !reflect.DeepEqual(got, cold) {
+			t.Fatalf("delete positions after move: markers=%v cold=%v", got, cold)
+		}
+	})
 }
 
 // cyclicText returns a length-n string where byte i is determined by i mod 7

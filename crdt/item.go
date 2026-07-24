@@ -265,13 +265,18 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		}
 	}
 
-	// Yjs parity note: once any ContentMove item is integrated into this type,
-	// mark hasMoves so YArray.Get/Slice know the marker-based fast path
-	// (search_marker.go's renderedStep, which is move-oblivious) can no
-	// longer be trusted and must fall back to the full move-aware walk. See
-	// the hasMoves doc comment on abstractType (abstract_type.go).
+	// Search-marker invalidation for moves (G5). renderedStep is fully
+	// move-aware, so markers CAN accelerate move-containing arrays — but a
+	// ContentMove changes rendered positions in a way the insertHint shift
+	// above cannot express: it is non-countable (so the length/marker block was
+	// skipped for it entirely) yet its arbitration re-renders the target at the
+	// destination and blanks the target's original slot. Any cached marker may
+	// now report a stale rendered start, so clear them all. Clearing is always
+	// safe (a subsequent lookup repopulates via a cold walk) and moves are rare
+	// enough that a full clear per move is acceptable. Covers both a fresh move
+	// and a re-arbitration that changes which move wins a target.
 	if _, ok := item.Content.(*ContentMove); ok && item.Parent != nil {
-		item.Parent.hasMoves = true
+		item.Parent.clearMarkers()
 	}
 
 	// Track ContentString items for end-of-transaction run squashing.
@@ -383,6 +388,21 @@ func (item *Item) delete(txn *Transaction) {
 	if item.Parent != nil && item.Content.IsCountable() {
 		item.Parent.length -= item.Content.Len()
 		if !txn.Local {
+			item.Parent.clearMarkers()
+		}
+	}
+	// Move-related deletes change rendered positions in ways the plain
+	// updateMarkerChanges index-shift can't model (G5): tombstoning a
+	// ContentMove stops it rendering its target at the destination (the target
+	// may re-render at its origin), and tombstoning a moved-away item removes a
+	// rendered position at the destination rather than at the item's physical
+	// slot. Either way, clear all markers — always safe, and independent of
+	// txn.Local since local move-deletes also take this path. ContentMove is
+	// non-countable, so the block above never runs for it.
+	if item.Parent != nil {
+		if _, ok := item.Content.(*ContentMove); ok {
+			item.Parent.clearMarkers()
+		} else if item.MovedBy != nil {
 			item.Parent.clearMarkers()
 		}
 	}

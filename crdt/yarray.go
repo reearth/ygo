@@ -256,72 +256,37 @@ func (a *YArray) Get(index int) any {
 		return nil
 	}
 
-	// Marker fast path: skip the O(index) walk from t.start via findMarkerRO
-	// (safe under RLock — it never mutates t.markers). Only valid when this
-	// array has never used Move: renderedStep counts items by PHYSICAL
-	// position and doesn't yet know how to render a ContentMove's target at
-	// its destination or skip an item that moved away, so a document with
-	// moves keeps the full move-aware walk below (see hasMoves doc comment).
+	// Single position definition (G5): findMarkerRO brackets the PHYSICAL item
+	// whose rendered range [start, start+n) contains index, using renderedStep
+	// — the one shared, move-aware notion of how each item contributes to
+	// rendered position. It internally handles the force-cold seam
+	// (t.disableMarkers → full walk from t.start) and an empty marker cache, so
+	// there is no separate inline cold walk to drift out of sync. It is safe
+	// under RLock (never mutates t.markers).
 	//
 	// index+1 converts Get's "which element" (0-based) numbering to
 	// findMarkerRO's "insert-before" numbering: findMarkerRO(index+1) brackets
-	// the item whose rendered range [start, start+n) contains index, with
-	// start==the item's own rendered start — exactly what the cold loop below
-	// computes as `counted`. The tie-break at an exact item boundary agrees
-	// too: findMarkerRO returns the earlier item when start+n == index+1,
-	// which is precisely the cold loop's `counted+n > index` bracket.
-	if !t.disableMarkers && !t.hasMoves {
-		item, start := t.findMarkerRO(index + 1)
-		if item == nil {
-			return nil
-		}
-		switch c := item.Content.(type) {
-		case *ContentAny:
-			return c.Vals[index-start]
-		case *ContentType:
-			return c.Type.owner
-		}
+	// the item whose rendered range contains index, with start == the item's
+	// own rendered start. The tie-break at an exact item boundary agrees too:
+	// findMarkerRO returns the earlier item when start+n == index+1.
+	//
+	// For a winning ContentMove the bracketing physical item is the ContentMove
+	// itself; renderedStep reports its rendered contribution as the moved
+	// target's, so renderAt points at the value-bearing target item. For a
+	// plain item renderAt is nil and the value comes from the item itself.
+	item, start := t.findMarkerRO(index + 1)
+	if item == nil {
 		return nil
 	}
-
-	counted := 0
-	for item := t.start; item != nil; item = item.Right {
-		if item.Deleted {
-			continue
-		}
-		if cm, ok := item.Content.(*ContentMove); ok {
-			if a.doc != nil {
-				target := a.doc.store.Find(*cm.Target)
-				if target != nil && target.MovedBy == item && !target.Deleted {
-					n := target.Content.Len()
-					if counted+n > index {
-						if ca, ok := target.Content.(*ContentAny); ok {
-							return ca.Vals[index-counted]
-						}
-						return nil
-					}
-					counted += n
-				}
-			}
-			continue
-		}
-		if !item.Content.IsCountable() {
-			continue
-		}
-		if item.MovedBy != nil {
-			continue
-		}
-		n := item.Content.Len()
-		if counted+n > index {
-			switch c := item.Content.(type) {
-			case *ContentAny:
-				return c.Vals[index-counted]
-			case *ContentType:
-				return c.Type.owner
-			}
-			return nil
-		}
-		counted += n
+	valItem := item
+	if _, _, renderAt := t.renderedStep(item); renderAt != nil {
+		valItem = renderAt
+	}
+	switch c := valItem.Content.(type) {
+	case *ContentAny:
+		return c.Vals[index-start]
+	case *ContentType:
+		return c.Type.owner
 	}
 	return nil
 }
@@ -478,50 +443,34 @@ func (a *YArray) Slice(start, end int) []any {
 	}
 	result := make([]any, 0, end-start)
 
-	// Marker fast path: jump straight to the item bracketing `start` instead
-	// of walking from t.start — same hasMoves/disableMarkers safety gate as
-	// Get (see its comment). Once positioned, the loop body below (unchanged,
-	// move-aware) still visits every item through `end` to collect values, so
-	// only the O(start) prefix walk is skipped, not the O(end-start) work.
-	var item *Item
-	counted := 0
-	if !t.disableMarkers && !t.hasMoves {
-		item, counted = t.findMarkerRO(start + 1)
-	} else {
-		item = t.start
-	}
+	// Marker fast path: jump straight to the physical item bracketing `start`
+	// via findMarkerRO instead of walking from t.start (it handles the
+	// force-cold seam and empty cache internally, so the disableMarkers path
+	// funnels through the same code). Once positioned, the loop still visits
+	// every item through `end` to collect values, so only the O(start) prefix
+	// walk is skipped, not the O(end-start) work.
+	//
+	// The loop derives countability, rendered length and the value-bearing
+	// item from renderedStep — the same shared, move-aware definition
+	// findMarkerRO used to position `counted` — so the collection walk can
+	// never drift out of step with the bracket it started from.
+	item, counted := t.findMarkerRO(start + 1)
 	for ; item != nil && counted < end; item = item.Right {
-		if item.Deleted {
+		countable, n, renderAt := t.renderedStep(item)
+		if !countable {
 			continue
 		}
-		if cm, ok := item.Content.(*ContentMove); ok {
-			if a.doc != nil {
-				target := a.doc.store.Find(*cm.Target)
-				if target != nil && target.MovedBy == item && !target.Deleted {
-					if ca, ok := target.Content.(*ContentAny); ok {
-						for _, v := range ca.Vals {
-							if counted >= start && counted < end {
-								result = append(result, v)
-							}
-							counted++
-							if counted >= end {
-								break
-							}
-						}
-					}
-				}
-			}
-			continue
+		valItem := item
+		if renderAt != nil {
+			valItem = renderAt
 		}
-		if !item.Content.IsCountable() {
-			continue
-		}
-		if item.MovedBy != nil {
-			continue
-		}
-		ca, ok := item.Content.(*ContentAny)
+		ca, ok := valItem.Content.(*ContentAny)
 		if !ok {
-			counted++
+			// Countable but not a plain-value item (e.g. a nested ContentType):
+			// advance the rendered cursor by its full contribution without
+			// emitting values, matching the position accounting used to bracket
+			// `start`.
+			counted += n
 			continue
 		}
 		for _, v := range ca.Vals {
@@ -546,31 +495,19 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 	}
 	t := &a.abstractType
 	index := 0
+	// Same shared position definition as Get/Slice: renderedStep decides
+	// countability and, for a winning ContentMove, points renderAt at the
+	// value-bearing target so the move is expanded at its destination.
 	for item := t.start; item != nil; item = item.Right {
-		if item.Deleted {
+		countable, _, renderAt := t.renderedStep(item)
+		if !countable {
 			continue
 		}
-		if cm, ok := item.Content.(*ContentMove); ok {
-			if a.doc != nil {
-				target := a.doc.store.Find(*cm.Target)
-				if target != nil && target.MovedBy == item && !target.Deleted {
-					if ca, ok := target.Content.(*ContentAny); ok {
-						for _, v := range ca.Vals {
-							fn(index, v)
-							index++
-						}
-					}
-				}
-			}
-			continue
+		valItem := item
+		if renderAt != nil {
+			valItem = renderAt
 		}
-		if !item.Content.IsCountable() {
-			continue
-		}
-		if item.MovedBy != nil {
-			continue
-		}
-		if ca, ok := item.Content.(*ContentAny); ok {
+		if ca, ok := valItem.Content.(*ContentAny); ok {
 			for _, v := range ca.Vals {
 				fn(index, v)
 				index++
@@ -607,38 +544,24 @@ func (a *YArray) Move(txn *Transaction, fromIndex, toIndex int) {
 	}
 	t := &a.abstractType
 
-	// Walk the rendered array to find the physical item at fromIndex.
-	// ContentMove items are "expanded" in rendering order; items with MovedBy
-	// set are skipped at their original position.
+	// Walk the rendered array to find the item at fromIndex, using the same
+	// shared renderedStep definition as Get/Slice/ForEach and the marker walk:
+	// a winning ContentMove is expanded at its destination (renderAt = the
+	// moved target), and an item that moved away contributes nothing at its
+	// origin. targetItem is the value-bearing item to relocate.
 	counted := 0
 	var targetItem *Item
 	var targetOff int
 	for item := t.start; item != nil; item = item.Right {
-		if item.Deleted {
+		countable, n, renderAt := t.renderedStep(item)
+		if !countable {
 			continue
 		}
-		if cm, ok := item.Content.(*ContentMove); ok {
-			// ContentMove renders the target here if this move won.
-			if a.doc != nil {
-				target := a.doc.store.Find(*cm.Target)
-				if target != nil && target.MovedBy == item && !target.Deleted {
-					n := target.Content.Len()
-					if counted+n > fromIndex {
-						targetItem = target
-						targetOff = fromIndex - counted
-						break
-					}
-					counted += n
-				}
-			}
-			continue
-		}
-		if !item.Content.IsCountable() || item.MovedBy != nil {
-			continue
-		}
-		n := item.Content.Len()
 		if counted+n > fromIndex {
 			targetItem = item
+			if renderAt != nil {
+				targetItem = renderAt
+			}
 			targetOff = fromIndex - counted
 			break
 		}

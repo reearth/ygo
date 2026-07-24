@@ -19,17 +19,55 @@ type searchMarker struct {
 }
 
 // renderedStep reports how a single item contributes to rendered (visible)
-// position. This is the single shared definition of position-contribution
-// used by marker-based lookups.
+// position. This is THE single shared definition of position-contribution — the
+// marker walk (findMarkerRO/markPositionAt/walkColdFrom/walkLeftFrom) and every
+// YArray positional walk (Get/Slice/ForEach) all decide countability, rendered
+// length, and which item holds the values from this one function, so there is
+// exactly one notion of "rendered position i" including ContentMove.
 //
-// Task 1 ships the non-move version: a deleted item contributes nothing, and
-// a countable, non-deleted item contributes its Content.Len(); everything
-// else (formatting marks, moves, non-countable content) contributes 0.
-// renderAt is reserved for move-awareness (Task 5), where a moved item's
-// rendered contribution is attributed to a different item than the one being
-// stepped over; until then it is always nil.
+// Returns:
+//   - countable: whether item occupies rendered positions (contributes to length)
+//   - n: the number of rendered positions it occupies
+//   - renderAt: the item whose Content actually holds the values rendered at this
+//     step. nil means "item itself"; non-nil is used only for a winning
+//     ContentMove, where the values come from the move's target, not the
+//     ContentMove item (which is non-countable on its own).
+//
+// Move-rendering model (identical to yarray.go's cold walks):
+//   - deleted item → contributes nothing.
+//   - a ContentMove that is the current WINNER for its target (target resolvable,
+//     target.MovedBy == this move, target live) → renders the target's values at
+//     this position; contributes target.Content.Len(), renderAt = target. A
+//     losing / target-less / target-deleted move renders nothing.
+//   - an item whose MovedBy != nil has been moved away and is rendered at its
+//     ContentMove's position, so it contributes nothing here.
+//   - any other non-countable content (formatting marks, non-winning moves) →
+//     contributes nothing.
+//   - otherwise → contributes Content.Len(), renderAt nil.
+//
+// YText has no moves and never sets MovedBy, so the move branches are inert for
+// text: the function collapses to "deleted/non-countable → 0, else Content.Len()".
 func (t *abstractType) renderedStep(item *Item) (countable bool, n int, renderAt *Item) {
-	if item == nil || item.Deleted || !item.Content.IsCountable() {
+	if item == nil || item.Deleted {
+		return false, 0, nil
+	}
+	if cm, ok := item.Content.(*ContentMove); ok {
+		// A ContentMove renders its target here only if this move won
+		// arbitration. Mirror yarray.go's resolution exactly.
+		if t.doc == nil || cm.Target == nil {
+			return false, 0, nil
+		}
+		target := t.doc.store.Find(*cm.Target)
+		if target == nil || target.MovedBy != item || target.Deleted {
+			return false, 0, nil
+		}
+		return true, target.Content.Len(), target
+	}
+	if !item.Content.IsCountable() {
+		return false, 0, nil
+	}
+	if item.MovedBy != nil {
+		// Moved away — rendered at its ContentMove's position, not here.
 		return false, 0, nil
 	}
 	return true, item.Content.Len(), nil
@@ -170,31 +208,37 @@ func (t *abstractType) markPositionAt(index int) {
 		marker.timestamp = t.markerTimestamp
 	}
 
-	// Iterate right while the running index is still left of the target.
+	// Iterate right while the running index is still left of the target. Rendered
+	// contribution (incl. ContentMove) comes from renderedStep so the marker's
+	// index tracks rendered — not physical — position, agreeing with findMarkerRO.
 	for p.Right != nil && pindex < index {
-		if !p.Deleted && p.Content.IsCountable() {
-			if index < pindex+p.Content.Len() {
+		if countable, n, _ := t.renderedStep(p); countable {
+			if index < pindex+n {
 				break
 			}
-			pindex += p.Content.Len()
+			pindex += n
 		}
 		p = p.Right
 	}
 	// Iterate left if we overshot (marker started to the right of the target).
 	for p.Left != nil && pindex > index {
 		p = p.Left
-		if !p.Deleted && p.Content.IsCountable() {
-			pindex -= p.Content.Len()
+		if countable, n, _ := t.renderedStep(p); countable {
+			pindex -= n
 		}
 	}
 	// Iterate left until p can't merge with its left neighbour, so the marker
 	// never points at the middle of a run that a later merge would collapse.
+	// The clock-contiguity condition is broader than true mergeability (which
+	// additionally requires matching MovedBy/Deleted/etc.), so it only ever
+	// backs the marker up further than strictly necessary — always safe. The
+	// pindex adjustment uses renderedStep so it stays the rendered start of p.
 	for p.Left != nil &&
 		p.Left.ID.Client == p.ID.Client &&
 		p.Left.ID.Clock+uint64(p.Left.Content.Len()) == p.ID.Clock {
 		p = p.Left
-		if !p.Deleted && p.Content.IsCountable() {
-			pindex -= p.Content.Len()
+		if countable, n, _ := t.renderedStep(p); countable {
+			pindex -= n
 		}
 	}
 
