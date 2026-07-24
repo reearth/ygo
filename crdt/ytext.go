@@ -1412,9 +1412,17 @@ func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, text
 		t.insertHint = pos.index
 	}
 	item.integrate(txn, 0)
+	// Always advance the anchor past the just-inserted item — regardless of
+	// whether it carried its own attributes (diff non-empty) — so the cursor
+	// invariant (pos.left/pos.right bracket the position immediately after
+	// this insert) holds for whatever op comes next. Previously this was
+	// only done inside the `len(diff) > 0` branch below (as part of setting
+	// up the closing-marker chain's origin), which left pos stale after a
+	// plain attribute-less insert: the following op would re-anchor at the
+	// PRE-insert position and could integrate out of order (#181 follow-up).
+	left = item
 
 	if len(diff) > 0 {
-		left = item
 		origin = &ID{
 			Client: item.ID.Client,
 			Clock:  item.ID.Clock + uint64(item.Content.Len()) - 1,
