@@ -1,6 +1,9 @@
 package crdt
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // arraySub pairs a unique subscription ID with a YArrayEvent callback.
 type arraySub struct {
@@ -706,6 +709,24 @@ func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 			// which is exactly how Yjs removes a moved element: the DELETE lands on
 			// the moved content, matching Get(i). No split of the target is needed
 			// or safe (splitItem would not carry MovedBy to the right half).
+			//
+			// Defensive guard (#181 follow-up): the line above assumes n <= length,
+			// which today always holds because n == 1 (TargetLen is forced to 1 by
+			// Move() and resolveMovedItem only ever clamps a remote target DOWN to
+			// <= TargetLen, never merges multiple items up to it) and length >= 1
+			// here (the loop guard). But TargetLen travels over the wire
+			// (update.go/update_v2.go encode it verbatim), so a hand-built or
+			// adversarial update could carry TargetLen > 1 against an item that is
+			// already exactly that wide, producing n > 1. If that ever collides
+			// with a smaller remaining length, unconditionally deleting the whole
+			// target below would silently delete more rendered positions than the
+			// caller asked for — and we can't fix it by partially deleting the
+			// target instead, because splitItem does not carry MovedBy to the right
+			// half, so a partial-target delete would corrupt the move. Fail loudly
+			// rather than silently over-deleting.
+			if n > length {
+				panic(fmt.Sprintf("crdt: deleteRange: winning ContentMove target width %d exceeds remaining delete length %d at rendered index %d (multi-element ContentMove targets are unsupported)", n, length, index))
+			}
 			renderAt.delete(txn)
 			length -= n
 			item = item.Right

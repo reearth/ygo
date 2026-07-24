@@ -113,6 +113,149 @@ func TestUnit_YArray_DeleteMoved_HeadFastPathUnmovedIntact(t *testing.T) {
 	assert.Equal(t, []any{"c", "d"}, arr.ToSlice())
 }
 
+// TestInteg_YArray_DeleteMovedElement_TwoPeer_ConcurrentNeighborDelete: peer A
+// deletes the moved element ("e", rendered via the winning ContentMove) while
+// peer B concurrently deletes a different, plain element rendered adjacent to
+// it ("b"). The two deletes target two distinct items, so this is an ordinary
+// (non-ambiguous) YATA delete-delete case: both removals apply independently
+// and both peers converge to the same array with both elements gone,
+// regardless of exchange order.
+func TestInteg_YArray_DeleteMovedElement_TwoPeer_ConcurrentNeighborDelete(t *testing.T) {
+	doc1 := newTestDoc(1)
+	doc2 := newTestDoc(2)
+	arr1 := doc1.GetArray("list")
+	arr2 := doc2.GetArray("list")
+
+	doc1.Transact(func(txn *Transaction) { arr1.Push(txn, []any{"a", "b", "c", "d", "e"}) })
+	require.NoError(t, ApplyUpdateV1(doc2, EncodeStateAsUpdateV1(doc1, nil), nil))
+
+	// Both peers learn the move (created by doc1): [a,e,b,c,d].
+	doc1.Transact(func(txn *Transaction) { arr1.Move(txn, 4, 1) })
+	require.NoError(t, ApplyUpdateV1(doc2, EncodeStateAsUpdateV1(doc1, doc2.store.StateVector()), nil))
+	require.Equal(t, []any{"a", "e", "b", "c", "d"}, arr1.ToSlice())
+	require.Equal(t, []any{"a", "e", "b", "c", "d"}, arr2.ToSlice())
+
+	sv1 := doc1.store.StateVector()
+	sv2 := doc2.store.StateVector()
+
+	// Concurrent: doc1 deletes the moved element "e" (rendered index 1);
+	// doc2 deletes its rendered neighbor "b" (rendered index 2) — a plain
+	// element, not the moved target itself.
+	doc1.Transact(func(txn *Transaction) { arr1.Delete(txn, 1, 1) })
+	doc2.Transact(func(txn *Transaction) { arr2.Delete(txn, 2, 1) })
+
+	u1to2 := EncodeStateAsUpdateV1(doc1, sv2)
+	u2to1 := EncodeStateAsUpdateV1(doc2, sv1)
+	require.NoError(t, ApplyUpdateV1(doc2, u1to2, nil))
+	require.NoError(t, ApplyUpdateV1(doc1, u2to1, nil))
+
+	s1 := arr1.ToSlice()
+	s2 := arr2.ToSlice()
+	assert.Equal(t, s1, s2, "peers converge")
+	assert.Equal(t, []any{"a", "c", "d"}, s1, "both the moved element and its neighbor are gone")
+}
+
+// TestInteg_YArray_DeleteMovedElement_TwoPeer_ConcurrentReMove: peer A deletes
+// the moved element ("e") while peer B, still on the pre-delete state,
+// concurrently issues a SECOND Move on that same element (re-moving an
+// already-moved target — Move() walks through a winning ContentMove to the
+// real target item, so this creates a second ContentMove pointing at the same,
+// now-concurrently-deleted, target).
+//
+// This is intentionally not asserted to a single fully-specified physical
+// structure: integrate()'s ContentMove arbitration
+// (target.MovedBy == nil || item.ID.Client < target.MovedBy.ID.Client) does
+// not consult target.Deleted, so which of the two ContentMove items "wins"
+// MovedBy is a structural detail. But renderedStep DOES gate on
+// target.Deleted before rendering a winning move's target, so a deleted
+// target renders nothing no matter which move claims it — the outcome is
+// well-defined at the rendered-value level even though the winning-move
+// bookkeeping is not something this test pins down. We assert convergence and
+// that the deleted element is gone from the rendered result on both peers.
+func TestInteg_YArray_DeleteMovedElement_TwoPeer_ConcurrentReMove(t *testing.T) {
+	doc1 := newTestDoc(1)
+	doc2 := newTestDoc(2)
+	arr1 := doc1.GetArray("list")
+	arr2 := doc2.GetArray("list")
+
+	doc1.Transact(func(txn *Transaction) { arr1.Push(txn, []any{"a", "b", "c", "d", "e"}) })
+	require.NoError(t, ApplyUpdateV1(doc2, EncodeStateAsUpdateV1(doc1, nil), nil))
+
+	// Both peers learn the first move (created by doc1): [a,e,b,c,d].
+	doc1.Transact(func(txn *Transaction) { arr1.Move(txn, 4, 1) })
+	require.NoError(t, ApplyUpdateV1(doc2, EncodeStateAsUpdateV1(doc1, doc2.store.StateVector()), nil))
+	require.Equal(t, []any{"a", "e", "b", "c", "d"}, arr1.ToSlice())
+	require.Equal(t, []any{"a", "e", "b", "c", "d"}, arr2.ToSlice())
+
+	sv1 := doc1.store.StateVector()
+	sv2 := doc2.store.StateVector()
+
+	// Concurrent: doc1 deletes the moved element "e" (rendered index 1);
+	// doc2, unaware of the delete, re-moves the SAME element ("e", still at
+	// its own rendered index 1) to a new destination.
+	doc1.Transact(func(txn *Transaction) { arr1.Delete(txn, 1, 1) })
+	doc2.Transact(func(txn *Transaction) { arr2.Move(txn, 1, 3) })
+
+	u1to2 := EncodeStateAsUpdateV1(doc1, sv2)
+	u2to1 := EncodeStateAsUpdateV1(doc2, sv1)
+	require.NoError(t, ApplyUpdateV1(doc2, u1to2, nil))
+	require.NoError(t, ApplyUpdateV1(doc1, u2to1, nil))
+
+	s1 := arr1.ToSlice()
+	s2 := arr2.ToSlice()
+	assert.Equal(t, s1, s2, "peers converge")
+	assert.NotContains(t, s1, "e", "deleted target is gone even though a concurrent re-move also claimed it")
+	assert.ElementsMatch(t, []any{"a", "b", "c", "d"}, s1, "the four plain elements survive")
+}
+
+// TestUnit_YArray_DeleteMoved_MultiWidthTargetGuardPanics exercises the
+// defensive guard added to deleteRange's renderAt branch (#181 follow-up).
+// Under Move()'s own invariant a ContentMove's target is always width 1, so
+// n <= length always holds there. But TargetLen travels over the wire
+// (update.go/update_v2.go encode it verbatim) and resolveMovedItem only ever
+// clamps a target DOWN to <= TargetLen — it never merges narrower items UP to
+// it — so a hand-built or adversarial ContentMove with TargetLen > 1 pointing
+// at an item that is already that wide (e.g. a single Push of several values)
+// can make a winning move render n > 1. This test constructs exactly that
+// (bypassing the normal Move() API, which cannot produce it) and asserts that
+// deleting fewer rendered positions than the target's width panics instead of
+// silently deleting the whole multi-element target.
+func TestUnit_YArray_DeleteMoved_MultiWidthTargetGuardPanics(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("list")
+	t2 := &arr.abstractType
+
+	var item1 *Item
+	doc.Transact(func(txn *Transaction) {
+		arr.Push(txn, []any{"x", "y"}) // single ContentAny item, width 2
+		item1 = t2.start
+	})
+	require.Equal(t, 2, item1.Content.Len(), "single Push of 2 values is one width-2 item")
+
+	doc.Transact(func(txn *Transaction) {
+		targetID := item1.ID
+		moveItem := &Item{
+			ID:          ID{Client: doc.clientID, Clock: doc.store.NextClock(doc.clientID)},
+			Left:        nil,
+			OriginRight: &targetID,
+			Parent:      t2,
+			Content:     NewContentMove(&targetID, 2), // TargetLen=2: violates the width-1 invariant
+		}
+		moveItem.integrate(txn, 0)
+	})
+	require.NotNil(t, item1.MovedBy, "hand-built ContentMove must win arbitration")
+
+	// Rendered array is now [x,y] (the moved-in target at index 0). Deleting
+	// only 1 rendered position (n=2 > length=1) must panic rather than
+	// silently deleting both "x" and "y".
+	require.Equal(t, []any{"x", "y"}, arr.ToSlice())
+	assert.PanicsWithValue(t,
+		"crdt: deleteRange: winning ContentMove target width 2 exceeds remaining delete length 1 at rendered index 0 (multi-element ContentMove targets are unsupported)",
+		func() {
+			doc.Transact(func(txn *Transaction) { arr.Delete(txn, 0, 1) })
+		})
+}
+
 // TestInteg_YArray_DeleteMovedElement_TwoPeer_Converge: peer A deletes a moved
 // element while peer B concurrently inserts; after exchanging deltas both peers
 // converge and the moved element is gone.
