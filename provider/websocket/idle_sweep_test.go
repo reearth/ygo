@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/reearth/ygo/crdt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/crdt"
 )
 
 // newUnloadSignal wires OnUnloadDocument to a buffered per-room channel so a

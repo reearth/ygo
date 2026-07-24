@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -10,9 +11,12 @@ import (
 	"time"
 
 	gws "github.com/gorilla/websocket"
-	"github.com/reearth/ygo/crdt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
+	ygsync "github.com/reearth/ygo/sync"
 )
 
 // idleRecordAdapter records LoadDoc and StoreUpdate call counts so tests can
@@ -50,16 +54,47 @@ func (a *idleRecordAdapter) storeCount() int {
 	return len(a.stores)
 }
 
-// dialWSHeader dials the test server like dialWS but attaches extra request
+// dialConnErr dials the test server like dialWS but attaches extra request
 // headers to the handshake (used to mark a specific connection so a test hook
-// can single it out). Registers a t.Cleanup to close the conn at test end.
-func dialWSHeader(t *testing.T, ts *httptest.Server, room string, h http.Header) *gws.Conn {
-	t.Helper()
+// can single it out), and reports failure via a returned error instead of
+// require. This makes it safe to call from a goroutine other than the one
+// running the test — a failed require.NoError off the test goroutine invokes
+// t.FailNow from the wrong goroutine, which is unsafe/undefined (testifylint
+// go-require). The caller (on the main test goroutine) is responsible for
+// asserting on the returned error and for closing the conn.
+func dialConnErr(ts *httptest.Server, room string, h http.Header) (*gws.Conn, error) {
 	u := "ws" + ts.URL[len("http"):] + "/" + room
 	conn, _, err := gws.DefaultDialer.Dial(u, h)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
-	return conn
+	if err != nil {
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+	return conn, nil
+}
+
+// drainConnErr is the error-returning equivalent of drainWS (see dialConnErr
+// for why): it reads the three handshake frames the server always sends on
+// connect and applies any sync frames into doc, reporting failure via the
+// returned error rather than require/assert.
+func drainConnErr(conn *gws.Conn, doc *crdt.Doc) error {
+	for i := 0; i < 3; i++ {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := conn.ReadMessage()
+		_ = conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			return fmt.Errorf("read handshake frame %d: %w", i, err)
+		}
+		dec := encoding.NewDecoder(data)
+		outer, err := dec.ReadVarUint()
+		if err != nil {
+			return fmt.Errorf("decode outer varuint: %w", err)
+		}
+		if outer == msgSync {
+			if _, err := ygsync.ApplySyncMessage(doc, dec.RemainingBytes(), nil); err != nil {
+				return fmt.Errorf("apply sync frame: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // roomState looks up the room directly (internal test, same package) and
@@ -217,13 +252,32 @@ func TestIdleRoom_ConcurrentLeaveRejoinNoStaleStampOnOccupiedRoom(t *testing.T) 
 	// B starts dialing with the slow-join marker and blocks mid-Upgrade: past
 	// getOrCreateRoom (which, on pre-fix code, has just cleared idleSince) but
 	// not yet registered in rm.peers.
+	//
+	// The dial+handshake run on this spawned goroutine, which is NOT the
+	// goroutine running the test, so they must not call require/assert
+	// (testifylint go-require): dialConnErr/drainConnErr report failure via a
+	// returned error instead, forwarded below through bResult for the MAIN
+	// test goroutine to assert on.
+	type joinResult struct {
+		conn *gws.Conn
+		err  error
+	}
+	bResult := make(chan joinResult, 1)
 	bDone := make(chan struct{})
 	go func() {
 		defer close(bDone)
 		docB := crdt.New(crdt.WithClientID(2))
 		h := http.Header{"X-Test-Slow-Join": {"1"}}
-		connB := dialWSHeader(t, ts, "room", h)
-		drainWS(t, connB, docB)
+		connB, err := dialConnErr(ts, "room", h)
+		if err != nil {
+			bResult <- joinResult{err: err}
+			return
+		}
+		if err := drainConnErr(connB, docB); err != nil {
+			bResult <- joinResult{conn: connB, err: fmt.Errorf("drain: %w", err)}
+			return
+		}
+		bResult <- joinResult{conn: connB}
 	}()
 	<-bInUpgrade // B is now parked in the lookup→registration window.
 
@@ -243,6 +297,14 @@ func TestIdleRoom_ConcurrentLeaveRejoinNoStaleStampOnOccupiedRoom(t *testing.T) 
 	// Release B: it finishes upgrading and registers onto the stamped room.
 	close(releaseB)
 	<-bDone // B has received its handshake (sent only after registration).
+
+	// Assertions on B's dial/handshake outcome happen here, on the MAIN test
+	// goroutine — the spawned goroutine only forwarded the result.
+	res := <-bResult
+	if res.conn != nil {
+		t.Cleanup(func() { _ = res.conn.Close() })
+	}
+	require.NoError(t, res.err, "peer B dial/handshake failed")
 
 	// The room now holds a LIVE, registered peer. Its idle stamp MUST be gone.
 	rm, present, idleOccupied := roomState(s, "room")
