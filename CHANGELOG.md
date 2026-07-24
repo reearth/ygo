@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.39.0] — 2026-07-24
+
+### Performance
+
+- **O(1) amortized positional access for `YText`/`YArray`**
+  ([#181](https://github.com/reearth/ygo/issues/181)): a Yjs-style
+  bidirectional, move-aware search-marker structure replaces the old
+  forward-only position cache behind `YArray.Get`/`Slice`, the shared
+  `deleteRange` used by `YText`/`YArray` deletes, and `YText.Format` /
+  `ApplyDelta`'s positional cursor. Internal only — no public API change.
+  Measured on a 100k-node document: random-position insert ~101× faster
+  (632µs → 6.3µs), reverse (backward-walking) insert ~916× faster
+  (1.15ms → 1.26µs — this was the O(n²) cliff the old forward-only cache hit
+  on backward walks), random `Get` ~114× faster (481µs → 4.2µs).
+
+### Fixed
+
+- **`YText.ApplyDelta` format-bleed into a following insert**
+  ([#181](https://github.com/reearth/ygo/issues/181)): an `insert` op with no
+  `Attributes` of its own no longer inherits formatting from a preceding
+  `{retain, attributes}` op — matching the Yjs/Quill rule that an insert's
+  formatting comes only from its own `Attributes`. This is a behaviour
+  change: code relying on the old bleed-through will see different
+  formatting output. Also fixed: consecutive attribute-less inserts could
+  integrate out of order.
+- **Room load no longer serializes under the global room-map lock**
+  ([#182](https://github.com/reearth/ygo/issues/182)): `LoadDoc` /
+  full-state decode / `OnLoadDocument` previously ran while holding the
+  server's single rooms lock, so one slow or large room load stalled every
+  other room's create/lookup/evict process-wide. Loading now runs off-lock
+  behind a per-room `ready` barrier — concurrent connects to distinct rooms
+  load in parallel — while a reentrant load into a room still loading (e.g.
+  the cluster relay's `Inject`) waits on the same barrier instead of
+  double-loading.
+
+### Added
+
+- **`Server.RoomIdleTimeout` and `Server.MaxResidentRooms`**
+  ([#183](https://github.com/reearth/ygo/issues/183)): `RoomIdleTimeout
+  time.Duration` keeps a room resident in memory for this long after its
+  last peer disconnects — the durable flush-before-evict still runs
+  immediately, but the in-memory doc and worker stay warm so a quick
+  reconnect skips a full `LoadDoc` reload; zero (the default) preserves the
+  previous eager-evict-on-last-peer behaviour. `MaxResidentRooms int` bounds
+  how many idle-resident rooms stay warm at once — once the count exceeds it,
+  a background sweeper evicts the least-recently-idle rooms first; zero is
+  unbounded and only meaningful together with `RoomIdleTimeout > 0`.
+
 ## [1.38.0] — 2026-07-24
 
 ### Added
