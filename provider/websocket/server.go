@@ -76,6 +76,24 @@ const (
 	msgPong               = uint64(10) // liveness reply to a server-sent Ping; no-op
 )
 
+// Hocuspocus in-band Auth (tag 2) sub-protocol types (see #104).
+const (
+	authTypeToken            = uint64(0)
+	authTypePermissionDenied = uint64(1)
+	authTypeAuthenticated    = uint64(2)
+
+	// wsCodeUnauthorized is Hocuspocus's WS close code for failed auth.
+	wsCodeUnauthorized = 4401
+
+	// wsReasonUnauthorized is the WS close-frame reason for a denied
+	// connection. It is a short constant because a WS close control frame's
+	// payload is capped at 125 bytes (2-byte code + reason); a long
+	// hook-supplied error would overflow it and drop the close frame, so the
+	// full error text is carried only in the PermissionDenied data frame.
+	// Matches Hocuspocus's CloseEvents.Unauthorized.reason.
+	wsReasonUnauthorized = "Unauthorized"
+)
+
 // maxWSMessageBytes is the maximum size of a single WebSocket frame accepted
 // by the server. Frames larger than this are rejected before being buffered,
 // preventing OOM from a single crafted large message.
@@ -326,6 +344,15 @@ type Server struct {
 	// instead — when Authorize is set it takes precedence and AuthFunc is ignored.
 	AuthFunc func(r *http.Request) bool
 
+	// HocuspocusFraming, when true, makes this server read and write the
+	// Hocuspocus docName-prefixed framing: every frame is
+	// VarString(docName) + <y-websocket frame>. Enables real @hocuspocus/provider
+	// interop. One room per connection is still enforced (no multi-document
+	// multiplexing); the inbound docName is read and used only for logging.
+	// Leave false (default) for native y-websocket clients — the two framings
+	// cannot be auto-detected on one endpoint.
+	HocuspocusFraming bool
+
 	// Authorize, if non-nil, is the richer alternative to AuthFunc: it both
 	// accepts/rejects the connection (second return value; false → 401) and
 	// returns a ConnectionConfig describing the accepted connection — notably
@@ -381,6 +408,19 @@ type Server struct {
 	// (Tiptap comments, custom presence metadata, application heartbeats)
 	// to the embedding application.
 	OnStateless StatelessHook
+
+	// OnTokenAuth, if non-nil, validates the token from a Hocuspocus in-band
+	// Auth message (tag 2). A nil error accepts the connection and replies
+	// Authenticated (scope from the returned ConnectionConfig.ReadOnly); a
+	// non-nil error replies PermissionDenied(err) and closes with WS 4401.
+	// When nil, tag-2 frames are silently ignored (unchanged legacy behavior).
+	//
+	// OnTokenAuth complements the HTTP-boundary AuthFunc/Authorize; it does not
+	// replace them. IMPORTANT: it is NOT a document-confidentiality gate — the
+	// initial sync is served before any PermissionDenied, so deployments that
+	// must withhold document contents from unauthenticated clients must reject
+	// them at the boundary via AuthFunc/Authorize.
+	OnTokenAuth func(room, token string) (ConnectionConfig, error)
 
 	// OnLoadDocument, if non-nil, is called once per room immediately
 	// after the document has been bootstrapped from the PersistenceAdapter
@@ -998,16 +1038,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(s.maxMessageBytes())
 
 	p := &peer{
-		conn:       ws,
-		room:       rm,
-		roomName:   name,
-		server:     s,
-		done:       make(chan struct{}),
-		clientIDs:  make(map[uint64]struct{}),
-		writeCh:    make(chan []byte, s.peerWriteQueueSize()),
-		writerDone: make(chan struct{}),
-		limiter:    s.newPeerLimiter(),
-		readOnly:   readOnly,
+		conn:              ws,
+		room:              rm,
+		roomName:          name,
+		server:            s,
+		done:              make(chan struct{}),
+		clientIDs:         make(map[uint64]struct{}),
+		writeCh:           make(chan []byte, s.peerWriteQueueSize()),
+		writerDone:        make(chan struct{}),
+		limiter:           s.newPeerLimiter(),
+		readOnly:          readOnly,
+		hocuspocusFraming: s.HocuspocusFraming,
 	}
 
 	// Verify the room is still in the server map before adding the peer.

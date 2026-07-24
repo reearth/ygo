@@ -1,3 +1,37 @@
+## v1.38.0
+
+A minor, additive release adding two independent features. On the awareness
+layer, a new `OnUpdate` event channel fires on every applied entry (including
+heartbeats) alongside the content-only `OnChange`, plus a `Meta(clientID)`
+accessor — matching Yjs `y-protocols`/yrs semantics. On the websocket provider,
+opt-in Hocuspocus docName framing and an `OnTokenAuth` hook bring in-band token
+authentication for the `@hocuspocus/provider` client ecosystem. No breaking
+API changes, though `OnChange` is tightened (see Changed).
+
+### Added
+
+- **Awareness `OnUpdate` + `Meta(clientID)`**
+  ([#105](https://github.com/reearth/ygo/issues/105)): `OnUpdate` fires on every
+  applied awareness entry including heartbeats, distinct from the content-only
+  `OnChange`. `Meta(clientID)` returns per-client `{Clock, LastUpdated}`,
+  retained for tombstones to match the reference implementations.
+- **Hocuspocus in-band token auth + docName framing**
+  ([#104](https://github.com/reearth/ygo/issues/104)): opt-in
+  `Server.HocuspocusFraming` reads/writes docName-prefixed frames for real
+  `@hocuspocus/provider` interop; `Server.OnTokenAuth` validates the tag-2 Auth
+  token and replies `Authenticated`/`PermissionDenied`, closing denied
+  connections with WebSocket code `4401`. Composes with `AuthFunc`/`Authorize`;
+  it is a handshake reply + optional read-only downgrade, not a
+  document-confidentiality gate (use the HTTP-boundary auth for that).
+
+### Changed
+
+- **`OnChange` no longer fires on content-identical re-emits**
+  ([#105](https://github.com/reearth/ygo/issues/105)): remote heartbeats (via
+  `ApplyUpdate`) and local same-content `SetLocalState` now fire `OnUpdate`
+  only. `Heartbeat()` now fires `OnUpdate` (previously silent). A reactivated
+  client is classified `Updated` rather than `Added`, matching Yjs/yrs.
+
 ## v1.37.0
 
 A minor release hardening the websocket server's coalesced persistence path.

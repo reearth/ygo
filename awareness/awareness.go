@@ -1,10 +1,12 @@
 package awareness
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"math"
+	"reflect"
 	"sync"
 	"time"
 
@@ -88,11 +90,28 @@ type ClientState struct {
 	State map[string]any // nil means the client was removed
 }
 
+// ClientMeta is the per-client metadata returned by Meta.
+type ClientMeta struct {
+	Clock       uint64
+	LastUpdated time.Time
+}
+
 // ChangeEvent is delivered to observers when states change.
 type ChangeEvent struct {
 	Added   []uint64 // client IDs newly seen
 	Updated []uint64 // client IDs whose state changed
 	Removed []uint64 // client IDs whose state was set to null
+	Origin  any
+}
+
+// UpdateEvent is delivered to OnUpdate observers on every applied awareness
+// entry, including same-content heartbeat re-emits at a bumped clock. Same
+// shape as ChangeEvent; a distinct type prevents accidentally crossing the two
+// callback kinds.
+type UpdateEvent struct {
+	Added   []uint64
+	Updated []uint64
+	Removed []uint64
 	Origin  any
 }
 
@@ -103,6 +122,12 @@ type observer struct {
 	active bool
 }
 
+// updateObserver wraps an OnUpdate callback with an active flag.
+type updateObserver struct {
+	fn     func(UpdateEvent)
+	active bool
+}
+
 // Awareness tracks ephemeral peer state.
 type Awareness struct {
 	clientID uint64
@@ -110,17 +135,22 @@ type Awareness struct {
 	// states stores all known clients including those with nil State (removed).
 	// Clients with nil State have been removed but their clock is retained so
 	// removal messages can be properly encoded with an up-to-date clock.
-	states     map[uint64]ClientState
-	meta       map[uint64]time.Time // last update time, for expiry (only active clients)
-	clock      uint64               // local client's clock
-	observers  []*observer
-	stopExpiry func() // set by StartAutoExpiry; stopped by Destroy
+	states          map[uint64]ClientState
+	meta            map[uint64]time.Time // last update time, for expiry (only active clients)
+	clock           uint64               // local client's clock
+	observers       []*observer
+	updateObservers []*updateObserver
+	stopExpiry      func() // set by StartAutoExpiry; stopped by Destroy
 	// wireBytes tracks the JSON byte length of the last ApplyUpdate-accepted
 	// state per client. Used to enforce maxBytes (issue #48 vector B). Only
 	// entries that arrived via ApplyUpdate are counted; SetLocalState is
 	// excluded because the local client's state is set by trusted embedder
 	// code, not adversarial wire input.
-	wireBytes   map[uint64]int
+	wireBytes map[uint64]int
+	// priorJSON stores the last ApplyUpdate-accepted non-null wire bytes per
+	// client, for the OnChange content-change fast-path (bytes.Equal). Same
+	// lifecycle as wireBytes: written on non-null accept, deleted on tombstone.
+	priorJSON   map[uint64][]byte
 	activeBytes int64 // sum of wireBytes values
 	maxBytes    int64 // 0 = unlimited (default; backward compatible)
 	maxClients  int   // 0 = unlimited (default; backward compatible)
@@ -139,6 +169,7 @@ func New(clientID uint64) *Awareness {
 		states:    make(map[uint64]ClientState),
 		meta:      make(map[uint64]time.Time),
 		wireBytes: make(map[uint64]int),
+		priorJSON: make(map[uint64][]byte),
 		removedAt: make(map[uint64]time.Time),
 	}
 }
@@ -205,7 +236,7 @@ func (a *Awareness) SetLocalState(state map[string]any) {
 	if a.clock < math.MaxUint64 {
 		a.clock++
 	}
-	var added, updated, removed []uint64
+	var added, updated, changedUpdated, removed []uint64
 
 	prev, exists := a.states[a.clientID]
 	// "exists and active" means prev.State != nil
@@ -219,21 +250,27 @@ func (a *Awareness) SetLocalState(state map[string]any) {
 			removed = []uint64{a.clientID}
 		}
 	} else {
-		a.states[a.clientID] = ClientState{Clock: a.clock, State: state}
-		a.meta[a.clientID] = time.Now()
 		if wasActive {
 			updated = []uint64{a.clientID}
+			if !reflect.DeepEqual(prev.State, state) {
+				changedUpdated = []uint64{a.clientID}
+			}
 		} else {
 			added = []uint64{a.clientID}
 		}
+		a.states[a.clientID] = ClientState{Clock: a.clock, State: state}
+		a.meta[a.clientID] = time.Now()
 	}
 
 	obs := a.copyObservers()
+	updObs := a.copyUpdateObservers()
 	a.mu.Unlock()
 
+	if len(added) > 0 || len(changedUpdated) > 0 || len(removed) > 0 {
+		fireObservers(obs, ChangeEvent{Added: added, Updated: changedUpdated, Removed: removed})
+	}
 	if len(added) > 0 || len(updated) > 0 || len(removed) > 0 {
-		evt := ChangeEvent{Added: added, Updated: updated, Removed: removed}
-		fireObservers(obs, evt)
+		fireUpdateObservers(updObs, UpdateEvent{Added: added, Updated: updated, Removed: removed})
 	}
 }
 
@@ -247,8 +284,9 @@ func (a *Awareness) SetLocalState(state map[string]any) {
 // haven't. Matches Yjs JS's constructor interval which re-emits local
 // state every outdatedTimeout/2.
 //
-// Observers are NOT fired — the state itself didn't change, only the
-// clock advanced. Peers will pick up the new clock via EncodeUpdate.
+// OnUpdate observers ARE fired (the clock advanced); OnChange observers are
+// not (the state content is unchanged). Matches Yjs, whose interval re-emits
+// local state via setLocalState and emits `update` but not `change`.
 //
 // Added in v1.11.0 (#73 vector C5).
 func (a *Awareness) Heartbeat() {
@@ -266,7 +304,11 @@ func (a *Awareness) Heartbeat() {
 	}
 	a.states[a.clientID] = ClientState{Clock: a.clock, State: cs.State}
 	a.meta[a.clientID] = time.Now()
+	updObs := a.copyUpdateObservers()
 	a.mu.Unlock()
+
+	// Content unchanged (only the clock advanced) -> OnUpdate only, never OnChange.
+	fireUpdateObservers(updObs, UpdateEvent{Updated: []uint64{a.clientID}})
 }
 
 // SetLocalStateContext is the context-aware variant of SetLocalState.
@@ -310,7 +352,30 @@ func (a *Awareness) GetStates() map[uint64]ClientState {
 	return out
 }
 
-// OnChange registers a callback invoked whenever any state changes.
+// Meta returns the clock and last-updated time for a known client, including
+// remote tombstones (Yjs/yrs retain meta for removed clients). LastUpdated is
+// the last-applied time for an active client, or the tombstone time for a
+// remote tombstone; a local tombstone (our own leaving state) has a valid
+// Clock with a zero LastUpdated. Returns ok=false only for never-seen clients.
+func (a *Awareness) Meta(clientID uint64) (ClientMeta, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	cs, ok := a.states[clientID]
+	if !ok {
+		return ClientMeta{}, false
+	}
+	m := ClientMeta{Clock: cs.Clock}
+	if t, active := a.meta[clientID]; active {
+		m.LastUpdated = t
+	} else if t, tomb := a.removedAt[clientID]; tomb {
+		m.LastUpdated = t
+	}
+	return m, true
+}
+
+// OnChange registers a callback invoked whenever client state content
+// changes (added, removed, or content-differing update). For an event on
+// every applied entry including heartbeats, use OnUpdate.
 // Returns an unsubscribe function.
 func (a *Awareness) OnChange(fn func(ChangeEvent)) func() {
 	if fn == nil {
@@ -342,6 +407,44 @@ func (a *Awareness) copyObservers() []func(ChangeEvent) {
 
 // fireObservers calls each observer function in turn.
 func fireObservers(fns []func(ChangeEvent), evt ChangeEvent) {
+	for _, fn := range fns {
+		fn(evt)
+	}
+}
+
+// OnUpdate registers a callback invoked on every applied awareness entry,
+// including heartbeats (where OnChange does not fire). Returns an unsubscribe
+// function. Observers are not cleared by Destroy (matches OnChange).
+func (a *Awareness) OnUpdate(fn func(UpdateEvent)) func() {
+	if fn == nil {
+		return func() {}
+	}
+	obs := &updateObserver{fn: fn, active: true}
+	a.mu.Lock()
+	a.updateObservers = append(a.updateObservers, obs)
+	a.mu.Unlock()
+
+	return func() {
+		a.mu.Lock()
+		obs.active = false
+		a.mu.Unlock()
+	}
+}
+
+// copyUpdateObservers returns a snapshot of active OnUpdate callbacks.
+// Must be called while holding a.mu (read or write).
+func (a *Awareness) copyUpdateObservers() []func(UpdateEvent) {
+	fns := make([]func(UpdateEvent), 0, len(a.updateObservers))
+	for _, o := range a.updateObservers {
+		if o.active {
+			fns = append(fns, o.fn)
+		}
+	}
+	return fns
+}
+
+// fireUpdateObservers calls each OnUpdate callback in turn.
+func fireUpdateObservers(fns []func(UpdateEvent), evt UpdateEvent) {
 	for _, fn := range fns {
 		fn(evt)
 	}
@@ -437,7 +540,7 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 	}
 
 	a.mu.Lock()
-	var added, updated, removed []uint64
+	var added, updated, changedUpdated, removed []uint64
 
 	for _, e := range entries {
 		current, exists := a.states[e.clientID]
@@ -559,7 +662,19 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 			if wasActive {
 				removed = append(removed, e.clientID)
 			}
+			delete(a.priorJSON, e.clientID)
 		} else {
+			// Content-change detection (pre-update values: oldSize, current.State,
+			// priorJSON[e.clientID] are all read before the overwrites below).
+			changed := true
+			if oldSize == newSize {
+				if prev, ok := a.priorJSON[e.clientID]; ok && bytes.Equal(prev, e.jsonBytes) {
+					changed = false
+				} else if current.State != nil && reflect.DeepEqual(current.State, state) {
+					changed = false
+				}
+			}
+
 			a.states[e.clientID] = ClientState{
 				Clock: e.clock,
 				State: state,
@@ -571,8 +686,13 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 			// Update byte accounting: replace the old size with the new size.
 			a.activeBytes += int64(newSize - oldSize)
 			a.wireBytes[e.clientID] = newSize
-			if wasActive {
+			a.priorJSON[e.clientID] = append([]byte(nil), e.jsonBytes...)
+
+			if exists {
 				updated = append(updated, e.clientID)
+				if changed {
+					changedUpdated = append(changedUpdated, e.clientID)
+				}
 			} else {
 				added = append(added, e.clientID)
 			}
@@ -580,11 +700,14 @@ func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
 	}
 
 	obs := a.copyObservers()
+	updObs := a.copyUpdateObservers()
 	a.mu.Unlock()
 
+	if len(added) > 0 || len(changedUpdated) > 0 || len(removed) > 0 {
+		fireObservers(obs, ChangeEvent{Added: added, Updated: changedUpdated, Removed: removed, Origin: origin})
+	}
 	if len(added) > 0 || len(updated) > 0 || len(removed) > 0 {
-		evt := ChangeEvent{Added: added, Updated: updated, Removed: removed, Origin: origin}
-		fireObservers(obs, evt)
+		fireUpdateObservers(updObs, UpdateEvent{Added: added, Updated: updated, Removed: removed, Origin: origin})
 	}
 
 	return nil
@@ -704,11 +827,12 @@ func (a *Awareness) RemoveExpired(timeout time.Duration) {
 		}
 	}
 	obs := a.copyObservers()
+	updObs := a.copyUpdateObservers()
 	a.mu.Unlock()
 
 	if len(removed) > 0 {
-		evt := ChangeEvent{Removed: removed}
-		fireObservers(obs, evt)
+		fireObservers(obs, ChangeEvent{Removed: removed})
+		fireUpdateObservers(updObs, UpdateEvent{Removed: removed})
 	}
 }
 

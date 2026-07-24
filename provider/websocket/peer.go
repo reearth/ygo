@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -30,9 +31,12 @@ type peer struct {
 	// needsResync is set (under wmu) when a broadcast is dropped because writeCh
 	// was full under SlowPeerResync. runWriter clears it and sends a full-state
 	// resync once the queue drains, so the peer converges without a reconnect.
-	needsResync bool
-	limiter     *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
-	readOnly    bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
+	needsResync       bool
+	closeCode         int           // #104: WS close code queued via enqueueClose (0 = none)
+	closeReason       string        // #104: WS close reason accompanying closeCode
+	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
+	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
+	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -45,6 +49,18 @@ type peer struct {
 // handleMessage decodes the outer message type and dispatches accordingly.
 func (p *peer) handleMessage(data []byte) {
 	dec := encoding.NewDecoder(data)
+	if p.hocuspocusFraming {
+		docName, err := dec.ReadVarString()
+		if err != nil {
+			p.server.log().Debug("discarded malformed hocuspocus frame: unreadable docName",
+				"room", p.roomName, "err", err)
+			return
+		}
+		if docName != p.roomName {
+			p.server.log().Debug("hocuspocus frame docName mismatch (processing anyway)",
+				"room", p.roomName, "docName", docName)
+		}
+	}
 	outerType, err := dec.ReadVarUint()
 	if err != nil {
 		// Debug, not Warn: the rate is attacker-controlled, so a noisier level
@@ -102,8 +118,7 @@ func (p *peer) handleMessage(data []byte) {
 		p.broadcastAwareness(awBytes)
 
 	case msgAuth:
-		// Auth messages (type 2) are defined by y-websocket but not used by
-		// this server. Silently ignore.
+		p.handleAuth(dec)
 
 	case msgQueryAwareness:
 		p.sendAwareness(p.room.awareness.EncodeUpdate(nil))
@@ -198,6 +213,122 @@ func (p *peer) handleMessage(data []byte) {
 		// not currently send Pings, so this is a no-op pass-through that
 		// just keeps the dispatcher from dropping the frame.
 	}
+}
+
+// handleAuth processes a Hocuspocus in-band Auth (tag 2) sub-message. No-op
+// when Server.OnTokenAuth is nil (backward compatible with the legacy
+// silent-ignore behavior).
+func (p *peer) handleAuth(dec *encoding.Decoder) {
+	hook := p.server.OnTokenAuth
+	if hook == nil {
+		return
+	}
+	subType, err := dec.ReadVarUint()
+	if err != nil || subType != authTypeToken {
+		return // only client Token(0) sub-messages are actionable
+	}
+	token, err := dec.ReadVarString()
+	if err != nil {
+		p.server.log().Debug("discarded malformed auth token frame", "room", p.roomName, "err", err)
+		return
+	}
+
+	cfg, authErr := p.safeTokenAuth(hook, token)
+	if authErr != nil {
+		p.write(encodeAuthMessage(authTypePermissionDenied, authErr.Error()))
+		// Full error text goes in the PermissionDenied data frame above; the
+		// WS close frame uses a short constant reason because control frames
+		// cap the payload at 125 bytes (a long reason would drop the close).
+		p.enqueueClose(wsCodeUnauthorized, wsReasonUnauthorized)
+		return
+	}
+
+	p.readOnly = cfg.ReadOnly // safe: only read on this read-loop goroutine
+	scope := "read-write"
+	if cfg.ReadOnly {
+		scope = "readonly"
+	}
+	p.write(encodeAuthMessage(authTypeAuthenticated, scope))
+}
+
+// safeTokenAuth calls the hook, converting a panic into a denial.
+func (p *peer) safeTokenAuth(hook func(string, string) (ConnectionConfig, error), token string) (cfg ConnectionConfig, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.server.log().Warn("OnTokenAuth panicked; denying", "room", p.roomName, "panic", r)
+			cfg = ConnectionConfig{}
+			err = fmt.Errorf("authentication error")
+		}
+	}()
+	return hook(p.roomName, token)
+}
+
+// encodeAuthMessage builds a tag-2 auth reply: VarUint(msgAuth) VarUint(sub)
+// VarString(s). docName framing (if enabled) is applied later in writeToConn.
+func encodeAuthMessage(subType uint64, s string) []byte {
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgAuth)
+		enc.WriteVarUint(subType)
+		enc.WriteVarString(s)
+	})
+}
+
+// enqueueClose queues a WS close (with an application close code) AFTER any
+// frames already in writeCh. The close control frame is emitted by runWriter
+// on the writer goroutine, preserving ordering (a preceding PermissionDenied
+// data frame is flushed first) and the single-writer invariant. A nil sentinel
+// on writeCh signals runWriter to close.
+//
+// Callers MUST invoke enqueueClose only from the peer's own read-loop
+// goroutine (the same goroutine that runs the deferred handleDisconnect).
+// Unlike write()/broadcast(), which hold wmu across both the closed-check and
+// the writeCh send, enqueueClose releases wmu before the send below: its
+// full-queue fallback calls sendCloseFrame(), which re-locks wmu, and
+// sync.Mutex is not reentrant, so holding wmu across the send would deadlock
+// on that path. Because handleDisconnect (the sole close(p.writeCh) site)
+// runs sequentially after enqueueClose's caller on the same goroutine, this
+// send can never race the channel close today.
+func (p *peer) enqueueClose(code int, reason string) {
+	p.wmu.Lock()
+	if p.closed {
+		p.wmu.Unlock()
+		return
+	}
+	p.closeCode = code
+	p.closeReason = reason
+	p.wmu.Unlock()
+
+	func() {
+		defer func() {
+			if recover() != nil {
+				// writeCh already closed by handleDisconnect (a future
+				// cross-goroutine misuse) — close directly instead of
+				// panicking.
+				p.sendCloseFrame()
+			}
+		}()
+		select {
+		case p.writeCh <- nil:
+		default:
+			// Queue full: best-effort direct close (ordering already at risk).
+			p.sendCloseFrame()
+		}
+	}()
+}
+
+// sendCloseFrame writes the queued WS close control frame then closes the
+// connection. Called only from the writer goroutine (via runWriter) or the
+// enqueueClose full-queue fallback.
+func (p *peer) sendCloseFrame() {
+	p.wmu.Lock()
+	code, reason := p.closeCode, p.closeReason
+	p.wmu.Unlock()
+	if code != 0 {
+		_ = p.conn.WriteControl(gws.CloseMessage,
+			gws.FormatCloseMessage(code, reason),
+			time.Now().Add(writeTimeout))
+	}
+	_ = p.conn.Close()
 }
 
 // trackAwarenessClients records which awareness clientIDs this peer owns
@@ -563,6 +694,12 @@ func (p *peer) write(data []byte) {
 func (p *peer) runWriter() {
 	defer close(p.writerDone)
 	for data := range p.writeCh {
+		if data == nil {
+			// close-directive sentinel (#104 G1): flush is done; emit the WS
+			// close control frame on this goroutine, then stop.
+			p.sendCloseFrame()
+			return
+		}
 		if !p.writeToConn(data) {
 			return
 		}
@@ -593,6 +730,12 @@ func (p *peer) writeToConn(data []byte) bool {
 	p.wmu.Unlock()
 	if closed {
 		return false
+	}
+	if p.hocuspocusFraming {
+		data = encoding.EncodeBytes(func(enc *encoding.Encoder) {
+			enc.WriteVarString(p.roomName)
+			enc.WriteRaw(data)
+		})
 	}
 	if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 		p.server.log().Debug("set write deadline failed", "err", err)
