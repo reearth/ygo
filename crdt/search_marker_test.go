@@ -102,3 +102,102 @@ func TestSearchMarker_ROMatchesCold_LargeDocRandom(t *testing.T) {
 		t.Fatalf("t.markers length changed by findMarkerRO: got %d, want %d", len(at.markers), len(markers))
 	}
 }
+
+// TestSearchMarker_InsertMatchesCold drives the mutating write-path lookup
+// (leftNeighbourAt → findMarkerMut) with several insert orderings and asserts
+// the resulting document is identical to a force-cold run (disableMarkers),
+// i.e. the search-marker maintenance never changes the position a local
+// insert resolves to.
+func TestSearchMarker_InsertMatchesCold(t *testing.T) {
+	build := func(cold bool, order []int) string {
+		d := New(WithClientID(1))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) {
+			for _, pos := range order {
+				txt.Insert(tr, pos, "x", nil)
+			}
+		})
+		return txt.ToString()
+	}
+	seq := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	rev := []int{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	rnd := []int{0, 1, 0, 2, 1, 3, 0, 4, 2, 1}
+	for _, order := range [][]int{seq, rev, rnd} {
+		if got, want := build(false, order), build(true, order); got != want {
+			t.Fatalf("markers=%q cold=%q order=%v", got, want, order)
+		}
+	}
+}
+
+// TestSearchMarker_InsertMatchesCold_LargeRandom is a heavier version of the
+// above: many random inserts and deletes through the marker write path must
+// still yield exactly the force-cold document. This exercises marker refresh,
+// LRU eviction, and the shim-driven invalidation across a long transaction.
+func TestSearchMarker_InsertMatchesCold_LargeRandom(t *testing.T) {
+	build := func(cold bool) string {
+		d := New(WithClientID(1))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		rng := rand.New(rand.NewSource(7))
+		d.Transact(func(tr *Transaction) {
+			for i := 0; i < 3000; i++ {
+				pos := rng.Intn(txt.Len() + 1)
+				txt.Insert(tr, pos, fmt.Sprintf("%d", rng.Intn(10)), nil)
+				if txt.Len() > 30 && rng.Intn(6) == 0 {
+					txt.Delete(tr, rng.Intn(txt.Len()-5), 1+rng.Intn(4))
+				}
+			}
+		})
+		return txt.ToString()
+	}
+	if got, want := build(false), build(true); got != want {
+		t.Fatalf("marker/cold divergence:\n marker len=%d\n cold   len=%d", len(got), len(want))
+	}
+}
+
+// TestSearchMarker_RO_IndexBeyondLen (carried over from Task 1 review): a
+// read-only lookup for index > Len() must match the cold oracle (both walk
+// off the end and return (nil, totalCounted)).
+func TestSearchMarker_RO_IndexBeyondLen(t *testing.T) {
+	d := New(WithClientID(1))
+	txt := d.GetText("t")
+	d.Transact(func(tr *Transaction) { txt.Insert(tr, 0, "abcde", nil) })
+	at := txt.baseType()
+	for _, idx := range []int{txt.Len() + 1, txt.Len() + 5, txt.Len() + 100} {
+		gi, gidx := at.findMarkerRO(idx)
+		ci, cidx := coldLeftNeighbour(at, idx)
+		if gi != ci || gidx != cidx {
+			t.Fatalf("index %d: findMarkerRO=(%p,%d) cold=(%p,%d)", idx, gi, gidx, ci, cidx)
+		}
+	}
+}
+
+// TestSearchMarker_RO_DisableMarkersIgnoresBadMarkers (carried over from Task
+// 1 review): with disableMarkers set, findMarkerRO must ignore t.markers
+// entirely and fall back to the cold walk — even when t.markers is populated
+// with deliberately wrong (item, index) pairs.
+func TestSearchMarker_RO_DisableMarkersIgnoresBadMarkers(t *testing.T) {
+	d := New(WithClientID(1))
+	txt := d.GetText("t")
+	d.Transact(func(tr *Transaction) { txt.Insert(tr, 0, "hello world foo bar", nil) })
+	at := txt.baseType()
+
+	// Populate markers with garbage: point every marker at the first item but
+	// claim wildly wrong indices. If findMarkerRO consulted these it would
+	// return wrong answers.
+	at.markers = []searchMarker{
+		{item: at.start, index: 9999},
+		{item: at.start, index: -50},
+		{item: at.start, index: 3},
+	}
+	at.disableMarkers = true
+
+	for i := 0; i <= txt.Len()+2; i++ {
+		gi, gidx := at.findMarkerRO(i)
+		ci, cidx := coldLeftNeighbour(at, i)
+		if gi != ci || gidx != cidx {
+			t.Fatalf("index %d: findMarkerRO=(%p,%d) cold=(%p,%d)", i, gi, gidx, ci, cidx)
+		}
+	}
+}

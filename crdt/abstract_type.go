@@ -1,17 +1,5 @@
 package crdt
 
-// posLRUSize is the number of (index → item) pairs cached per abstractType.
-// 80 entries matches the value used by the Yjs reference implementation and
-// gives O(1) average-case performance for sequential and nearby insertions.
-const posLRUSize = 80
-
-// posCacheEntry maps a logical cumulative character count to the item at that
-// boundary. "index" is the total counted characters up to and including item.
-type posCacheEntry struct {
-	index int
-	item  *Item
-}
-
 // SharedType is the public interface satisfied by every exported CRDT type
 // (YArray, YMap, YText, YXmlFragment, …). It exists so external callers can
 // name the element type of NewUndoManager's scope slice
@@ -60,20 +48,10 @@ type abstractType struct {
 	deepSubIDGen  uint64
 	deepObservers []deepSub
 
-	// posCache is a small circular cache of (cumulativeIndex → *Item) pairs
-	// used by leftNeighbourAt to skip linear scan from t.start on repeat
-	// accesses. posCacheLen tracks how many slots are filled (capped at
-	// posLRUSize). posCacheWr is the next write position; it wraps around once
-	// the cache is full, giving O(1) FIFO eviction instead of the previous
-	// O(posLRUSize) min-scan.
-	posCache    [posLRUSize]posCacheEntry
-	posCacheLen int
-	posCacheWr  int
-
 	// insertHint is set by Insert callers to the logical index of an imminent
-	// local insertion. When non-zero, item.integrate uses partial cache
-	// invalidation (discarding only entries ≥ insertHint) instead of clearing
-	// the entire cache, so that entries before the insertion point survive for
+	// local insertion. When non-zero, item.integrate uses partial marker
+	// invalidation (dropping only markers ≥ insertHint) instead of clearing
+	// all markers, so that markers before the insertion point survive for
 	// subsequent nearby lookups. Zero means "no hint; do a full clear".
 	insertHint int
 
@@ -95,16 +73,16 @@ type abstractType struct {
 	hasFormatting bool
 
 	// markers is a small cache of (rendered index → *Item) search markers,
-	// modelled on Yjs's ArraySearchMarker. Capped at maxSearchMarker entries.
-	// As of Task 1 (#181) nothing writes to this slice yet — only the
-	// read-only findMarkerRO consults it, and only when a later task
-	// populates it; the field exists now so the read path and the
-	// force-cold test seam (disableMarkers) can be exercised ahead of the
-	// write-path migration that replaces posCache.
+	// modelled on Yjs's ArraySearchMarker, replacing the old posCache. Capped
+	// at maxSearchMarker entries. The write path (findMarkerMut, called from
+	// leftNeighbourAt) is the only place that installs/refreshes/evicts
+	// markers; the read-only findMarkerRO merely consults them. Because
+	// mutation happens exclusively under the document write lock, findMarkerRO
+	// stays safe to call under an RLock.
 	markers []searchMarker
-	// markerTimestamp is a monotonically increasing counter later tasks use
-	// to decide which marker to evict/refresh (LRU-by-recency). Unused by
-	// Task 1's read-only lookup.
+	// markerTimestamp is a monotonically increasing counter used to decide
+	// which marker to evict/refresh (LRU-by-recency) in markPosition/
+	// markPositionAt.
 	markerTimestamp uint64
 	// disableMarkers is a test-only seam that forces findMarkerRO (and, once
 	// later tasks add a marker-aware write path, the rest of the
@@ -169,45 +147,22 @@ func (t *abstractType) invalidateFirstLiveCache() {
 	t.firstLiveCache = nil
 }
 
-// invalidatePosCache clears all cached position entries. Must be called
-// whenever an insertion or deletion changes the logical positions of items
-// in this type's linked list.
+// invalidatePosCache clears all search markers. Must be called whenever an
+// insertion or deletion changes the logical positions of items in this type's
+// linked list but the affected range is not known (remote applies, splits,
+// merges). Retained as a thin shim over clearMarkers so existing call sites
+// keep compiling; Task 3 will refine the exact invalidation semantics.
 func (t *abstractType) invalidatePosCache() {
-	t.posCacheLen = 0
-	t.posCacheWr = 0
+	t.clearMarkers()
 }
 
-// invalidatePosCacheFrom removes all cached entries with cumulative index ≥ pos.
-// Entries before pos remain valid and can be reused by the next leftNeighbourAt
-// call near the same location, avoiding a full O(n) rescan from t.start.
+// invalidatePosCacheFrom drops every marker at or after rendered position pos.
+// Markers before pos still point at items whose rendered start an edit at pos
+// cannot shift, so they remain accurate. Retained as a thin shim over
+// dropMarkersFrom for existing call sites; Task 3 will replace these with
+// precise updateMarkerChanges calls.
 func (t *abstractType) invalidatePosCacheFrom(pos int) {
-	n := 0
-	for i := 0; i < t.posCacheLen; i++ {
-		if t.posCache[i].index < pos {
-			t.posCache[n] = t.posCache[i]
-			n++
-		}
-	}
-	t.posCacheLen = n
-	t.posCacheWr = 0 // reset write cursor; the compacted entries sit at [0..n-1]
-}
-
-// storePosCache records the entry (index, item) in the circular cache.
-// When the cache is not yet full entries are appended; once full the oldest
-// entry is overwritten in FIFO order. This gives O(1) insertion cost vs the
-// previous O(posLRUSize) min-scan eviction strategy.
-func (t *abstractType) storePosCache(index int, item *Item) {
-	if t.posCacheLen < posLRUSize {
-		t.posCache[t.posCacheLen] = posCacheEntry{index, item}
-		t.posCacheLen++
-		return
-	}
-	// Cache full: circular overwrite.
-	t.posCache[t.posCacheWr] = posCacheEntry{index, item}
-	t.posCacheWr++
-	if t.posCacheWr >= posLRUSize {
-		t.posCacheWr = 0
-	}
+	t.dropMarkersFrom(pos)
 }
 
 // leftNeighbourAt returns the item that should be the left neighbour when
@@ -218,62 +173,35 @@ func (t *abstractType) storePosCache(index int, item *Item) {
 // caller must split it before inserting.
 // Returns (nil, 0) when index == 0 (insert at the very beginning).
 //
-// The LRU position cache is consulted first so that repeated insertions near
-// the same position avoid re-scanning from t.start.
+// The search-marker cache (findMarkerMut) is consulted first so that repeated
+// insertions near the same position avoid re-scanning from t.start; it also
+// installs/refreshes a marker for the resolved position as a side effect.
 func (t *abstractType) leftNeighbourAt(index int) (*Item, int) {
 	if index == 0 {
 		return nil, 0
 	}
 
-	// Find the cache entry with the largest cumulative index ≤ requested index.
-	// Deleted cached items are skipped (they are no longer at their recorded position).
-	startCounted := 0
-	var startItem *Item // first item to scan from (the Right of the cached boundary item)
-	for i := 0; i < t.posCacheLen; i++ {
-		e := t.posCache[i]
-		if e.index <= index && e.index > startCounted && !e.item.Deleted {
-			startCounted = e.index
-			startItem = e.item
-		}
-	}
-
-	counted := startCounted
-	var lastItem *Item
-	scanFrom := t.start
-	if startItem != nil {
-		// Resume scan from the item right after the cached boundary.
-		lastItem = startItem
-		scanFrom = startItem.Right
-	}
-
-	for item := scanFrom; item != nil; item = item.Right {
-		if !item.Deleted && item.Content.IsCountable() {
-			n := item.Content.Len()
-			newCounted := counted + n
-			// Store this boundary in the cache for future nearby lookups.
-			t.storePosCache(newCounted, item)
-			if newCounted >= index {
-				offset := index - counted
-				if offset == n {
-					// Position is at the very end of item — insert right after it.
-					return item, 0
-				}
-				if offset == 0 {
-					// Position is at the very start of item — insert right after
-					// lastItem (i.e. before this item). The cache can cause counted
-					// to equal index at the start of a scan, producing offset=0 for
-					// the first item encountered; returning that item would tell the
-					// caller to insert after it (too far right).
-					return lastItem, 0
-				}
-				return item, offset
+	item, start := t.findMarkerMut(index)
+	if item == nil {
+		// index > total rendered length: append after the last countable item.
+		var last *Item
+		for it := t.start; it != nil; it = it.Right {
+			if !it.Deleted && it.Content.IsCountable() {
+				last = it
 			}
-			counted = newCounted
-			lastItem = item
 		}
+		return last, 0
 	}
-	// index >= length: insert after the last item (append).
-	return lastItem, 0
+
+	// findMarkerMut (like the cold oracle) always returns an item whose
+	// rendered start is strictly < index, so offset ∈ [1, len]. offset == len
+	// means index is exactly at the item's end → insert right after it;
+	// otherwise the item must be split at offset.
+	offset := index - start
+	if offset >= item.Content.Len() {
+		return item, 0
+	}
+	return item, offset
 }
 
 // observeDeep registers fn to be called after any transaction that modifies
