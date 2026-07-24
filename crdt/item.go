@@ -265,6 +265,15 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		}
 	}
 
+	// Yjs parity note: once any ContentMove item is integrated into this type,
+	// mark hasMoves so YArray.Get/Slice know the marker-based fast path
+	// (search_marker.go's renderedStep, which is move-oblivious) can no
+	// longer be trusted and must fall back to the full move-aware walk. See
+	// the hasMoves doc comment on abstractType (abstract_type.go).
+	if _, ok := item.Content.(*ContentMove); ok && item.Parent != nil {
+		item.Parent.hasMoves = true
+	}
+
 	// Track ContentString items for end-of-transaction run squashing.
 	if _, ok := item.Content.(*ContentString); ok {
 		txn.newItems = append(txn.newItems, item)

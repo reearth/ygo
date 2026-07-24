@@ -90,6 +90,18 @@ type abstractType struct {
 	// exactly like the marker-free oracle. Used to assert marker-based and
 	// cold-walk results agree.
 	disableMarkers bool
+
+	// hasMoves becomes true the first time a ContentMove item is integrated
+	// into this type (locally via YArray.Move or remotely via an update).
+	// renderedStep (search_marker.go) counts items by their PHYSICAL position
+	// in the linked list and does not yet know how to render a ContentMove's
+	// target at the move's destination, nor to skip an item that moved away
+	// (item.MovedBy != nil) — that move-awareness is explicitly deferred to a
+	// later task. Until then, YArray.Get/Slice gate their marker-based fast
+	// path on !hasMoves so arrays that use Move keep taking the original,
+	// fully move-aware linear walk instead of a marker answer that could
+	// silently disagree with it. Once true, stays true (mirrors hasFormatting).
+	hasMoves bool
 }
 
 // prelimFlusher is implemented by types that buffer mutations while detached

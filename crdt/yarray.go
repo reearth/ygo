@@ -252,6 +252,38 @@ func (a *YArray) Get(index int) any {
 		defer doc.mu.RUnlock()
 	}
 	t := &a.abstractType
+	if index < 0 {
+		return nil
+	}
+
+	// Marker fast path: skip the O(index) walk from t.start via findMarkerRO
+	// (safe under RLock — it never mutates t.markers). Only valid when this
+	// array has never used Move: renderedStep counts items by PHYSICAL
+	// position and doesn't yet know how to render a ContentMove's target at
+	// its destination or skip an item that moved away, so a document with
+	// moves keeps the full move-aware walk below (see hasMoves doc comment).
+	//
+	// index+1 converts Get's "which element" (0-based) numbering to
+	// findMarkerRO's "insert-before" numbering: findMarkerRO(index+1) brackets
+	// the item whose rendered range [start, start+n) contains index, with
+	// start==the item's own rendered start — exactly what the cold loop below
+	// computes as `counted`. The tie-break at an exact item boundary agrees
+	// too: findMarkerRO returns the earlier item when start+n == index+1,
+	// which is precisely the cold loop's `counted+n > index` bracket.
+	if !t.disableMarkers && !t.hasMoves {
+		item, start := t.findMarkerRO(index + 1)
+		if item == nil {
+			return nil
+		}
+		switch c := item.Content.(type) {
+		case *ContentAny:
+			return c.Vals[index-start]
+		case *ContentType:
+			return c.Type.owner
+		}
+		return nil
+	}
+
 	counted := 0
 	for item := t.start; item != nil; item = item.Right {
 		if item.Deleted {
@@ -445,8 +477,20 @@ func (a *YArray) Slice(start, end int) []any {
 		return nil
 	}
 	result := make([]any, 0, end-start)
+
+	// Marker fast path: jump straight to the item bracketing `start` instead
+	// of walking from t.start — same hasMoves/disableMarkers safety gate as
+	// Get (see its comment). Once positioned, the loop body below (unchanged,
+	// move-aware) still visits every item through `end` to collect values, so
+	// only the O(start) prefix walk is skipped, not the O(end-start) work.
+	var item *Item
 	counted := 0
-	for item := t.start; item != nil && counted < end; item = item.Right {
+	if !t.disableMarkers && !t.hasMoves {
+		item, counted = t.findMarkerRO(start + 1)
+	} else {
+		item = t.start
+	}
+	for ; item != nil && counted < end; item = item.Right {
 		if item.Deleted {
 			continue
 		}
@@ -678,14 +722,38 @@ func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 	// needed during the walk, clears all markers, in which case the call below
 	// is a no-op on the empty set — still correct.
 	origLen := length
-	counted := 0
-	// Start the walk at firstLiveFromStart, not t.start: leading tombstones
-	// accumulated by earlier head-deletes are skipped in O(1) via the cache,
-	// turning the previous O(N) per-call leading-skip into O(1) amortized.
-	// firstLiveFromStart returns the first non-deleted item; subsequent
-	// non-countable items (e.g. ContentFormat) are still handled by the
-	// existing skip branch below. Closes the deleteRange half of #86.
-	item := t.firstLiveFromStart()
+	var item *Item
+	var counted int
+	if index <= 0 {
+		// index<=0 has no meaningful "bracket item" under findMarkerMut (it
+		// always answers (nil,0) there, by design — that's the correct
+		// leftNeighbourAt/insert-before-everything answer, not a delete
+		// start). Start the walk at firstLiveFromStart, not t.start: leading
+		// tombstones accumulated by earlier head-deletes are skipped in O(1)
+		// via the cache, turning the previous O(N) per-call leading-skip into
+		// O(1) amortized. firstLiveFromStart returns the first non-deleted
+		// item; subsequent non-countable items (e.g. ContentFormat) are still
+		// handled by the existing skip branch below. Closes the deleteRange
+		// half of #86.
+		item = t.firstLiveFromStart()
+		counted = 0
+	} else {
+		// Marker fast path: findMarkerMut brackets index directly (counted <=
+		// index <= counted+n) instead of summing lengths from the document
+		// head, closing the O(index) walk this function used to do on every
+		// call. Its tie-break (returns the earlier item when an item's range
+		// ends exactly at index) is reconciled by the same "counted+n <=
+		// index: skip forward" branch below that a full walk from t.start
+		// would also have to pass through — the very next loop iteration
+		// advances past a boundary-tied item exactly as if we'd walked here.
+		// It also respects t.disableMarkers internally (falls back to the
+		// identical cold walk), so this is safe under the force-cold test
+		// seam too. As a write-path call it also installs/refreshes a marker
+		// at the pre-delete position; updateMarkerChanges below (which always
+		// runs afterward) correctly shifts or drops it along with every other
+		// marker once the range is tombstoned.
+		item, counted = t.findMarkerMut(index)
+	}
 	for item != nil && length > 0 {
 		if item.Deleted || !item.Content.IsCountable() {
 			item = item.Right

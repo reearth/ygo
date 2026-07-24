@@ -3,6 +3,8 @@ package crdt
 import (
 	"fmt"
 	"math/rand"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -339,6 +341,405 @@ func TestSearchMarker_RO_DisableMarkersIgnoresBadMarkers(t *testing.T) {
 		ci, cidx := coldLeftNeighbour(at, i)
 		if gi != ci || gidx != cidx {
 			t.Fatalf("index %d: findMarkerRO=(%p,%d) cold=(%p,%d)", i, gi, gidx, ci, cidx)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 4: route positional ops through markers + single-cursor ApplyDelta (#181)
+//
+// Every test below builds the SAME document twice: once with markers live
+// (disableMarkers=false, the fast path this task adds) and once with
+// disableMarkers=true (forces every op back to its pre-Task-4 full linear
+// walk — the oracle). The two runs must be byte/value-identical. Where an
+// independent expectation is easy to compute (values are their own index,
+// or plain-ASCII string splicing), the test also checks the result against
+// that — so a bug shared by both the marker and cold-walk implementations
+// can't hide behind marker==cold agreement alone.
+
+// TestSearchMarker_ArrayGet_MatchesCold exercises YArray.Get's findMarkerRO
+// fast path (yarray.go). Values are inserted equal to their own index, so
+// the expected answer is independently known without re-deriving it from
+// the array's own Get/Slice logic.
+func TestSearchMarker_ArrayGet_MatchesCold(t *testing.T) {
+	idxs := []int{0, 1999, 1000, 3, 1500, 7, 1234, 1998}
+	build := func(cold bool) []any {
+		d := New(WithClientID(1))
+		arr := d.GetArray("a")
+		arr.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) {
+			for i := 0; i < 2000; i++ {
+				arr.Insert(tr, arr.Len(), []any{i})
+			}
+		})
+		out := make([]any, 0, len(idxs))
+		for _, idx := range idxs {
+			out = append(out, arr.Get(idx))
+		}
+		return out
+	}
+	got, cold := build(false), build(true)
+	if !reflect.DeepEqual(got, cold) {
+		t.Fatalf("marker/cold mismatch:\n got  %v\n cold %v", got, cold)
+	}
+	want := make([]any, len(idxs))
+	for i, idx := range idxs {
+		// arr[i] == i by construction, but NewContentAny normalises Go `int`
+		// values to int64 (matching the JSON-number convention used
+		// elsewhere), so the independent oracle must match that type.
+		want[i] = int64(idx)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v (independent oracle)", got, want)
+	}
+	// Out-of-bounds and negative indices must still behave like before.
+	d := New(WithClientID(1))
+	arr := d.GetArray("a")
+	d.Transact(func(tr *Transaction) { arr.Insert(tr, 0, []any{1, 2, 3}) })
+	if v := arr.Get(-1); v != nil {
+		t.Fatalf("Get(-1) = %v, want nil", v)
+	}
+	if v := arr.Get(3); v != nil {
+		t.Fatalf("Get(len) = %v, want nil", v)
+	}
+}
+
+// TestSearchMarker_ArraySlice_MatchesCold exercises YArray.Slice's
+// findMarkerRO-accelerated start lookup (yarray.go).
+func TestSearchMarker_ArraySlice_MatchesCold(t *testing.T) {
+	build := func(cold bool) [][]any {
+		d := New(WithClientID(1))
+		arr := d.GetArray("a")
+		arr.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) {
+			for i := 0; i < 2000; i++ {
+				arr.Insert(tr, arr.Len(), []any{i})
+			}
+		})
+		return [][]any{
+			arr.Slice(0, 10),
+			arr.Slice(500, 510),
+			arr.Slice(1990, 2000),
+			arr.Slice(1000, 1000), // empty range
+			arr.Slice(1995, 5000), // end clamps to Len()
+		}
+	}
+	got, cold := build(false), build(true)
+	if !reflect.DeepEqual(got, cold) {
+		t.Fatalf("marker/cold mismatch:\n got  %v\n cold %v", got, cold)
+	}
+	expectRange := func(s, e int) []any {
+		if e > 2000 {
+			e = 2000
+		}
+		out := make([]any, 0, e-s)
+		for i := s; i < e; i++ {
+			out = append(out, int64(i)) // NewContentAny normalises int -> int64
+		}
+		return out
+	}
+	want := [][]any{
+		expectRange(0, 10),
+		expectRange(500, 510),
+		expectRange(1990, 2000),
+		expectRange(1000, 1000),
+		expectRange(1995, 5000),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v (independent oracle)", got, want)
+	}
+}
+
+// TestSearchMarker_ArrayGetSlice_MoveGated_MatchesCold guards the hasMoves
+// gate added alongside this task's Get/Slice routing: search_marker.go's
+// renderedStep counts items by PHYSICAL position and doesn't yet know how to
+// render a ContentMove's target at its destination or skip an item that
+// moved away (that move-awareness is deferred to a later task), so an array
+// that has ever used Move must keep taking the original fully move-aware
+// walk regardless of disableMarkers. Without the gate this would silently
+// return wrong values instead of merely being slow.
+func TestSearchMarker_ArrayGetSlice_MoveGated_MatchesCold(t *testing.T) {
+	build := func(cold bool) ([]any, []any) {
+		d := New(WithClientID(1))
+		arr := d.GetArray("a")
+		arr.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) {
+			for _, v := range []any{"a", "b", "c", "d", "e"} {
+				arr.Push(tr, []any{v})
+			}
+			arr.Move(tr, 0, 3) // [b c d a e]
+		})
+		return arr.ToSlice(), []any{arr.Get(0), arr.Get(1), arr.Get(2), arr.Get(3), arr.Get(4)}
+	}
+	gotSlice, gotGet := build(false)
+	coldSlice, coldGet := build(true)
+	if !reflect.DeepEqual(gotSlice, coldSlice) || !reflect.DeepEqual(gotGet, coldGet) {
+		t.Fatalf("marker/cold mismatch: slice got=%v cold=%v; get got=%v cold=%v", gotSlice, coldSlice, gotGet, coldGet)
+	}
+	want := []any{"b", "c", "d", "a", "e"}
+	if !reflect.DeepEqual(gotSlice, want) {
+		t.Fatalf("ToSlice got %v want %v", gotSlice, want)
+	}
+	if !reflect.DeepEqual(gotGet, want) {
+		t.Fatalf("Get(0..4) got %v want %v", gotGet, want)
+	}
+}
+
+// cyclicText returns a length-n string where byte i is determined by i mod 7
+// (a period unlikely to accidentally line up with the small shift amounts a
+// boundary/off-by-a-few bug would introduce). Unlike a uniform "aaaa...", a
+// range shifted by a few positions but kept the same length still changes
+// the surviving/inserted substring content — so tests built on cyclicText
+// catch position bugs that a uniform-content oracle would render invisible
+// (e.g. deleting [2925,2965) instead of [2930,2970) from an all-'x' string
+// yields the same result either way; from cyclicText it does not).
+func cyclicText(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte('a' + i%7)
+	}
+	return string(b)
+}
+
+// TestSearchMarker_DeleteRange_MatchesCold_Random exercises deleteRange's
+// findMarkerMut-accelerated start lookup (yarray.go, shared by YArray.Delete
+// and YText.Delete) with many random-position deletes on a large document.
+func TestSearchMarker_DeleteRange_MatchesCold_Random(t *testing.T) {
+	build := func(cold bool) string {
+		d := New(WithClientID(1))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		rng := rand.New(rand.NewSource(99))
+		d.Transact(func(tr *Transaction) {
+			for txt.Len() < 4000 {
+				txt.Insert(tr, txt.Len(), fmt.Sprintf("%d-", rng.Intn(1000)), nil)
+			}
+			for i := 0; i < 300 && txt.Len() > 20; i++ {
+				pos := rng.Intn(txt.Len() - 10)
+				n := 1 + rng.Intn(9)
+				txt.Delete(tr, pos, n)
+			}
+		})
+		return txt.ToString()
+	}
+	got, cold := build(false), build(true)
+	if got != cold {
+		t.Fatalf("marker/cold mismatch: len(got)=%d len(cold)=%d", len(got), len(cold))
+	}
+}
+
+// TestSearchMarker_DeleteRange_MatchesCold_Tail exercises the deleteRange
+// fast path for a delete anchored near the end of a large document — the
+// case an O(index) walk from the head would make expensive, and the case
+// most likely to trip up findMarkerMut's boundary tie-break if it were wired
+// in wrong (see the "counted+n <= index: skip forward" comment in
+// yarray.go's deleteRange). Content is cyclicText (not a uniform character)
+// so a start-position-shifted-but-same-length delete is actually detectable
+// (see cyclicText's doc comment) — this is what makes the independent
+// oracle discriminating rather than tautological.
+func TestSearchMarker_DeleteRange_MatchesCold_Tail(t *testing.T) {
+	const n = 3000
+	// Two variants: one where the tail delete lands exactly on an item
+	// boundary (single-char items), and one where it must split a large
+	// multi-char item mid-run — the latter is what actually exercises
+	// deleteRange's "counted < index: split at the start of the deletion"
+	// branch (a corrupted marker-derived `counted` that still finds the
+	// right bracket item can hide behind a boundary-aligned delete, since
+	// the split decision never triggers there).
+	base := cyclicText(n)
+	build := func(cold bool, bulk bool) string {
+		d := New(WithClientID(1))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) {
+			if bulk {
+				txt.Insert(tr, 0, base, nil) // one big item
+				txt.Delete(tr, n-70, 40)     // mid-item, both boundaries
+			} else {
+				for i := 0; i < n; i++ {
+					txt.Insert(tr, txt.Len(), base[i:i+1], nil)
+				}
+				txt.Delete(tr, txt.Len()-50, 50) // exactly on an item boundary
+			}
+		})
+		return txt.ToString()
+	}
+	for _, bulk := range []bool{false, true} {
+		got, cold := build(false, bulk), build(true, bulk)
+		var want string
+		if bulk {
+			want = base[:n-70] + base[n-30:]
+		} else {
+			want = base[:n-50]
+		}
+		if got != cold {
+			t.Fatalf("bulk=%v marker/cold mismatch:\n got  %q\n cold %q", bulk, got, cold)
+		}
+		if got != want {
+			t.Fatalf("bulk=%v got %q want %q (independent oracle)", bulk, got, want)
+		}
+	}
+}
+
+// TestSearchMarker_Format_MatchesCold exercises YText.Format's
+// findTextPos/findMarkerMut-accelerated cursor resolution on a large
+// document (ytext.go). Content is cyclicText so a shifted-but-same-length
+// format range still produces a detectably different Delta (different
+// substrings in the surrounding plain runs), not just different lengths.
+func TestSearchMarker_Format_MatchesCold(t *testing.T) {
+	const n = 3000
+	base := cyclicText(n)
+	build := func(cold bool) []Delta {
+		d := New(WithClientID(1))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) {
+			txt.Insert(tr, 0, base, nil)
+			txt.Format(tr, 1500, 100, Attributes{"bold": true})
+		})
+		return txt.ToDelta()
+	}
+	got, cold := build(false), build(true)
+	if !reflect.DeepEqual(got, cold) {
+		t.Fatalf("marker/cold mismatch:\n got  %v\n cold %v", got, cold)
+	}
+	want := []Delta{
+		{Op: DeltaOpInsert, Insert: base[:1500]},
+		{Op: DeltaOpInsert, Insert: base[1500:1600], Attributes: Attributes{"bold": true}},
+		{Op: DeltaOpInsert, Insert: base[1600:]},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v (independent oracle)", got, want)
+	}
+}
+
+// TestSearchMarker_CurrentAttributesAt_MatchesCold exercises
+// YText.currentAttributesAt's !hasFormatting short-circuit (returns empty
+// without walking, ytext.go) together with its ordinary full-walk fallback
+// once formatting exists — both are consulted by Insert whenever attrs is
+// non-empty. Attrs-carrying inserts happen before, at the hasFormatting
+// transition, and after, on a large document.
+func TestSearchMarker_CurrentAttributesAt_MatchesCold(t *testing.T) {
+	build := func(cold bool) []Delta {
+		d := New(WithClientID(1))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) {
+			for i := 0; i < 2000; i++ {
+				txt.Insert(tr, txt.Len(), "a", nil)
+			}
+			// First attrs-carrying insert: hasFormatting is still false when
+			// currentAttributesAt is consulted here (it flips true only once
+			// this call's own opening marker integrates).
+			txt.Insert(tr, txt.Len(), "BOLD", Attributes{"bold": true})
+			for i := 0; i < 2000; i++ {
+				txt.Insert(tr, txt.Len(), "b", nil)
+			}
+			// hasFormatting is now true: exercises the full walk from
+			// txt.start, at a position before the only existing marker.
+			txt.Insert(tr, 500, "MID", Attributes{"bold": true})
+			txt.Insert(tr, txt.Len(), "END", Attributes{"italic": true})
+		})
+		return txt.ToDelta()
+	}
+	got, cold := build(false), build(true)
+	if !reflect.DeepEqual(got, cold) {
+		t.Fatalf("marker/cold mismatch:\n got  %v\n cold %v", got, cold)
+	}
+}
+
+// TestSearchMarker_ApplyDelta_MatchesCold exercises ApplyDelta's single
+// threaded itemTextPos cursor (ytext.go) across a full mix of insert/
+// delete/retain/retain+format ops on a large document. The independent
+// oracle applies the identical delta to a plain Go string via ordinary
+// slicing (no crdt code at all), so it also catches a bug shared by both the
+// marker and cold-cursor ygo code paths.
+func TestSearchMarker_ApplyDelta_MatchesCold(t *testing.T) {
+	const n = 3000
+	delta := []Delta{
+		{Op: DeltaOpRetain, Retain: 500},
+		{Op: DeltaOpInsert, Insert: "HELLO"},
+		{Op: DeltaOpDelete, Delete: 20},
+		{Op: DeltaOpRetain, Retain: 1000, Attributes: Attributes{"bold": true}},
+		{Op: DeltaOpInsert, Insert: "WORLD", Attributes: Attributes{"italic": true}},
+		{Op: DeltaOpRetain, Retain: 300},
+		{Op: DeltaOpDelete, Delete: 500},
+		{Op: DeltaOpInsert, Insert: "TAIL"},
+	}
+	base := cyclicText(n)
+	build := func(cold bool) (string, []Delta) {
+		d := New(WithClientID(1))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) {
+			txt.Insert(tr, 0, base, nil)
+			txt.ApplyDelta(tr, delta)
+		})
+		return txt.ToString(), txt.ToDelta()
+	}
+	gotStr, gotDelta := build(false)
+	coldStr, coldDelta := build(true)
+	if gotStr != coldStr {
+		t.Fatalf("ToString marker/cold mismatch:\n got  %q\n cold %q", gotStr, coldStr)
+	}
+	if !reflect.DeepEqual(gotDelta, coldDelta) {
+		t.Fatalf("ToDelta marker/cold mismatch:\n got  %v\n cold %v", gotDelta, coldDelta)
+	}
+
+	// Independent oracle: replay the same delta over plain ASCII text with
+	// ordinary string slicing (quill-delta semantics), entirely outside the
+	// crdt package.
+	independentApply := func(base string, delta []Delta) string {
+		var out strings.Builder
+		pos := 0
+		for _, d := range delta {
+			switch d.Op {
+			case DeltaOpInsert:
+				if s, ok := d.Insert.(string); ok {
+					out.WriteString(s)
+				}
+			case DeltaOpRetain:
+				out.WriteString(base[pos : pos+d.Retain])
+				pos += d.Retain
+			case DeltaOpDelete:
+				pos += d.Delete
+			}
+		}
+		out.WriteString(base[pos:])
+		return out.String()
+	}
+	want := independentApply(base, delta)
+	if gotStr != want {
+		t.Fatalf("got %q want %q (independent oracle)", gotStr, want)
+	}
+}
+
+// TestSearchMarker_Format_MatchesCold_OutOfRange exercises findTextPos's
+// !hasFormatting fast path (ytext.go) at and beyond the document's length —
+// the case findTextPos must clamp pos.index to t.length exactly like the
+// walk-from-start loop does. Format itself clamps length so an out-of-range
+// index is a no-op either way; what this actually exercises is that
+// findTextPos's fast path doesn't panic or corrupt state when index >
+// t.length, agreeing with the cold walk on the (harmless) result.
+func TestSearchMarker_Format_MatchesCold_OutOfRange(t *testing.T) {
+	const n = 500
+	build := func(cold bool, idx int) string {
+		d := New(WithClientID(1))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) {
+			txt.Insert(tr, 0, cyclicText(n), nil)
+			txt.Format(tr, idx, 10, Attributes{"bold": true})
+		})
+		return txt.ToString()
+	}
+	for _, idx := range []int{n, n + 1, n + 50} {
+		got, cold := build(false, idx), build(true, idx)
+		if got != cold {
+			t.Fatalf("idx=%d marker/cold mismatch:\n got  %q\n cold %q", idx, got, cold)
+		}
+		if got != cyclicText(n) {
+			t.Fatalf("idx=%d out-of-range Format changed content: got %q", idx, got)
 		}
 	}
 }
