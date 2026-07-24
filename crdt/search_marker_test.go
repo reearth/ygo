@@ -1040,31 +1040,84 @@ func TestSearchMarker_AfterGC_MatchesCold(t *testing.T) {
 func TestSearchMarker_AfterGC_LargeDoc_MatchesCold(t *testing.T) {
 	const n = 3000
 	base := cyclicText(n)
+
+	// op records one loop iteration's parameters. Ops are precomputed by
+	// replaying the exact same rng-driven sequence against a plain Go string
+	// (see oracle below) rather than against the CRDT's own txt.Len(), so the
+	// two build() runs and the oracle all execute the identical sequence of
+	// (delPos, delN, insPos) regardless of what ygo itself reports for Len() —
+	// this is what makes the oracle independent: it cannot inherit a bug that
+	// both the marker and cold ygo code paths might share (e.g. in
+	// gcTxnDeleteSet's content-swap or deleteRange's accounting), because it
+	// never asks ygo for a length while deciding what to do next.
+	type op struct {
+		delPos, delN, insPos int
+	}
+	var ops []op
+	oracle := func() string {
+		want := base
+		rng := rand.New(rand.NewSource(42))
+		for i := 0; i < 200 && len(want) > 20; i++ {
+			delPos := rng.Intn(len(want) - 10)
+			delN := 1 + rng.Intn(9)
+			want = want[:delPos] + want[delPos+delN:]
+
+			insPos := rng.Intn(len(want) + 1)
+			want = want[:insPos] + "Z" + want[insPos:]
+
+			ops = append(ops, op{delPos, delN, insPos})
+		}
+		return want
+	}()
+
 	build := func(cold bool) string {
 		d := New(WithClientID(1), WithGC(true))
 		txt := d.GetText("t")
 		txt.baseType().disableMarkers = cold
 		d.Transact(func(tr *Transaction) { txt.Insert(tr, 0, base, nil) })
-		rng := rand.New(rand.NewSource(42))
-		for i := 0; i < 200 && txt.Len() > 20; i++ {
+		for _, o := range ops {
 			// Each delete commits (and auto-GCs) in its own transaction so the
 			// NEXT operation always sees GC'd tombstones from the previous one.
-			d.Transact(func(tr *Transaction) {
-				pos := rng.Intn(txt.Len() - 10)
-				dn := 1 + rng.Intn(9)
-				txt.Delete(tr, pos, dn)
-			})
-			d.Transact(func(tr *Transaction) {
-				pos := rng.Intn(txt.Len() + 1)
-				txt.Insert(tr, pos, "Z", nil)
-			})
+			d.Transact(func(tr *Transaction) { txt.Delete(tr, o.delPos, o.delN) })
+			d.Transact(func(tr *Transaction) { txt.Insert(tr, o.insPos, "Z", nil) })
 		}
 		return txt.ToString()
 	}
 	got, cold := build(false), build(true)
 	if got != cold {
-		t.Fatalf("post-GC large-doc marker/cold mismatch: len(got)=%d len(cold)=%d", len(got), len(cold))
+		t.Fatalf("post-GC large-doc marker/cold mismatch:\n%s", diffSummary(got, cold))
 	}
+	if got != oracle {
+		t.Fatalf("post-GC large-doc ygo result != independent plain-Go oracle:\n%s", diffSummary(got, oracle))
+	}
+}
+
+// diffSummary reports the first index at which a and b differ, plus a
+// truncated %q window around it, for use in test failure messages where a
+// bare length comparison would hide where (and how) two long strings
+// actually diverge.
+func diffSummary(a, b string) string {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	const window = 20
+	snippet := func(s string) string {
+		end := i + window
+		if end > len(s) {
+			end = len(s)
+		}
+		if i >= len(s) {
+			return "<end of string>"
+		}
+		return fmt.Sprintf("%q", s[i:end])
+	}
+	return fmt.Sprintf("len(a)=%d len(b)=%d, first diff at index %d\n a[%d:] = %s\n b[%d:] = %s",
+		len(a), len(b), i, i, snippet(a), i, snippet(b))
 }
 
 // TestSearchMarker_DeleteAtZero_FirstLiveCacheCoexistsWithMarkers (G6)
@@ -1131,9 +1184,9 @@ func TestSearchMarker_DeleteAtZero_FirstLiveCacheCoexistsWithMarkers(t *testing.
 
 	got, cold := build(false), build(true)
 	if got != cold {
-		t.Fatalf("marker/cold mismatch: len(got)=%d len(cold)=%d", len(got), len(cold))
+		t.Fatalf("marker/cold mismatch:\n%s", diffSummary(got, cold))
 	}
 	if got != oracle {
-		t.Fatalf("got len=%d != independent-oracle len=%d (firstLiveCache/marker coexistence bug)", len(got), len(oracle))
+		t.Fatalf("ygo result != independent-oracle (firstLiveCache/marker coexistence bug):\n%s", diffSummary(got, oracle))
 	}
 }
