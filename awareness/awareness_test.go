@@ -930,7 +930,7 @@ func TestUnit_Meta_ActiveAndTombstone(t *testing.T) {
 	require.NoError(t, a.ApplyUpdate(b.EncodeUpdate(nil), nil))
 	m, ok := a.Meta(99)
 	require.True(t, ok)
-	require.Greater(t, m.Clock, uint64(0))
+	require.Positive(t, m.Clock)
 	require.False(t, m.LastUpdated.IsZero())
 
 	// tombstone (remote removal): Meta still returns clock + a timestamp
