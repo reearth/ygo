@@ -323,8 +323,17 @@ func TestIdleRoom_ZeroTimeoutPreservesEagerEvict(t *testing.T) {
 	a := &idleRecordAdapter{}
 	s := NewServerWithPersistence(a) // RoomIdleTimeout left at zero value
 	var unloaded int32
-	s.OnUnloadDocument = func(_ context.Context, _ string) {
+	// newUnloadSignal (idle_sweep_test.go) is the deterministic wait point for
+	// OnUnloadDocument. Chain it behind our own counter-incrementing hook: the
+	// teardown order is OnLastPeer THEN OnUnloadDocument (peer.go), so <-lastPeer
+	// alone does NOT guarantee OnUnloadDocument has fired yet — asserting
+	// unloaded==1 right after <-lastPeer races the async teardown goroutine.
+	// Waiting on waitUnloaded (in addition to <-lastPeer) closes that gap.
+	waitUnloaded := newUnloadSignal(s)
+	signalOnUnload := s.OnUnloadDocument
+	s.OnUnloadDocument = func(ctx context.Context, name string) {
 		atomic.AddInt32(&unloaded, 1)
+		signalOnUnload(ctx, name)
 	}
 	lastPeer := newLastPeerSignal(s)
 	ts := httptest.NewServer(s)
@@ -338,7 +347,9 @@ func TestIdleRoom_ZeroTimeoutPreservesEagerEvict(t *testing.T) {
 	sendV1Update(t, connA, crdt.EncodeStateAsUpdateV1(docA, nil))
 
 	_ = connA.Close()
-	<-lastPeer
+	<-lastPeer // teardown decision made (1->0 transition)
+	require.True(t, waitUnloaded(t, "room", 2*time.Second),
+		"OnUnloadDocument must fire on eager eviction")
 
 	_, present, _ := roomState(s, "room")
 	assert.False(t, present, "RoomIdleTimeout=0 must evict the room eagerly, unchanged from prior releases")
