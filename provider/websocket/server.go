@@ -994,19 +994,16 @@ func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 // (re-acquiring s.rmu for the O(1) delete) and stops the awareness sweep, then
 // closes r.ready to wake every waiter with the error. r.ready is always closed
 // exactly once, on both paths.
+//
+// A panic raised by the adapter's LoadDoc or by the state decode (a buggy or
+// malicious adapter, or malformed persisted bytes) is recovered by
+// loadRoomDoc and funneled into loadErr rather than propagating: without this,
+// the placeholder is already published in s.rooms but r.ready is never
+// closed, so every future getOrCreateRoom/BroadcastUpdate/CloseRoom for this
+// room parks on <-r.ready forever — a permanent goroutine/connection/MaxRooms
+// leak that administrative CloseRoom cannot even clear (#182 follow-up).
 func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
-	var loadErr error
-	if s.persistence != nil {
-		data, err := s.persistence.LoadDoc(name)
-		switch {
-		case err != nil:
-			loadErr = fmt.Errorf("loading room %q: %w", name, err)
-		case len(data) > 0:
-			if err := crdt.ApplyUpdateV1(r.doc, data, nil); err != nil {
-				loadErr = fmt.Errorf("bootstrapping room %q: %w", name, err)
-			}
-		}
-	}
+	loadErr := s.loadRoomDoc(r, name)
 	// #60 — fire OnLoadDocument AFTER persistence bootstrap but BEFORE the
 	// persistence worker starts, so a hook returning an error fails room creation
 	// cleanly. Runs off-lock now (#182), so a slow hook no longer stalls other
@@ -1025,16 +1022,7 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 	}
 
 	if loadErr != nil {
-		// Remove the placeholder under s.rmu (O(1) delete) and stop the awareness
-		// sweep so a failed load leaves no room in s.rooms and no goroutine leak.
-		s.rmu.Lock()
-		if cur, ok := s.rooms[name]; ok && cur == r {
-			delete(s.rooms, name)
-		}
-		s.rmu.Unlock()
-		r.awareness.Destroy()
-		r.loadErr = loadErr
-		close(r.ready)
+		s.failRoomLoad(r, name, loadErr)
 		return
 	}
 
@@ -1064,6 +1052,53 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 	if s.relay != nil {
 		s.registerRelayObservers(r, name)
 	}
+	close(r.ready)
+}
+
+// loadRoomDoc performs the persistence LoadDoc call and, if data was returned,
+// the full-state V1 decode into r.doc. A panic raised by either — a
+// buggy/malicious PersistenceAdapter, or a decode panic on malformed/corrupt
+// persisted bytes — is recovered and converted into the returned error rather
+// than propagating up through loadRoom. This must NOT re-panic: the caller
+// (the goroutine that published the placeholder into s.rooms) has to reach
+// failRoomLoad/close(r.ready) so waiters wake with an error instead of
+// parking on r.ready forever (#182 follow-up).
+func (s *Server) loadRoomDoc(r *room, name string) (loadErr error) {
+	if s.persistence == nil {
+		return nil
+	}
+	defer func() {
+		if rv := recover(); rv != nil {
+			loadErr = fmt.Errorf("LoadDoc panic for room %q: %v", name, rv)
+		}
+	}()
+	data, err := s.persistence.LoadDoc(name)
+	switch {
+	case err != nil:
+		return fmt.Errorf("loading room %q: %w", name, err)
+	case len(data) > 0:
+		if err := crdt.ApplyUpdateV1(r.doc, data, nil); err != nil {
+			return fmt.Errorf("bootstrapping room %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// failRoomLoad is the single failure path shared by every loadRoom failure
+// mode (LoadDoc error, decode error, OnLoadDocument hook error, or a
+// recovered LoadDoc/decode panic via loadRoomDoc): remove the placeholder
+// from s.rooms under s.rmu (O(1) delete, guarded by pointer identity in case
+// it was already replaced), stop the awareness auto-expiry sweep, record
+// loadErr, then close r.ready so every waiter — including the caller that
+// created the placeholder — wakes with the error instead of blocking.
+func (s *Server) failRoomLoad(r *room, name string, loadErr error) {
+	s.rmu.Lock()
+	if cur, ok := s.rooms[name]; ok && cur == r {
+		delete(s.rooms, name)
+	}
+	s.rmu.Unlock()
+	r.awareness.Destroy()
+	r.loadErr = loadErr
 	close(r.ready)
 }
 
