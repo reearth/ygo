@@ -93,6 +93,25 @@ type abstractType struct {
 	// have never had formatting applied — the dominant cost on head-delete
 	// workloads in plain-text documents. Once true, stays true.
 	hasFormatting bool
+
+	// markers is a small cache of (rendered index → *Item) search markers,
+	// modelled on Yjs's ArraySearchMarker. Capped at maxSearchMarker entries.
+	// As of Task 1 (#181) nothing writes to this slice yet — only the
+	// read-only findMarkerRO consults it, and only when a later task
+	// populates it; the field exists now so the read path and the
+	// force-cold test seam (disableMarkers) can be exercised ahead of the
+	// write-path migration that replaces posCache.
+	markers []searchMarker
+	// markerTimestamp is a monotonically increasing counter later tasks use
+	// to decide which marker to evict/refresh (LRU-by-recency). Unused by
+	// Task 1's read-only lookup.
+	markerTimestamp uint64
+	// disableMarkers is a test-only seam that forces findMarkerRO (and, once
+	// later tasks add a marker-aware write path, the rest of the
+	// marker-based lookups) to fall back to a full linear walk from t.start,
+	// exactly like the marker-free oracle. Used to assert marker-based and
+	// cold-walk results agree.
+	disableMarkers bool
 }
 
 // prelimFlusher is implemented by types that buffer mutations while detached
