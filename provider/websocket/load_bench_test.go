@@ -81,6 +81,35 @@ func BenchmarkGetOrCreateRoom_ConcurrentDistinctRoomLoads(b *testing.B) {
 	}
 }
 
+// BenchmarkReconnectReuse_WarmIdleRoom measures the #183 (G4) reconnect-reuse
+// fast path: with RoomIdleTimeout > 0 an idle room stays resident, so a
+// reconnect to it hits the warm in-memory doc and pays NONE of the adapter's
+// LoadDoc latency. Each op re-resolves the SAME already-resident room, so the
+// steady-state cost is a map lookup plus the ready-barrier receive — orders of
+// magnitude below the loadLatency a cold (evicted) room would re-incur. Compare
+// ns/op against loadLatency to confirm the reuse path avoids the reload.
+//
+// Run:
+//
+//	go test ./provider/websocket/ -bench 'ReconnectReuse' -run '^$' -benchtime=1000x
+func BenchmarkReconnectReuse_WarmIdleRoom(b *testing.B) {
+	const loadLatency = 20 * time.Millisecond
+	s := NewServerWithPersistence(fixedLatencyAdapter{latency: loadLatency})
+	s.RoomIdleTimeout = time.Hour // keep the room resident for the whole run
+	// Prime the room once (pays the one-time LoadDoc latency).
+	if _, err := s.getOrCreateRoom(context.Background(), "warm"); err != nil {
+		b.Fatalf("prime getOrCreateRoom: %v", err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := s.getOrCreateRoom(context.Background(), "warm"); err != nil {
+			b.Fatalf("warm getOrCreateRoom: %v", err)
+		}
+	}
+	b.StopTimer()
+	_ = s.Shutdown(context.Background())
+}
+
 // TestGetOrCreateRoom_ConcurrentDistinctRooms_LoadIsParallel is a timed-test
 // companion to the benchmark above, meant to run under plain `go test` (no
 // -bench flag) so the #182 (G3) parallelism guarantee is checked on every CI

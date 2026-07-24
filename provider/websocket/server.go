@@ -588,6 +588,25 @@ type Server struct {
 	// mutated while the server is handling connections.
 	RoomIdleTimeout time.Duration
 
+	// MaxResidentRooms, when > 0, bounds how many IDLE-resident rooms the
+	// server keeps warm at once (#183, G4). When RoomIdleTimeout > 0 an empty
+	// room is not evicted immediately but stamped idle and left resident so a
+	// rejoin reuses the warm doc; without a bound, a workload that touches many
+	// distinct rooms would accumulate them until each individually ages past
+	// RoomIdleTimeout. This cap makes the idle set an LRU: whenever the count of
+	// idle-resident rooms exceeds MaxResidentRooms, the background sweeper evicts
+	// the least-recently-idle rooms first (smallest idleSince) — durably flushing
+	// each before eviction — until the count is back within the bound, even for
+	// rooms that have not yet reached RoomIdleTimeout. Active rooms (with peers)
+	// are never counted or evicted.
+	//
+	// Only meaningful together with RoomIdleTimeout > 0 (only then are rooms
+	// stamped idle and a sweeper started); it is ignored in eager-evict mode.
+	// Zero (the default) means unlimited idle residency. Like the other config
+	// fields, set it before serving; it is read without synchronisation and must
+	// not be mutated while the server is handling connections.
+	MaxResidentRooms int
+
 	// PersistCoalesceWindow controls debounced coalescing of persistence
 	// writes. Buffered updates are merged into a single StoreUpdate rather than
 	// written one-per-update. The window is a debounce: each new update resets
@@ -691,6 +710,19 @@ type Server struct {
 	// first ServeHTTP. nil when MaxConnections == 0 (unlimited).
 	connSem     *semaphore.Weighted
 	connSemOnce sync.Once
+
+	// Idle-room sweeper (#183, G4). A single background goroutine per Server,
+	// started lazily by ensureIdleSweeper the first time a room is created while
+	// RoomIdleTimeout > 0, that periodically evicts rooms idle longer than
+	// RoomIdleTimeout and enforces the MaxResidentRooms LRU bound. sweeperDone is
+	// closed when the loop exits (on Shutdown), letting tests observe a clean
+	// stop. sweeperStarted records whether the loop was ever launched.
+	// idleSweepInterval overrides the poll cadence in tests; production derives
+	// it from RoomIdleTimeout.
+	sweeperOnce       sync.Once
+	sweeperStarted    atomic.Bool
+	sweeperDone       chan struct{}
+	idleSweepInterval time.Duration
 }
 
 // connSemaphore lazily initialises and returns the server-wide connection
@@ -827,8 +859,9 @@ func (s *Server) newPeerLimiter() *rate.Limiter {
 // NewServer returns a new Server with an empty room store and no persistence.
 func NewServer() *Server {
 	s := &Server{
-		rooms:      make(map[string]*room),
-		shutdownCh: make(chan struct{}),
+		rooms:       make(map[string]*room),
+		shutdownCh:  make(chan struct{}),
+		sweeperDone: make(chan struct{}),
 	}
 	s.upgrader = gws.Upgrader{CheckOrigin: s.checkOrigin}
 	return s
@@ -976,6 +1009,13 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 	if r.loadErr != nil {
 		return nil, r.loadErr
 	}
+
+	// #183 (G4): start the idle-room sweeper lazily on first room creation when
+	// RoomIdleTimeout > 0. getOrCreateRoom is the single funnel for every room
+	// creation (peer upgrade, Apply, BroadcastUpdate, relay Inject), so this
+	// covers all of them; the sync.Once makes it a cheap no-op afterwards and a
+	// no-op entirely in eager-evict mode (RoomIdleTimeout == 0).
+	s.ensureIdleSweeper()
 
 	// NOTE (#183): idleSince is deliberately NOT cleared here. Looking a room up
 	// is not the same causal event as a peer becoming present: for the WS join
