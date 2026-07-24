@@ -873,6 +873,23 @@ func NewServer() *Server {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
 
+	// Join the idle-room sweeper (#183, G4) before doing anything else. Closing
+	// shutdownCh above only asks idleSweepLoop to exit on its next select; a
+	// sweep pass already in flight (including an evictIdleRoom flush) keeps
+	// running and can still fire OnUnloadDocument after Shutdown would
+	// otherwise have returned, which a caller reasonably assumes means "no more
+	// hooks will fire". Waiting here also keeps the sweeper from concurrently
+	// mutating s.rooms while Shutdown enumerates it below. Only wait if the
+	// sweeper was ever started (RoomIdleTimeout > 0 at some point); bounded by
+	// ctx, like the persistDone wait further down, so a stuck sweep can't hang
+	// Shutdown forever.
+	if s.sweeperStarted.Load() {
+		select {
+		case <-s.sweeperDone:
+		case <-ctx.Done():
+		}
+	}
+
 	// Stop THIS server's relay delivery by cancelling the relay context: this
 	// winds down the relay worker and the relay's per-node delivery goroutine
 	// (started under relayCtx). It does NOT Close the relay — the caller owns

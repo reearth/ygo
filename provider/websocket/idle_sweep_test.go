@@ -155,6 +155,109 @@ func TestIdleSweep_ReCheckPeersUnderLock(t *testing.T) {
 	require.NoError(t, s.Shutdown(context.Background()))
 }
 
+// White-box guard on the COMMIT-PHASE recheck inside evictIdleRoom itself
+// (idle_sweep.go ~179), as distinct from TestIdleSweep_ReCheckPeersUnderLock
+// above which only exercises the SNAPSHOT-phase filter in sweepIdleRooms (an
+// occupied room is excluded from the candidate list before evictIdleRoom is
+// ever called). Here evictIdleRoom is invoked directly with a stale
+// expectIdle captured before a re-activation, so only the
+// `rm.idleSince.Equal(expectIdle)` + peers-under-lock recheck inside
+// evictIdleRoom can save the room.
+//
+// Case (a): the room is rejoined (a peer registers) between the snapshot and
+// the evictIdleRoom call — registration clears idleSince to zero, so
+// len(rm.peers)==0 already fails and the Equal check also fails.
+func TestEvictIdleRoom_CommitPhaseSkipsRejoinedRoom(t *testing.T) {
+	a := &idleRecordAdapter{}
+	s := NewServerWithPersistence(a)
+	s.RoomIdleTimeout = time.Hour // irrelevant: evictIdleRoom is called directly
+	waitUnloaded := newUnloadSignal(s)
+	lastPeer := newLastPeerSignal(s)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	docA := crdt.New(crdt.WithClientID(1))
+	connA := dialWS(t, ts, "room")
+	drainWS(t, connA, docA)
+	_ = connA.Close()
+	<-lastPeer // last peer left; room stamped idle
+
+	rm, present, staleExpectIdle := roomState(s, "room")
+	require.True(t, present)
+	require.False(t, staleExpectIdle.IsZero(), "idleSince must be stamped after last peer leaves")
+
+	// Re-activation between snapshot and commit: a rejoin registers a new peer,
+	// which clears idleSince (per the peer-registration fix, #183).
+	docB := crdt.New(crdt.WithClientID(2))
+	connB := dialWS(t, ts, "room")
+	drainWS(t, connB, docB)
+
+	_, _, liveIdleSince := roomState(s, "room")
+	require.True(t, liveIdleSince.IsZero(), "rejoin must have cleared idleSince")
+
+	// Call evictIdleRoom DIRECTLY with the now-stale snapshot value, simulating
+	// a sweep pass whose snapshot predates the rejoin.
+	evicted := s.evictIdleRoom("room", rm, staleExpectIdle)
+	assert.False(t, evicted, "commit-phase recheck must refuse to evict a rejoined room")
+
+	_, stillPresent, _ := roomState(s, "room")
+	assert.True(t, stillPresent, "rejoined room must remain in s.rooms")
+	assert.False(t, waitUnloaded(t, "room", 50*time.Millisecond),
+		"OnUnloadDocument must not fire for a rejoined room")
+
+	_ = connB.Close()
+	require.NoError(t, s.Shutdown(context.Background()))
+}
+
+// Case (b): the room churns (leaves again, re-stamping idleSince to a fresh
+// instant) between the snapshot and the evictIdleRoom call. len(rm.peers)==0
+// still holds, so only the `idleSince.Equal(expectIdle)` half of the guard can
+// save the room — it must fail because the two time.Time instants differ.
+func TestEvictIdleRoom_CommitPhaseSkipsChurnedIdleStamp(t *testing.T) {
+	a := &idleRecordAdapter{}
+	s := NewServerWithPersistence(a)
+	s.RoomIdleTimeout = time.Hour // irrelevant: evictIdleRoom is called directly
+	waitUnloaded := newUnloadSignal(s)
+	lastPeer := newLastPeerSignal(s)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	docA := crdt.New(crdt.WithClientID(1))
+	connA := dialWS(t, ts, "room")
+	drainWS(t, connA, docA)
+	_ = connA.Close()
+	<-lastPeer // last peer left; room stamped idle
+
+	rm, present, staleExpectIdle := roomState(s, "room")
+	require.True(t, present)
+	require.False(t, staleExpectIdle.IsZero(), "idleSince must be stamped after last peer leaves")
+
+	// Simulate churn: another join+leave cycle re-stamps idleSince to a fresh
+	// instant without ever registering as "occupied" at the moment we look.
+	// A short sleep guarantees the new time.Now() is a distinct instant from
+	// staleExpectIdle (monotonic clock reading granularity).
+	time.Sleep(2 * time.Millisecond)
+	rm.mu.Lock()
+	rm.idleSince = time.Now()
+	freshIdleSince := rm.idleSince
+	rm.mu.Unlock()
+	require.False(t, freshIdleSince.Equal(staleExpectIdle),
+		"test setup must produce a genuinely different idleSince instant")
+
+	// Call evictIdleRoom DIRECTLY with the now-stale snapshot value, simulating
+	// a sweep pass whose snapshot predates the churn.
+	evicted := s.evictIdleRoom("room", rm, staleExpectIdle)
+	assert.False(t, evicted, "commit-phase recheck must refuse to evict on a stale idle stamp")
+
+	_, stillPresent, idleSinceAfter := roomState(s, "room")
+	assert.True(t, stillPresent, "churned room must remain in s.rooms")
+	assert.True(t, idleSinceAfter.Equal(freshIdleSince), "idleSince must be left untouched by the aborted eviction")
+	assert.False(t, waitUnloaded(t, "room", 50*time.Millisecond),
+		"OnUnloadDocument must not fire on a stale idle stamp")
+
+	require.NoError(t, s.Shutdown(context.Background()))
+}
+
 // With MaxResidentRooms=N, creating the (N+1)-th idle room must trigger LRU
 // eviction of the least-recently-idle room (smallest idleSince) first.
 func TestIdleSweep_MaxResidentRoomsLRU(t *testing.T) {
