@@ -1497,22 +1497,23 @@ func TestUnit_SearchMarker_LargeDocEndAppend(t *testing.T) {
 	assert.Equal(t, total+1, txtDst.Len())
 }
 
-// ── invalidatePosCacheFrom: keeps lower-index entries ────────────────────────
+// ── search-marker position lookup after partial invalidation ────────────────
 
-func TestUnit_InvalidatePosCacheFrom_KeepsLowerEntries(t *testing.T) {
+func TestUnit_SearchMarker_PartialInvalidation_KeepsLowerMarkers(t *testing.T) {
 	// Build two separate ContentString items so leftNeighbourAt stores two
-	// cache entries. Then insert at a position that invalidates only the higher
-	// one, exercising the "posCache[n] = posCache[i]" keep path.
+	// search markers. Then insert at a position that invalidates only the
+	// higher-index marker, exercising the marker-cache "keep entries below the
+	// invalidation point" path.
 	doc := newTestDoc(1)
 	txt := doc.GetText("t")
 	// Two separate transactions → two separate items after squashRuns.
 	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "abc", nil) })
 	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 3, "def", nil) })
-	// Insert at index 4 → leftNeighbourAt(4) scans both items and stores:
-	//   (3, item_abc) and (6, item_def) in the cache.
-	// integrate then calls invalidatePosCacheFrom(4):
-	//   entry (3, item_abc): 3 < 4 → KEPT   ← exercises the keep path
-	//   entry (6, item_def): 6 >= 4 → dropped
+	// Insert at index 4 → leftNeighbourAt(4) scans both items and stores search
+	// markers at (3, item_abc) and (6, item_def).
+	// integrate then invalidates markers from index 4:
+	//   marker (3, item_abc): 3 < 4 → KEPT   ← exercises the keep path
+	//   marker (6, item_def): 6 >= 4 → dropped
 	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 4, "X", nil) })
 	assert.Equal(t, 7, txt.Len())
 }

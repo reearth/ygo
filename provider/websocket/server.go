@@ -911,6 +911,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			conns = append(conns, p.conn)
 		}
 		r.mu.Unlock()
+		// Stop this room's awareness auto-expiry sweep (if AwarenessExpiry>0
+		// started one). Pre-#183, every empty room was evicted on last-peer-leave,
+		// which already called awareness.Destroy(); with idle-resident rooms
+		// (RoomIdleTimeout>0) a room can now sit in s.rooms with no peers and
+		// never get evicted before Shutdown, leaking its sweep goroutine forever.
+		// Safe to call unconditionally here: awareness is allocated synchronously
+		// in createRoomPlaceholder (even for a still-loading room), and Destroy is
+		// idempotent/concurrency-safe, so this cannot double-stop or race the
+		// eviction/CloseRoom/handleDisconnect paths that may also call it.
+		r.awareness.Destroy()
 		// Only read the persistence fields once the room's load has completed:
 		// loadRoom sets r.persistDone off-lock, then closes r.ready, so observing
 		// a closed ready is the happens-before that publishes the write (#182). A

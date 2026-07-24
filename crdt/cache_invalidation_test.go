@@ -35,15 +35,15 @@ func TestFirstLiveCache_StaleAfterInsertAfterTombstone(t *testing.T) {
 		"Delete after insert-past-tombstone must use the live head, not a stale firstLiveCache")
 }
 
-// TestPosCache_StaleAfterRemoteDeleteOnlyApply is #70 residual class 2 — a
+// TestSearchMarker_StaleAfterRemoteDeleteOnlyApply is #70 residual class 2 — a
 // pre-existing bug independent of the YText fix.
 //
 // transactInternal hardcodes txn.Local=true even for ApplyUpdate, so
-// item.delete's posCache-clearing branch (`if !txn.Local`) is dead during
-// remote applies, and applyToPartial never invalidates posCache. A remote
-// update that only tombstones an item leaves posCache stale, so the next local
-// positioned insert resolves the wrong neighbour.
-func TestPosCache_StaleAfterRemoteDeleteOnlyApply(t *testing.T) {
+// item.delete's marker-clearing branch (`if !txn.Local`) is dead during
+// remote applies, and applyToPartial never invalidates the search-marker
+// cache. A remote update that only tombstones an item leaves stale markers
+// behind, so the next local positioned insert resolves the wrong neighbour.
+func TestSearchMarker_StaleAfterRemoteDeleteOnlyApply(t *testing.T) {
 	docA := New(WithClientID(1))
 	arrA := docA.GetArray("a")
 	docA.Transact(func(txn *Transaction) {
@@ -56,11 +56,11 @@ func TestPosCache_StaleAfterRemoteDeleteOnlyApply(t *testing.T) {
 	require.NoError(t, ApplyUpdateV1(docB, EncodeStateAsUpdateV1(docA, nil), nil))
 	arrB := docB.GetArray("a")
 
-	// Populate docB's posCache with a positioned insert near the end, so live
-	// items AFTER the soon-deleted "B" (namely C@3, D@4) get cached. -> [A B C D X E]
+	// Populate docB's search markers with a positioned insert near the end, so
+	// live items AFTER the soon-deleted "B" (namely C@3, D@4) get cached. -> [A B C D X E]
 	docB.Transact(func(txn *Transaction) { arrB.Insert(txn, 4, []any{"X"}) })
 
-	// docA deletes "B"; ship ONLY that delete to docB. The cached C/D entries
+	// docA deletes "B"; ship ONLY that delete to docB. The cached C/D markers
 	// stay LIVE but their cumulative index is now off by one.
 	var delUpdate []byte
 	docA.OnUpdate(func(u []byte, _ any) { delUpdate = u })
@@ -73,7 +73,7 @@ func TestPosCache_StaleAfterRemoteDeleteOnlyApply(t *testing.T) {
 	got, err := arrB.ToJSON()
 	require.NoError(t, err)
 	require.JSONEq(t, `["A","C","D","Y","X","E"]`, string(got),
-		"positioned insert after a remote delete-only apply must not use a stale posCache")
+		"positioned insert after a remote delete-only apply must not use a stale search marker")
 }
 
 func mustText(t *testing.T, d *Doc, name string) string {
