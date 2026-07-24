@@ -714,6 +714,89 @@ func TestSearchMarker_ApplyDelta_MatchesCold(t *testing.T) {
 	}
 }
 
+// TestApplyDelta_InsertDoesNotInheritPrecedingRetainFormat pins the corrected
+// (Yjs/Quill-aligned) YText.ApplyDelta insert-attribute semantics introduced
+// by the single-cursor rewrite (#181, commit 481c949): an Insert op's
+// formatting comes ONLY from that op's own Attributes field, never from a
+// preceding {retain, attributes} op's format bleeding through the shared
+// cursor. This is the documented Yjs/Quill delta rule (Yjs Text.js
+// applyDelta / the Quill delta spec): "insert" ops are formatted exclusively
+// by their own attributes map, and retain+attributes formats only the
+// retained range, closing itself with a matching negated marker immediately
+// after the range (Yjs insertNegatedAttributes) so nothing downstream
+// inherits it.
+//
+// TestSearchMarker_ApplyDelta_MatchesCold (above) is NOT discriminating for
+// this: both its marker and cold arms run the exact same ApplyDelta cursor
+// code (disableMarkers only gates search-marker usage in unrelated
+// positional lookups, not ApplyDelta's threaded cursor), and its only
+// attributed insert ("WORLD") already carries its own explicit Attributes,
+// so it never exercises the "insert with NO attributes right after a
+// formatted retain" case that changed behavior in 481c949. This test
+// asserts an explicit expected Delta/ToString, not marker==cold agreement,
+// so a silent regression back to the old bleed-through behavior is caught.
+// (Confirmed discriminating by hand: temporarily making applyDeltaInsert
+// re-derive its anchor from the index via leftNeighbourAt(pos.index) instead
+// of trusting the threaded pos.left pointer — i.e. reproducing the old
+// pre-#181 per-op index-based anchoring that let a same-index plain insert
+// land on the wrong side of a just-emitted format-closing marker — turns
+// this test red (got Insert:"abcX" with Attributes:{bold:true} instead of
+// separate "abc"/bold and "Xd"/plain runs). Reverted after confirming, not
+// committed.)
+//
+// NOTE: a Retain is deliberately placed between the two Insert ops below
+// (rather than putting them back-to-back) to sidestep a separate, unrelated
+// cursor bug also present in this rewrite: applyDeltaInsert only advances
+// pos.left past the newly-inserted item when the insert carries its own
+// attributes (diff non-empty); for a plain attribute-less insert, pos.left
+// is left stale, so a second Insert op immediately following it re-anchors
+// at the PRE-insert position and can integrate out of order (observed:
+// ApplyDelta([{Retain:3},{Insert:"X"},{Insert:"Y"}]) on "abcdefghij" yields
+// "abcYXdefghij" — X and Y swapped). That bug is out of scope for this test
+// (which only pins the insert-attribute/format-bleed semantic) and has been
+// flagged separately for a dedicated fix.
+func TestApplyDelta_InsertDoesNotInheritPrecedingRetainFormat(t *testing.T) {
+	d := New(WithClientID(1))
+	txt := d.GetText("t")
+	d.Transact(func(tr *Transaction) {
+		txt.Insert(tr, 0, "abcdefghij", nil) // 10 plain chars, no formatting
+		txt.ApplyDelta(tr, []Delta{
+			// Formats "abc" bold; the format must close itself and NOT leak
+			// past its own range into whatever comes next.
+			{Op: DeltaOpRetain, Retain: 3, Attributes: Attributes{"bold": true}},
+			// No attributes of its own -> must land PLAIN (the behavior this
+			// task is pinning), not bold-formatted from the preceding retain.
+			{Op: DeltaOpInsert, Insert: "X"},
+			// Plain retain over "d": no attributes, no format change. (Also
+			// sidesteps the unrelated back-to-back-insert cursor bug noted above.)
+			{Op: DeltaOpRetain, Retain: 1},
+			// Explicit attributes of its own -> must land bold.
+			{Op: DeltaOpInsert, Insert: "Y", Attributes: Attributes{"bold": true}},
+			// Plain retain over "e": no attributes, no format change.
+			{Op: DeltaOpRetain, Retain: 1},
+			// Deletes "fg".
+			{Op: DeltaOpDelete, Delete: 2},
+			// Trailing "hij" is left untouched (implicit retain-to-end).
+		})
+	})
+
+	wantStr := "abcXdYehij"
+	if got := txt.ToString(); got != wantStr {
+		t.Fatalf("ToString() = %q, want %q", got, wantStr)
+	}
+
+	want := []Delta{
+		{Op: DeltaOpInsert, Insert: "abc", Attributes: Attributes{"bold": true}},
+		{Op: DeltaOpInsert, Insert: "Xd"},
+		{Op: DeltaOpInsert, Insert: "Y", Attributes: Attributes{"bold": true}},
+		{Op: DeltaOpInsert, Insert: "ehij"},
+	}
+	got := txt.ToDelta()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ToDelta() mismatch (Yjs-aligned insert-attribute semantics):\n got  %#v\n want %#v", got, want)
+	}
+}
+
 // TestSearchMarker_Format_MatchesCold_OutOfRange exercises findTextPos's
 // !hasFormatting fast path (ytext.go) at and beyond the document's length —
 // the case findTextPos must clamp pos.index to t.length exactly like the
