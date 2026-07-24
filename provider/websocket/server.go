@@ -268,6 +268,22 @@ type room struct {
 	awareness *awareness.Awareness
 	peers     map[*peer]struct{}
 
+	// ready is closed exactly once, by the goroutine that created the room, when
+	// the off-lock load (LoadDoc + decode + OnLoadDocument) has finished — whether
+	// it succeeded or failed. It is the barrier that lets room load run OFF the
+	// global rooms lock (s.rmu): the placeholder room is published into s.rooms
+	// under s.rmu (an O(1) map write), s.rmu is released, and the actual load runs
+	// unlocked. Every consumer that touches r.doc must first receive on ready.
+	// #182 (G3).
+	ready chan struct{}
+
+	// loadErr holds the load failure, if any. Written exactly once by the creating
+	// goroutine BEFORE close(ready), and read only AFTER a receive on ready — the
+	// channel close is the happens-before that publishes it, so no mutex is
+	// needed. When non-nil the placeholder has already been removed from s.rooms
+	// and r.doc must NOT be used.
+	loadErr error
+
 	// peerSem enforces MaxPeersPerRoom as a hard cap. Initialised at room
 	// creation time. nil when MaxPeersPerRoom == 0 (unlimited).
 	peerSem *semaphore.Weighted
@@ -431,11 +447,14 @@ type Server struct {
 	// in a custom resolver, decrypt-at-rest, schema-migration check, or
 	// any other one-time per-room setup. (#60)
 	//
-	// The hook runs while the server room-map lock is held, so
-	// implementations must return promptly; defer heavy I/O to a
-	// goroutine if needed. The doc passed in is owned by the server —
-	// retaining a reference past the hook return is safe as long as the
-	// caller serialises access through Transact / public APIs.
+	// As of #182 the hook runs OFF the global room-map lock (s.rmu): the
+	// room is published as a not-yet-ready placeholder under s.rmu, then
+	// LoadDoc + decode + this hook run with s.rmu released. A slow hook
+	// therefore no longer stalls create / lookup / evict for other rooms —
+	// it only delays callers waiting on THIS room's ready barrier. The doc
+	// passed in is owned by the server — retaining a reference past the hook
+	// return is safe as long as the caller serialises access through Transact
+	// / public APIs.
 	OnLoadDocument func(ctx context.Context, room string, doc *crdt.Doc) error
 
 	// OnUnloadDocument, if non-nil, is called once per room immediately
@@ -799,8 +818,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			conns = append(conns, p.conn)
 		}
 		r.mu.Unlock()
-		if r.persistDone != nil {
-			persistDones = append(persistDones, r.persistDone)
+		// Only read the persistence fields once the room's load has completed:
+		// loadRoom sets r.persistDone off-lock, then closes r.ready, so observing
+		// a closed ready is the happens-before that publishes the write (#182). A
+		// still-loading room has no peers and no worker yet — nothing to drain.
+		select {
+		case <-r.ready:
+			if r.persistDone != nil {
+				persistDones = append(persistDones, r.persistDone)
+			}
+		default:
 		}
 	}
 	s.rmu.RUnlock()
@@ -841,40 +868,82 @@ func NewServerWithPersistence(p PersistenceAdapter) *Server {
 
 // GetDoc returns the document for the given room, or nil if no peer has
 // connected to that room yet.
+//
+// A room that is still loading (its off-lock LoadDoc + decode + OnLoadDocument
+// has not finished; #182) is reported as not-yet-present — GetDoc returns nil
+// rather than block or expose a doc that is being mutated by the loader. This
+// matches the documented "no room yet" contract: the result is an
+// immediately-stale snapshot. Once the load completes, GetDoc returns the doc;
+// if the load failed, the room was removed and GetDoc returns nil.
 func (s *Server) GetDoc(name string) *crdt.Doc {
 	s.rmu.RLock()
-	defer s.rmu.RUnlock()
-	if r, ok := s.rooms[name]; ok {
-		return r.doc
+	r, ok := s.rooms[name]
+	s.rmu.RUnlock()
+	if !ok {
+		return nil
 	}
-	return nil
+	select {
+	case <-r.ready:
+		if r.loadErr != nil {
+			return nil
+		}
+		return r.doc
+	default:
+		return nil // still loading; do not expose a doc under construction
+	}
 }
 
-// getOrCreateRoom returns the room for name, creating it on first use. When a
-// new room is created and a relay is attached, the relay's RoomActivated
-// callback fires AFTER s.rmu is released (#133): RoomActivated may synchronously
-// replay stream history via Sink.Inject, which re-enters getOrCreateRoom — under
-// s.rmu the non-reentrant mutex would self-deadlock and wedge the whole instance.
-// This mirrors teardownRelayRoom, which already fires RoomDeactivated off-lock.
+// getOrCreateRoom returns the room for name, creating it on first use.
+//
+// Room load — LoadDoc (I/O), full-state decode, and the OnLoadDocument hook —
+// runs OFF the global rooms lock (#182, G3). s.rmu is held only for the O(1)
+// map operations of createRoomPlaceholder; the load itself happens in loadRoom
+// with s.rmu released, so one slow or large load never stalls create / lookup /
+// evict for every other room process-wide.
+//
+// The creating goroutine (created==true) performs the load and closes r.ready;
+// every other caller — including a caller for the same still-loading room —
+// waits on r.ready rather than on s.rmu. On load failure the placeholder has
+// already been removed from s.rooms and r.loadErr is returned to all waiters.
+//
+// When a new room is loaded and a relay is attached, the relay's RoomActivated
+// callback fires AFTER r.ready is closed (#133): RoomActivated may synchronously
+// replay stream history via Sink.Inject, which re-enters getOrCreateRoom. By
+// that point the placeholder is published AND ready is closed, so the re-entrant
+// call finds the room and returns off an already-closed barrier instead of
+// self-deadlocking on the non-reentrant s.rmu.
 func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error) {
-	r, created, err := s.getOrCreateRoomLocked(ctx, name)
+	r, created, err := s.createRoomPlaceholder(name)
 	if err != nil {
 		return nil, err
 	}
-	if created && s.relay != nil {
-		// Off-lock: the room is already published into s.rooms, so a re-entrant
-		// Sink.Inject finds it and returns instead of blocking on s.rmu.
-		s.relay.RoomActivated(name)
+	if created {
+		// This goroutine owns the load. It runs with s.rmu released; other
+		// callers (same or different room) never block on it via s.rmu.
+		s.loadRoom(ctx, r, name)
+		if r.loadErr == nil && s.relay != nil {
+			// Off-lock and post-ready: a re-entrant Sink.Inject from RoomActivated
+			// finds the published room and waits on the already-closed ready.
+			s.relay.RoomActivated(name)
+		}
+	} else {
+		// Someone else is (or was) loading this room; wait for the barrier.
+		<-r.ready
+	}
+	if r.loadErr != nil {
+		return nil, r.loadErr
 	}
 	return r, nil
 }
 
-// getOrCreateRoomLocked is the locked portion of getOrCreateRoom. It returns the
-// room, whether it was newly created (so the caller fires RoomActivated exactly
-// once off-lock), and any creation error. Relay observers are registered here,
-// before the room is published into s.rooms, so no local change is missed — only
-// the RoomActivated notification is deferred until after s.rmu is released.
-func (s *Server) getOrCreateRoomLocked(ctx context.Context, name string) (*room, bool, error) {
+// createRoomPlaceholder returns the room for name. If it already exists the
+// existing room is returned with created=false; otherwise a PLACEHOLDER room —
+// doc/awareness/peer map allocated but NOT yet bootstrapped from persistence — is
+// published into s.rooms with an open ready barrier and returned with
+// created=true so the caller performs the off-lock load. s.rmu is held only for
+// the duration of these O(1) allocations and the single map write; no I/O and no
+// O(doc) work happens under the lock (#182).
+func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
 	if r, ok := s.rooms[name]; ok {
@@ -895,48 +964,85 @@ func (s *Server) getOrCreateRoomLocked(ctx context.Context, name string) (*room,
 		aw.SetMaxClients(s.MaxAwarenessClientsPerRoom)
 	}
 	if s.AwarenessExpiry > 0 {
-		// Background sweep; stopped via aw.Destroy() when the room is evicted.
+		// Background sweep; stopped via aw.Destroy() when the room is evicted, or
+		// when the off-lock load fails (loadRoom removes the placeholder).
 		aw.StartAutoExpiry(s.AwarenessExpiry)
 	}
 	r := &room{
 		doc:       crdt.New(docOpts...),
 		awareness: aw,
 		peers:     make(map[*peer]struct{}),
+		ready:     make(chan struct{}),
 	}
 	if s.MaxPeersPerRoom > 0 {
 		r.peerSem = semaphore.NewWeighted(int64(s.MaxPeersPerRoom))
 	}
+	s.rooms[name] = r
+	return r, true, nil
+}
+
+// loadRoom performs the off-lock room load for a freshly created placeholder:
+// LoadDoc + full-state decode + the OnLoadDocument hook. s.rmu is NOT held here.
+//
+// On success it wires the persistence worker and relay observers (AFTER the
+// bootstrap decode, so the loaded state is not re-persisted or re-relayed —
+// preserving the pre-#182 registration timing) and closes r.ready. Because no
+// other goroutine may touch r.doc until ready closes (all consumers gate on it),
+// registering observers just before close(ready) still misses no update.
+//
+// On failure it records r.loadErr, removes the placeholder from s.rooms
+// (re-acquiring s.rmu for the O(1) delete) and stops the awareness sweep, then
+// closes r.ready to wake every waiter with the error. r.ready is always closed
+// exactly once, on both paths.
+func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
+	var loadErr error
 	if s.persistence != nil {
 		data, err := s.persistence.LoadDoc(name)
-		if err != nil {
-			return nil, false, fmt.Errorf("loading room %q: %w", name, err)
-		}
-		if len(data) > 0 {
+		switch {
+		case err != nil:
+			loadErr = fmt.Errorf("loading room %q: %w", name, err)
+		case len(data) > 0:
 			if err := crdt.ApplyUpdateV1(r.doc, data, nil); err != nil {
-				return nil, false, fmt.Errorf("bootstrapping room %q: %w", name, err)
+				loadErr = fmt.Errorf("bootstrapping room %q: %w", name, err)
 			}
 		}
 	}
 	// #60 — fire OnLoadDocument AFTER persistence bootstrap but BEFORE the
-	// persistence worker starts and the room is registered, so a hook
-	// returning an error fails room creation cleanly with nothing left to
-	// clean up. Hook runs under s.rmu.Lock; implementations must be fast.
-	// A panic in the hook is recovered (logged at Error with the stack)
-	// and treated as a hook-failure error so room creation is not silently
-	// committed in an inconsistent state.
-	if hook := s.OnLoadDocument; hook != nil {
-		var hookErr error
-		s.safeHook("OnLoadDocument", func() {
-			hookErr = hook(ctx, name, r.doc)
-		})
-		if hookErr != nil {
-			return nil, false, fmt.Errorf("OnLoadDocument for room %q: %w", name, hookErr)
+	// persistence worker starts, so a hook returning an error fails room creation
+	// cleanly. Runs off-lock now (#182), so a slow hook no longer stalls other
+	// rooms. A panic in the hook is recovered (logged at Error with the stack)
+	// and treated as a hook-failure error.
+	if loadErr == nil {
+		if hook := s.OnLoadDocument; hook != nil {
+			var hookErr error
+			s.safeHook("OnLoadDocument", func() {
+				hookErr = hook(ctx, name, r.doc)
+			})
+			if hookErr != nil {
+				loadErr = fmt.Errorf("OnLoadDocument for room %q: %w", name, hookErr)
+			}
 		}
 	}
+
+	if loadErr != nil {
+		// Remove the placeholder under s.rmu (O(1) delete) and stop the awareness
+		// sweep so a failed load leaves no room in s.rooms and no goroutine leak.
+		s.rmu.Lock()
+		if cur, ok := s.rooms[name]; ok && cur == r {
+			delete(s.rooms, name)
+		}
+		s.rmu.Unlock()
+		r.awareness.Destroy()
+		r.loadErr = loadErr
+		close(r.ready)
+		return
+	}
+
 	if s.persistence != nil {
 		// Serialise persistence writes through a buffered channel so that a
 		// slow storage backend does not block the Transact caller (N-H7) and
-		// writes arrive in order.
+		// writes arrive in order. Registered AFTER the bootstrap decode so the
+		// loaded state is not re-persisted.
 		r.persistCh = make(chan []byte, 256)
 		r.persistStop = make(chan struct{})
 		r.persistDone = make(chan struct{})
@@ -949,16 +1055,16 @@ func (s *Server) getOrCreateRoomLocked(ctx context.Context, name string) (*room,
 			}
 		})
 	}
-	// Wire relay observers (doc.OnUpdate + awareness.OnChange) so local changes
-	// are published to other nodes. Registered under s.rmu.Lock before the room
-	// is published into s.rooms, so no change is missed. No-op when no relay is
-	// attached. RoomActivated is NOT fired here — the caller fires it off-lock
-	// once getOrCreateRoomLocked returns created=true (#133).
+	// Wire relay observers (doc.OnUpdate + awareness.OnUpdate) so local changes
+	// are published to other nodes. Registered AFTER the bootstrap decode (so the
+	// loaded state is not re-relayed) but BEFORE close(ready) — since no consumer
+	// may mutate r.doc until ready closes, no local change is missed. No-op when
+	// no relay is attached. RoomActivated is fired by getOrCreateRoom off-lock
+	// after ready closes (#133).
 	if s.relay != nil {
 		s.registerRelayObservers(r, name)
 	}
-	s.rooms[name] = r
-	return r, true, nil
+	close(r.ready)
 }
 
 // ServeHTTP upgrades the request to WebSocket and runs the peer sync loop.
