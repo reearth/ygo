@@ -448,13 +448,31 @@ func (p *peer) handleDisconnect() {
 		// persistStop close and the persistDone wait so they stay consistent —
 		// when we abort (flush failed) the worker stays alive and we must NOT wait
 		// on persistDone (it would block forever).
+		//
+		// IDLE RESIDENCY (#183). When Server.RoomIdleTimeout > 0, a still-empty
+		// room whose flush succeeded is NOT evicted: instead we stamp
+		// rm.idleSince and leave it resident (persistStop stays open, worker
+		// stays alive) so a rejoin reuses the warm in-memory doc with no
+		// reload. This only changes what happens on the safe (flushOK) path;
+		// a flush failure still leaves the room alive exactly as before
+		// (evict stays false), matching pre-#183 behaviour, and does NOT stamp
+		// idleSince — an unflushed room isn't safely idle. RoomIdleTimeout==0
+		// takes the exact pre-#183 branch (evict = stillEmpty && flushOK), so
+		// behaviour for existing callers is byte-identical.
 		stillEmpty := false
 		evict := false
 		if empty {
+			idleTimeout := p.server.RoomIdleTimeout
 			p.server.rmu.Lock()
 			rm.mu.Lock()
 			stillEmpty = len(rm.peers) == 0
-			evict = stillEmpty && flushOK
+			if stillEmpty && flushOK {
+				if idleTimeout > 0 {
+					rm.idleSince = time.Now()
+				} else {
+					evict = true
+				}
+			}
 			if evict {
 				if current, stillIn := p.server.rooms[p.roomName]; stillIn && current == rm {
 					delete(p.server.rooms, p.roomName)

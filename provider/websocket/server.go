@@ -308,6 +308,17 @@ type room struct {
 	// once when the room is evicted so the relay observers don't leak. Guarded
 	// by the room's mu via registerRelayObservers / unregisterRelayObservers.
 	relayUnsub []func()
+
+	// idleSince records when this room last went empty while
+	// Server.RoomIdleTimeout > 0 (#183). Zero value means "not idle" — either
+	// the room has peers, or RoomIdleTimeout is 0 (eager-evict mode, in which
+	// case an empty room is deleted from s.rooms rather than stamped). Set by
+	// handleDisconnect's teardown path when the room goes empty and the
+	// durable flush succeeds; cleared by getOrCreateRoom when a rejoin finds
+	// this resident room. Guarded by mu. The background sweeper that evicts
+	// rooms whose idleSince has aged past RoomIdleTimeout is a separate piece
+	// of work (#183 follow-up); this field only records the stamp.
+	idleSince time.Time
 }
 
 // ConnectionConfig describes an accepted WebSocket connection. It is returned by
@@ -544,6 +555,25 @@ type Server struct {
 	// synchronisation and must not be mutated while the server is handling
 	// connections.
 	SlowPeerPolicy SlowPeerPolicy
+
+	// RoomIdleTimeout, when > 0, switches room eviction from eager to lazy
+	// (#183): when the last peer leaves a room, the v1.37.0 durable
+	// flush-before-evict still runs (so pending writes are never lost), but
+	// the room is NOT deleted from the server map — it is stamped idle
+	// (its idleSince timestamp is set) and stays resident, worker and
+	// in-memory doc alive. A rejoin before eviction reuses the warm doc with
+	// no LoadDoc / reload. Actually evicting rooms whose idle time exceeds
+	// this timeout is done by a separate background sweeper; setting this
+	// field alone only stops eager eviction and marks rooms idle — without a
+	// sweeper an idle room simply stays resident indefinitely, which is safe
+	// (just extra memory) but never reclaims it on its own.
+	//
+	// Zero (the default) preserves the original eager-evict behaviour: the
+	// room is deleted from the server map and OnUnloadDocument fires the
+	// instant the last peer disconnects. Like the other config fields, set
+	// this before serving; it is read without synchronisation and must not be
+	// mutated while the server is handling connections.
+	RoomIdleTimeout time.Duration
 
 	// PersistCoalesceWindow controls debounced coalescing of persistence
 	// writes. Buffered updates are merged into a single StoreUpdate rather than
@@ -933,6 +963,17 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 	if r.loadErr != nil {
 		return nil, r.loadErr
 	}
+
+	// Rejoin-cancels-idle (#183): any caller that reaches a resident room —
+	// fresh or previously idle-stamped — clears idleSince under the room's
+	// own lock. A no-op (already zero) for a room that was never idle or was
+	// just created; race-free against the teardown stamp in handleDisconnect
+	// because both paths serialise through s.rmu (the stamp is written inside
+	// an s.rmu.Lock()+rm.mu section, and createRoomPlaceholder above already
+	// took/released s.rmu.Lock() to find this room before we get here).
+	r.mu.Lock()
+	r.idleSince = time.Time{}
+	r.mu.Unlock()
 	return r, nil
 }
 
