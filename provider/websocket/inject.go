@@ -300,6 +300,7 @@ func (s *Server) Apply(
 	if err != nil {
 		return err
 	}
+	rm.clearIdle() // #183: Apply mutates the doc immediately; no registration delay.
 
 	origin := new(struct{})
 	var (

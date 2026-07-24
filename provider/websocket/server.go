@@ -314,11 +314,24 @@ type room struct {
 	// the room has peers, or RoomIdleTimeout is 0 (eager-evict mode, in which
 	// case an empty room is deleted from s.rooms rather than stamped). Set by
 	// handleDisconnect's teardown path when the room goes empty and the
-	// durable flush succeeds; cleared by getOrCreateRoom when a rejoin finds
-	// this resident room. Guarded by mu. The background sweeper that evicts
-	// rooms whose idleSince has aged past RoomIdleTimeout is a separate piece
-	// of work (#183 follow-up); this field only records the stamp.
+	// durable flush succeeds; cleared at peer REGISTRATION (ServeHTTP) — not at
+	// room lookup — so it tracks true occupancy, and by the immediate-mutation
+	// relay/admin callers via clearIdle. Guarded by mu. The background sweeper
+	// that evicts rooms whose idleSince has aged past RoomIdleTimeout is a
+	// separate piece of work (#183 follow-up); this field only records the stamp.
 	idleSince time.Time
+}
+
+// clearIdle marks the room as non-idle. Used by the immediate-mutation callers
+// (relay Inject, admin Apply) that make the room active without registering a
+// peer, so there is no lookup→registration window to worry about. Takes rm.mu
+// itself; must NOT be called while already holding rm.mu. The WS join path does
+// NOT use this — it clears idleSince inside the same rm.mu section that adds the
+// peer (see ServeHTTP) so the clear is ordered against handleDisconnect's stamp.
+func (r *room) clearIdle() {
+	r.mu.Lock()
+	r.idleSince = time.Time{}
+	r.mu.Unlock()
 }
 
 // ConnectionConfig describes an accepted WebSocket connection. It is returned by
@@ -964,16 +977,23 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 		return nil, r.loadErr
 	}
 
-	// Rejoin-cancels-idle (#183): any caller that reaches a resident room —
-	// fresh or previously idle-stamped — clears idleSince under the room's
-	// own lock. A no-op (already zero) for a room that was never idle or was
-	// just created; race-free against the teardown stamp in handleDisconnect
-	// because both paths serialise through s.rmu (the stamp is written inside
-	// an s.rmu.Lock()+rm.mu section, and createRoomPlaceholder above already
-	// took/released s.rmu.Lock() to find this room before we get here).
-	r.mu.Lock()
-	r.idleSince = time.Time{}
-	r.mu.Unlock()
+	// NOTE (#183): idleSince is deliberately NOT cleared here. Looking a room up
+	// is not the same causal event as a peer becoming present: for the WS join
+	// path (ServeHTTP) there is a wide window — a semaphore acquire plus the full
+	// Upgrade handshake — between this return and the peer actually registering
+	// in rm.peers. Clearing at lookup time desynced idleSince from true room
+	// occupancy two ways:
+	//   1. peer A (sole occupant) leaves inside that window: handleDisconnect saw
+	//      len(peers)==0 (the joining peer B not yet registered), stamped idle,
+	//      and B then registered onto an occupied room whose stale stamp nothing
+	//      cleared — a room with a LIVE peer eligible for idle eviction; and
+	//   2. the request failing after this lookup (semaphore denial / Upgrade
+	//      error) left a genuinely-empty, previously-idle room with its stamp
+	//      wiped and no disconnect to re-stamp it — never reaped.
+	// So the JOIN path clears idleSince in the SAME rm.mu section that mutates
+	// rm.peers (see ServeHTTP), tying "not idle" to "a peer is present." The
+	// immediate-mutation callers (relay Inject, admin Apply) that mutate the doc
+	// with no registration delay clear it themselves right after this returns.
 	return r, nil
 }
 
@@ -1252,6 +1272,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rm.mu.Lock()
 	rm.peers[p] = struct{}{}
 	firstPeer := len(rm.peers) == 1 // #60: 0→1 transition
+	// #183: clear idleSince in the SAME rm.mu section that adds the peer, so
+	// "not idle" is tied to true occupancy. handleDisconnect stamps idleSince
+	// under this same rm.mu (after re-checking len(rm.peers)==0), so a
+	// concurrent last-peer-leave / rejoin can only interleave as one of:
+	//   - stamp then register: this clear wins, occupied room ends non-idle;
+	//   - register then stamp: handleDisconnect sees len(peers)>=1 and does not
+	//     stamp at all.
+	// Either way an occupied room never keeps a stale idle stamp.
+	rm.idleSince = time.Time{}
 	rm.mu.Unlock()
 	s.rmu.RUnlock()
 
