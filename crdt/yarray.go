@@ -2,7 +2,6 @@ package crdt
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 // arraySub pairs a unique subscription ID with a YArrayEvent callback.
@@ -716,16 +715,14 @@ func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 			// <= TargetLen, never merges multiple items up to it) and length >= 1
 			// here (the loop guard). But TargetLen travels over the wire
 			// (update.go/update_v2.go encode it verbatim), so a hand-built or
-			// adversarial update could carry TargetLen > 1 against an item that is
-			// already exactly that wide, producing n > 1. If that ever collides
-			// with a smaller remaining length, unconditionally deleting the whole
-			// target below would silently delete more rendered positions than the
-			// caller asked for — and we can't fix it by partially deleting the
-			// target instead, because splitItem does not carry MovedBy to the right
-			// half, so a partial-target delete would corrupt the move. Fail loudly
-			// rather than silently over-deleting.
+			// foreign update could carry TargetLen > 1 against an item that is
+			// already exactly that wide, producing n > 1. A library must never
+			// panic on wire-derived input, so clamp instead of failing loudly: the
+			// width-1 (n == 1) path is untouched and byte-identical, and clamping
+			// only bounds how much of the caller's remaining delete length this
+			// malformed/foreign multi-width moved target can consume.
 			if n > length {
-				panic(fmt.Sprintf("crdt: deleteRange: winning ContentMove target width %d exceeds remaining delete length %d at rendered index %d (multi-element ContentMove targets are unsupported)", n, length, index))
+				n = length
 			}
 			renderAt.delete(txn)
 			length -= n

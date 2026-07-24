@@ -208,19 +208,22 @@ func TestInteg_YArray_DeleteMovedElement_TwoPeer_ConcurrentReMove(t *testing.T) 
 	assert.ElementsMatch(t, []any{"a", "b", "c", "d"}, s1, "the four plain elements survive")
 }
 
-// TestUnit_YArray_DeleteMoved_MultiWidthTargetGuardPanics exercises the
-// defensive guard added to deleteRange's renderAt branch (#181 follow-up).
-// Under Move()'s own invariant a ContentMove's target is always width 1, so
+// TestUnit_YArray_DeleteMoved_MultiWidthTargetGuardClamps exercises the
+// defensive guard in deleteRange's renderAt branch (#181 follow-up). Under
+// Move()'s own invariant a ContentMove's target is always width 1, so
 // n <= length always holds there. But TargetLen travels over the wire
 // (update.go/update_v2.go encode it verbatim) and resolveMovedItem only ever
 // clamps a target DOWN to <= TargetLen — it never merges narrower items UP to
-// it — so a hand-built or adversarial ContentMove with TargetLen > 1 pointing
-// at an item that is already that wide (e.g. a single Push of several values)
+// it — so a hand-built or foreign ContentMove with TargetLen > 1 pointing at
+// an item that is already that wide (e.g. a single Push of several values)
 // can make a winning move render n > 1. This test constructs exactly that
-// (bypassing the normal Move() API, which cannot produce it) and asserts that
-// deleting fewer rendered positions than the target's width panics instead of
-// silently deleting the whole multi-element target.
-func TestUnit_YArray_DeleteMoved_MultiWidthTargetGuardPanics(t *testing.T) {
+// (bypassing the normal Move() API, which cannot produce it) and asserts
+// that deleting fewer rendered positions than the target's width does NOT
+// panic — a library must never crash on wire-derived/foreign input — and
+// leaves the array in a state where Get/Slice/ToSlice stay coherent with
+// each other (no partial, MovedBy-corrupting split of the target; the whole
+// target is consumed instead).
+func TestUnit_YArray_DeleteMoved_MultiWidthTargetGuardClamps(t *testing.T) {
 	doc := newTestDoc(1)
 	arr := doc.GetArray("list")
 	t2 := &arr.abstractType
@@ -246,14 +249,23 @@ func TestUnit_YArray_DeleteMoved_MultiWidthTargetGuardPanics(t *testing.T) {
 	require.NotNil(t, item1.MovedBy, "hand-built ContentMove must win arbitration")
 
 	// Rendered array is now [x,y] (the moved-in target at index 0). Deleting
-	// only 1 rendered position (n=2 > length=1) must panic rather than
-	// silently deleting both "x" and "y".
+	// only 1 rendered position (n=2 > length=1) must NOT panic. The guard
+	// clamps n down to the remaining length rather than partially deleting
+	// the target (unsafe: splitItem doesn't carry MovedBy to the right
+	// half), so the whole width-2 target is consumed by this single-position
+	// delete request.
 	require.Equal(t, []any{"x", "y"}, arr.ToSlice())
-	assert.PanicsWithValue(t,
-		"crdt: deleteRange: winning ContentMove target width 2 exceeds remaining delete length 1 at rendered index 0 (multi-element ContentMove targets are unsupported)",
-		func() {
-			doc.Transact(func(txn *Transaction) { arr.Delete(txn, 0, 1) })
-		})
+	assert.NotPanics(t, func() {
+		doc.Transact(func(txn *Transaction) { arr.Delete(txn, 0, 1) })
+	})
+
+	// The clamp fully deletes the moved target (both "x" and "y"); the array
+	// is left empty, and Get/Slice/ToSlice/Len must all agree on that — no
+	// stale or partially-visible remnant of the malformed move.
+	assert.True(t, item1.Deleted, "clamp must fully consume the multi-width target, not partially split it")
+	assert.Equal(t, 0, arr.Len())
+	assert.Equal(t, []any{}, arr.ToSlice())
+	assert.Equal(t, []any{}, getAll(arr))
 }
 
 // TestInteg_YArray_DeleteMovedElement_TwoPeer_Converge: peer A deletes a moved

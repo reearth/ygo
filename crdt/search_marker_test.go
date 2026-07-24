@@ -249,7 +249,7 @@ func TestSearchMarker_RemoteDeleteOnly_NoStale(t *testing.T) {
 // naive strict-less-than condition wrong for our re-walk-trusting findMarkerRO
 // (see the "index <= m.index" reasoning in search_marker.go).
 func TestUpdateMarkerChanges_ShiftSemantics(t *testing.T) {
-	live := &Item{Content: NewContentString("x")}         // countable, not deleted
+	live := &Item{Content: NewContentString("x")} // countable, not deleted
 	dead := &Item{Content: NewContentString("y"), Deleted: true}
 
 	t.Run("insert shifts markers at or after the edit index", func(t *testing.T) {
