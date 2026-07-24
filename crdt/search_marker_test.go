@@ -138,13 +138,16 @@ func TestSearchMarker_InsertMatchesCold(t *testing.T) {
 // still yield exactly the force-cold document. This exercises marker refresh,
 // LRU eviction, and the shim-driven invalidation across a long transaction.
 func TestSearchMarker_InsertMatchesCold_LargeRandom(t *testing.T) {
+	// 1000 iterations (well above maxSearchMarker=80) keeps the O(n^2) cold
+	// random insert/delete cost under the CI race budget while still
+	// exercising marker refresh, LRU eviction, and shim-driven invalidation.
 	build := func(cold bool) string {
 		d := New(WithClientID(1))
 		txt := d.GetText("t")
 		txt.baseType().disableMarkers = cold
 		rng := rand.New(rand.NewSource(7))
 		d.Transact(func(tr *Transaction) {
-			for i := 0; i < 3000; i++ {
+			for i := 0; i < 1000; i++ {
 				pos := rng.Intn(txt.Len() + 1)
 				txt.Insert(tr, pos, fmt.Sprintf("%d", rng.Intn(10)), nil)
 				if txt.Len() > 30 && rng.Intn(6) == 0 {
@@ -363,13 +366,16 @@ func TestSearchMarker_RO_DisableMarkersIgnoresBadMarkers(t *testing.T) {
 // the expected answer is independently known without re-deriving it from
 // the array's own Get/Slice logic.
 func TestSearchMarker_ArrayGet_MatchesCold(t *testing.T) {
-	idxs := []int{0, 1999, 1000, 3, 1500, 7, 1234, 1998}
+	// 800 elements (10x maxSearchMarker=80) keeps multiple markers in play
+	// while the O(n^2) force-cold build below stays well under the CI race
+	// budget; see search_marker_test.go doc comment for the sizing rationale.
+	idxs := []int{0, 799, 400, 3, 600, 7, 494, 798}
 	build := func(cold bool) []any {
 		d := New(WithClientID(1))
 		arr := d.GetArray("a")
 		arr.baseType().disableMarkers = cold
 		d.Transact(func(tr *Transaction) {
-			for i := 0; i < 2000; i++ {
+			for i := 0; i < 800; i++ {
 				arr.Insert(tr, arr.Len(), []any{i})
 			}
 		})
@@ -408,21 +414,24 @@ func TestSearchMarker_ArrayGet_MatchesCold(t *testing.T) {
 // TestSearchMarker_ArraySlice_MatchesCold exercises YArray.Slice's
 // findMarkerRO-accelerated start lookup (yarray.go).
 func TestSearchMarker_ArraySlice_MatchesCold(t *testing.T) {
+	// 800 elements (10x maxSearchMarker=80) keeps multiple markers in play
+	// while the O(n^2) force-cold build below stays well under the CI race
+	// budget; see search_marker_test.go doc comment for the sizing rationale.
 	build := func(cold bool) [][]any {
 		d := New(WithClientID(1))
 		arr := d.GetArray("a")
 		arr.baseType().disableMarkers = cold
 		d.Transact(func(tr *Transaction) {
-			for i := 0; i < 2000; i++ {
+			for i := 0; i < 800; i++ {
 				arr.Insert(tr, arr.Len(), []any{i})
 			}
 		})
 		return [][]any{
 			arr.Slice(0, 10),
-			arr.Slice(500, 510),
-			arr.Slice(1990, 2000),
-			arr.Slice(1000, 1000), // empty range
-			arr.Slice(1995, 5000), // end clamps to Len()
+			arr.Slice(200, 210),
+			arr.Slice(790, 800),
+			arr.Slice(400, 400),  // empty range
+			arr.Slice(795, 5000), // end clamps to Len()
 		}
 	}
 	got, cold := build(false), build(true)
@@ -430,8 +439,8 @@ func TestSearchMarker_ArraySlice_MatchesCold(t *testing.T) {
 		t.Fatalf("marker/cold mismatch:\n got  %v\n cold %v", got, cold)
 	}
 	expectRange := func(s, e int) []any {
-		if e > 2000 {
-			e = 2000
+		if e > 800 {
+			e = 800
 		}
 		out := make([]any, 0, e-s)
 		for i := s; i < e; i++ {
@@ -441,10 +450,10 @@ func TestSearchMarker_ArraySlice_MatchesCold(t *testing.T) {
 	}
 	want := [][]any{
 		expectRange(0, 10),
-		expectRange(500, 510),
-		expectRange(1990, 2000),
-		expectRange(1000, 1000),
-		expectRange(1995, 5000),
+		expectRange(200, 210),
+		expectRange(790, 800),
+		expectRange(400, 400),
+		expectRange(795, 5000),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v want %v (independent oracle)", got, want)
@@ -675,13 +684,16 @@ func cyclicText(n int) string {
 // findMarkerMut-accelerated start lookup (yarray.go, shared by YArray.Delete
 // and YText.Delete) with many random-position deletes on a large document.
 func TestSearchMarker_DeleteRange_MatchesCold_Random(t *testing.T) {
+	// 1200-char doc (15x maxSearchMarker=80) keeps the O(n^2) cold random
+	// positioned-delete cost under the CI race budget while still exercising
+	// multiple markers across a randomised delete pattern.
 	build := func(cold bool) string {
 		d := New(WithClientID(1))
 		txt := d.GetText("t")
 		txt.baseType().disableMarkers = cold
 		rng := rand.New(rand.NewSource(99))
 		d.Transact(func(tr *Transaction) {
-			for txt.Len() < 4000 {
+			for txt.Len() < 1200 {
 				txt.Insert(tr, txt.Len(), fmt.Sprintf("%d-", rng.Intn(1000)), nil)
 			}
 			for i := 0; i < 300 && txt.Len() > 20; i++ {
@@ -708,7 +720,10 @@ func TestSearchMarker_DeleteRange_MatchesCold_Random(t *testing.T) {
 // (see cyclicText's doc comment) — this is what makes the independent
 // oracle discriminating rather than tautological.
 func TestSearchMarker_DeleteRange_MatchesCold_Tail(t *testing.T) {
-	const n = 3000
+	// n=800 (10x maxSearchMarker=80) keeps the O(n^2) force-cold, single-char
+	// sequential-append build (the "bulk=false" variant below) well under
+	// the CI race budget while still exercising multiple markers.
+	const n = 800
 	// Two variants: one where the tail delete lands exactly on an item
 	// boundary (single-char items), and one where it must split a large
 	// multi-char item mid-run — the latter is what actually exercises
@@ -790,24 +805,28 @@ func TestSearchMarker_Format_MatchesCold(t *testing.T) {
 // non-empty. Attrs-carrying inserts happen before, at the hasFormatting
 // transition, and after, on a large document.
 func TestSearchMarker_CurrentAttributesAt_MatchesCold(t *testing.T) {
+	// 500-char blocks (well above maxSearchMarker=80) keep the O(n^2)
+	// force-cold single-char-append build below under the CI race budget
+	// while still exercising multiple markers and the hasFormatting
+	// transition.
 	build := func(cold bool) []Delta {
 		d := New(WithClientID(1))
 		txt := d.GetText("t")
 		txt.baseType().disableMarkers = cold
 		d.Transact(func(tr *Transaction) {
-			for i := 0; i < 2000; i++ {
+			for i := 0; i < 500; i++ {
 				txt.Insert(tr, txt.Len(), "a", nil)
 			}
 			// First attrs-carrying insert: hasFormatting is still false when
 			// currentAttributesAt is consulted here (it flips true only once
 			// this call's own opening marker integrates).
 			txt.Insert(tr, txt.Len(), "BOLD", Attributes{"bold": true})
-			for i := 0; i < 2000; i++ {
+			for i := 0; i < 500; i++ {
 				txt.Insert(tr, txt.Len(), "b", nil)
 			}
 			// hasFormatting is now true: exercises the full walk from
 			// txt.start, at a position before the only existing marker.
-			txt.Insert(tr, 500, "MID", Attributes{"bold": true})
+			txt.Insert(tr, 125, "MID", Attributes{"bold": true})
 			txt.Insert(tr, txt.Len(), "END", Attributes{"italic": true})
 		})
 		return txt.ToDelta()
@@ -1134,7 +1153,11 @@ func diffSummary(a, b string) string {
 // the head fast path stays correct whether or not the marker cache beside it
 // is active.
 func TestSearchMarker_DeleteAtZero_FirstLiveCacheCoexistsWithMarkers(t *testing.T) {
-	const n = 4000
+	// n=1000 (well above maxSearchMarker=80): the head/positioned delete loop
+	// below is self-limiting on len(want)>20/>10, so it naturally runs fewer
+	// iterations at smaller n — this keeps the O(n^2) cold positioned-delete
+	// cost under the CI race budget while still exercising multiple markers.
+	const n = 1000
 	base := cyclicText(n)
 
 	// replay runs the exact same delete sequence — driven only by the shared
