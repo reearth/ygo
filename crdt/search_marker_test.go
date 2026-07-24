@@ -995,3 +995,145 @@ func TestSearchMarker_Format_MatchesCold_OutOfRange(t *testing.T) {
 		}
 	}
 }
+
+// TestSearchMarker_AfterGC_MatchesCold (G7) exercises the interaction between
+// search markers and auto-GC (doc.gc=true, snapshot.go's gcTxnDeleteSet):
+// once a deleted range's Content is replaced with a ContentDeleted tombstone,
+// any search marker that used to point at one of those items must not be
+// consulted as if it were still live. GC only ever touches items that are
+// already item.Deleted (gcTxnDeleteSet/RunGC both gate on it), and every
+// marker-maintenance site keys off item.Deleted, not Content's concrete
+// type (updateMarkerChanges drops markers on m.item.Deleted; renderedStep
+// treats a Deleted item as non-countable regardless of Content) — so this
+// test is expected to already pass, serving as a regression guard for that
+// invariant rather than motivating new invalidation code.
+func TestSearchMarker_AfterGC_MatchesCold(t *testing.T) {
+	build := func(cold bool) string {
+		d := New(WithClientID(1), WithGC(true))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) { txt.Insert(tr, 0, "abcdefghij", nil) })
+		// Deletes "cdef"; auto-GC (d.gc=true) replaces its Content with a
+		// ContentDeleted tombstone at commit, per doc.go's gcTxnDeleteSet.
+		d.Transact(func(tr *Transaction) { txt.Delete(tr, 2, 4) })
+		// A positioned insert that must resolve its left-neighbour via
+		// findMarkerMut/leftNeighbourAt against a document that now contains
+		// a GC'd tombstone in the middle of the list.
+		d.Transact(func(tr *Transaction) { txt.Insert(tr, 3, "Z", nil) })
+		return txt.ToString()
+	}
+	got, cold := build(false), build(true)
+	if got != cold {
+		t.Fatalf("post-GC markers=%q cold=%q", got, cold)
+	}
+	if want := "abgZhij"; got != want {
+		t.Fatalf("got %q want %q (independent oracle: delete [2,6) from abcdefghij, then insert Z at 3)", got, want)
+	}
+}
+
+// TestSearchMarker_AfterGC_LargeDoc_MatchesCold stresses G7 further: many
+// scattered deletes across a large document, each committed in its own
+// transaction so auto-GC tombstones them before the next operation runs,
+// interleaved with positioned inserts/deletes that must route around the
+// GC'd items via the marker fast path. Guards against a marker surviving a
+// GC'd item and mis-reporting its rendered start.
+func TestSearchMarker_AfterGC_LargeDoc_MatchesCold(t *testing.T) {
+	const n = 3000
+	base := cyclicText(n)
+	build := func(cold bool) string {
+		d := New(WithClientID(1), WithGC(true))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) { txt.Insert(tr, 0, base, nil) })
+		rng := rand.New(rand.NewSource(42))
+		for i := 0; i < 200 && txt.Len() > 20; i++ {
+			// Each delete commits (and auto-GCs) in its own transaction so the
+			// NEXT operation always sees GC'd tombstones from the previous one.
+			d.Transact(func(tr *Transaction) {
+				pos := rng.Intn(txt.Len() - 10)
+				dn := 1 + rng.Intn(9)
+				txt.Delete(tr, pos, dn)
+			})
+			d.Transact(func(tr *Transaction) {
+				pos := rng.Intn(txt.Len() + 1)
+				txt.Insert(tr, pos, "Z", nil)
+			})
+		}
+		return txt.ToString()
+	}
+	got, cold := build(false), build(true)
+	if got != cold {
+		t.Fatalf("post-GC large-doc marker/cold mismatch: len(got)=%d len(cold)=%d", len(got), len(cold))
+	}
+}
+
+// TestSearchMarker_DeleteAtZero_FirstLiveCacheCoexistsWithMarkers (G6)
+// exercises firstLiveCache and the search-marker cache side by side.
+// deleteRange's index<=0 branch (yarray.go) ALWAYS resolves the head item via
+// t.firstLiveFromStart — unconditionally, regardless of disableMarkers — so a
+// long run of delete-at-0 calls builds a large head-tombstone run that is
+// skipped in O(1) amortized per issue #86. Interleaved positioned deletes
+// elsewhere use findMarkerMut (or, under the force-cold seam, an equivalent
+// full walk). Comparing marker-enabled vs force-cold builds — AND both
+// against a plain-Go-string oracle that replays the identical operation
+// sequence — proves the two caches don't corrupt each other's bookkeeping:
+// the head fast path stays correct whether or not the marker cache beside it
+// is active.
+func TestSearchMarker_DeleteAtZero_FirstLiveCacheCoexistsWithMarkers(t *testing.T) {
+	const n = 4000
+	base := cyclicText(n)
+
+	// replay runs the exact same delete sequence — driven only by the shared
+	// rng and the current oracle length, so it stays in lockstep with
+	// whatever the CRDT actually did — against a plain Go string. Used both
+	// as the independent oracle and (via replay) to derive deterministic
+	// positions/lengths for the CRDT operations below.
+	replay := func(want string, rng *rand.Rand, headDeletes int) string {
+		for i := 0; i < headDeletes && len(want) > 20; i++ {
+			want = want[1:] // head delete, mirrors deleteRange's index<=0 path
+			if len(want) > 10 {
+				pos := 1 + rng.Intn(len(want)-5)
+				dn := 1 + rng.Intn(3)
+				if pos+dn > len(want) {
+					dn = len(want) - pos
+				}
+				want = want[:pos] + want[pos+dn:]
+			}
+		}
+		return want
+	}
+	oracle := replay(base, rand.New(rand.NewSource(7)), 1500)
+
+	build := func(cold bool) string {
+		d := New(WithClientID(1))
+		txt := d.GetText("t")
+		txt.baseType().disableMarkers = cold
+		d.Transact(func(tr *Transaction) { txt.Insert(tr, 0, base, nil) })
+		rng := rand.New(rand.NewSource(7))
+		want := base
+		d.Transact(func(tr *Transaction) {
+			for i := 0; i < 1500 && len(want) > 20; i++ {
+				txt.Delete(tr, 0, 1) // head delete: exercises firstLiveCache
+				want = want[1:]
+				if len(want) > 10 {
+					pos := 1 + rng.Intn(len(want)-5)
+					dn := 1 + rng.Intn(3)
+					if pos+dn > len(want) {
+						dn = len(want) - pos
+					}
+					txt.Delete(tr, pos, dn) // positioned delete: exercises findMarkerMut
+					want = want[:pos] + want[pos+dn:]
+				}
+			}
+		})
+		return txt.ToString()
+	}
+
+	got, cold := build(false), build(true)
+	if got != cold {
+		t.Fatalf("marker/cold mismatch: len(got)=%d len(cold)=%d", len(got), len(cold))
+	}
+	if got != oracle {
+		t.Fatalf("got len=%d != independent-oracle len=%d (firstLiveCache/marker coexistence bug)", len(got), len(oracle))
+	}
+}
