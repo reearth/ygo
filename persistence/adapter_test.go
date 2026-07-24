@@ -81,6 +81,45 @@ func TestLegacyAdapter_PluggedIntoServer(t *testing.T) {
 	assert.Equal(t, "persisted", docB.GetText("t").ToString())
 }
 
+func TestLegacyAdapter_CompactForwardsWithKeep(t *testing.T) {
+	store := persistence.NewMemoryPersistence()
+	ad := persistence.NewLegacyAdapter(store)
+	ad.KeepVersions = 2
+
+	// Append 5 versions.
+	for i := 0; i < 5; i++ {
+		doc := crdt.New(crdt.WithClientID(crdt.ClientID(i + 1)))
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "x", nil) })
+		require.NoError(t, ad.StoreUpdate("room", crdt.EncodeStateAsUpdateV1(doc, nil)))
+	}
+
+	// Compact via the shim → must forward to store.Compact(room, 2).
+	require.NoError(t, ad.Compact(context.Background(), "room"))
+
+	metas, err := store.ListVersions(context.Background(), "room")
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(metas), 2, "history should be trimmed to KeepVersions")
+
+	// State is preserved (materialised head still loads).
+	head, err := ad.LoadDoc("room")
+	require.NoError(t, err)
+	assert.NotEmpty(t, head)
+}
+
+func TestLegacyAdapter_CompactKeepZeroIsNoop(t *testing.T) {
+	store := persistence.NewMemoryPersistence()
+	ad := persistence.NewLegacyAdapter(store) // KeepVersions defaults to 0
+	doc := crdt.New(crdt.WithClientID(1))
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "x", nil) })
+	require.NoError(t, ad.StoreUpdate("room", crdt.EncodeStateAsUpdateV1(doc, nil)))
+	require.NoError(t, ad.Compact(context.Background(), "room")) // keep=0 → keep all, no error
+	metas, err := store.ListVersions(context.Background(), "room")
+	require.NoError(t, err)
+	assert.Len(t, metas, 1)
+}
+
 // ── minimal WS test helpers (self-contained; persistence_test package) ──
 
 func dialWS(t *testing.T, ts *httptest.Server, room string) *gws.Conn {

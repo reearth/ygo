@@ -1,3 +1,40 @@
+## v1.37.0
+
+A minor release hardening the websocket server's coalesced persistence path.
+It closes a durability gap where a room could be evicted before its pending
+batch was flushed, and gives adapters an optional way to bound stored-version
+growth. No breaking changes; the default behaviour of servers without a
+`CompactableAdapter` is unchanged.
+
+### Fixed
+
+- **Lost edits on quick refresh with coalesced persistence**
+  ([#175](https://github.com/reearth/ygo/issues/175)): the room-teardown paths
+  (`handleDisconnect`, `CloseRoom`) now flush the pending coalesced batch
+  durably — and await it — while the room is still discoverable, then re-check
+  and evict. A peer that reconnects during the flush reuses the live
+  in-memory document instead of reloading stale state from the backing store.
+
+### Added
+
+- **`CompactableAdapter` and `Server.CompactEvery`**
+  ([#175](https://github.com/reearth/ygo/issues/175)): an optional
+  `PersistenceAdapter` extension the server calls on room unload, and — when
+  `CompactEvery > 0` — after every N persistence flushes, letting an adapter
+  bound stored-version growth. `persistence.LegacyAdapter` implements it via a
+  new `KeepVersions` field, forwarding to the existing
+  `VersionedPersistence.Compact`.
+
+## Install
+
+```
+go get github.com/reearth/ygo@v1.37.0
+```
+
+See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
+
+---
+
 ## v1.36.0
 
 A minor release that changes the default persistence behaviour for the
