@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -1188,5 +1189,92 @@ func TestSearchMarker_DeleteAtZero_FirstLiveCacheCoexistsWithMarkers(t *testing.
 	}
 	if got != oracle {
 		t.Fatalf("ygo result != independent-oracle (firstLiveCache/marker coexistence bug):\n%s", diffSummary(got, oracle))
+	}
+}
+
+// TestSearchMarker_ConcurrentReadersNoRace is the -race regression guard for
+// G2: it proves that concurrent readers consulting the search-marker cache
+// via findMarkerRO (under doc.mu.RLock) never race against a writer mutating
+// that same cache via findMarkerMut (under doc.mu.Lock, inside Transact).
+//
+// This intentionally exercises YArray, not YText. YText's only read paths
+// (ToString/ToDelta) walk t.start directly and never call findMarkerRO at
+// all — a test built on them would pass under -race no matter what
+// findMarkerRO did, because it would never touch t.markers concurrently in
+// the first place. YArray.Get is the one exported read op that calls
+// findMarkerRO (see yarray.go), so looping it concurrently with Transact
+// writes on the same array is what actually puts G2 (findMarkerRO must never
+// write t.markers/t.markerTimestamp) under test: if findMarkerRO ever
+// mutated shared state, or if a read op ever reached findMarkerMut instead,
+// `go test -race` would report a race between the reader goroutines' RLock
+// section and the writer's Lock section touching t.markers.
+//
+// The test asserts no panic (out-of-range Get during a concurrent shrink
+// must return nil, not crash) and that the array is left internally
+// consistent once the race stops. Its real value is only visible under
+// `-race`; run with `go test ./crdt/ -race -run TestSearchMarker_ConcurrentReadersNoRace`.
+func TestSearchMarker_ConcurrentReadersNoRace(t *testing.T) {
+	d := New(WithClientID(1))
+	arr := d.GetArray("a")
+
+	const seedLen = 64
+	seed := make([]any, seedLen)
+	for i := range seed {
+		seed[i] = i
+	}
+	d.Transact(func(tr *Transaction) { arr.Insert(tr, 0, seed) })
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(seed int64) {
+			defer wg.Done()
+			rng := rand.New(rand.NewSource(seed))
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				// ToSlice() (RLock) both reads a chunk of live state and gives
+				// us a length to probe with Get(); Get() itself (RLock) drives
+				// findMarkerRO directly against whatever the writer's Transact
+				// (Lock) is doing to t.markers concurrently.
+				s := arr.ToSlice()
+				if n := len(s); n > 0 {
+					_ = arr.Get(rng.Intn(n))
+				}
+				// Also probe indices that may already be out of range by the
+				// time Get runs (the writer shrinks/grows concurrently) —
+				// Get must degrade to nil, never panic or corrupt state.
+				_ = arr.Get(rng.Intn(seedLen * 2))
+			}
+		}(int64(i) + 1)
+	}
+
+	rng := rand.New(rand.NewSource(99))
+	for i := 0; i < 200; i++ {
+		d.Transact(func(tr *Transaction) {
+			n := arr.Len()
+			switch {
+			case n == 0 || rng.Intn(3) == 0:
+				arr.Push(tr, []any{i})
+			case rng.Intn(2) == 0:
+				arr.Insert(tr, rng.Intn(n), []any{i})
+			default:
+				arr.Delete(tr, rng.Intn(n), 1)
+			}
+		})
+	}
+	close(done)
+	wg.Wait()
+
+	// Sanity check post-race: Len() (the running count maintained by the
+	// write path) must agree with the actual number of live elements a fresh
+	// RLock'd walk finds. A findMarkerRO/findMarkerMut race that corrupted
+	// t.markers could plausibly desync these even though nothing panicked.
+	if got, want := len(arr.ToSlice()), arr.Len(); got != want {
+		t.Fatalf("post-race inconsistency: len(ToSlice())=%d Len()=%d", got, want)
 	}
 }
