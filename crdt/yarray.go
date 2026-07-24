@@ -668,13 +668,16 @@ func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 	if length <= 0 {
 		return
 	}
-	// For local transactions, invalidate only the cache entries at and after the
-	// deletion start. Entries before index remain valid and can be reused by a
-	// subsequent leftNeighbourAt call near the same location.
-	// For remote transactions, item.delete handles cache invalidation.
-	if txn.Local {
-		t.invalidatePosCacheFrom(index)
-	}
+	// Search-marker maintenance (G1) happens AFTER the tombstoning below: once
+	// the affected items carry Deleted=true, updateMarkerChanges(index, -deleted)
+	// both drops markers that now point at a tombstone and shifts the survivors
+	// after the deleted region left by the number of rendered positions removed,
+	// preserving markers before index for a subsequent nearby lookup. Doing it
+	// up-front (the old drop-from-index shim) would discard reusable markers and
+	// could not distinguish shift-vs-drop. splitItem, if a boundary split is
+	// needed during the walk, clears all markers, in which case the call below
+	// is a no-op on the empty set — still correct.
+	origLen := length
 	counted := 0
 	// Start the walk at firstLiveFromStart, not t.start: leading tombstones
 	// accumulated by earlier head-deletes are skipped in O(1) via the cache,
@@ -712,5 +715,11 @@ func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 			item.delete(txn)
 			length = 0
 		}
+	}
+	// Shift/drop markers for the rendered positions actually removed. length is
+	// whatever could not be deleted (deletion ran past the end), so the number
+	// of removed positions is origLen-length. Zero → no-op.
+	if deleted := origLen - length; deleted > 0 {
+		t.updateMarkerChanges(index, -deleted)
 	}
 }

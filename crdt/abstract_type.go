@@ -147,24 +147,6 @@ func (t *abstractType) invalidateFirstLiveCache() {
 	t.firstLiveCache = nil
 }
 
-// invalidatePosCache clears all search markers. Must be called whenever an
-// insertion or deletion changes the logical positions of items in this type's
-// linked list but the affected range is not known (remote applies, splits,
-// merges). Retained as a thin shim over clearMarkers so existing call sites
-// keep compiling; Task 3 will refine the exact invalidation semantics.
-func (t *abstractType) invalidatePosCache() {
-	t.clearMarkers()
-}
-
-// invalidatePosCacheFrom drops every marker at or after rendered position pos.
-// Markers before pos still point at items whose rendered start an edit at pos
-// cannot shift, so they remain accurate. Retained as a thin shim over
-// dropMarkersFrom for existing call sites; Task 3 will replace these with
-// precise updateMarkerChanges calls.
-func (t *abstractType) invalidatePosCacheFrom(pos int) {
-	t.dropMarkersFrom(pos)
-}
-
 // leftNeighbourAt returns the item that should be the left neighbour when
 // inserting at logical position index, plus the offset within that item.
 //

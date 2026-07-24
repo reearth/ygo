@@ -233,13 +233,30 @@ func (t *abstractType) markPosition(item *Item, index int) {
 
 // updateMarkerChanges shifts marker indices to account for an edit of size
 // delta (delta > 0 insert, delta < 0 delete) that begins at rendered position
-// index, and drops markers whose item has become deleted/invalid. Ports the
-// index-shift half of Yjs updateMarkerChanges. Write-lock only.
+// index, and drops markers whose item has become deleted/invalid. It is the
+// maintenance primitive wired into the local structural mutation sites (Task 3):
+// a positioned insert calls it with (index, +len), a positioned delete with
+// (index, -len) AFTER tombstoning the affected items. Write-lock only.
 //
-// Task 2 does not yet route the invalidation call sites through this method
-// (the invalidatePosCache* shims below use the conservative drop-from-index
-// behaviour instead); it is provided as the maintenance primitive that Task 3
-// will wire in once the exact insert/delete invalidation semantics are settled.
+// Shift condition — index <= m.index. Every marker whose recorded rendered
+// start is at or after the edit position shifts by delta; markers strictly
+// before the edit are untouched (an edit at index never moves the rendered
+// start of an item that ends at or before index). This is the "index <= m.index"
+// form the Yjs source notes "would actually suffice" (src/types/AbstractType.js).
+//
+// Why "<=" and not the "index < m.index || (delta<0 && index==m.index)" that a
+// literal port of Yjs's default branch uses: Yjs additionally marks items with a
+// boolean and de-dups a marker that lands on an already-marked item, so a marker
+// left un-shifted at the exact boundary is harmless there. Our findMarkerRO has
+// no such de-dup — it TRUSTS m.index as m.item's rendered start and re-walks from
+// it — so a marker sitting exactly at an insert position MUST shift, or it would
+// report a stale (too-low) start for the item that the insert pushed right. For
+// deletes the two forms coincide (the boundary marker's item is tombstoned and
+// dropped by the check above), so "<=" is correct for both directions.
+//
+// Post-condition (the invariant every caller relies on): each surviving marker
+// still satisfies renderedStart(m.item) == m.index, given the list and Deleted
+// flags are already updated for this edit.
 func (t *abstractType) updateMarkerChanges(index, delta int) {
 	for i := len(t.markers) - 1; i >= 0; i-- {
 		m := &t.markers[i]
@@ -247,7 +264,7 @@ func (t *abstractType) updateMarkerChanges(index, delta int) {
 			t.markers = append(t.markers[:i], t.markers[i+1:]...)
 			continue
 		}
-		if index < m.index || (delta < 0 && index == m.index) {
+		if index <= m.index {
 			ni := m.index + delta
 			if ni < index {
 				ni = index
@@ -264,22 +281,6 @@ func (t *abstractType) clearMarkers() {
 	if len(t.markers) > 0 {
 		t.markers = t.markers[:0]
 	}
-}
-
-// dropMarkersFrom removes every marker whose recorded index is at or after
-// pos. It is the marker analogue of the old invalidatePosCacheFrom: an edit at
-// pos never shifts the rendered start of items that begin strictly before pos,
-// so those markers stay accurate and are kept, while markers at/after pos
-// (which would shift, or point into the edited region) are discarded.
-func (t *abstractType) dropMarkersFrom(pos int) {
-	n := 0
-	for i := range t.markers {
-		if t.markers[i].index < pos {
-			t.markers[n] = t.markers[i]
-			n++
-		}
-	}
-	t.markers = t.markers[:n]
 }
 
 func absInt(x int) int {

@@ -156,6 +156,147 @@ func TestSearchMarker_InsertMatchesCold_LargeRandom(t *testing.T) {
 	}
 }
 
+// TestSearchMarker_RemoteDeleteOnly_NoStale is the v1.31.6 stale-cache class
+// guard (Task 3, #181). A remote update that ONLY tombstones an item is applied
+// via ApplyUpdateV1 (which runs with txn.Local hardcoded true, so item.delete's
+// own !txn.Local invalidation is dead), then a positioned LOCAL insert follows.
+// If the remote delete-apply path fails to invalidate the search markers, the
+// still-live markers after the tombstone carry indices that are now one-too-high
+// and the insert resolves the wrong neighbour. The marker-run result must equal
+// the force-cold run.
+func TestSearchMarker_RemoteDeleteOnly_NoStale(t *testing.T) {
+	// The v1.31.6 stale-cache class: a remote update that ONLY tombstones an
+	// item applies with txn.Local hardcoded true (so item.delete's own
+	// !txn.Local invalidation is dead) and must still invalidate the search
+	// markers. A warmed cache holding markers for live items AFTER the deleted
+	// one would otherwise carry indices that are now too high, and the next
+	// positioned insert resolves the wrong neighbour.
+	//
+	// The cache is hand-seeded (as the read-only oracle tests do) because the
+	// write path snaps markers to run-starts, which would hide the exact tail
+	// marker this class needs; seeding models precisely the warmed state that
+	// v1.31.6 corrupted.
+	a := New(WithClientID(1))
+	arrA := a.GetArray("arr")
+	a.Transact(func(tr *Transaction) {
+		for _, v := range []any{"A", "B", "C", "D", "E"} { // 5 distinct (unmerged) items
+			arrA.Push(tr, []any{v})
+		}
+	})
+	at := arrA.baseType()
+
+	// Seed a correct, pre-delete warmed cache: markers for the live tail items.
+	seed := func() {
+		at.markers = at.markers[:0]
+		for _, p := range []int{4, 5} { // -> (D,3), (E,4)
+			it, idx := coldLeftNeighbour(at, p)
+			if it != nil {
+				at.markers = append(at.markers, searchMarker{item: it, index: idx})
+			}
+		}
+	}
+	seed()
+	// Sanity: with the correct warmed cache, findMarkerRO agrees with cold.
+	for i := 0; i <= arrA.Len(); i++ {
+		if gi, gx := at.findMarkerRO(i); func() bool { ci, cx := coldLeftNeighbour(at, i); return gi != ci || gx != cx }() {
+			t.Fatalf("pre-delete seed already stale at %d: got (%p,%d)", i, gi, gx)
+		}
+	}
+
+	// A remote peer tombstones "B" and ships ONLY that delete back.
+	b := New(WithClientID(2))
+	if err := ApplyUpdateV1(b, EncodeStateAsUpdateV1(a, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	arrB := b.GetArray("arr")
+	seed() // re-warm right before the delete apply (encoding above may have touched markers)
+	b.Transact(func(tr *Transaction) { arrB.Delete(tr, 1, 1) })
+	upd := EncodeStateAsUpdateV1(b, a.StateVector())
+	if err := ApplyUpdateV1(a, upd, nil); err != nil { // a live: [A C D E]; D,E shift left by 1
+		t.Fatal(err)
+	}
+
+	// The invariant the remote-delete apply must uphold: every surviving marker
+	// still resolves like the cold oracle. A stale (D,3)/(E,4) that survived the
+	// tombstone would make findMarkerRO return the wrong item near the tail.
+	for i := 0; i <= arrA.Len(); i++ {
+		gi, gx := at.findMarkerRO(i)
+		ci, cx := coldLeftNeighbour(at, i)
+		if gi != ci || gx != cx {
+			t.Fatalf("stale marker after remote delete-only apply at index %d: findMarkerRO=(%p,%d) cold=(%p,%d)", i, gi, gx, ci, cx)
+		}
+	}
+
+	// And the end-to-end shape: a positioned insert after the remote delete must
+	// land where the cold walk would put it.
+	a.Transact(func(tr *Transaction) { arrA.Insert(tr, 4, []any{"Y"}) }) // append at end -> [A C D E Y]
+	j, err := arrA.ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(j), `["A","C","D","E","Y"]`; got != want {
+		t.Fatalf("positioned insert after remote delete-only: got %s want %s", got, want)
+	}
+}
+
+// TestUpdateMarkerChanges_ShiftSemantics directly exercises the index-shift
+// primitive that Task 3 wires into the structural mutation sites. The subtle
+// invariant it must uphold: after the call, every surviving marker's recorded
+// index still equals its item's true rendered start. The exact-boundary case
+// (a marker whose index equals the edit position) is the one that made the
+// naive strict-less-than condition wrong for our re-walk-trusting findMarkerRO
+// (see the "index <= m.index" reasoning in search_marker.go).
+func TestUpdateMarkerChanges_ShiftSemantics(t *testing.T) {
+	live := &Item{Content: NewContentString("x")}         // countable, not deleted
+	dead := &Item{Content: NewContentString("y"), Deleted: true}
+
+	t.Run("insert shifts markers at or after the edit index", func(t *testing.T) {
+		at := &abstractType{markers: []searchMarker{
+			{item: live, index: 2}, // strictly before edit: must NOT move
+			{item: live, index: 5}, // exactly at edit: MUST move (boundary case)
+			{item: live, index: 9}, // after edit: must move
+		}}
+		at.updateMarkerChanges(5, +3) // insert 3 units at index 5
+		want := []int{2, 8, 12}
+		for i, w := range want {
+			if at.markers[i].index != w {
+				t.Fatalf("insert marker[%d].index=%d want %d", i, at.markers[i].index, w)
+			}
+		}
+	})
+
+	t.Run("delete shifts and clamps markers at or after the edit index", func(t *testing.T) {
+		at := &abstractType{markers: []searchMarker{
+			{item: live, index: 2},  // before delete: unchanged
+			{item: live, index: 10}, // after delete: shift left by 3
+		}}
+		at.updateMarkerChanges(4, -3) // delete 3 units at index 4
+		want := []int{2, 7}
+		for i, w := range want {
+			if at.markers[i].index != w {
+				t.Fatalf("delete marker[%d].index=%d want %d", i, at.markers[i].index, w)
+			}
+		}
+	})
+
+	t.Run("markers on deleted items are dropped", func(t *testing.T) {
+		at := &abstractType{markers: []searchMarker{
+			{item: live, index: 1},
+			{item: dead, index: 4}, // item became a tombstone: drop
+			{item: live, index: 8},
+		}}
+		at.updateMarkerChanges(4, -2)
+		if len(at.markers) != 2 {
+			t.Fatalf("expected deleted-item marker dropped, got %d markers", len(at.markers))
+		}
+		for _, m := range at.markers {
+			if m.item == dead {
+				t.Fatalf("deleted-item marker survived")
+			}
+		}
+	})
+}
+
 // TestSearchMarker_RO_IndexBeyondLen (carried over from Task 1 review): a
 // read-only lookup for index > Len() must match the cold oracle (both walk
 // off the end and return (nil, totalCounted)).
