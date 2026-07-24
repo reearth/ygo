@@ -84,6 +84,14 @@ const (
 
 	// wsCodeUnauthorized is Hocuspocus's WS close code for failed auth.
 	wsCodeUnauthorized = 4401
+
+	// wsReasonUnauthorized is the WS close-frame reason for a denied
+	// connection. It is a short constant because a WS close control frame's
+	// payload is capped at 125 bytes (2-byte code + reason); a long
+	// hook-supplied error would overflow it and drop the close frame, so the
+	// full error text is carried only in the PermissionDenied data frame.
+	// Matches Hocuspocus's CloseEvents.Unauthorized.reason.
+	wsReasonUnauthorized = "Unauthorized"
 )
 
 // maxWSMessageBytes is the maximum size of a single WebSocket frame accepted

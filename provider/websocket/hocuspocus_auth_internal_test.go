@@ -171,6 +171,59 @@ func TestInbandAuth_PermissionDenied_Then4401(t *testing.T) {
 		"connection must close with 4401, got %v", closeErr)
 }
 
+// TestInbandAuth_LongErrorReason_StillCloses4401 guards the fix for the WS
+// control-frame 125-byte cap: an OnTokenAuth error longer than the close-frame
+// payload limit must NOT drop the 4401 close. The full error text still rides
+// in the PermissionDenied data frame; the close frame uses the short constant
+// reason, so the client always sees the 4401 code.
+func TestInbandAuth_LongErrorReason_StillCloses4401(t *testing.T) {
+	longReason := strings.Repeat("x", 300) // >123 bytes: would overflow a close frame
+	srv := NewServer()
+	srv.HocuspocusFraming = true
+	srv.OnTokenAuth = func(room, token string) (ConnectionConfig, error) {
+		return ConnectionConfig{}, fmt.Errorf("%s", longReason)
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	room := "r1"
+	c := dialRoomInternal(t, ts, room)
+	defer c.Close()
+
+	frame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarString(room)
+		enc.WriteVarUint(msgAuth)
+		enc.WriteVarUint(authTypeToken)
+		enc.WriteVarString("nope")
+	})
+	require.NoError(t, c.WriteMessage(gws.BinaryMessage, frame))
+
+	sawFullReason := false
+	var closeErr error
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := c.ReadMessage()
+		if err != nil {
+			closeErr = err
+			break
+		}
+		dec := encoding.NewDecoder(data)
+		_, _ = dec.ReadVarString() // docName
+		if tag, _ := dec.ReadVarUint(); tag == msgAuth {
+			if sub, _ := dec.ReadVarUint(); sub == authTypePermissionDenied {
+				reason, _ := dec.ReadVarString()
+				if reason == longReason {
+					sawFullReason = true
+				}
+			}
+		}
+	}
+	require.True(t, sawFullReason, "full error text must survive in the PermissionDenied data frame")
+	require.True(t, gws.IsCloseError(closeErr, wsCodeUnauthorized),
+		"4401 close must still be delivered despite a long hook error, got %v", closeErr)
+}
+
 // TestInbandAuth_NilHook_Ignored verifies backward compatibility (#104): when
 // Server.OnTokenAuth is nil, an inbound Auth (tag 2) frame is silently
 // ignored — no reply, no close — and the connection keeps working normally,

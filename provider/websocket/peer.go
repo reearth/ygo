@@ -236,7 +236,10 @@ func (p *peer) handleAuth(dec *encoding.Decoder) {
 	cfg, authErr := p.safeTokenAuth(hook, token)
 	if authErr != nil {
 		p.write(encodeAuthMessage(authTypePermissionDenied, authErr.Error()))
-		p.enqueueClose(wsCodeUnauthorized, authErr.Error())
+		// Full error text goes in the PermissionDenied data frame above; the
+		// WS close frame uses a short constant reason because control frames
+		// cap the payload at 125 bytes (a long reason would drop the close).
+		p.enqueueClose(wsCodeUnauthorized, wsReasonUnauthorized)
 		return
 	}
 
