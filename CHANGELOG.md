@@ -31,7 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only, not `OnChange` — use `OnUpdate` for heartbeat/liveness signals.
   `Heartbeat()` now fires `OnUpdate` (previously fired no observers). A
   reactivated (removed→returning) client is now classified `Updated` rather than
-  `Added`, matching Yjs/yrs.
+  `Added`, matching Yjs/yrs. The in-repo `provider/websocket` cluster relay now
+  subscribes to awareness via `OnUpdate` (not `OnChange`) so that cross-node
+  liveness (heartbeats) keeps propagating to other nodes; other `OnChange`
+  consumers, such as the mobile UI presence observer, intentionally remain
+  content-only.
 
 ## [1.37.0] — 2026-07-23
 

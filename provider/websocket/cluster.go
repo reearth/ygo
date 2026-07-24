@@ -49,7 +49,7 @@ var _ cluster.Sink = (*Server)(nil)
 // cancelled when Server.Shutdown is called. If relay.Start returns an error the
 // server is left UNATTACHED (s.relay stays nil) and the call may be retried —
 // it does not latch a partial attach. Rooms that become resident after attach
-// are wired automatically (doc.OnUpdate + awareness.OnChange → a bounded
+// are wired automatically (doc.OnUpdate + awareness.OnUpdate → a bounded
 // outbound queue drained by a worker → Publish); the echo guard drops changes
 // whose origin is the relay sentinel.
 //
@@ -108,10 +108,16 @@ func (s *Server) relayWorker(ctx context.Context, out <-chan relayOutbound) {
 	}
 }
 
-// registerRelayObservers wires doc.OnUpdate and awareness.OnChange for a room so
-// local (non-sentinel-origin) changes are published to the relay. Must be called
-// with s.rmu.Lock held (from getOrCreateRoomLocked). The unsubscribe functions
-// are stored on the room and invoked by teardownRelayRoom.
+// registerRelayObservers wires doc.OnUpdate and awareness.OnUpdate for a room so
+// local (non-sentinel-origin) changes are published to the relay. The awareness
+// side deliberately subscribes via OnUpdate rather than OnChange: OnUpdate fires
+// for every applied entry, including content-identical heartbeat re-emits, so a
+// heartbeat still gets relayed cross-node. Using OnChange here would drop
+// heartbeats from the relay (OnChange only fires on content changes), leaving a
+// remote node's view of this client's liveness stale and causing it to falsely
+// expire a still-alive client. Must be called with s.rmu.Lock held (from
+// getOrCreateRoomLocked). The unsubscribe functions are stored on the room and
+// invoked by teardownRelayRoom.
 func (s *Server) registerRelayObservers(r *room, name string) {
 	sentinel := s.relaySentinel
 
@@ -129,7 +135,7 @@ func (s *Server) registerRelayObservers(r *room, name string) {
 		})
 	})
 
-	unsubAw := r.awareness.OnChange(func(ev awareness.ChangeEvent) {
+	unsubAw := r.awareness.OnUpdate(func(ev awareness.UpdateEvent) {
 		if ev.Origin == sentinel {
 			return // echo guard
 		}
@@ -165,7 +171,7 @@ func (s *Server) enqueueRelayOutbound(name string, out cluster.Outbound) {
 }
 
 // changedAwarenessIDs returns the union of added/updated/removed client IDs.
-func changedAwarenessIDs(ev awareness.ChangeEvent) []uint64 {
+func changedAwarenessIDs(ev awareness.UpdateEvent) []uint64 {
 	ids := make([]uint64, 0, len(ev.Added)+len(ev.Updated)+len(ev.Removed))
 	ids = append(ids, ev.Added...)
 	ids = append(ids, ev.Updated...)
@@ -195,8 +201,8 @@ func (s *Server) teardownRelayRoom(r *room, name string) {
 // sentinel origin (so the local doc.OnUpdate observer does NOT re-publish them)
 // and rebroadcast to local peers via BroadcastUpdate. KindAwareness updates are
 // merged into the room's awareness with the sentinel origin; the awareness
-// fan-out to peers is driven by the awareness OnChange path the server already
-// runs for local peers — but inbound merges fire OnChange with the sentinel
+// fan-out to peers is driven by the awareness OnUpdate path the server already
+// runs for local peers — but inbound merges fire OnUpdate with the sentinel
 // origin, which the relay observer drops, so we additionally fan the awareness
 // update out to local peers here.
 //
@@ -240,7 +246,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		if err := rm.awareness.ApplyUpdate(in.Data, s.relaySentinel); err != nil {
 			return err
 		}
-		// Fan the awareness update out to local peers (the OnChange-driven relay
+		// Fan the awareness update out to local peers (the OnUpdate-driven relay
 		// observer dropped it as a sentinel echo, so peers won't otherwise see it).
 		s.broadcastAwarenessToPeers(rm, in.Data)
 		return nil
