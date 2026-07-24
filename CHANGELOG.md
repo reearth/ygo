@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.38.0] — 2026-07-24
+
+### Added
+
+- **Awareness `OnUpdate` event + `Meta(clientID)` accessor**
+  ([#105](https://github.com/reearth/ygo/issues/105)): `OnUpdate` fires on every
+  applied awareness entry including heartbeats, distinct from the content-only
+  `OnChange`; `Meta(clientID)` returns the per-client `{Clock, LastUpdated}`,
+  retained for tombstones to match Yjs `y-protocols`/yrs.
+- **Hocuspocus in-band token auth + docName framing**
+  ([#104](https://github.com/reearth/ygo/issues/104)): opt-in
+  `Server.HocuspocusFraming` reads/writes docName-prefixed frames for real
+  `@hocuspocus/provider` interop; new `Server.OnTokenAuth` hook handles the
+  in-band Auth message (tag 2), replying `Authenticated`/`PermissionDenied` and
+  closing denied connections with WebSocket code `4401`. Complements (does not
+  replace) `AuthFunc`/`Authorize`; `OnTokenAuth` is a handshake reply and
+  optional read-only downgrade, not a document-confidentiality gate.
+
+### Changed
+
+- **Awareness `OnChange` no longer fires on content-identical re-emits**
+  ([#105](https://github.com/reearth/ygo/issues/105)): a remote heartbeat via
+  `ApplyUpdate` and a local same-content `SetLocalState` now fire `OnUpdate`
+  only, not `OnChange` — use `OnUpdate` for heartbeat/liveness signals.
+  `Heartbeat()` now fires `OnUpdate` (previously fired no observers). A
+  reactivated (removed→returning) client is now classified `Updated` rather than
+  `Added`, matching Yjs/yrs.
+
 ## [1.37.0] — 2026-07-23
 
 ### Fixed
