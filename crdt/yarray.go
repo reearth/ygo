@@ -678,13 +678,36 @@ func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 		item, counted = t.findMarkerMut(index)
 	}
 	for item != nil && length > 0 {
-		if item.Deleted || !item.Content.IsCountable() {
+		// Rendered contribution via the single shared, move-aware definition —
+		// the SAME one Get/Slice/ForEach use to resolve values — so deleteRange's
+		// counting can never drift out of step with what Get reports at a rendered
+		// index (the #181 bug: the old loop counted raw physical IsCountable/Len,
+		// so on a moved array it skipped the winning ContentMove, counted the
+		// moved-away item at its origin, and thus deleted the wrong element).
+		countable, n, renderAt := t.renderedStep(item)
+		if !countable {
 			item = item.Right
 			continue
 		}
-		n := item.Content.Len()
 		if counted+n <= index {
 			counted += n
+			item = item.Right
+			continue
+		}
+		if renderAt != nil {
+			// Winning ContentMove: the rendered values come from the moved TARGET
+			// (renderAt), not from this ContentMove item. TargetLen is always 1
+			// (Move() forces single-element targets; resolveMovedItem trims remote
+			// moves to it), so n == 1 — the moved element is atomic and can only be
+			// fully within the deletion range here (counted >= index, since an
+			// integer index cannot land strictly inside a width-1 rendered step).
+			// Deleting the target makes BOTH the target's origin slot and this
+			// ContentMove render nothing (renderedStep drops a deleted-target move),
+			// which is exactly how Yjs removes a moved element: the DELETE lands on
+			// the moved content, matching Get(i). No split of the target is needed
+			// or safe (splitItem would not carry MovedBy to the right half).
+			renderAt.delete(txn)
+			length -= n
 			item = item.Right
 			continue
 		}
