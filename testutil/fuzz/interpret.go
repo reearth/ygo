@@ -81,6 +81,12 @@ func applyLocalOp(p *peerState, st Step) {
 				if arr.Len() > 0 {
 					arr.Delete(txn, clampIndex(st.PosHint, arr.Len(), false), minInt(st.LenHint, arr.Len()))
 				}
+			case OpMove:
+				if arr.Len() >= 2 {
+					from := clampIndex(st.PosHint, arr.Len(), false)
+					to := clampIndex(st.ToHint, arr.Len(), false)
+					arr.Move(txn, from, to)
+				}
 			}
 		})
 	case KindMap:
