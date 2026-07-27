@@ -296,7 +296,7 @@ func (s *Server) Apply(
 			return fmt.Errorf("%w: %w", ErrInjectRefused, err)
 		}
 	}
-	rm, err := s.getOrCreateRoom(ctx, room)
+	rm, _, err := s.getOrCreateRoom(ctx, room)
 	if err != nil {
 		return err
 	}

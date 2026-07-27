@@ -224,7 +224,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 
 	switch in.Kind {
 	case cluster.KindSync:
-		rm, err := s.getOrCreateRoom(ctx, in.Room)
+		rm, _, err := s.getOrCreateRoom(ctx, in.Room)
 		if err != nil {
 			return err
 		}
@@ -240,7 +240,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		return s.broadcastUpdate(ctx, in.Room, in.Data, false)
 
 	case cluster.KindAwareness:
-		rm, err := s.getOrCreateRoom(ctx, in.Room)
+		rm, _, err := s.getOrCreateRoom(ctx, in.Room)
 		if err != nil {
 			return err
 		}

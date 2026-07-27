@@ -117,7 +117,7 @@ func TestGetOrCreateRoom_ConcurrentDistinctRooms_DoNotSerialize(t *testing.T) {
 
 	aDone := make(chan struct{})
 	go func() {
-		_, _ = s.getOrCreateRoom(context.Background(), "A")
+		_, _, _ = s.getOrCreateRoom(context.Background(), "A")
 		close(aDone)
 	}()
 
@@ -132,7 +132,7 @@ func TestGetOrCreateRoom_ConcurrentDistinctRooms_DoNotSerialize(t *testing.T) {
 	// B must complete while A is still blocked in LoadDoc.
 	bDone := make(chan struct{})
 	go func() {
-		if _, err := s.getOrCreateRoom(context.Background(), "B"); err != nil {
+		if _, _, err := s.getOrCreateRoom(context.Background(), "B"); err != nil {
 			t.Errorf("B getOrCreateRoom: %v", err)
 		}
 		close(bDone)
@@ -164,7 +164,7 @@ func TestGetOrCreateRoom_SecondJoinerWaitsOnReady(t *testing.T) {
 
 	r1done := make(chan *room, 1)
 	go func() {
-		r, _ := s.getOrCreateRoom(context.Background(), "A")
+		r, _, _ := s.getOrCreateRoom(context.Background(), "A")
 		r1done <- r
 	}()
 	select {
@@ -175,13 +175,13 @@ func TestGetOrCreateRoom_SecondJoinerWaitsOnReady(t *testing.T) {
 
 	r2done := make(chan *room, 1)
 	go func() {
-		r, _ := s.getOrCreateRoom(context.Background(), "A")
+		r, _, _ := s.getOrCreateRoom(context.Background(), "A")
 		r2done <- r
 	}()
 
 	// A different room must still be creatable while the second A joiner waits,
 	// proving the joiner does not hold s.rmu.
-	if _, err := s.getOrCreateRoom(context.Background(), "C"); err != nil {
+	if _, _, err := s.getOrCreateRoom(context.Background(), "C"); err != nil {
 		t.Fatalf("C getOrCreateRoom blocked while a joiner waited on ready: %v", err)
 	}
 
@@ -215,7 +215,7 @@ func TestGetOrCreateRoom_LoadErrorWakesWaitersNoPlaceholder(t *testing.T) {
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
 		go func() {
-			_, err := s.getOrCreateRoom(context.Background(), "A")
+			_, _, err := s.getOrCreateRoom(context.Background(), "A")
 			errs <- err
 		}()
 	}
@@ -267,7 +267,7 @@ func TestGetOrCreateRoom_RelayReentrancyWithPersistence_NoDeadlock(t *testing.T)
 		t.Fatalf("AttachRelay: %v", err)
 	}
 
-	runWithDeadlockGuard(t, func() { _, _ = s.getOrCreateRoom(context.Background(), "doc1") })
+	runWithDeadlockGuard(t, func() { _, _, _ = s.getOrCreateRoom(context.Background(), "doc1") })
 
 	if relay.injectErr != nil {
 		t.Fatalf("re-entrant Inject returned error: %v", relay.injectErr)
@@ -316,7 +316,7 @@ func TestGetOrCreateRoom_LoadDocPanicWakesWaitersNoPlaceholder(t *testing.T) {
 				err1ch <- fmt.Errorf("panic escaped getOrCreateRoom uncaught (not recovered into loadErr): %v", rv)
 			}
 		}()
-		_, err := s.getOrCreateRoom(context.Background(), "A")
+		_, _, err := s.getOrCreateRoom(context.Background(), "A")
 		err1ch <- err
 	}()
 
@@ -330,7 +330,7 @@ func TestGetOrCreateRoom_LoadDocPanicWakesWaitersNoPlaceholder(t *testing.T) {
 	// s.rmu, and must also wake with an error once the panic is recovered.
 	err2ch := make(chan error, 1)
 	go func() {
-		_, err := s.getOrCreateRoom(context.Background(), "A")
+		_, _, err := s.getOrCreateRoom(context.Background(), "A")
 		err2ch <- err
 	}()
 
@@ -373,7 +373,7 @@ func TestGetOrCreateRoom_LoadDocPanicWakesWaitersNoPlaceholder(t *testing.T) {
 	// (c/d) a subsequent getOrCreateRoom with a now-healthy adapter succeeds,
 	// proving the MaxRooms slot was released and the room is retryable.
 	a.setPanic("A", false)
-	r, err := s.getOrCreateRoom(context.Background(), "A")
+	r, _, err := s.getOrCreateRoom(context.Background(), "A")
 	if err != nil {
 		t.Fatalf("retry after panicked load failed: %v", err)
 	}

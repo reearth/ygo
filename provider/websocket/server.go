@@ -1018,10 +1018,10 @@ func (s *Server) GetDoc(name string) *crdt.Doc {
 // that point the placeholder is published AND ready is closed, so the re-entrant
 // call finds the room and returns off an already-closed barrier instead of
 // self-deadlocking on the non-reentrant s.rmu.
-func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error) {
+func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, bool, error) {
 	r, created, err := s.createRoomPlaceholder(name)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if created {
 		// This goroutine owns the load. It runs with s.rmu released; other
@@ -1037,7 +1037,7 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 		<-r.ready
 	}
 	if r.loadErr != nil {
-		return nil, r.loadErr
+		return nil, false, r.loadErr
 	}
 
 	// #183 (G4): start the idle-room sweeper lazily on first room creation when
@@ -1064,7 +1064,7 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error
 	// rm.peers (see ServeHTTP), tying "not idle" to "a peer is present." The
 	// immediate-mutation callers (relay Inject, admin Apply) that mutate the doc
 	// with no registration delay clear it themselves right after this returns.
-	return r, nil
+	return r, created, nil
 }
 
 // createRoomPlaceholder returns the room for name. If it already exists the
@@ -1265,7 +1265,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rm, err := s.getOrCreateRoom(r.Context(), name)
+	rm, created, err := s.getOrCreateRoom(r.Context(), name)
 	if err != nil {
 		if errors.Is(err, ErrTooManyRooms) {
 			http.Error(w, "too many rooms", http.StatusServiceUnavailable)
@@ -1291,6 +1291,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log().Debug("MaxConnections cap reached")
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		if created {
+			// #192: this request created the room but no peer will register. Tear it
+			// down (flush-before-evict + delete + awareness/relay/worker teardown).
+			// evictIdleRoom no-ops safely if a concurrent request already joined
+			// (peers>0) or the room is idle-resident (idleSince != 0).
+			s.evictIdleRoom(name, rm, time.Time{})
+		}
 		return
 	}
 
@@ -1301,6 +1308,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if sem := s.connSemaphore(); sem != nil {
 			sem.Release(1)
+		}
+		if created {
+			// #192: this request created the room but no peer will register. Tear it
+			// down (flush-before-evict + delete + awareness/relay/worker teardown).
+			// evictIdleRoom no-ops safely if a concurrent request already joined
+			// (peers>0) or the room is idle-resident (idleSince != 0).
+			s.evictIdleRoom(name, rm, time.Time{})
 		}
 		return
 	}

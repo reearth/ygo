@@ -163,7 +163,7 @@ func awarenessUpdateFor(id uint64) []byte {
 func TestServer_MaxAwarenessClientsPerRoom_IsWired(t *testing.T) {
 	s := NewServer()
 	s.MaxAwarenessClientsPerRoom = 2
-	rm, err := s.getOrCreateRoom(context.Background(), "room")
+	rm, _, err := s.getOrCreateRoom(context.Background(), "room")
 	if err != nil {
 		t.Fatalf("getOrCreateRoom: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestServer_AwarenessExpiry_GoroutineStoppedOnEvict(t *testing.T) {
 	s.AwarenessExpiry = 50 * time.Millisecond
 
 	before := runtime.NumGoroutine()
-	rm, err := s.getOrCreateRoom(context.Background(), "room")
+	rm, _, err := s.getOrCreateRoom(context.Background(), "room")
 	if err != nil {
 		t.Fatalf("getOrCreateRoom: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestServer_Shutdown_DestroysAwarenessOfResidentRooms(t *testing.T) {
 	s.RoomIdleTimeout = time.Hour // large enough that the sweeper (if started) never evicts
 
 	before := runtime.NumGoroutine()
-	rm, err := s.getOrCreateRoom(context.Background(), "room")
+	rm, _, err := s.getOrCreateRoom(context.Background(), "room")
 	if err != nil {
 		t.Fatalf("getOrCreateRoom: %v", err)
 	}
