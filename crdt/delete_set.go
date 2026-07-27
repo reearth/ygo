@@ -144,15 +144,19 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 					end = itemEnd
 				}
 				item.delete(txn)
-				// Remote applies run with txn.Local==true (transactInternal
-				// hardcodes it), so item.delete's own posCache invalidation
-				// (guarded on !txn.Local) is dead here — and unlike local
-				// deleteRange, this path never cleared the cache. A stale
-				// posCache would then mis-resolve the next local positioned
-				// insert, since cached (index→item) entries for still-live items
-				// after the tombstone now carry an index that is too high (#160).
+				// Search-marker invalidation for the remote delete-apply path
+				// (the v1.31.6 stale-cache class, #181). Remote applies run with
+				// txn.Local==true (transactInternal hardcodes it), so
+				// item.delete's own marker invalidation (guarded on !txn.Local)
+				// is dead here. The rendered index of the tombstoned item is not
+				// tracked by this delete-set walk, so a precise
+				// updateMarkerChanges(index, -len) is not available — we clear all
+				// markers, which is always safe (the next lookup repopulates via a
+				// cold walk). Without this, still-live markers after the tombstone
+				// would keep an index that is now too high and mis-resolve the next
+				// local positioned insert (#160).
 				if item.Parent != nil && item.Content.IsCountable() {
-					item.Parent.invalidatePosCache()
+					item.Parent.clearMarkers()
 				}
 				applied = end - r.Clock
 			}

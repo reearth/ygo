@@ -2,6 +2,8 @@ package crdt
 
 import (
 	"fmt"
+	"math/rand"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -299,5 +301,378 @@ func BenchmarkConcurrentSamePositionInsert(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Search-marker proving harness (Task 8, #181).
+//
+// Tasks 1-7 replaced the old forward-only posCache with a move-aware,
+// Yjs-style search marker (crdt/search_marker.go). abstractType.disableMarkers
+// is the test seam those tasks added: forcing it true makes every positional
+// lookup fall back to the pre-marker full linear walk from t.start, exactly
+// as it behaved before. Every benchmark below runs the identical workload
+// twice — once with markers live (the "_Markers" variant) and once with
+// disableMarkers forced true (the "_Cold" variant) — so the ns/op columns
+// are a direct, apples-to-apples measurement of the speedup those tasks
+// claim, on the shapes that used to be O(n) per op (random access) or
+// O(n^2) over a growing/shrinking document (many such ops in a row).
+//
+// Base documents are always CONSTRUCTED with markers enabled — disableMarkers
+// is flipped only afterward, immediately before the timed section. This
+// keeps setup cost identical (and cheap) between the two variants; building
+// a large fragmented document with disableMarkers forced from the start
+// would itself be the O(n^2) cold walk the benchmark exists to measure,
+// which would make the 100k builds impractically slow.
+// ---------------------------------------------------------------------------
+
+// buildFragmentedTextDoc builds a YText of exactly target characters by
+// inserting one character at a time at a random position, each in its own
+// transaction. Two things matter about this shape:
+//
+//   - One transaction per character means squashRuns (transaction.go) — which
+//     only merges items created within the SAME transaction — never collapses
+//     them back together, so the linked list stays genuinely fragmented into
+//     target separate Items. That is what makes a cold linear walk from
+//     t.start expensive.
+//   - Every item has length exactly 1, so a later Insert at any position
+//     always lands ON an item boundary (leftNeighbourAt's offset is always
+//     == len) and never INSIDE the middle of a multi-character item. That
+//     matters: a mid-item insert forces splitItem, which itself conservatively
+//     clears every marker (item.go's splitItem doc comment) and does an O(store
+//     size) StructStore.insertItem slice-shift — a cost that has nothing to do
+//     with search markers but would otherwise dominate and mask the very
+//     speedup these benchmarks exist to measure. Single-character items avoid
+//     that confound entirely, isolating the position-lookup cost.
+//
+// Markers are left enabled during this build (the default zero value of
+// disableMarkers), keeping construction fast regardless of which variant
+// calls it.
+func buildFragmentedTextDoc(target int, seed int64) (*Doc, *YText) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("text")
+	rng := rand.New(rand.NewSource(seed))
+	for i := 0; i < target; i++ {
+		pos := rng.Intn(txt.Len() + 1)
+		doc.Transact(func(txn *Transaction) {
+			txt.Insert(txn, pos, "a", nil)
+		})
+	}
+	return doc, txt
+}
+
+// buildFragmentedArrayDoc builds a YArray of exactly target elements
+// (values 0..target-1, each its own Insert call at a random position), the
+// YArray counterpart of buildFragmentedTextDoc above.
+func buildFragmentedArrayDoc(target int, seed int64) (*Doc, *YArray) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("arr")
+	rng := rand.New(rand.NewSource(seed))
+	for i := 0; i < target; i++ {
+		pos := rng.Intn(arr.Len() + 1)
+		doc.Transact(func(txn *Transaction) {
+			arr.Insert(txn, pos, []any{i})
+		})
+	}
+	return doc, arr
+}
+
+// benchInsertRandom measures inserting a single character at a
+// uniformly-random position on every iteration — the classic O(n)-per-op
+// cold case, since a linear walk from t.start must cross, on average, half
+// the document to resolve a random target index.
+func benchInsertRandom(b *testing.B, n int, cold bool) {
+	b.ReportAllocs()
+
+	doc, txt := buildFragmentedTextDoc(n, int64(n)+1)
+	txt.baseType().disableMarkers = cold
+	rng := rand.New(rand.NewSource(int64(n) + 2))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		pos := rng.Intn(txt.Len() + 1)
+		doc.Transact(func(txn *Transaction) {
+			txt.Insert(txn, pos, "x", nil)
+		})
+	}
+}
+
+// benchInsertReverse measures inserting characters at a cursor that walks
+// BACKWARD one position per iteration through a large pre-existing document
+// (decrementing from txt.Len() toward 0, wrapping back to the end when it
+// hits bottom). This is the adversarial case for a forward-only cache: each
+// new target is strictly less than the previous one, so a cache that only
+// ever remembers "the last position, moving forward" is useless here and
+// every op degrades to a full cold walk. The move-aware marker this task
+// benchmarks resolves it in O(1) per step instead, via walkLeftFrom from the
+// marker installed one position to the right on the previous iteration —
+// this is exactly the "move-aware" (bidirectional) property Tasks 1-7 added
+// over the old posCache.
+func benchInsertReverse(b *testing.B, n int, cold bool) {
+	b.ReportAllocs()
+
+	doc, txt := buildFragmentedTextDoc(n, int64(n)+3)
+	txt.baseType().disableMarkers = cold
+	cursor := txt.Len()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if cursor < 0 {
+			cursor = txt.Len()
+		}
+		pos := cursor
+		doc.Transact(func(txn *Transaction) {
+			txt.Insert(txn, pos, "x", nil)
+		})
+		cursor--
+	}
+}
+
+// benchArrayGetRandom measures YArray.Get at a uniformly-random index on
+// every iteration — the YArray counterpart of benchInsertRandom. Get must be
+// called outside Transact (it takes its own read lock).
+func benchArrayGetRandom(b *testing.B, n int, cold bool) {
+	b.ReportAllocs()
+
+	doc, arr := buildFragmentedArrayDoc(n, int64(n)+4)
+	_ = doc
+	arr.baseType().disableMarkers = cold
+	rng := rand.New(rand.NewSource(int64(n) + 5))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		idx := rng.Intn(arr.Len())
+		_ = arr.Get(idx)
+	}
+}
+
+// benchDeleteRangeTail measures deleting a small chunk from just before the
+// end of a large document on every iteration. The tail is the position
+// farthest from t.start, so a cold walk must cross the entire document to
+// reach it every single time.
+func benchDeleteRangeTail(b *testing.B, n int, cold bool) {
+	b.ReportAllocs()
+
+	const chunk = 3
+	doc, txt := buildFragmentedTextDoc(n, int64(n)+6)
+	txt.baseType().disableMarkers = cold
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l := txt.Len()
+		if l <= chunk {
+			break
+		}
+		pos := l - chunk
+		doc.Transact(func(txn *Transaction) {
+			txt.Delete(txn, pos, chunk)
+		})
+	}
+}
+
+// benchDeleteRangeRandom measures deleting a small chunk at a
+// uniformly-random position on every iteration.
+func benchDeleteRangeRandom(b *testing.B, n int, cold bool) {
+	b.ReportAllocs()
+
+	const chunk = 3
+	doc, txt := buildFragmentedTextDoc(n, int64(n)+7)
+	txt.baseType().disableMarkers = cold
+	rng := rand.New(rand.NewSource(int64(n) + 8))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l := txt.Len()
+		if l <= chunk {
+			break
+		}
+		pos := rng.Intn(l - chunk)
+		doc.Transact(func(txn *Transaction) {
+			txt.Delete(txn, pos, chunk)
+		})
+	}
+}
+
+// benchApplyDelta measures applying a multi-op (retain/delete/insert) delta
+// — the same shape a rich-text editor emits for a single user edit — to a
+// large document on every iteration. ApplyDelta advances a single running
+// cursor through its ops (search_marker_test.go's Task 4 header comment),
+// so this exercises the marker-accelerated cursor advance across a Retain
+// large enough to force a real positional jump on a big document.
+func benchApplyDelta(b *testing.B, n int, cold bool) {
+	b.ReportAllocs()
+
+	const insertStr = "the quick brown fox jumps"
+	const delChunk = 5
+	doc, txt := buildFragmentedTextDoc(n, int64(n)+9)
+	txt.baseType().disableMarkers = cold
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l := txt.Len()
+		retain := l / 2
+		del := delChunk
+		if retain+del > l {
+			del = 0
+		}
+		delta := []Delta{
+			{Op: DeltaOpRetain, Retain: retain},
+			{Op: DeltaOpDelete, Delete: del},
+			{Op: DeltaOpInsert, Insert: insertStr},
+		}
+		doc.Transact(func(txn *Transaction) {
+			txt.ApplyDelta(txn, delta)
+		})
+	}
+}
+
+func BenchmarkSearchMarker_InsertRandom_1k_Markers(b *testing.B) { benchInsertRandom(b, 1_000, false) }
+func BenchmarkSearchMarker_InsertRandom_1k_Cold(b *testing.B)    { benchInsertRandom(b, 1_000, true) }
+func BenchmarkSearchMarker_InsertRandom_100k_Markers(b *testing.B) {
+	benchInsertRandom(b, 100_000, false)
+}
+func BenchmarkSearchMarker_InsertRandom_100k_Cold(b *testing.B) { benchInsertRandom(b, 100_000, true) }
+
+func BenchmarkSearchMarker_InsertReverse_1k_Markers(b *testing.B) {
+	benchInsertReverse(b, 1_000, false)
+}
+func BenchmarkSearchMarker_InsertReverse_1k_Cold(b *testing.B) { benchInsertReverse(b, 1_000, true) }
+func BenchmarkSearchMarker_InsertReverse_100k_Markers(b *testing.B) {
+	benchInsertReverse(b, 100_000, false)
+}
+func BenchmarkSearchMarker_InsertReverse_100k_Cold(b *testing.B) {
+	benchInsertReverse(b, 100_000, true)
+}
+
+func BenchmarkSearchMarker_ArrayGetRandom_1k_Markers(b *testing.B) {
+	benchArrayGetRandom(b, 1_000, false)
+}
+func BenchmarkSearchMarker_ArrayGetRandom_1k_Cold(b *testing.B) {
+	benchArrayGetRandom(b, 1_000, true)
+}
+func BenchmarkSearchMarker_ArrayGetRandom_100k_Markers(b *testing.B) {
+	benchArrayGetRandom(b, 100_000, false)
+}
+func BenchmarkSearchMarker_ArrayGetRandom_100k_Cold(b *testing.B) {
+	benchArrayGetRandom(b, 100_000, true)
+}
+
+func BenchmarkSearchMarker_DeleteRangeTail_1k_Markers(b *testing.B) {
+	benchDeleteRangeTail(b, 1_000, false)
+}
+func BenchmarkSearchMarker_DeleteRangeTail_1k_Cold(b *testing.B) {
+	benchDeleteRangeTail(b, 1_000, true)
+}
+func BenchmarkSearchMarker_DeleteRangeTail_100k_Markers(b *testing.B) {
+	benchDeleteRangeTail(b, 100_000, false)
+}
+func BenchmarkSearchMarker_DeleteRangeTail_100k_Cold(b *testing.B) {
+	benchDeleteRangeTail(b, 100_000, true)
+}
+
+func BenchmarkSearchMarker_DeleteRangeRandom_1k_Markers(b *testing.B) {
+	benchDeleteRangeRandom(b, 1_000, false)
+}
+func BenchmarkSearchMarker_DeleteRangeRandom_1k_Cold(b *testing.B) {
+	benchDeleteRangeRandom(b, 1_000, true)
+}
+func BenchmarkSearchMarker_DeleteRangeRandom_100k_Markers(b *testing.B) {
+	benchDeleteRangeRandom(b, 100_000, false)
+}
+func BenchmarkSearchMarker_DeleteRangeRandom_100k_Cold(b *testing.B) {
+	benchDeleteRangeRandom(b, 100_000, true)
+}
+
+func BenchmarkSearchMarker_ApplyDelta_1k_Markers(b *testing.B) { benchApplyDelta(b, 1_000, false) }
+func BenchmarkSearchMarker_ApplyDelta_1k_Cold(b *testing.B)    { benchApplyDelta(b, 1_000, true) }
+func BenchmarkSearchMarker_ApplyDelta_100k_Markers(b *testing.B) {
+	benchApplyDelta(b, 100_000, false)
+}
+func BenchmarkSearchMarker_ApplyDelta_100k_Cold(b *testing.B) { benchApplyDelta(b, 100_000, true) }
+
+// ---------------------------------------------------------------------------
+// Light correctness re-assertion for the helpers above.
+//
+// search_marker_test.go already carries heavy, dedicated fuzz-style coverage
+// proving markers agree with the cold oracle across inserts, deletes, Get,
+// Slice, and ApplyDelta. The two tests below are deliberately light — they
+// exist only to guard the NEW builder/workload helpers in this file (which
+// are not exercised anywhere else) against a silent divergence, so a benchmark
+// showing "markers are faster" is never quietly measuring two paths that
+// disagree.
+// ---------------------------------------------------------------------------
+
+// TestBenchSearchMarker_TextHelpersMatchCold runs the exact insert-random,
+// insert-reverse, delete-range, and ApplyDelta sequences the benchmarks above
+// use — once with markers enabled, once with disableMarkers forced — and
+// asserts the resulting document text is byte-identical either way.
+func TestBenchSearchMarker_TextHelpersMatchCold(t *testing.T) {
+	const n = 2000
+	run := func(cold bool) string {
+		doc, txt := buildFragmentedTextDoc(n, 99)
+		txt.baseType().disableMarkers = cold
+
+		rng := rand.New(rand.NewSource(100))
+		for i := 0; i < 200; i++ {
+			pos := rng.Intn(txt.Len() + 1)
+			doc.Transact(func(txn *Transaction) { txt.Insert(txn, pos, "x", nil) })
+		}
+
+		cursor := txt.Len()
+		for i := 0; i < 200; i++ {
+			if cursor < 0 {
+				cursor = txt.Len()
+			}
+			pos := cursor
+			doc.Transact(func(txn *Transaction) { txt.Insert(txn, pos, "y", nil) })
+			cursor--
+		}
+
+		for i := 0; i < 50; i++ {
+			l := txt.Len()
+			if l <= 5 {
+				break
+			}
+			pos := rng.Intn(l - 5)
+			doc.Transact(func(txn *Transaction) { txt.Delete(txn, pos, 5) })
+		}
+
+		l := txt.Len()
+		retain := l / 2
+		doc.Transact(func(txn *Transaction) {
+			txt.ApplyDelta(txn, []Delta{
+				{Op: DeltaOpRetain, Retain: retain},
+				{Op: DeltaOpDelete, Delete: 5},
+				{Op: DeltaOpInsert, Insert: "zzz"},
+			})
+		})
+		return txt.ToString()
+	}
+
+	got, want := run(false), run(true)
+	if got != want {
+		t.Fatalf("marker/cold divergence: len(got)=%d len(want)=%d", len(got), len(want))
+	}
+}
+
+// TestBenchSearchMarker_ArrayGetHelperMatchesCold is the YArray.Get
+// counterpart of the text test above.
+func TestBenchSearchMarker_ArrayGetHelperMatchesCold(t *testing.T) {
+	const n = 2000
+	idxs := []int{0, 1, 999, 1000, 1999}
+	run := func(cold bool) []any {
+		doc, arr := buildFragmentedArrayDoc(n, 101)
+		_ = doc
+		arr.baseType().disableMarkers = cold
+		out := make([]any, 0, len(idxs))
+		for _, idx := range idxs {
+			out = append(out, arr.Get(idx))
+		}
+		return out
+	}
+
+	got, want := run(false), run(true)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("marker/cold divergence:\n got  %v\n want %v", got, want)
 	}
 }

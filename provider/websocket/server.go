@@ -268,6 +268,22 @@ type room struct {
 	awareness *awareness.Awareness
 	peers     map[*peer]struct{}
 
+	// ready is closed exactly once, by the goroutine that created the room, when
+	// the off-lock load (LoadDoc + decode + OnLoadDocument) has finished — whether
+	// it succeeded or failed. It is the barrier that lets room load run OFF the
+	// global rooms lock (s.rmu): the placeholder room is published into s.rooms
+	// under s.rmu (an O(1) map write), s.rmu is released, and the actual load runs
+	// unlocked. Every consumer that touches r.doc must first receive on ready.
+	// #182 (G3).
+	ready chan struct{}
+
+	// loadErr holds the load failure, if any. Written exactly once by the creating
+	// goroutine BEFORE close(ready), and read only AFTER a receive on ready — the
+	// channel close is the happens-before that publishes it, so no mutex is
+	// needed. When non-nil the placeholder has already been removed from s.rooms
+	// and r.doc must NOT be used.
+	loadErr error
+
 	// peerSem enforces MaxPeersPerRoom as a hard cap. Initialised at room
 	// creation time. nil when MaxPeersPerRoom == 0 (unlimited).
 	peerSem *semaphore.Weighted
@@ -292,6 +308,33 @@ type room struct {
 	// once when the room is evicted so the relay observers don't leak. Guarded
 	// by the room's mu via registerRelayObservers / unregisterRelayObservers.
 	relayUnsub []func()
+
+	// idleSince records when this room last went empty while
+	// Server.RoomIdleTimeout > 0 (#183). Zero value means "not idle" — either
+	// the room has peers, or RoomIdleTimeout is 0 (eager-evict mode, in which
+	// case an empty room is deleted from s.rooms rather than stamped). Set by
+	// handleDisconnect's teardown path when the room goes empty and the
+	// durable flush succeeds; cleared at peer REGISTRATION (ServeHTTP) — not at
+	// room lookup — so it tracks true occupancy, and by the immediate-mutation
+	// relay/admin callers via clearIdle. Guarded by mu. Rooms stamped idle here
+	// are reclaimed by the background sweeper (idle_sweep.go, started lazily via
+	// ensureIdleSweeper when RoomIdleTimeout > 0): it evicts any room idle longer
+	// than RoomIdleTimeout and, when MaxResidentRooms > 0, the least-recently-idle
+	// rooms in excess of that bound (LRU). This field only records the stamp; the
+	// sweeper acts on it.
+	idleSince time.Time
+}
+
+// clearIdle marks the room as non-idle. Used by the immediate-mutation callers
+// (relay Inject, admin Apply) that make the room active without registering a
+// peer, so there is no lookup→registration window to worry about. Takes rm.mu
+// itself; must NOT be called while already holding rm.mu. The WS join path does
+// NOT use this — it clears idleSince inside the same rm.mu section that adds the
+// peer (see ServeHTTP) so the clear is ordered against handleDisconnect's stamp.
+func (r *room) clearIdle() {
+	r.mu.Lock()
+	r.idleSince = time.Time{}
+	r.mu.Unlock()
 }
 
 // ConnectionConfig describes an accepted WebSocket connection. It is returned by
@@ -431,11 +474,14 @@ type Server struct {
 	// in a custom resolver, decrypt-at-rest, schema-migration check, or
 	// any other one-time per-room setup. (#60)
 	//
-	// The hook runs while the server room-map lock is held, so
-	// implementations must return promptly; defer heavy I/O to a
-	// goroutine if needed. The doc passed in is owned by the server —
-	// retaining a reference past the hook return is safe as long as the
-	// caller serialises access through Transact / public APIs.
+	// As of #182 the hook runs OFF the global room-map lock (s.rmu): the
+	// room is published as a not-yet-ready placeholder under s.rmu, then
+	// LoadDoc + decode + this hook run with s.rmu released. A slow hook
+	// therefore no longer stalls create / lookup / evict for other rooms —
+	// it only delays callers waiting on THIS room's ready barrier. The doc
+	// passed in is owned by the server — retaining a reference past the hook
+	// return is safe as long as the caller serialises access through Transact
+	// / public APIs.
 	OnLoadDocument func(ctx context.Context, room string, doc *crdt.Doc) error
 
 	// OnUnloadDocument, if non-nil, is called once per room immediately
@@ -525,6 +571,44 @@ type Server struct {
 	// synchronisation and must not be mutated while the server is handling
 	// connections.
 	SlowPeerPolicy SlowPeerPolicy
+
+	// RoomIdleTimeout, when > 0, switches room eviction from eager to lazy
+	// (#183): when the last peer leaves a room, the v1.37.0 durable
+	// flush-before-evict still runs (so pending writes are never lost), but
+	// the room is NOT deleted from the server map — it is stamped idle
+	// (its idleSince timestamp is set) and stays resident, worker and
+	// in-memory doc alive. A rejoin before eviction reuses the warm doc with
+	// no LoadDoc / reload. Actually evicting rooms whose idle time exceeds
+	// this timeout is done by a separate background sweeper; setting this
+	// field alone only stops eager eviction and marks rooms idle — without a
+	// sweeper an idle room simply stays resident indefinitely, which is safe
+	// (just extra memory) but never reclaims it on its own.
+	//
+	// Zero (the default) preserves the original eager-evict behaviour: the
+	// room is deleted from the server map and OnUnloadDocument fires the
+	// instant the last peer disconnects. Like the other config fields, set
+	// this before serving; it is read without synchronisation and must not be
+	// mutated while the server is handling connections.
+	RoomIdleTimeout time.Duration
+
+	// MaxResidentRooms, when > 0, bounds how many IDLE-resident rooms the
+	// server keeps warm at once (#183, G4). When RoomIdleTimeout > 0 an empty
+	// room is not evicted immediately but stamped idle and left resident so a
+	// rejoin reuses the warm doc; without a bound, a workload that touches many
+	// distinct rooms would accumulate them until each individually ages past
+	// RoomIdleTimeout. This cap makes the idle set an LRU: whenever the count of
+	// idle-resident rooms exceeds MaxResidentRooms, the background sweeper evicts
+	// the least-recently-idle rooms first (smallest idleSince) — durably flushing
+	// each before eviction — until the count is back within the bound, even for
+	// rooms that have not yet reached RoomIdleTimeout. Active rooms (with peers)
+	// are never counted or evicted.
+	//
+	// Only meaningful together with RoomIdleTimeout > 0 (only then are rooms
+	// stamped idle and a sweeper started); it is ignored in eager-evict mode.
+	// Zero (the default) means unlimited idle residency. Like the other config
+	// fields, set it before serving; it is read without synchronisation and must
+	// not be mutated while the server is handling connections.
+	MaxResidentRooms int
 
 	// PersistCoalesceWindow controls debounced coalescing of persistence
 	// writes. Buffered updates are merged into a single StoreUpdate rather than
@@ -629,6 +713,19 @@ type Server struct {
 	// first ServeHTTP. nil when MaxConnections == 0 (unlimited).
 	connSem     *semaphore.Weighted
 	connSemOnce sync.Once
+
+	// Idle-room sweeper (#183, G4). A single background goroutine per Server,
+	// started lazily by ensureIdleSweeper the first time a room is created while
+	// RoomIdleTimeout > 0, that periodically evicts rooms idle longer than
+	// RoomIdleTimeout and enforces the MaxResidentRooms LRU bound. sweeperDone is
+	// closed when the loop exits (on Shutdown), letting tests observe a clean
+	// stop. sweeperStarted records whether the loop was ever launched.
+	// idleSweepInterval overrides the poll cadence in tests; production derives
+	// it from RoomIdleTimeout.
+	sweeperOnce       sync.Once
+	sweeperStarted    atomic.Bool
+	sweeperDone       chan struct{}
+	idleSweepInterval time.Duration
 }
 
 // connSemaphore lazily initialises and returns the server-wide connection
@@ -765,8 +862,9 @@ func (s *Server) newPeerLimiter() *rate.Limiter {
 // NewServer returns a new Server with an empty room store and no persistence.
 func NewServer() *Server {
 	s := &Server{
-		rooms:      make(map[string]*room),
-		shutdownCh: make(chan struct{}),
+		rooms:       make(map[string]*room),
+		shutdownCh:  make(chan struct{}),
+		sweeperDone: make(chan struct{}),
 	}
 	s.upgrader = gws.Upgrader{CheckOrigin: s.checkOrigin}
 	return s
@@ -777,6 +875,23 @@ func NewServer() *Server {
 // goroutine leaks and ensure in-flight operations complete cleanly.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
+
+	// Join the idle-room sweeper (#183, G4) before doing anything else. Closing
+	// shutdownCh above only asks idleSweepLoop to exit on its next select; a
+	// sweep pass already in flight (including an evictIdleRoom flush) keeps
+	// running and can still fire OnUnloadDocument after Shutdown would
+	// otherwise have returned, which a caller reasonably assumes means "no more
+	// hooks will fire". Waiting here also keeps the sweeper from concurrently
+	// mutating s.rooms while Shutdown enumerates it below. Only wait if the
+	// sweeper was ever started (RoomIdleTimeout > 0 at some point); bounded by
+	// ctx, like the persistDone wait further down, so a stuck sweep can't hang
+	// Shutdown forever.
+	if s.sweeperStarted.Load() {
+		select {
+		case <-s.sweeperDone:
+		case <-ctx.Done():
+		}
+	}
 
 	// Stop THIS server's relay delivery by cancelling the relay context: this
 	// winds down the relay worker and the relay's per-node delivery goroutine
@@ -799,8 +914,26 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			conns = append(conns, p.conn)
 		}
 		r.mu.Unlock()
-		if r.persistDone != nil {
-			persistDones = append(persistDones, r.persistDone)
+		// Stop this room's awareness auto-expiry sweep (if AwarenessExpiry>0
+		// started one). Pre-#183, every empty room was evicted on last-peer-leave,
+		// which already called awareness.Destroy(); with idle-resident rooms
+		// (RoomIdleTimeout>0) a room can now sit in s.rooms with no peers and
+		// never get evicted before Shutdown, leaking its sweep goroutine forever.
+		// Safe to call unconditionally here: awareness is allocated synchronously
+		// in createRoomPlaceholder (even for a still-loading room), and Destroy is
+		// idempotent/concurrency-safe, so this cannot double-stop or race the
+		// eviction/CloseRoom/handleDisconnect paths that may also call it.
+		r.awareness.Destroy()
+		// Only read the persistence fields once the room's load has completed:
+		// loadRoom sets r.persistDone off-lock, then closes r.ready, so observing
+		// a closed ready is the happens-before that publishes the write (#182). A
+		// still-loading room has no peers and no worker yet — nothing to drain.
+		select {
+		case <-r.ready:
+			if r.persistDone != nil {
+				persistDones = append(persistDones, r.persistDone)
+			}
+		default:
 		}
 	}
 	s.rmu.RUnlock()
@@ -841,40 +974,107 @@ func NewServerWithPersistence(p PersistenceAdapter) *Server {
 
 // GetDoc returns the document for the given room, or nil if no peer has
 // connected to that room yet.
+//
+// A room that is still loading (its off-lock LoadDoc + decode + OnLoadDocument
+// has not finished; #182) is reported as not-yet-present — GetDoc returns nil
+// rather than block or expose a doc that is being mutated by the loader. This
+// matches the documented "no room yet" contract: the result is an
+// immediately-stale snapshot. Once the load completes, GetDoc returns the doc;
+// if the load failed, the room was removed and GetDoc returns nil.
 func (s *Server) GetDoc(name string) *crdt.Doc {
 	s.rmu.RLock()
-	defer s.rmu.RUnlock()
-	if r, ok := s.rooms[name]; ok {
-		return r.doc
+	r, ok := s.rooms[name]
+	s.rmu.RUnlock()
+	if !ok {
+		return nil
 	}
-	return nil
+	select {
+	case <-r.ready:
+		if r.loadErr != nil {
+			return nil
+		}
+		return r.doc
+	default:
+		return nil // still loading; do not expose a doc under construction
+	}
 }
 
-// getOrCreateRoom returns the room for name, creating it on first use. When a
-// new room is created and a relay is attached, the relay's RoomActivated
-// callback fires AFTER s.rmu is released (#133): RoomActivated may synchronously
-// replay stream history via Sink.Inject, which re-enters getOrCreateRoom — under
-// s.rmu the non-reentrant mutex would self-deadlock and wedge the whole instance.
-// This mirrors teardownRelayRoom, which already fires RoomDeactivated off-lock.
+// getOrCreateRoom returns the room for name, creating it on first use.
+//
+// Room load — LoadDoc (I/O), full-state decode, and the OnLoadDocument hook —
+// runs OFF the global rooms lock (#182, G3). s.rmu is held only for the O(1)
+// map operations of createRoomPlaceholder; the load itself happens in loadRoom
+// with s.rmu released, so one slow or large load never stalls create / lookup /
+// evict for every other room process-wide.
+//
+// The creating goroutine (created==true) performs the load and closes r.ready;
+// every other caller — including a caller for the same still-loading room —
+// waits on r.ready rather than on s.rmu. On load failure the placeholder has
+// already been removed from s.rooms and r.loadErr is returned to all waiters.
+//
+// When a new room is loaded and a relay is attached, the relay's RoomActivated
+// callback fires AFTER r.ready is closed (#133): RoomActivated may synchronously
+// replay stream history via Sink.Inject, which re-enters getOrCreateRoom. By
+// that point the placeholder is published AND ready is closed, so the re-entrant
+// call finds the room and returns off an already-closed barrier instead of
+// self-deadlocking on the non-reentrant s.rmu.
 func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, error) {
-	r, created, err := s.getOrCreateRoomLocked(ctx, name)
+	r, created, err := s.createRoomPlaceholder(name)
 	if err != nil {
 		return nil, err
 	}
-	if created && s.relay != nil {
-		// Off-lock: the room is already published into s.rooms, so a re-entrant
-		// Sink.Inject finds it and returns instead of blocking on s.rmu.
-		s.relay.RoomActivated(name)
+	if created {
+		// This goroutine owns the load. It runs with s.rmu released; other
+		// callers (same or different room) never block on it via s.rmu.
+		s.loadRoom(ctx, r, name)
+		if r.loadErr == nil && s.relay != nil {
+			// Off-lock and post-ready: a re-entrant Sink.Inject from RoomActivated
+			// finds the published room and waits on the already-closed ready.
+			s.relay.RoomActivated(name)
+		}
+	} else {
+		// Someone else is (or was) loading this room; wait for the barrier.
+		<-r.ready
 	}
+	if r.loadErr != nil {
+		return nil, r.loadErr
+	}
+
+	// #183 (G4): start the idle-room sweeper lazily on first room creation when
+	// RoomIdleTimeout > 0. getOrCreateRoom is the single funnel for every room
+	// creation (peer upgrade, Apply, BroadcastUpdate, relay Inject), so this
+	// covers all of them; the sync.Once makes it a cheap no-op afterwards and a
+	// no-op entirely in eager-evict mode (RoomIdleTimeout == 0).
+	s.ensureIdleSweeper()
+
+	// NOTE (#183): idleSince is deliberately NOT cleared here. Looking a room up
+	// is not the same causal event as a peer becoming present: for the WS join
+	// path (ServeHTTP) there is a wide window — a semaphore acquire plus the full
+	// Upgrade handshake — between this return and the peer actually registering
+	// in rm.peers. Clearing at lookup time desynced idleSince from true room
+	// occupancy two ways:
+	//   1. peer A (sole occupant) leaves inside that window: handleDisconnect saw
+	//      len(peers)==0 (the joining peer B not yet registered), stamped idle,
+	//      and B then registered onto an occupied room whose stale stamp nothing
+	//      cleared — a room with a LIVE peer eligible for idle eviction; and
+	//   2. the request failing after this lookup (semaphore denial / Upgrade
+	//      error) left a genuinely-empty, previously-idle room with its stamp
+	//      wiped and no disconnect to re-stamp it — never reaped.
+	// So the JOIN path clears idleSince in the SAME rm.mu section that mutates
+	// rm.peers (see ServeHTTP), tying "not idle" to "a peer is present." The
+	// immediate-mutation callers (relay Inject, admin Apply) that mutate the doc
+	// with no registration delay clear it themselves right after this returns.
 	return r, nil
 }
 
-// getOrCreateRoomLocked is the locked portion of getOrCreateRoom. It returns the
-// room, whether it was newly created (so the caller fires RoomActivated exactly
-// once off-lock), and any creation error. Relay observers are registered here,
-// before the room is published into s.rooms, so no local change is missed — only
-// the RoomActivated notification is deferred until after s.rmu is released.
-func (s *Server) getOrCreateRoomLocked(ctx context.Context, name string) (*room, bool, error) {
+// createRoomPlaceholder returns the room for name. If it already exists the
+// existing room is returned with created=false; otherwise a PLACEHOLDER room —
+// doc/awareness/peer map allocated but NOT yet bootstrapped from persistence — is
+// published into s.rooms with an open ready barrier and returned with
+// created=true so the caller performs the off-lock load. s.rmu is held only for
+// the duration of these O(1) allocations and the single map write; no I/O and no
+// O(doc) work happens under the lock (#182).
+func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
 	if r, ok := s.rooms[name]; ok {
@@ -895,48 +1095,73 @@ func (s *Server) getOrCreateRoomLocked(ctx context.Context, name string) (*room,
 		aw.SetMaxClients(s.MaxAwarenessClientsPerRoom)
 	}
 	if s.AwarenessExpiry > 0 {
-		// Background sweep; stopped via aw.Destroy() when the room is evicted.
+		// Background sweep; stopped via aw.Destroy() when the room is evicted, or
+		// when the off-lock load fails (loadRoom removes the placeholder).
 		aw.StartAutoExpiry(s.AwarenessExpiry)
 	}
 	r := &room{
 		doc:       crdt.New(docOpts...),
 		awareness: aw,
 		peers:     make(map[*peer]struct{}),
+		ready:     make(chan struct{}),
 	}
 	if s.MaxPeersPerRoom > 0 {
 		r.peerSem = semaphore.NewWeighted(int64(s.MaxPeersPerRoom))
 	}
-	if s.persistence != nil {
-		data, err := s.persistence.LoadDoc(name)
-		if err != nil {
-			return nil, false, fmt.Errorf("loading room %q: %w", name, err)
-		}
-		if len(data) > 0 {
-			if err := crdt.ApplyUpdateV1(r.doc, data, nil); err != nil {
-				return nil, false, fmt.Errorf("bootstrapping room %q: %w", name, err)
+	s.rooms[name] = r
+	return r, true, nil
+}
+
+// loadRoom performs the off-lock room load for a freshly created placeholder:
+// LoadDoc + full-state decode + the OnLoadDocument hook. s.rmu is NOT held here.
+//
+// On success it wires the persistence worker and relay observers (AFTER the
+// bootstrap decode, so the loaded state is not re-persisted or re-relayed —
+// preserving the pre-#182 registration timing) and closes r.ready. Because no
+// other goroutine may touch r.doc until ready closes (all consumers gate on it),
+// registering observers just before close(ready) still misses no update.
+//
+// On failure it records r.loadErr, removes the placeholder from s.rooms
+// (re-acquiring s.rmu for the O(1) delete) and stops the awareness sweep, then
+// closes r.ready to wake every waiter with the error. r.ready is always closed
+// exactly once, on both paths.
+//
+// A panic raised by the adapter's LoadDoc or by the state decode (a buggy or
+// malicious adapter, or malformed persisted bytes) is recovered by
+// loadRoomDoc and funneled into loadErr rather than propagating: without this,
+// the placeholder is already published in s.rooms but r.ready is never
+// closed, so every future getOrCreateRoom/BroadcastUpdate/CloseRoom for this
+// room parks on <-r.ready forever — a permanent goroutine/connection/MaxRooms
+// leak that administrative CloseRoom cannot even clear (#182 follow-up).
+func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
+	loadErr := s.loadRoomDoc(r, name)
+	// #60 — fire OnLoadDocument AFTER persistence bootstrap but BEFORE the
+	// persistence worker starts, so a hook returning an error fails room creation
+	// cleanly. Runs off-lock now (#182), so a slow hook no longer stalls other
+	// rooms. A panic in the hook is recovered (logged at Error with the stack)
+	// and treated as a hook-failure error.
+	if loadErr == nil {
+		if hook := s.OnLoadDocument; hook != nil {
+			var hookErr error
+			s.safeHook("OnLoadDocument", func() {
+				hookErr = hook(ctx, name, r.doc)
+			})
+			if hookErr != nil {
+				loadErr = fmt.Errorf("OnLoadDocument for room %q: %w", name, hookErr)
 			}
 		}
 	}
-	// #60 — fire OnLoadDocument AFTER persistence bootstrap but BEFORE the
-	// persistence worker starts and the room is registered, so a hook
-	// returning an error fails room creation cleanly with nothing left to
-	// clean up. Hook runs under s.rmu.Lock; implementations must be fast.
-	// A panic in the hook is recovered (logged at Error with the stack)
-	// and treated as a hook-failure error so room creation is not silently
-	// committed in an inconsistent state.
-	if hook := s.OnLoadDocument; hook != nil {
-		var hookErr error
-		s.safeHook("OnLoadDocument", func() {
-			hookErr = hook(ctx, name, r.doc)
-		})
-		if hookErr != nil {
-			return nil, false, fmt.Errorf("OnLoadDocument for room %q: %w", name, hookErr)
-		}
+
+	if loadErr != nil {
+		s.failRoomLoad(r, name, loadErr)
+		return
 	}
+
 	if s.persistence != nil {
 		// Serialise persistence writes through a buffered channel so that a
 		// slow storage backend does not block the Transact caller (N-H7) and
-		// writes arrive in order.
+		// writes arrive in order. Registered AFTER the bootstrap decode so the
+		// loaded state is not re-persisted.
 		r.persistCh = make(chan []byte, 256)
 		r.persistStop = make(chan struct{})
 		r.persistDone = make(chan struct{})
@@ -949,16 +1174,63 @@ func (s *Server) getOrCreateRoomLocked(ctx context.Context, name string) (*room,
 			}
 		})
 	}
-	// Wire relay observers (doc.OnUpdate + awareness.OnChange) so local changes
-	// are published to other nodes. Registered under s.rmu.Lock before the room
-	// is published into s.rooms, so no change is missed. No-op when no relay is
-	// attached. RoomActivated is NOT fired here — the caller fires it off-lock
-	// once getOrCreateRoomLocked returns created=true (#133).
+	// Wire relay observers (doc.OnUpdate + awareness.OnUpdate) so local changes
+	// are published to other nodes. Registered AFTER the bootstrap decode (so the
+	// loaded state is not re-relayed) but BEFORE close(ready) — since no consumer
+	// may mutate r.doc until ready closes, no local change is missed. No-op when
+	// no relay is attached. RoomActivated is fired by getOrCreateRoom off-lock
+	// after ready closes (#133).
 	if s.relay != nil {
 		s.registerRelayObservers(r, name)
 	}
-	s.rooms[name] = r
-	return r, true, nil
+	close(r.ready)
+}
+
+// loadRoomDoc performs the persistence LoadDoc call and, if data was returned,
+// the full-state V1 decode into r.doc. A panic raised by either — a
+// buggy/malicious PersistenceAdapter, or a decode panic on malformed/corrupt
+// persisted bytes — is recovered and converted into the returned error rather
+// than propagating up through loadRoom. This must NOT re-panic: the caller
+// (the goroutine that published the placeholder into s.rooms) has to reach
+// failRoomLoad/close(r.ready) so waiters wake with an error instead of
+// parking on r.ready forever (#182 follow-up).
+func (s *Server) loadRoomDoc(r *room, name string) (loadErr error) {
+	if s.persistence == nil {
+		return nil
+	}
+	defer func() {
+		if rv := recover(); rv != nil {
+			loadErr = fmt.Errorf("LoadDoc panic for room %q: %v", name, rv)
+		}
+	}()
+	data, err := s.persistence.LoadDoc(name)
+	switch {
+	case err != nil:
+		return fmt.Errorf("loading room %q: %w", name, err)
+	case len(data) > 0:
+		if err := crdt.ApplyUpdateV1(r.doc, data, nil); err != nil {
+			return fmt.Errorf("bootstrapping room %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// failRoomLoad is the single failure path shared by every loadRoom failure
+// mode (LoadDoc error, decode error, OnLoadDocument hook error, or a
+// recovered LoadDoc/decode panic via loadRoomDoc): remove the placeholder
+// from s.rooms under s.rmu (O(1) delete, guarded by pointer identity in case
+// it was already replaced), stop the awareness auto-expiry sweep, record
+// loadErr, then close r.ready so every waiter — including the caller that
+// created the placeholder — wakes with the error instead of blocking.
+func (s *Server) failRoomLoad(r *room, name string, loadErr error) {
+	s.rmu.Lock()
+	if cur, ok := s.rooms[name]; ok && cur == r {
+		delete(s.rooms, name)
+	}
+	s.rmu.Unlock()
+	r.awareness.Destroy()
+	r.loadErr = loadErr
+	close(r.ready)
 }
 
 // ServeHTTP upgrades the request to WebSocket and runs the peer sync loop.
@@ -1070,6 +1342,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rm.mu.Lock()
 	rm.peers[p] = struct{}{}
 	firstPeer := len(rm.peers) == 1 // #60: 0→1 transition
+	// #183: clear idleSince in the SAME rm.mu section that adds the peer, so
+	// "not idle" is tied to true occupancy. handleDisconnect stamps idleSince
+	// under this same rm.mu (after re-checking len(rm.peers)==0), so a
+	// concurrent last-peer-leave / rejoin can only interleave as one of:
+	//   - stamp then register: this clear wins, occupied room ends non-idle;
+	//   - register then stamp: handleDisconnect sees len(peers)>=1 and does not
+	//     stamp at all.
+	// Either way an occupied room never keeps a stale idle stamp.
+	rm.idleSince = time.Time{}
 	rm.mu.Unlock()
 	s.rmu.RUnlock()
 

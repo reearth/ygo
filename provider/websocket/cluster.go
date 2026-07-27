@@ -228,6 +228,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		if err != nil {
 			return err
 		}
+		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, s.relaySentinel); err != nil {
 			return err
 		}
@@ -243,6 +244,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		if err != nil {
 			return err
 		}
+		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		if err := rm.awareness.ApplyUpdate(in.Data, s.relaySentinel); err != nil {
 			return err
 		}

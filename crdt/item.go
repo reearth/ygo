@@ -199,26 +199,25 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		item.Right.Left = item
 	}
 
-	// Update logical length and, if necessary, invalidate the position cache.
-	// When the item is appended at the end (item.Right == nil), all existing
-	// cache entries remain valid — no previously-cached position shifts.
-	// For middle insertions we must discard cache entries at and after the
-	// insertion point. When the caller set insertHint (local inserts where the
-	// logical index is known) we do a partial clear, preserving entries before
-	// the hint position so the next nearby lookup can resume from a cache hit
-	// rather than rescanning from t.start. For remote updates (no hint) we fall
-	// back to a full clear.
+	// Update logical length and maintain the search markers (G1). When the item
+	// is appended at the end (item.Right == nil), no previously-cached position
+	// shifts, so markers stay valid untouched. For a middle insertion with a
+	// known local index (insertHint), updateMarkerChanges shifts every marker at
+	// or after the insertion point right by the inserted length while preserving
+	// markers before it — so a subsequent nearby lookup still gets a cache hit.
+	// For hintless middle insertions (remote applies, where the rendered index
+	// is not known here) we conservatively clear all markers.
 	if !item.Deleted && item.Content.IsCountable() {
 		item.Parent.length += item.Content.Len()
 		if item.Right != nil {
 			if hint := item.Parent.insertHint; hint > 0 {
 				item.Parent.insertHint = 0
-				item.Parent.invalidatePosCacheFrom(hint)
+				item.Parent.updateMarkerChanges(hint, item.Content.Len())
 			} else {
-				item.Parent.invalidatePosCache()
+				item.Parent.clearMarkers()
 			}
 		} else {
-			item.Parent.insertHint = 0 // reset even on end-append (no cache action needed)
+			item.Parent.insertHint = 0 // end-append: markers before the end stay valid.
 		}
 	}
 
@@ -264,6 +263,20 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 				target.MovedBy = item
 			}
 		}
+	}
+
+	// Search-marker invalidation for moves (G5). renderedStep is fully
+	// move-aware, so markers CAN accelerate move-containing arrays — but a
+	// ContentMove changes rendered positions in a way the insertHint shift
+	// above cannot express: it is non-countable (so the length/marker block was
+	// skipped for it entirely) yet its arbitration re-renders the target at the
+	// destination and blanks the target's original slot. Any cached marker may
+	// now report a stale rendered start, so clear them all. Clearing is always
+	// safe (a subsequent lookup repopulates via a cold walk) and moves are rare
+	// enough that a full clear per move is acceptable. Covers both a fresh move
+	// and a re-arbitration that changes which move wins a target.
+	if _, ok := item.Content.(*ContentMove); ok && item.Parent != nil {
+		item.Parent.clearMarkers()
 	}
 
 	// Track ContentString items for end-of-transaction run squashing.
@@ -350,11 +363,16 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 // delete marks this item as a tombstone. The item stays in the linked list so
 // that position references from other items (via Origin) remain valid.
 //
-// Cache invalidation strategy: for remote transactions (txn.Local == false)
-// we clear the entire posCache here because the caller doesn't know the
-// logical position. For local transactions the caller (e.g., deleteRange)
-// is responsible for calling invalidatePosCacheFrom before scanning, so we
-// skip the redundant full clear to avoid O(n²) behaviour.
+// Search-marker invalidation strategy: for remote transactions
+// (txn.Local == false) we clear all markers here because the caller doesn't
+// know the rendered position of the deleted item. For local transactions the
+// caller (deleteRange) performs the precise updateMarkerChanges(index, -len)
+// once, after tombstoning the range, so we skip any per-item work here (also
+// avoiding O(n²) clears across a multi-item delete). NOTE: transactInternal
+// hardcodes txn.Local=true even for remote applies, so this branch is dead on
+// the ApplyUpdate path — the remote delete-apply invalidation lives in
+// delete_set.go (applyToPartial). This branch only fires for the rare direct
+// item.delete under an explicitly non-local transaction.
 //
 // Cascade: when this item wraps a ContentType (nested YMap/YArray/YText/…),
 // every child item is recursively deleted so the delete-set encoded on the
@@ -370,7 +388,22 @@ func (item *Item) delete(txn *Transaction) {
 	if item.Parent != nil && item.Content.IsCountable() {
 		item.Parent.length -= item.Content.Len()
 		if !txn.Local {
-			item.Parent.invalidatePosCache()
+			item.Parent.clearMarkers()
+		}
+	}
+	// Move-related deletes change rendered positions in ways the plain
+	// updateMarkerChanges index-shift can't model (G5): tombstoning a
+	// ContentMove stops it rendering its target at the destination (the target
+	// may re-render at its origin), and tombstoning a moved-away item removes a
+	// rendered position at the destination rather than at the item's physical
+	// slot. Either way, clear all markers — always safe, and independent of
+	// txn.Local since local move-deletes also take this path. ContentMove is
+	// non-countable, so the block above never runs for it.
+	if item.Parent != nil {
+		if _, ok := item.Content.(*ContentMove); ok {
+			item.Parent.clearMarkers()
+		} else if item.MovedBy != nil {
+			item.Parent.clearMarkers()
 		}
 	}
 	txn.deleteSet.add(item.ID, item.Content.Len())
@@ -421,11 +454,17 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 	}
 	item.Right = right
 	txn.doc.store.insertItem(right)
-	// The split shortens item's content, invalidating any cached boundary that
-	// pointed to item's old end position. Clear the entire position cache so
-	// subsequent leftNeighbourAt calls re-scan rather than using stale entries.
+	// A split does not move any rendered position — the two halves occupy exactly
+	// the range the original item did, and a marker pointing at the original
+	// (now-left) half keeps a correct rendered start (renderedStep recomputes its
+	// shortened length on the fly). So finer maintenance is unnecessary here; we
+	// nonetheless clear all markers, conservatively, because a split is a
+	// structural rewrite and clearing is always safe (correctness over reuse; a
+	// future task may relax this to a no-op). Clearing here also means the
+	// deleteRange updateMarkerChanges below operates on an empty set whenever a
+	// boundary split occurred — still correct.
 	if item.Parent != nil {
-		item.Parent.invalidatePosCache()
+		item.Parent.clearMarkers()
 	}
 	// #78 H2 — track the right half so tryMergeWithLefts can reverse the split
 	// at transaction commit if no item ends up inserted between the two halves.

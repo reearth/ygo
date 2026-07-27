@@ -485,7 +485,23 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 // Added in v1.13.0 (#71 vectors A2 + A3). The caller is responsible for
 // not invoking this with stale anchor pointers; YText.Insert calls it
 // immediately after leftNeighbourAt.
+//
+// Marker-era fast path (#181): a ContentFormat item can only ever exist if
+// hasFormatting is true (item.go sets it the first time one integrates, and
+// it is sticky), so when hasFormatting is false the walk below is guaranteed
+// to find nothing and always returns an empty map — we can skip it entirely
+// rather than walk from txt.start to anchor. This is what keeps a first-ever
+// attrs-carrying Insert on an otherwise-plain document O(1) instead of O(n);
+// once any formatting exists, the exact walk resumes so scattered markers
+// anywhere before anchor are still picked up correctly (search markers only
+// track rendered position, not accumulated attribute state, so they cannot
+// safely shortcut this in general). Gated on t.disableMarkers too
+// so the force-cold test seam still exercises the full walk.
 func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
+	t := &txt.abstractType
+	if !t.disableMarkers && !t.hasFormatting {
+		return make(Attributes)
+	}
 	attrs := make(Attributes)
 	if anchor == nil {
 		return attrs
@@ -776,14 +792,6 @@ func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) 
 	}
 	t := &txt.abstractType
 
-	// Deterministic emission order — Go map iteration is randomized, but
-	// linked-list order is observable, so sort keys.
-	keys := make([]string, 0, len(attrs))
-	for k := range attrs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
 	// Faithful port of Yjs JS YText.formatText (yjs@13.6.30), built on an
 	// ItemTextListPosition-equivalent cursor (itemTextPos). The previous ygo
 	// implementation deleted ALL same-key markers in the range, which
@@ -793,7 +801,33 @@ func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) 
 	// after the range (the "negated" map), deletes only in-range overlapping
 	// markers, and restores the post-range state — matching Yjs across fresh and
 	// applyUpdate-loaded docs (the un-split-run case, yjs#606).
+	//
+	// findTextPos resolves the cursor (marker-accelerated for the common
+	// never-formatted-before-this-call case, #181); the rest of the algorithm
+	// lives in applyFormatAtPos, shared with ApplyDelta's single-threaded
+	// cursor so a Retain-with-attributes delta op doesn't re-resolve position
+	// from scratch (#181 single-cursor requirement).
 	pos := t.findTextPos(txn, index)
+	t.applyFormatAtPos(txn, pos, length, attrs)
+}
+
+// applyFormatAtPos is Format's core algorithm, parameterised over an
+// already-resolved cursor so callers that already hold a live itemTextPos
+// (ApplyDelta's single threaded cursor) don't pay for a fresh findTextPos
+// walk per op. Format itself is just findTextPos + this call. Mirrors Yjs JS
+// YText.formatText's body (see Format's doc comment for the full rationale).
+func (t *abstractType) applyFormatAtPos(txn *Transaction, pos *itemTextPos, length int, attrs Attributes) {
+	if len(attrs) == 0 || length <= 0 {
+		return
+	}
+	// Deterministic emission order — Go map iteration is randomized, but
+	// linked-list order is observable, so sort keys.
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	minimizeAttributeChanges(pos, attrs)
 	negated := t.insertAttributes(txn, pos, keys, attrs)
 
@@ -875,6 +909,35 @@ func (p *itemTextPos) forward() {
 	p.right = p.right.Right
 }
 
+// advance moves the cursor forward by exactly n countable units from wherever
+// it currently sits, splitting the boundary item if n lands inside it and
+// updating cur as any live ContentFormat markers are passed. This is
+// forward's per-item step body generalised to "consume n units" instead of
+// "consume one item" — the shared core of findTextPos (which starts a fresh
+// cursor at t.start and advances it to index) and ApplyDelta's single
+// threaded cursor (which advances an already-live cursor by each delta op's
+// Retain amount without re-resolving position from t.start every time, #181).
+func (p *itemTextPos) advance(txn *Transaction, n int) {
+	count := n
+	for p.right != nil && count > 0 {
+		if cf, ok := p.right.Content.(*ContentFormat); ok {
+			if !p.right.Deleted {
+				updateAttr(p.cur, cf)
+			}
+		} else if !p.right.Deleted {
+			itemLen := p.right.Content.Len()
+			if count < itemLen {
+				splitItem(txn, p.right, count) // clean boundary mid-item
+				itemLen = p.right.Content.Len()
+			}
+			p.index += itemLen
+			count -= itemLen
+		}
+		p.left = p.right
+		p.right = p.right.Right
+	}
+}
+
 // updateAttr applies a ContentFormat marker to an attribute map: a nil value
 // clears the key (no formatting), a non-nil value sets it.
 func updateAttr(attrs Attributes, cf *ContentFormat) {
@@ -916,25 +979,40 @@ func (t *abstractType) skipDeletedForTextAnchor(left *Item) *Item {
 // boundary item when index falls inside it, with cur reflecting the format
 // state at index. Mirrors Yjs findPosition/findNextPosition.
 func (t *abstractType) findTextPos(txn *Transaction, index int) *itemTextPos {
-	pos := &itemTextPos{right: t.start, cur: make(Attributes)}
-	count := index
-	for pos.right != nil && count > 0 {
-		if cf, ok := pos.right.Content.(*ContentFormat); ok {
-			if !pos.right.Deleted {
-				updateAttr(pos.cur, cf)
-			}
-		} else if !pos.right.Deleted {
-			n := pos.right.Content.Len()
-			if count < n {
-				splitItem(txn, pos.right, count) // clean boundary at index
-				n = pos.right.Content.Len()
-			}
-			pos.index += n
-			count -= n
+	// Marker fast path (#181): a ContentFormat item can only exist if
+	// hasFormatting is true (sticky, set by item.go on first integration), so
+	// with !hasFormatting the walk below would never touch the `if cf, ok :=
+	// ...ContentFormat` branch and cur would stay empty regardless of where
+	// we start it from — the walk purely becomes "find/split the boundary
+	// item at index", exactly what leftNeighbourAt (already marker-routed)
+	// computes. index<=0 is special-cased to match the original walk's
+	// "cursor before everything" answer exactly: leftNeighbourAt(index<=0)
+	// answers the different question "append at the physical end" once index
+	// is out of [1,length], which is right for insert-before-everything at
+	// index==0 but wrong for a negative index (the original walk here never
+	// runs its loop for count<=0 and returns right=t.start unconditionally).
+	if !t.disableMarkers && !t.hasFormatting {
+		if index <= 0 {
+			return &itemTextPos{right: t.start, cur: make(Attributes)}
 		}
-		pos.left = pos.right
-		pos.right = pos.right.Right
+		left, offset := t.leftNeighbourAt(index)
+		if offset > 0 {
+			splitItem(txn, left, offset)
+		}
+		pidx := index
+		if pidx > t.length {
+			pidx = t.length
+		}
+		pos := &itemTextPos{left: left, index: pidx, cur: make(Attributes)}
+		if left != nil {
+			pos.right = left.Right
+		} else {
+			pos.right = t.start
+		}
+		return pos
 	}
+	pos := &itemTextPos{right: t.start, cur: make(Attributes)}
+	pos.advance(txn, index)
 	return pos
 }
 
@@ -1207,22 +1285,218 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 		txt.buffer(func(txn *Transaction) { txt.ApplyDelta(txn, delta) })
 		return
 	}
-	pos := 0
+	t := &txt.abstractType
+	// Single threaded cursor (#181): every op below advances the SAME
+	// itemTextPos instead of each op independently re-resolving its own
+	// position from an int index (which — even with the marker routing the
+	// rest of this task adds to deleteRange/findTextPos — still pays an
+	// O(maxSearchMarker) nearest-marker scan plus a local walk per call).
+	// Threading one cursor drops that to true O(1) continuation, since each
+	// op leaves pos sitting exactly where the next one needs to start.
+	// pos starts at index 0 — equivalent to t.findTextPos(txn, 0), just
+	// without that call's marker-lookup machinery for a position we already
+	// know statically.
+	pos := &itemTextPos{right: t.start, cur: make(Attributes)}
 	for _, d := range delta {
 		switch d.Op {
 		case DeltaOpInsert:
 			if s, ok := d.Insert.(string); ok {
-				txt.Insert(txn, pos, s, d.Attributes)
-				pos += utf16Len(s)
+				t.applyDeltaInsert(txn, pos, s, d.Attributes)
 			}
 		case DeltaOpDelete:
-			deleteRange(&txt.abstractType, txn, pos, d.Delete)
+			t.applyDeltaDelete(txn, pos, d.Delete)
 		case DeltaOpRetain:
 			if len(d.Attributes) > 0 {
-				txt.Format(txn, pos, d.Retain, d.Attributes)
+				t.applyFormatAtPos(txn, pos, d.Retain, d.Attributes)
+			} else {
+				pos.advance(txn, d.Retain)
 			}
-			pos += d.Retain
 		}
+	}
+}
+
+// applyDeltaInsert inserts text at the cursor pos, mirroring YText.Insert's
+// item construction (attribute open/close markers, tombstone-skipping
+// anchor) exactly — but sourcing the "current attributes" diff input from
+// pos.cur (already tracked incrementally by the cursor) instead of a fresh
+// currentAttributesAt walk from t.start. This is safe because the opening
+// markers this function inserts are always paired with closing markers that
+// restore the exact pre-insert value (or absence) for each touched key, so
+// the net effect on the ambient format state — and therefore on pos.cur — is
+// zero: leaving pos.cur untouched here is equivalent to (and cheaper than)
+// walking it past the new markers. Advances pos past the inserted run.
+func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, text string, attrs Attributes) {
+	if text == "" {
+		return
+	}
+
+	// Anchor after any adjacent tombstones (Yjs text-insert parity, #160),
+	// same as YText.Insert. Resync pos.right so the cursor invariant
+	// (right == left.Right, or t.start when left is nil) holds afterward.
+	left := t.skipDeletedForTextAnchor(pos.left)
+	pos.left = left
+	if left != nil {
+		pos.right = left.Right
+	} else {
+		pos.right = t.start
+	}
+
+	type diffEntry struct {
+		key    string
+		newVal any
+		oldVal any
+		hadKey bool
+	}
+	var diff []diffEntry
+	if len(attrs) > 0 {
+		keys := make([]string, 0, len(attrs))
+		for k := range attrs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			newVal := attrs[k]
+			oldVal, hadKey := pos.cur[k]
+			if !hadKey && newVal == nil {
+				continue
+			}
+			if hadKey && reflect.DeepEqual(oldVal, newVal) {
+				continue
+			}
+			diff = append(diff, diffEntry{key: k, newVal: newVal, oldVal: oldVal, hadKey: hadKey})
+		}
+	}
+
+	var origin *ID
+	var originRight *ID
+	if left != nil {
+		end := left.ID.Clock + uint64(left.Content.Len()) - 1
+		origin = &ID{Client: left.ID.Client, Clock: end}
+		if left.Right != nil {
+			id := left.Right.ID
+			originRight = &id
+		}
+	} else if t.start != nil {
+		id := t.start.ID
+		originRight = &id
+	}
+
+	clock := txn.doc.store.NextClock(txn.doc.clientID)
+
+	for _, d := range diff {
+		fmtItem := &Item{
+			ID:          ID{Client: txn.doc.clientID, Clock: clock},
+			Origin:      origin,
+			OriginRight: originRight,
+			Left:        left,
+			Parent:      t,
+			Content:     NewContentFormat(d.key, d.newVal),
+		}
+		fmtItem.integrate(txn, 0)
+		left = fmtItem
+		origin = &ID{Client: fmtItem.ID.Client, Clock: fmtItem.ID.Clock}
+		originRight = nil
+		clock = txn.doc.store.NextClock(txn.doc.clientID)
+	}
+
+	item := &Item{
+		ID:          ID{Client: txn.doc.clientID, Clock: clock},
+		Origin:      origin,
+		OriginRight: originRight,
+		Left:        left,
+		Parent:      t,
+		Content:     NewContentString(text),
+	}
+	if pos.index > 0 {
+		t.insertHint = pos.index
+	}
+	item.integrate(txn, 0)
+	// Always advance the anchor past the just-inserted item — regardless of
+	// whether it carried its own attributes (diff non-empty) — so the cursor
+	// invariant (pos.left/pos.right bracket the position immediately after
+	// this insert) holds for whatever op comes next. Previously this was
+	// only done inside the `len(diff) > 0` branch below (as part of setting
+	// up the closing-marker chain's origin), which left pos stale after a
+	// plain attribute-less insert: the following op would re-anchor at the
+	// PRE-insert position and could integrate out of order (#181 follow-up).
+	left = item
+
+	if len(diff) > 0 {
+		origin = &ID{
+			Client: item.ID.Client,
+			Clock:  item.ID.Clock + uint64(item.Content.Len()) - 1,
+		}
+		if left.Right != nil {
+			rid := left.Right.ID
+			originRight = &rid
+		} else {
+			originRight = nil
+		}
+		clock = txn.doc.store.NextClock(txn.doc.clientID)
+
+		for _, d := range diff {
+			var revertVal any
+			if d.hadKey {
+				revertVal = d.oldVal
+			}
+			closeItem := &Item{
+				ID:          ID{Client: txn.doc.clientID, Clock: clock},
+				Origin:      origin,
+				OriginRight: originRight,
+				Left:        left,
+				Parent:      t,
+				Content:     NewContentFormat(d.key, revertVal),
+			}
+			closeItem.integrate(txn, 0)
+			left = closeItem
+			origin = &ID{Client: closeItem.ID.Client, Clock: closeItem.ID.Clock}
+			originRight = nil
+			clock = txn.doc.store.NextClock(txn.doc.clientID)
+		}
+	}
+
+	pos.left = left
+	pos.index += utf16Len(text)
+}
+
+// applyDeltaDelete deletes length countable units starting at the cursor pos,
+// mirroring deleteRange's per-item tombstone walk exactly but resuming from
+// the already-known cursor instead of re-resolving the start item — pos.right
+// is already the correct bracket item, so (unlike deleteRange) no leading
+// split-at-index-in-item step is needed. A delete never advances the cursor's
+// logical index (pos.index is left unchanged; only pos.left/pos.right move).
+// Live ContentFormat markers within the deleted span are walked over (their
+// contribution to pos.cur is applied) rather than skipped blindly, since a
+// delete never removes a marker itself (deleteRange only tombstones countable
+// content) and any such marker is still live and in scope at the cursor after
+// the delete completes.
+func (t *abstractType) applyDeltaDelete(txn *Transaction, pos *itemTextPos, length int) {
+	if length <= 0 {
+		return
+	}
+	origLen := length
+	for pos.right != nil && length > 0 {
+		item := pos.right
+		if !item.Deleted {
+			if cf, ok := item.Content.(*ContentFormat); ok {
+				updateAttr(pos.cur, cf)
+			} else if item.Content.IsCountable() {
+				n := item.Content.Len()
+				if n <= length {
+					item.delete(txn)
+					length -= n
+				} else {
+					splitItem(txn, item, length)
+					item.delete(txn)
+					length = 0
+				}
+			}
+		}
+		pos.left = pos.right
+		pos.right = pos.right.Right
+	}
+	if deleted := origLen - length; deleted > 0 {
+		t.updateMarkerChanges(pos.index, -deleted)
 	}
 }
 
