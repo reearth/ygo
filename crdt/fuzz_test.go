@@ -35,6 +35,26 @@ func TestFuzzConvergence(t *testing.T) {
 	}
 }
 
+// TestFuzzConvergenceMoves sweeps move-enabled scenarios (moves interleaved with
+// insert/delete/push/map/xml across 3–5 peers with random sync) through the
+// node-free multi-peer Converged oracle. Moves are an ygo wire extension yjs
+// cannot decode (ref 11), so they are validated here by ygo-internal convergence
+// rather than the yjs cross-impl oracle. Both bugs caught in #190 review
+// (move+delete mis-delete; insert-beyond-end into a moved array) are of exactly
+// this class.
+func TestFuzzConvergenceMoves(t *testing.T) {
+	n := fuzzIter()
+	for seed := uint64(0); seed < n; seed++ {
+		peers, err := fuzz.RunGo(fuzz.GenerateWith(seed, fuzz.GenOpts{Moves: true}))
+		if err != nil {
+			t.Fatalf("seed %d: %v (reproduce: FUZZ_SEED=%d, moves)", seed, err, seed)
+		}
+		if err := fuzz.Converged(peers); err != nil {
+			t.Fatalf("seed %d: %v (reproduce: FUZZ_SEED=%d, moves)", seed, err, seed)
+		}
+	}
+}
+
 // TestFuzzCrossImpl replays each scenario against real Yjs (node) and asserts
 // ygo's own replay matches Yjs both logically (per-peer ToJSON/ToXML) and by
 // round-trip (a fresh ygo doc that decodes Yjs's encoded update must produce

@@ -20,6 +20,16 @@ type StructStore struct {
 	// pendingDs holds delete-set entries targeting items not yet integrated.
 	// Accumulated across updates and retried whenever pending drains.
 	pendingDs DeleteSet
+
+	// pendingMoves holds ContentMove items whose target item was not yet
+	// integrated when the move itself integrated (e.g. a fresh peer applying a
+	// merged update where the move's client sorts before the target's client).
+	// Keyed by the target ID's ClientID. Each entry is retried whenever an item
+	// for that client is integrated, so the move can claim its target as soon as
+	// the target arrives — in this or any later update. Without this, the move's
+	// arbitration (target.MovedBy = move) would be silently dropped and the array
+	// would diverge by merge/integration order. nil until first used.
+	pendingMoves map[ClientID][]*Item
 }
 
 // pendingUpdate holds decoded items parked because of unresolved
@@ -123,6 +133,56 @@ func (s *StructStore) getItemCleanStart(txn *Transaction, id ID) *Item {
 	// Split so the right half starts exactly at id.Clock.
 	splitAt := int(id.Clock - item.ID.Clock)
 	return splitItem(txn, item, splitAt)
+}
+
+// addPendingMove records a ContentMove whose target was not resolvable at
+// integration time, keyed by the target's ClientID, so it can be retried when
+// that client's items arrive. See the pendingMoves field doc.
+func (s *StructStore) addPendingMove(targetClient ClientID, move *Item) {
+	if s.pendingMoves == nil {
+		s.pendingMoves = make(map[ClientID][]*Item)
+	}
+	s.pendingMoves[targetClient] = append(s.pendingMoves[targetClient], move)
+}
+
+// resolvePendingMoves retries every deferred ContentMove whose target belongs to
+// client. Called after an item for that client integrates: the target may now be
+// present, letting the move claim it. Moves that resolve are dropped from the
+// pending set; the arbitration rule (lowest ClientID wins) is order-independent,
+// so retrying deferred moves yields the same MovedBy on every peer regardless of
+// the order in which moves and targets were integrated.
+func (s *StructStore) resolvePendingMoves(txn *Transaction, client ClientID) {
+	moves := s.pendingMoves[client]
+	if len(moves) == 0 {
+		return
+	}
+	remaining := moves[:0]
+	for _, mv := range moves {
+		cm, ok := mv.Content.(*ContentMove)
+		if !ok || mv.Deleted || cm.Target == nil {
+			// Move item was deleted (its move undone) or is malformed — drop it.
+			continue
+		}
+		target := resolveMovedItem(txn, cm.Target, cm.TargetLen)
+		if target == nil {
+			// Target still not present — keep waiting.
+			remaining = append(remaining, mv)
+			continue
+		}
+		if target.MovedBy == nil || mv.ID.Client < target.MovedBy.ID.Client {
+			target.MovedBy = mv
+			// Setting MovedBy re-renders the target at the move's destination and
+			// blanks its original slot, so any cached position marker is stale.
+			if mv.Parent != nil {
+				mv.Parent.clearMarkers()
+			}
+		}
+	}
+	if len(remaining) == 0 {
+		delete(s.pendingMoves, client)
+	} else {
+		s.pendingMoves[client] = remaining
+	}
 }
 
 // StateVector computes the current state vector: for each client, the clock of
