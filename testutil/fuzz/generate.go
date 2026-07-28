@@ -24,6 +24,13 @@ func Generate(seed uint64) Scenario {
 	return GenerateWith(seed, GenOpts{})
 }
 
+// GenerateArrayMoves builds a deterministic array-only Scenario from seed
+// with move ops enabled on peer 0 only (SingleMover) — the shape the yrs
+// oracle expects: array-root scenarios that may include OpMove.
+func GenerateArrayMoves(seed uint64) Scenario {
+	return GenerateWith(seed, GenOpts{Moves: true, ArrayOnly: true, SingleMover: true})
+}
+
 // GenerateWith builds a deterministic Scenario from seed, honoring opts.
 func GenerateWith(seed uint64, opts GenOpts) Scenario {
 	r := rand.New(rand.NewSource(int64(seed))) //nolint:gosec // deterministic fuzz seed, not crypto
