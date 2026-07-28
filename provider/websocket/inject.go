@@ -300,6 +300,10 @@ func (s *Server) Apply(
 	if err != nil {
 		return err
 	}
+	// Balance the inflight++ from getOrCreateRoom: this call uses rm
+	// synchronously and then returns, so a deferred release is correct
+	// (#193 review). Also protects rm from a concurrent eviction while in use.
+	defer s.releaseInflight(rm)
 	rm.clearIdle() // #183: Apply mutates the doc immediately; no registration delay.
 
 	origin := new(struct{})

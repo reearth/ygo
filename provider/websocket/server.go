@@ -323,6 +323,17 @@ type room struct {
 	// rooms in excess of that bound (LRU). This field only records the stamp; the
 	// sweeper acts on it.
 	idleSince time.Time
+
+	// inflight counts callers that have obtained this room via getOrCreateRoom
+	// but have not yet either registered a peer (ServeHTTP join path) or
+	// finished their synchronous use of the room (relay Inject / admin Apply).
+	// Guarded by mu. Incremented under s.rmu in getOrCreateRoomLocked — atomic
+	// with the room lookup/publish, so an eviction that holds s.rmu cannot
+	// interleave between a caller's lookup and its increment (#193 review).
+	// evictIdleRoom refuses to evict while inflight > 0: this closes the race
+	// where a lone creator's pre-registration failure reaps a room a
+	// concurrent joiner is still in the process of joining.
+	inflight int
 }
 
 // clearIdle marks the room as non-idle. Used by the immediate-mutation callers
@@ -1078,6 +1089,13 @@ func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
 	if r, ok := s.rooms[name]; ok {
+		// Increment inflight under s.rmu (which we still hold) so a concurrent
+		// evictIdleRoom — which also takes s.rmu — cannot interleave between this
+		// lookup and the increment (#193 review). Balanced by exactly one
+		// releaseInflight (or the ServeHTTP peer-registration inflight--).
+		r.mu.Lock()
+		r.inflight++
+		r.mu.Unlock()
 		return r, false, nil
 	}
 	if s.MaxRooms > 0 && len(s.rooms) >= s.MaxRooms {
@@ -1108,8 +1126,24 @@ func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	if s.MaxPeersPerRoom > 0 {
 		r.peerSem = semaphore.NewWeighted(int64(s.MaxPeersPerRoom))
 	}
+	// Increment inflight before publishing, under s.rmu (uniform with the
+	// existing-room path above, even though no other caller can hold a
+	// reference to r yet). Balanced by exactly one releaseInflight (or the
+	// ServeHTTP peer-registration inflight--).
+	r.mu.Lock()
+	r.inflight++
+	r.mu.Unlock()
 	s.rooms[name] = r
 	return r, true, nil
+}
+
+// releaseInflight drops a room's inflight-join count. Every successful
+// getOrCreateRoom must be balanced by exactly one releaseInflight (or, for the
+// WS join path, one inflight-- at peer registration).
+func (s *Server) releaseInflight(rm *room) {
+	rm.mu.Lock()
+	rm.inflight--
+	rm.mu.Unlock()
 }
 
 // loadRoom performs the off-lock room load for a freshly created placeholder:
@@ -1283,12 +1317,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rm.peerSem != nil && !rm.peerSem.TryAcquire(1) {
 		s.log().Debug("MaxPeersPerRoom cap reached", "room", name)
 		http.Error(w, "room full", http.StatusServiceUnavailable)
+		// Release OUR inflight-join count BEFORE evicting: this request is
+		// leaving, so its own inflight must not block its own reap. A
+		// concurrent joiner's inflight (still > 0) correctly blocks the
+		// reap (#193 review).
+		s.releaseInflight(rm)
 		if created {
 			// #192: same orphan-reap as the other pre-registration failure
 			// paths — a room this request created but no peer will join.
 			// No semaphore to release here: TryAcquire failed, so nothing
 			// was acquired. evictIdleRoom no-ops safely if a concurrent
-			// request already joined the room (peers>0).
+			// request already joined the room (peers>0) or is still
+			// mid-join (inflight>0).
 			s.evictIdleRoom(name, rm, time.Time{})
 		}
 		return
@@ -1299,11 +1339,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log().Debug("MaxConnections cap reached")
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		// Release OUR inflight-join count BEFORE evicting; see the peerSem
+		// denial path above (#193 review).
+		s.releaseInflight(rm)
 		if created {
 			// #192: this request created the room but no peer will register. Tear it
 			// down (flush-before-evict + delete + awareness/relay/worker teardown).
 			// evictIdleRoom no-ops safely if a concurrent request already joined
-			// the room (peers>0).
+			// the room (peers>0) or is still mid-join (inflight>0).
 			s.evictIdleRoom(name, rm, time.Time{})
 		}
 		return
@@ -1317,11 +1360,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if sem := s.connSemaphore(); sem != nil {
 			sem.Release(1)
 		}
+		// Release OUR inflight-join count BEFORE evicting; see the peerSem
+		// denial path above (#193 review).
+		s.releaseInflight(rm)
 		if created {
 			// #192: this request created the room but no peer will register. Tear it
 			// down (flush-before-evict + delete + awareness/relay/worker teardown).
 			// evictIdleRoom no-ops safely if a concurrent request already joined
-			// the room (peers>0).
+			// the room (peers>0) or is still mid-join (inflight>0).
 			s.evictIdleRoom(name, rm, time.Time{})
 		}
 		return
@@ -1358,6 +1404,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if sem := s.connSemaphore(); sem != nil {
 			sem.Release(1)
 		}
+		// This request never registers a peer for rm; release its inflight
+		// count so it cannot spuriously block a future eviction (#193 review).
+		s.releaseInflight(rm)
 		_ = ws.Close() // close errors during teardown are expected; not logged
 		return
 	}
@@ -1373,6 +1422,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//     stamp at all.
 	// Either way an occupied room never keeps a stale idle stamp.
 	rm.idleSince = time.Time{}
+	// This inflight join is now a registered peer: convert it atomically with
+	// the peers++ above rather than calling releaseInflight (#193 review).
+	rm.inflight--
 	rm.mu.Unlock()
 	s.rmu.RUnlock()
 

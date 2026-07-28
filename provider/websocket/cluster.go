@@ -228,6 +228,11 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		if err != nil {
 			return err
 		}
+		// Balance the inflight++ from getOrCreateRoom: this call uses rm
+		// synchronously and then returns, so a deferred release is correct
+		// (#193 review). Also protects rm from a concurrent eviction while
+		// in use.
+		defer s.releaseInflight(rm)
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, s.relaySentinel); err != nil {
 			return err
@@ -244,6 +249,9 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		if err != nil {
 			return err
 		}
+		// Balance the inflight++ from getOrCreateRoom (#193 review); see the
+		// KindSync case above.
+		defer s.releaseInflight(rm)
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		if err := rm.awareness.ApplyUpdate(in.Data, s.relaySentinel); err != nil {
 			return err

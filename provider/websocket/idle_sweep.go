@@ -141,10 +141,16 @@ func (s *Server) sweepIdleRooms(now time.Time) {
 //
 // CRITICAL: expectIdle is the idleSince observed in the snapshot. Eviction
 // commits only if, under rm.mu, the room is STILL empty AND idleSince is
-// unchanged. A rejoin clears idleSince (→ zero); any join/leave churn restamps
-// it to a different time.Now(); relay/Apply activity clears it via clearIdle.
-// All three make the Equal check fail, so the sweeper never evicts a room that
-// became active — it evicts on emptiness, never on the stale stamp alone.
+// unchanged AND no caller is mid-join (inflight == 0). A rejoin clears
+// idleSince (→ zero); any join/leave churn restamps it to a different
+// time.Now(); relay/Apply activity clears it via clearIdle. All three make the
+// Equal check fail, so the sweeper never evicts a room that became active — it
+// evicts on emptiness, never on the stale stamp alone. The inflight guard
+// additionally covers the #192 orphan-reap paths (ServeHTTP pre-registration
+// failures): a concurrent joiner that has obtained the room via
+// getOrCreateRoom but not yet registered its peer holds inflight > 0, which
+// blocks eviction even though peers is still 0 and idleSince is still zero
+// (#193 review).
 //
 // On flush failure the room + worker are kept alive (matching handleDisconnect):
 // the retained batch is retried on the next sweep / teardown, and a reconnect
@@ -176,7 +182,7 @@ func (s *Server) evictIdleRoom(name string, rm *room, expectIdle time.Time) bool
 	// Re-check under the locks: only evict a room that is STILL empty and STILL
 	// carries the exact idle stamp we snapshotted. This mirrors handleDisconnect's
 	// own re-check and is the guarantee that we never evict on idleSince alone.
-	if len(rm.peers) == 0 && rm.idleSince.Equal(expectIdle) {
+	if len(rm.peers) == 0 && rm.idleSince.Equal(expectIdle) && rm.inflight == 0 {
 		if current, ok := s.rooms[name]; ok && current == rm {
 			delete(s.rooms, name)
 			evicted = true
