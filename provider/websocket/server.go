@@ -1283,6 +1283,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rm.peerSem != nil && !rm.peerSem.TryAcquire(1) {
 		s.log().Debug("MaxPeersPerRoom cap reached", "room", name)
 		http.Error(w, "room full", http.StatusServiceUnavailable)
+		if created {
+			// #192: same orphan-reap as the other pre-registration failure
+			// paths — a room this request created but no peer will join.
+			// No semaphore to release here: TryAcquire failed, so nothing
+			// was acquired. evictIdleRoom no-ops safely if a concurrent
+			// request already joined the room (peers>0).
+			s.evictIdleRoom(name, rm, time.Time{})
+		}
 		return
 	}
 	if sem := s.connSemaphore(); sem != nil && !sem.TryAcquire(1) {
@@ -1295,7 +1303,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// #192: this request created the room but no peer will register. Tear it
 			// down (flush-before-evict + delete + awareness/relay/worker teardown).
 			// evictIdleRoom no-ops safely if a concurrent request already joined
-			// (peers>0) or the room is idle-resident (idleSince != 0).
+			// the room (peers>0).
 			s.evictIdleRoom(name, rm, time.Time{})
 		}
 		return
@@ -1313,7 +1321,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// #192: this request created the room but no peer will register. Tear it
 			// down (flush-before-evict + delete + awareness/relay/worker teardown).
 			// evictIdleRoom no-ops safely if a concurrent request already joined
-			// (peers>0) or the room is idle-resident (idleSince != 0).
+			// the room (peers>0).
 			s.evictIdleRoom(name, rm, time.Time{})
 		}
 		return

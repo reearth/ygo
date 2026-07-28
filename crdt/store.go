@@ -29,6 +29,10 @@ type StructStore struct {
 	// the target arrives — in this or any later update. Without this, the move's
 	// arbitration (target.MovedBy = move) would be silently dropped and the array
 	// would diverge by merge/integration order. nil until first used.
+	// Same bounded-leak posture as pendingDs: a move whose target never
+	// integrates (or that is itself deleted/undone) lingers here until the
+	// next resolve pass for that target client — bounded by move-op count,
+	// and it is never applied without its target.
 	pendingMoves map[ClientID][]*Item
 }
 
