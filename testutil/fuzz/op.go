@@ -32,7 +32,7 @@ const (
 	OpDelete   OpCode = "delete"   // text/array/xml children
 	OpFormat   OpCode = "format"   // text
 	OpPush     OpCode = "push"     // array
-	OpMove     OpCode = "move"     // array: CRDT-safe move (ygo extension)
+	OpMove     OpCode = "move"     // array: CRDT-safe move (ygo extension); yjs can't decode this wire extension, so moves are excluded from the yjs cross-impl oracle and validated instead by the Go-internal multi-peer convergence fuzzer (TestFuzzConvergenceMoves)
 	OpSetKey   OpCode = "setkey"   // map
 	OpDelKey   OpCode = "delkey"   // map
 	OpSetAttr  OpCode = "setattr"  // xmlelem

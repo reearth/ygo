@@ -54,24 +54,3 @@ func TestGenerate_MovesAreOptIn(t *testing.T) {
 		}
 	}
 }
-
-func TestGenerateWith_SingleMover_OnlyPeerZeroMoves(t *testing.T) {
-	sawMove := false
-	for seed := uint64(0); seed < 300; seed++ {
-		s := fuzz.GenerateWith(seed, fuzz.GenOpts{Moves: true, ArrayOnly: true, SingleMover: true})
-		for _, st := range s.Steps {
-			if st.Op == fuzz.OpMove {
-				sawMove = true
-				if st.Peer != 0 {
-					t.Fatalf("seed %d: single-mover emitted a move on peer %d", seed, st.Peer)
-				}
-			}
-			if st.Kind == fuzz.StepLocalOp && st.TypeKind != fuzz.KindArray {
-				t.Fatalf("seed %d: ArrayOnly emitted a %s op", seed, st.TypeKind)
-			}
-		}
-	}
-	if !sawMove {
-		t.Fatal("expected at least one move across 300 single-mover seeds")
-	}
-}

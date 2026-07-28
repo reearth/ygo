@@ -12,10 +12,7 @@ var textAlphabets = []string{"abcdef", "αβγδ日本語", "🙂🎉ABC"} // as
 // the yjs oracle cannot decode) and so must never appear in default
 // generation.
 type GenOpts struct {
-	Moves       bool // allow array move ops (ygo-only; breaks yjs cross-impl)
-	ArrayOnly   bool // restrict generation to the single {"a", KindArray} root
-	SingleMover bool // only peer 0 may emit a move op (others stay move-free)
-	NoPush      bool // never emit OpPush for array ops (emit OpInsert instead); yrs's push_back is less Yjs-conformant than ygo's OpPush (see testutil/yrs-oracle), so the yrs cross-impl oracle excludes it
+	Moves bool // allow array move ops (ygo-only; breaks yjs cross-impl)
 }
 
 // Generate builds a deterministic Scenario from seed with unchanged, move-free
@@ -23,13 +20,6 @@ type GenOpts struct {
 // so TestFuzzConvergence and TestFuzzCrossImpl are unaffected.
 func Generate(seed uint64) Scenario {
 	return GenerateWith(seed, GenOpts{})
-}
-
-// GenerateArrayMoves builds a deterministic array-only Scenario from seed
-// with move ops enabled on peer 0 only (SingleMover) — the shape the yrs
-// oracle expects: array-root scenarios that may include OpMove.
-func GenerateArrayMoves(seed uint64) Scenario {
-	return GenerateWith(seed, GenOpts{Moves: true, ArrayOnly: true, SingleMover: true, NoPush: true})
 }
 
 // GenerateWith builds a deterministic Scenario from seed, honoring opts.
@@ -42,14 +32,6 @@ func GenerateWith(seed uint64, opts GenOpts) Scenario {
 		kind TypeKind
 	}{
 		{"t", KindText}, {"a", KindArray}, {"m", KindMap}, {"x", KindXmlFragment},
-	}
-	if opts.ArrayOnly {
-		roots = []struct {
-			name string
-			kind TypeKind
-		}{
-			{"a", KindArray},
-		}
 	}
 	s := Scenario{Seed: seed, NumPeers: numPeers}
 	for i := 0; i < numSteps; i++ {
@@ -86,7 +68,7 @@ func genLocalOp(r *rand.Rand, n int, root string, kind TypeKind, opts GenOpts) S
 			st.Op, st.PosHint, st.LenHint = OpDelete, r.Intn(50), 1+r.Intn(3)
 		}
 	case KindArray:
-		moveOK := opts.Moves && (!opts.SingleMover || st.Peer == 0)
+		moveOK := opts.Moves
 		pick := r.Intn(3)
 		if moveOK {
 			pick = r.Intn(4) // 0..3, add the move branch
@@ -95,11 +77,7 @@ func genLocalOp(r *rand.Rand, n int, root string, kind TypeKind, opts GenOpts) S
 		case 0:
 			st.Op, st.PosHint, st.JSONVal = OpInsert, r.Intn(50), randScalarJSON(r)
 		case 1:
-			if opts.NoPush {
-				st.Op, st.PosHint, st.JSONVal = OpInsert, r.Intn(50), randScalarJSON(r)
-			} else {
-				st.Op, st.JSONVal = OpPush, randScalarJSON(r)
-			}
+			st.Op, st.JSONVal = OpPush, randScalarJSON(r)
 		case 2:
 			st.Op, st.PosHint, st.LenHint = OpDelete, r.Intn(50), 1+r.Intn(3)
 		default: // move
