@@ -43,7 +43,7 @@ func loadNDistinctRooms(tb testing.TB, s *Server, n int, prefix string) time.Dur
 		room := fmt.Sprintf("%s-%d", prefix, j)
 		go func() {
 			defer wg.Done()
-			if _, err := s.getOrCreateRoom(context.Background(), room); err != nil {
+			if _, _, err := s.getOrCreateRoom(context.Background(), room); err != nil {
 				tb.Errorf("getOrCreateRoom(%s): %v", room, err)
 			}
 		}()
@@ -97,12 +97,12 @@ func BenchmarkReconnectReuse_WarmIdleRoom(b *testing.B) {
 	s := NewServerWithPersistence(fixedLatencyAdapter{latency: loadLatency})
 	s.RoomIdleTimeout = time.Hour // keep the room resident for the whole run
 	// Prime the room once (pays the one-time LoadDoc latency).
-	if _, err := s.getOrCreateRoom(context.Background(), "warm"); err != nil {
+	if _, _, err := s.getOrCreateRoom(context.Background(), "warm"); err != nil {
 		b.Fatalf("prime getOrCreateRoom: %v", err)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := s.getOrCreateRoom(context.Background(), "warm"); err != nil {
+		if _, _, err := s.getOrCreateRoom(context.Background(), "warm"); err != nil {
 			b.Fatalf("warm getOrCreateRoom: %v", err)
 		}
 	}

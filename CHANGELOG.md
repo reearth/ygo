@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.40.0] — 2026-07-28
+
+### Fixed
+
+- **`YArray.Move` could diverge across peers depending on merge order**
+  ([#191](https://github.com/reearth/ygo/issues/191)): when a move integrated
+  before its target item (ascending-ClientID integration order), it silently
+  dropped its target claim. Moves now defer target arbitration until the
+  target integrates, so all peers converge on the same result regardless of
+  merge order.
+- **Orphaned websocket rooms on early connection failure**
+  ([#192](https://github.com/reearth/ygo/issues/192)): a room created for a
+  connection that failed before any peer registered (connection-limit denial
+  or WebSocket upgrade failure) is now reaped instead of leaking the room and
+  its persistence/awareness goroutines.
+
+### Testing
+
+- Added a Go-internal multi-peer move-convergence fuzzer sweep
+  (`TestFuzzConvergenceMoves`, [#191](https://github.com/reearth/ygo/issues/191)).
+  Move is a ygo wire extension the yjs reference implementation cannot
+  decode, so moves are validated by internal convergence rather than the yjs
+  cross-impl oracle.
+- Added yjs-interop guard tests for nested `Y.Map` (and non-finite `NaN`)
+  values round-tripping through the V1 and V2 wire formats
+  ([#194](https://github.com/reearth/ygo/pull/194)), confirming ygo preserves
+  a nested shared type's entries exactly as a real yjs client emits them.
+
 ## [1.39.0] — 2026-07-24
 
 ### Performance

@@ -32,6 +32,7 @@ const (
 	OpDelete   OpCode = "delete"   // text/array/xml children
 	OpFormat   OpCode = "format"   // text
 	OpPush     OpCode = "push"     // array
+	OpMove     OpCode = "move"     // array: CRDT-safe move (ygo extension); yjs can't decode this wire extension, so moves are excluded from the yjs cross-impl oracle and validated instead by the Go-internal multi-peer convergence fuzzer (TestFuzzConvergenceMoves)
 	OpSetKey   OpCode = "setkey"   // map
 	OpDelKey   OpCode = "delkey"   // map
 	OpSetAttr  OpCode = "setattr"  // xmlelem
@@ -63,6 +64,7 @@ type Step struct {
 	Op       OpCode   `json:"op,omitempty"`
 	PosHint  int      `json:"posHint,omitempty"`
 	LenHint  int      `json:"lenHint,omitempty"`  // delete length
+	ToHint   int      `json:"toHint,omitempty"`   // move destination index
 	StrVal   string   `json:"strVal,omitempty"`   // text/xmltext content
 	Key      string   `json:"key,omitempty"`      // map key / attr name
 	JSONVal  string   `json:"jsonVal,omitempty"`  // JSON-encoded scalar value for map-set/array-insert

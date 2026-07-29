@@ -296,10 +296,14 @@ func (s *Server) Apply(
 			return fmt.Errorf("%w: %w", ErrInjectRefused, err)
 		}
 	}
-	rm, err := s.getOrCreateRoom(ctx, room)
+	rm, _, err := s.getOrCreateRoom(ctx, room)
 	if err != nil {
 		return err
 	}
+	// Balance the inflight++ from getOrCreateRoom: this call uses rm
+	// synchronously and then returns, so a deferred release is correct
+	// (#193 review). Also protects rm from a concurrent eviction while in use.
+	defer s.releaseInflight(rm)
 	rm.clearIdle() // #183: Apply mutates the doc immediately; no registration delay.
 
 	origin := new(struct{})

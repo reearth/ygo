@@ -1,3 +1,35 @@
+## v1.40.0
+
+Two convergence/lifecycle fixes plus new fuzz coverage. `YArray.Move` could
+diverge across peers depending on merge order — a move that integrated
+before its target item silently dropped its target claim; moves now defer
+target arbitration until the target integrates, so all peers converge
+regardless of order. On the websocket server, a room created for a
+connection that fails before any peer registers (connection-limit denial or
+WebSocket upgrade failure) is now reaped instead of leaking the room and its
+persistence/awareness goroutines. No breaking API changes.
+
+### Fixed
+
+- **`YArray.Move` convergence across merge orders**
+  ([#191](https://github.com/reearth/ygo/issues/191)): moves now defer
+  target arbitration until the target item integrates, fixing a case where
+  ascending-ClientID integration order caused peers to diverge.
+- **Orphaned websocket rooms on early connection failure**
+  ([#192](https://github.com/reearth/ygo/issues/192)): rooms are now reaped
+  when a connection fails before any peer registers, instead of leaking the
+  room and its background goroutines.
+
+### Testing
+
+- New Go-internal multi-peer move-convergence fuzzer sweep
+  (`TestFuzzConvergenceMoves`, [#191](https://github.com/reearth/ygo/issues/191)).
+  Moves are a ygo wire extension the yjs reference can't decode, so they're
+  validated by internal convergence rather than the yjs cross-impl oracle.
+- New yjs-interop guard tests for nested `Y.Map` (and `NaN`) values across
+  V1/V2 round-trips ([#194](https://github.com/reearth/ygo/pull/194)),
+  proving ygo preserves nested shared-type entries from genuine yjs bytes.
+
 ## v1.39.0
 
 A minor release focused on performance and websocket-server room lifecycle.

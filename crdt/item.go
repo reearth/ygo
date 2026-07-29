@@ -262,8 +262,21 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 			if target.MovedBy == nil || item.ID.Client < target.MovedBy.ID.Client {
 				target.MovedBy = item
 			}
+		} else {
+			// The target has not been integrated yet — common on a fresh peer
+			// applying a merged update, where struct groups are ordered by
+			// ClientID so a move whose client sorts before its target's client
+			// integrates first. Defer arbitration until the target arrives (in
+			// this or a later update); otherwise the move is silently dropped and
+			// the array diverges by integration order (#191, move fuzzer seed 16).
+			txn.doc.store.addPendingMove(cm.Target.Client, item)
 		}
 	}
+
+	// Retry any deferred ContentMove whose target belongs to this item's client:
+	// the item we just integrated may be that target (or split into it), letting
+	// the move finally claim it. No-op when nothing is pending for this client.
+	txn.doc.store.resolvePendingMoves(txn, item.ID.Client)
 
 	// Search-marker invalidation for moves (G5). renderedStep is fully
 	// move-aware, so markers CAN accelerate move-containing arrays — but a

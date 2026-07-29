@@ -78,7 +78,7 @@ func TestGetOrCreateRoom_ReentrantSyncInjectFromRoomActivated(t *testing.T) {
 		t.Fatalf("AttachRelay: %v", err)
 	}
 
-	runWithDeadlockGuard(t, func() { _, _ = s.getOrCreateRoom(context.Background(), "doc1") })
+	runWithDeadlockGuard(t, func() { _, _, _ = s.getOrCreateRoom(context.Background(), "doc1") })
 
 	if relay.injectErr != nil {
 		t.Fatalf("re-entrant Inject returned error: %v", relay.injectErr)
@@ -101,7 +101,7 @@ func TestGetOrCreateRoom_ReentrantAwarenessInjectFromRoomActivated(t *testing.T)
 		t.Fatalf("AttachRelay: %v", err)
 	}
 
-	runWithDeadlockGuard(t, func() { _, _ = s.getOrCreateRoom(context.Background(), "doc1") })
+	runWithDeadlockGuard(t, func() { _, _, _ = s.getOrCreateRoom(context.Background(), "doc1") })
 
 	if relay.injectErr != nil {
 		t.Fatalf("re-entrant Inject returned error: %v", relay.injectErr)
@@ -142,11 +142,11 @@ func TestGetOrCreateRoom_RoomActivatedFiresOnceOffLockAfterPublish(t *testing.T)
 		t.Fatalf("AttachRelay: %v", err)
 	}
 
-	r1, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r1, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	if err != nil {
 		t.Fatalf("first getOrCreateRoom: %v", err)
 	}
-	r2, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r2, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	if err != nil {
 		t.Fatalf("second getOrCreateRoom: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestRegisterRelayObservers_HeartbeatPropagatesToRelay(t *testing.T) {
 		t.Fatalf("AttachRelay: %v", err)
 	}
 
-	rm, err := s.getOrCreateRoom(context.Background(), "room")
+	rm, _, err := s.getOrCreateRoom(context.Background(), "room")
 	if err != nil {
 		t.Fatalf("getOrCreateRoom: %v", err)
 	}
