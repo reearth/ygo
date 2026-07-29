@@ -45,16 +45,21 @@ func dialWSBench(b *testing.B, ts *httptest.Server, room string) *gws.Conn {
 // Adapted from drainWS: this benchmark only cares that clients are fully
 // joined before timing starts, not the frame contents, so unlike drainWS it
 // does not decode/apply sync frames into a local doc.
-func drainHandshakeBench(b *testing.B, conn *gws.Conn) {
-	b.Helper()
+//
+// It returns an error rather than calling b.Fatalf directly so the caller
+// can close the partially-joined connection first — failing straight into
+// b.Fatalf here would leak the socket (never recorded anywhere for cleanup)
+// on a mid-setup failure, e.g. a tight fd ulimit at N=500.
+func drainHandshakeBench(conn *gws.Conn) error {
 	for i := 0; i < 3; i++ {
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		_, _, err := conn.ReadMessage()
 		_ = conn.SetReadDeadline(time.Time{})
 		if err != nil {
-			b.Fatalf("drain handshake frame %d: %v", i, err)
+			return fmt.Errorf("drain handshake frame %d: %w", i, err)
 		}
 	}
+	return nil
 }
 
 // drainLoop continuously reads (and discards) messages from conn until the
@@ -102,23 +107,39 @@ func BenchmarkBroadcastFanout(b *testing.B) {
 			defer ts.Close()
 			defer func() { _ = s.Shutdown(context.Background()) }()
 
+			// conns/doneCh are preallocated to size n, but a mid-setup failure
+			// (plausible at N=500 under a tight fd ulimit: 500 client + 500
+			// server sockets) can leave a suffix of both slices unset. joined
+			// tracks how many entries actually got a live conn + a started
+			// drainLoop goroutine; the cleanup defer below bounds itself to
+			// conns[:joined]/doneCh[:joined] so it never touches a nil *gws.Conn
+			// (which would panic in Close, crashing the whole bench binary
+			// during the b.Fatalf-triggered Goexit unwind) or blocks forever on
+			// a nil doneCh receive.
 			conns := make([]*gws.Conn, n)
 			doneCh := make([]chan struct{}, n)
+			joined := 0
 			defer func() {
-				for _, c := range conns {
-					_ = c.Close()
+				for i := 0; i < joined; i++ {
+					_ = conns[i].Close()
 				}
-				for _, d := range doneCh {
-					<-d
+				for i := 0; i < joined; i++ {
+					<-doneCh[i]
 				}
 			}()
 
 			for i := 0; i < n; i++ {
 				conn := dialWSBench(b, ts, "room")
-				drainHandshakeBench(b, conn)
+				if err := drainHandshakeBench(conn); err != nil {
+					// Not yet recorded in conns/joined, so close it here —
+					// otherwise this socket leaks past the b.Fatalf below.
+					_ = conn.Close()
+					b.Fatalf("client %d: %v", i, err)
+				}
 				conns[i] = conn
 				doneCh[i] = make(chan struct{})
 				go drainLoop(conn, doneCh[i])
+				joined++
 			}
 
 			b.ReportAllocs()
