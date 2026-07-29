@@ -21,6 +21,7 @@
 package persistence_test
 
 import (
+	"context"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -137,18 +138,35 @@ const persistThroughputCoalesceWindow = 50 * time.Millisecond
 //     the countingAdapter's counter, never from Server internals.
 func BenchmarkPersistThroughput_Coalescing(b *testing.B) {
 	b.Run(fmt.Sprintf("M=%d", persistThroughputM), func(b *testing.B) {
+		var totalElapsed time.Duration
+		var totalStores int64
 		for i := 0; i < b.N; i++ {
-			runPersistThroughputIteration(b)
+			elapsed, stores := runPersistThroughputIteration(b)
+			totalElapsed += elapsed
+			totalStores += stores
 		}
+		// Reported once for the whole run (b.N iterations): testing.B keeps
+		// only the last value passed to ReportMetric per unit name, so
+		// calling it per-iteration (as a prior version of this benchmark
+		// did) silently discarded every iteration but the last. Aggregating
+		// totals across all b.N iterations first and reporting once here
+		// makes both metrics reflect the full run.
+		b.ReportMetric(float64(persistThroughputM*b.N)/totalElapsed.Seconds(), "updates/s")
+		b.ReportMetric(1-float64(totalStores)/float64(persistThroughputM*b.N), "coalesce-hit-rate")
 	})
 }
 
-func runPersistThroughputIteration(b *testing.B) {
+// runPersistThroughputIteration runs one iteration of the throughput
+// workload and returns the elapsed time (send-through-flush) and the number
+// of StoreUpdate calls observed, for the caller to aggregate across all b.N
+// iterations before reporting metrics once.
+func runPersistThroughputIteration(b *testing.B) (elapsed time.Duration, stores int64) {
 	b.Helper()
 
 	counting := &countingAdapter{inner: persistence.NewLegacyAdapter(persistence.NewMemoryPersistence())}
 	s := ygws.NewServerWithPersistence(counting)
 	s.PersistCoalesceWindow = persistThroughputCoalesceWindow
+	defer func() { _ = s.Shutdown(context.Background()) }()
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -184,11 +202,9 @@ func runPersistThroughputIteration(b *testing.B) {
 	if err := s.CloseRoom(room, true); err != nil {
 		b.Fatalf("CloseRoom: %v", err)
 	}
-	elapsed := time.Since(start)
-
-	stores := atomic.LoadInt64(&counting.stores)
-	b.ReportMetric(float64(persistThroughputM)/elapsed.Seconds(), "updates/s")
-	b.ReportMetric(1-float64(stores)/float64(persistThroughputM), "coalesce-hit-rate")
+	elapsed = time.Since(start)
+	stores = atomic.LoadInt64(&counting.stores)
+	return elapsed, stores
 }
 
 // waitForDocTextLen polls the server's live, in-memory doc (an exported

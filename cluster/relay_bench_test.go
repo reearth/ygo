@@ -165,9 +165,14 @@ const (
 // one slowSink per b.N iteration, publishes benchBackpressureMessages
 // messages each under a short deadline, and reports "publish-timeouts"
 // (Publish calls that hit their caller-side deadline against the full
-// buffer) and "published" (K) via b.ReportMetric.
+// buffer) and "published" (K) via b.ReportMetric — accumulated across all
+// b.N iterations and reported once after the loop, since testing.B keeps
+// only the last value passed to ReportMetric per unit name (calling it
+// per-iteration, as a prior version of this benchmark did, silently
+// discarded every iteration but the last).
 func benchMemRelayBackpressure(b *testing.B) {
 	b.ReportAllocs()
+	var totalPublished, totalPublishTimeouts int64
 	for i := 0; i < b.N; i++ {
 		relay := cluster.NewMemRelay(cluster.WithBufferSize(1))
 		sink := &slowSink{room: "room", delay: benchBackpressureSinkDelay}
@@ -205,12 +210,17 @@ func benchMemRelayBackpressure(b *testing.B) {
 		// or sub-benchmarks.
 		time.Sleep(2*benchBackpressureSinkDelay + 10*time.Millisecond)
 
-		// These are CALLER-SIDE context-deadline timeouts against MemRelay's
-		// blocking backpressure, NOT relay-internal drops: MemRelay has no
-		// drop-on-full path (mem_relay.go's Publish doc: "intentionally does
-		// NOT drop on full"). Real drop-on-full semantics are deferred to the
-		// #187 Redis-relay work. Metric name reflects that deliberately.
-		b.ReportMetric(float64(publishTimeouts), "publish-timeouts")
-		b.ReportMetric(float64(published), "published")
+		totalPublished += published
+		totalPublishTimeouts += publishTimeouts
 	}
+
+	// These are CALLER-SIDE context-deadline timeouts against MemRelay's
+	// blocking backpressure, NOT relay-internal drops: MemRelay has no
+	// drop-on-full path (mem_relay.go's Publish doc: "intentionally does
+	// NOT drop on full"). Real drop-on-full semantics are deferred to the
+	// #187 Redis-relay work. Metric name reflects that deliberately. Totals
+	// (not per-iteration averages) are reported so "published" stays an
+	// exact K-per-iteration-times-b.N count.
+	b.ReportMetric(float64(totalPublishTimeouts), "publish-timeouts")
+	b.ReportMetric(float64(totalPublished), "published")
 }

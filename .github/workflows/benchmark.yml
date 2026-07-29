@@ -64,10 +64,14 @@ jobs:
         run: benchstat /tmp/old.txt /tmp/new.txt
       - name: Heavy-tier benchmarks (nightly + manual)
         if: github.event_name != 'pull_request'
-        run: go test -tags benchheavy -bench=. -benchmem -count=6 ./... | tee /tmp/heavy.txt
+        run: |
+          set -o pipefail
+          go test -tags benchheavy -bench=. -benchmem -count=6 ./... | tee /tmp/heavy.txt
       - name: Scaling probe (nightly + manual)
         if: github.event_name != 'pull_request'
-        run: go test -tags benchheavy -run TestScaleProbe -v ./provider/websocket/ | tee /tmp/scaleprobe.txt
+        run: |
+          set -o pipefail
+          go test -tags benchheavy -run TestScaleProbe -v ./provider/websocket/ | tee /tmp/scaleprobe.txt
       - name: Upload nightly/dispatch output
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4

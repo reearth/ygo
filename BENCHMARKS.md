@@ -32,9 +32,9 @@ go version go1.26.5 darwin/arm64
 - CI (`.github/workflows/benchmark.yml`) uses `-count=5` (PR gate) / `-count=6`
   (nightly heavy tier) so `benchstat` has enough samples to report a
   meaningful confidence interval. This document's numbers use `-count=3`
-  (light tier) and `-count=1` (`-benchtime=10x`, heavy tier) — enough to sanity
-  -check the shape of the numbers, not a substitute for `benchstat old.txt
-  new.txt` when evaluating a real performance change.
+  (light tier) and `-count=1` (`-benchtime=10x`, heavy tier) — enough to
+  sanity-check the shape of the numbers, not a substitute for `benchstat
+  old.txt new.txt` when evaluating a real performance change.
 - **Determinism:** every randomized scenario in this suite seeds its PRNG
   from a fixed constant (`rand.New(rand.NewSource(<const>))`) — never
   unseeded `math/rand` or a wall-clock seed. Re-running any benchmark here
@@ -76,12 +76,13 @@ that room count, to spot `O(rooms)` growth in server-side resource usage.
 go test -tags benchheavy -run TestScaleProbe -v ./provider/websocket/
 ```
 
-Override the room count with `SCALE_PROBE_N` (default is a smaller
-built-in value suitable for a laptop; set it higher to approximate
-production room counts):
+By default `TestScaleProbe` runs at both 1,000 and 10,000 rooms. Override
+with `SCALE_PROBE_N` to run a single size instead — set it lower (e.g.
+`200`) for a quick laptop smoke run, or higher to approximate production
+room counts:
 
 ```
-SCALE_PROBE_N=1000 go test -tags benchheavy -run TestScaleProbe -v ./provider/websocket/
+SCALE_PROBE_N=200 go test -tags benchheavy -run TestScaleProbe -v ./provider/websocket/
 ```
 
 ## Results
@@ -270,10 +271,10 @@ The engine-scenario benchmarks in this suite (`crdt/bench_test.go`'s
 B1-style Prepend/RandomInsert/InsertThenDelete/WordInsert/MixedEdits, and
 `crdt/bench_heavy_test.go`'s B2/B3 conflict scenarios, plus the pre-existing
 B4 editing-trace suite in `benchmarks/`) are deliberately named and shaped
-to mirror
-[`dmonad/crdt-benchmarks`](https://github.com/dmonad/crdt-benchmarks)'
-operation definitions, so that a future native yjs (JS)/yrs (Rust) run on
-the same hardware is a drop-in comparison rather than a re-design.
+to mirror the operation definitions from
+[`dmonad/crdt-benchmarks`](https://github.com/dmonad/crdt-benchmarks), so
+that a future native yjs (JS)/yrs (Rust) run on the same hardware is a
+drop-in comparison rather than a re-design.
 
 That native re-run has **not** been done as part of this task — it is
 explicitly out of scope here and tracked as a follow-up (see "Draft
