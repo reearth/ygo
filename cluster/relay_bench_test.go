@@ -3,8 +3,10 @@
 // Package cluster_test benchmark for issue #180 (Task 6): MemRelay fan-out.
 // Measures Publish throughput fanning a sync update out to M subscriber
 // sinks (BenchmarkMemRelay_Fanout/Fanout), and exercises the small-buffer +
-// slow-subscriber path that #187 raised concerns about
-// (BenchmarkMemRelay_Fanout/DropOnFull).
+// slow-subscriber backpressure path that #187 raised concerns about
+// (BenchmarkMemRelay_Fanout/Backpressure) — MemRelay blocks rather than drops
+// on a full buffer, so this measures caller-side publish timeouts against
+// that blocking, not relay-internal drops; see the Backpressure doc below.
 //
 // Run:
 //
@@ -59,16 +61,16 @@ const benchFanoutSubscribers = 8
 const benchFanoutDrainTimeout = 5 * time.Second
 
 // BenchmarkMemRelay_Fanout groups the two relay fan-out scenarios from issue
-// #180 Task 6: plain fan-out throughput (Fanout) and the drop-on-full path
-// under a saturated small buffer + slow subscriber (DropOnFull).
+// #180 Task 6: plain fan-out throughput (Fanout) and the backpressure path
+// under a saturated small buffer + slow subscriber (Backpressure).
 func BenchmarkMemRelay_Fanout(b *testing.B) {
 	b.Run("Fanout", benchMemRelayFanout)
-	b.Run("DropOnFull", benchMemRelayDropOnFull)
+	b.Run("Backpressure", benchMemRelayBackpressure)
 }
 
 // benchMemRelayFanout starts a MemRelay with benchFanoutSubscribers counting
 // sinks behind a generous buffer (so Publish never blocks on delivery — that
-// backpressure path is what DropOnFull covers instead), then times b.N
+// backpressure path is what Backpressure covers instead), then times b.N
 // Publish calls of a representative sync-update payload.
 func benchMemRelayFanout(b *testing.B) {
 	relay := cluster.NewMemRelay(cluster.WithBufferSize(4096))
@@ -118,17 +120,18 @@ func benchMemRelayFanout(b *testing.B) {
 //
 // MemRelay itself has no drop-on-full path: mem_relay.go's Publish doc is
 // explicit that it "intentionally does NOT drop on full" — a full per-node
-// channel makes Publish block until the node drains, ctx is cancelled, or the
+// channel makes Publish BLOCK until the node drains, ctx is cancelled, or the
 // node shuts down (that blocking-not-dropping choice is exactly what #187
 // raised). Since MemRelay is production code and this task must not modify
-// production code, DropOnFull exercises that real blocking path from the
+// production code, Backpressure exercises that real blocking path from the
 // benchmark side instead: pairing WithBufferSize(1) with this slow sink
 // saturates the node's channel almost immediately, and each Publish call is
 // given a short per-call context deadline. A Publish that would otherwise
 // block past that deadline returns ctx.Err() (MemRelay's Publish selects on
-// ctx.Done()) and is counted as "dropped" here at the call site — i.e. this
-// benchmark is the thing choosing not to wait, not MemRelay silently
-// discarding data.
+// ctx.Done()) and is counted as a caller-side publish-timeout here at the
+// call site — i.e. this benchmark is the thing choosing not to wait, not
+// MemRelay dropping anything. Real drop-on-full semantics (if ever added) are
+// deferred to the #187 Redis-relay work; MemRelay has none today.
 type slowSink struct {
 	room  string
 	delay time.Duration
@@ -146,41 +149,42 @@ func (s *slowSink) GetAwareness(string) (*awareness.Awareness, bool) { return ni
 func (s *slowSink) GetDoc(string) *crdt.Doc { return nil }
 
 const (
-	// benchDropOnFullMessages is K, the number of Publish calls attempted
+	// benchBackpressureMessages is K, the number of Publish calls attempted
 	// per b.N iteration against the saturated single-slot buffer.
-	benchDropOnFullMessages = 200
-	// benchDropOnFullSinkDelay is how long the slow sink's Inject stalls —
+	benchBackpressureMessages = 200
+	// benchBackpressureSinkDelay is how long the slow sink's Inject stalls —
 	// long enough that, combined with a 1-slot buffer, most Publish calls
 	// below hit their deadline instead of enqueuing.
-	benchDropOnFullSinkDelay = 20 * time.Millisecond
-	// benchDropOnFullPublishDeadline is the per-Publish context timeout that
-	// stands in for a bounded-wait caller giving up on a full buffer.
-	benchDropOnFullPublishDeadline = 2 * time.Millisecond
+	benchBackpressureSinkDelay = 20 * time.Millisecond
+	// benchBackpressurePublishDeadline is the per-Publish context timeout
+	// that stands in for a bounded-wait caller giving up on a full buffer.
+	benchBackpressurePublishDeadline = 2 * time.Millisecond
 )
 
-// benchMemRelayDropOnFull starts a fresh MemRelay(WithBufferSize(1)) with one
-// slowSink per b.N iteration, publishes benchDropOnFullMessages messages each
-// under a short deadline, and reports "dropped" (Publish calls that timed out
-// against the full buffer) and "published" (K) via b.ReportMetric.
-func benchMemRelayDropOnFull(b *testing.B) {
+// benchMemRelayBackpressure starts a fresh MemRelay(WithBufferSize(1)) with
+// one slowSink per b.N iteration, publishes benchBackpressureMessages
+// messages each under a short deadline, and reports "publish-timeouts"
+// (Publish calls that hit their caller-side deadline against the full
+// buffer) and "published" (K) via b.ReportMetric.
+func benchMemRelayBackpressure(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		relay := cluster.NewMemRelay(cluster.WithBufferSize(1))
-		sink := &slowSink{room: "room", delay: benchDropOnFullSinkDelay}
+		sink := &slowSink{room: "room", delay: benchBackpressureSinkDelay}
 		if err := relay.Start(context.Background(), sink); err != nil {
 			b.Fatalf("Start: %v", err)
 		}
 
-		var published, dropped int64
-		for j := 0; j < benchDropOnFullMessages; j++ {
-			ctx, cancel := context.WithTimeout(context.Background(), benchDropOnFullPublishDeadline)
+		var published, publishTimeouts int64
+		for j := 0; j < benchBackpressureMessages; j++ {
+			ctx, cancel := context.WithTimeout(context.Background(), benchBackpressurePublishDeadline)
 			err := relay.Publish(ctx, cluster.Outbound{
 				Room: "room", Kind: cluster.KindSync, Data: []byte{byte(j)},
 			})
 			cancel()
 			published++
 			if err != nil {
-				dropped++
+				publishTimeouts++
 			}
 		}
 
@@ -189,15 +193,24 @@ func benchMemRelayDropOnFull(b *testing.B) {
 		}
 		// relay.Close only signals shutdown (mem_relay.go's Close doc: it
 		// closes the relay-level done channel but never the per-node
-		// channel, precisely so a concurrent send can't panic). The node's
-		// delivery goroutine may still be mid-Inject (sleeping up to
-		// benchDropOnFullSinkDelay) when Close returns; give it a bounded
-		// grace period to finish that call and exit on the now-closed done
-		// channel before the next iteration (or the benchmark) proceeds, so
-		// no goroutine leaks across b.N iterations or sub-benchmarks.
-		time.Sleep(benchDropOnFullSinkDelay + 10*time.Millisecond)
+		// channel, precisely so a concurrent send can't panic). At loop end
+		// the node is often mid-Inject AND still holding one queued item
+		// (buffer size 1), so up to ~2×benchBackpressureSinkDelay of work can
+		// remain when Close returns. This sleep is a probabilistic bound, not
+		// a guaranteed join (MemRelay exposes no WaitGroup/join API) — it
+		// relies on iteration isolation (each b.N iteration gets its own
+		// relay/sink) plus generous per-iteration wall time for the run()
+		// goroutine to actually exit before the next iteration or the
+		// benchmark proceeds, so no goroutine leaks pile up across iterations
+		// or sub-benchmarks.
+		time.Sleep(2*benchBackpressureSinkDelay + 10*time.Millisecond)
 
-		b.ReportMetric(float64(dropped), "dropped")
+		// These are CALLER-SIDE context-deadline timeouts against MemRelay's
+		// blocking backpressure, NOT relay-internal drops: MemRelay has no
+		// drop-on-full path (mem_relay.go's Publish doc: "intentionally does
+		// NOT drop on full"). Real drop-on-full semantics are deferred to the
+		// #187 Redis-relay work. Metric name reflects that deliberately.
+		b.ReportMetric(float64(publishTimeouts), "publish-timeouts")
 		b.ReportMetric(float64(published), "published")
 	}
 }
