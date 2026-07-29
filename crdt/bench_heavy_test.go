@@ -153,10 +153,25 @@ func benchConflict(b *testing.B, users, opsPerUser int) {
 	}
 }
 
-// BenchmarkConflict_B2_TwoUsers is the B2 scenario: two peers concurrently
-// insert at the same position, then converge.
-func BenchmarkConflict_B2_TwoUsers(b *testing.B) { benchConflict(b, 2, 1000) }
+// NOTE: same-start-position concurrent inserts are the pathological O(n^2)-ish
+// conflict-arbitration case for a CRDT text type (every peer's insert is
+// causally concurrent with, and ordered against, every other peer's insert at
+// that position), which is exactly the shape B2/B3 are meant to exercise. The
+// sizes below are deliberately bounded (not the dmonad/crdt-benchmarks
+// upstream sizes) so a single -benchtime=1x iteration stays under ~3s and
+// ~1GB allocated — nightly CI runs the benchheavy tier at -count=6 on
+// GitHub-hosted runners with only ~7-16GB of RAM, and an unbounded conflict
+// bench at that scale (e.g. 20 users x 1000 ops measured ~160s/iter and
+// ~223GB allocated/iter) would OOM or hang the job. Profiling larger N is a
+// manual `go test -bench` exercise outside CI, not something this suite runs
+// automatically.
 
-// BenchmarkConflict_B3_ManyUsers is the B3 scenario: 20 peers concurrently
-// insert at the same position, then converge.
-func BenchmarkConflict_B3_ManyUsers(b *testing.B) { benchConflict(b, 20, 1000) }
+// BenchmarkConflict_B2_TwoUsers is the B2 scenario: two peers concurrently
+// insert at the same position, then converge. Measured (this machine,
+// -benchtime=1x -benchmem): ~12ms/iter, ~19.6MB/iter, ~21.9k allocs/iter.
+func BenchmarkConflict_B2_TwoUsers(b *testing.B) { benchConflict(b, 2, 500) }
+
+// BenchmarkConflict_B3_ManyUsers is the B3 scenario: many peers concurrently
+// insert at the same position, then converge. Measured (this machine,
+// -benchtime=1x -benchmem): ~413ms/iter, ~596MB/iter, ~274k allocs/iter.
+func BenchmarkConflict_B3_ManyUsers(b *testing.B) { benchConflict(b, 10, 150) }
