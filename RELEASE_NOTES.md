@@ -1,4 +1,4 @@
-## [Unreleased]
+## v1.40.0
 
 Two convergence/lifecycle fixes plus new fuzz coverage. `YArray.Move` could
 diverge across peers depending on merge order — a move that integrated
@@ -26,6 +26,9 @@ persistence/awareness goroutines. No breaking API changes.
   (`TestFuzzConvergenceMoves`, [#191](https://github.com/reearth/ygo/issues/191)).
   Moves are a ygo wire extension the yjs reference can't decode, so they're
   validated by internal convergence rather than the yjs cross-impl oracle.
+- New yjs-interop guard tests for nested `Y.Map` (and `NaN`) values across
+  V1/V2 round-trips ([#194](https://github.com/reearth/ygo/pull/194)),
+  proving ygo preserves nested shared-type entries from genuine yjs bytes.
 
 ## v1.39.0
 
