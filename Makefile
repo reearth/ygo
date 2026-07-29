@@ -1,4 +1,4 @@
-.PHONY: all test lint fuzz bench coverage vet tools fixtures fmt clean
+.PHONY: all test lint fuzz bench bench-heavy coverage vet tools fixtures fmt clean
 
 GOTEST  := go test -race -timeout 120s
 PACKAGES := ./...
@@ -31,6 +31,14 @@ fuzz:
 bench:
 	@mkdir -p benchmarks
 	go test -bench=. -benchmem -count=3 $(PACKAGES) | tee benchmarks/latest.txt
+
+# Heavy tier (see BENCHMARKS.md): 100k-scale + conflict benches gated behind
+# the benchheavy build tag, plus the websocket scaling probe. Too slow for
+# the PR gate; run locally before/after perf-sensitive changes, or let the
+# nightly CI cron job (.github/workflows/benchmark.yml) run it on main.
+bench-heavy:
+	go test -tags benchheavy -bench=. -benchmem -count=6 $(PACKAGES)
+	go test -tags benchheavy -run TestScaleProbe -v ./provider/websocket/
 
 # Regenerates the deterministic cross-impl conformance fixtures
 # (crdt/testdata/*_yjs_fixtures.json) from the pinned yjs. The legacy
