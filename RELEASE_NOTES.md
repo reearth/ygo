@@ -1,3 +1,99 @@
+## v1.40.0
+
+Two convergence/lifecycle fixes plus new fuzz coverage. `YArray.Move` could
+diverge across peers depending on merge order — a move that integrated
+before its target item silently dropped its target claim; moves now defer
+target arbitration until the target integrates, so all peers converge
+regardless of order. On the websocket server, a room created for a
+connection that fails before any peer registers (connection-limit denial or
+WebSocket upgrade failure) is now reaped instead of leaking the room and its
+persistence/awareness goroutines. No breaking API changes.
+
+### Fixed
+
+- **`YArray.Move` convergence across merge orders**
+  ([#191](https://github.com/reearth/ygo/issues/191)): moves now defer
+  target arbitration until the target item integrates, fixing a case where
+  ascending-ClientID integration order caused peers to diverge.
+- **Orphaned websocket rooms on early connection failure**
+  ([#192](https://github.com/reearth/ygo/issues/192)): rooms are now reaped
+  when a connection fails before any peer registers, instead of leaking the
+  room and its background goroutines.
+
+### Testing
+
+- New Go-internal multi-peer move-convergence fuzzer sweep
+  (`TestFuzzConvergenceMoves`, [#191](https://github.com/reearth/ygo/issues/191)).
+  Moves are a ygo wire extension the yjs reference can't decode, so they're
+  validated by internal convergence rather than the yjs cross-impl oracle.
+- New yjs-interop guard tests for nested `Y.Map` (and `NaN`) values across
+  V1/V2 round-trips ([#194](https://github.com/reearth/ygo/pull/194)),
+  proving ygo preserves nested shared-type entries from genuine yjs bytes.
+
+## v1.39.0
+
+A minor release focused on performance and websocket-server room lifecycle.
+`YText`/`YArray` positional access (`Get`/`Slice`, positional insert/delete,
+`Format`, `ApplyDelta`) now runs through a Yjs-style bidirectional,
+move-aware search-marker cache instead of the old forward-only position
+cache — a purely internal change, no public API surface moved — cutting
+100k-node positional operations by roughly two orders of magnitude. Along
+the way, a real `YText.ApplyDelta` formatting bug was fixed: an `insert` op
+with no attributes of its own no longer bleeds in a preceding retain's
+formatting (Yjs/Quill-aligned); this is a **behaviour change** for code that
+relied on the old bleed-through. On the websocket server, room load
+(`LoadDoc`/decode/`OnLoadDocument`) no longer runs under the global
+room-map lock, so concurrent connects to distinct rooms load in parallel
+instead of serializing; and new `Server.RoomIdleTimeout` /
+`Server.MaxResidentRooms` fields let a room stay warm in memory for a
+bounded time (and bounded count) after its last peer leaves, so a quick
+reconnect reuses the live doc instead of a full reload. No breaking API
+changes; both new fields default to zero, which preserves prior-release
+behaviour exactly.
+
+### Performance
+
+- **O(1) amortized positional access for `YText`/`YArray`**
+  ([#181](https://github.com/reearth/ygo/issues/181)): a Yjs-style
+  bidirectional, move-aware search-marker structure replaces the old
+  forward-only position cache. Internal only — no public API change.
+  Measured on a 100k-node document: random-position insert ~101× faster
+  (632µs → 6.3µs), reverse insert ~916× faster (1.15ms → 1.26µs), random
+  `Get` ~114× faster (481µs → 4.2µs).
+
+### Fixed
+
+- **`YText.ApplyDelta` format-bleed into a following insert**
+  ([#181](https://github.com/reearth/ygo/issues/181)): an `insert` op with
+  no `Attributes` of its own no longer inherits formatting from a preceding
+  `{retain, attributes}` op, matching the Yjs/Quill rule. Behaviour change —
+  see summary above. Also fixed: consecutive attribute-less inserts could
+  integrate out of order.
+- **Room load no longer serializes under the global room-map lock**
+  ([#182](https://github.com/reearth/ygo/issues/182)): loading now runs
+  off-lock behind a per-room `ready` barrier, so concurrent connects to
+  distinct rooms load in parallel; a reentrant load (e.g. cluster relay
+  `Inject`) waits on the same barrier instead of double-loading.
+
+### Added
+
+- **`Server.RoomIdleTimeout` and `Server.MaxResidentRooms`**
+  ([#183](https://github.com/reearth/ygo/issues/183)): keep a room resident
+  and warm for a bounded time after its last peer leaves (durable flush
+  still happens immediately), with an LRU bound on how many idle rooms stay
+  resident at once. Both default to zero, preserving the previous
+  eager-evict behaviour.
+
+## Install
+
+```
+go get github.com/reearth/ygo@v1.39.0
+```
+
+See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
+
+---
+
 ## v1.38.0
 
 A minor, additive release adding two independent features. On the awareness

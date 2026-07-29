@@ -1,0 +1,12 @@
+{
+  "seed": 900016,
+  "numPeers": 3,
+  "steps": [
+    {"kind":"op","peer":0,"root":"a","typeKind":"array","op":"insert","posHint":8,"jsonVal":"true"},
+    {"kind":"op","peer":2,"root":"a","typeKind":"array","op":"insert","posHint":16,"jsonVal":"0.46287052329119144"},
+    {"kind":"op","peer":0,"root":"a","typeKind":"array","op":"insert","posHint":14,"jsonVal":"0.28866551144576397"},
+    {"kind":"op","peer":2,"root":"a","typeKind":"array","op":"insert","posHint":4,"jsonVal":"true"},
+    {"kind":"sync","from":2,"to":0,"method":"mergev1"},
+    {"kind":"op","peer":0,"root":"a","typeKind":"array","op":"move","posHint":31,"toHint":13}
+  ]
+}

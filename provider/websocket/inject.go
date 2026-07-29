@@ -195,6 +195,15 @@ func (s *Server) broadcastUpdate(ctx context.Context, room string, update []byte
 	if !ok {
 		return ErrRoomNotFound
 	}
+	// Gate on the room's load barrier (#182). For the public BroadcastUpdate path
+	// this waits until the off-lock load finished; for the relay Inject path the
+	// room was already obtained via getOrCreateRoom (ready closed), so this is a
+	// no-op. A room whose load failed was removed from s.rooms and is treated as
+	// not found. The wait holds no lock, so it cannot stall other rooms.
+	<-rm.ready
+	if rm.loadErr != nil {
+		return ErrRoomNotFound
+	}
 	rm.mu.Lock()
 	targets := make([]*peer, 0, len(rm.peers))
 	for p := range rm.peers {
@@ -287,10 +296,15 @@ func (s *Server) Apply(
 			return fmt.Errorf("%w: %w", ErrInjectRefused, err)
 		}
 	}
-	rm, err := s.getOrCreateRoom(ctx, room)
+	rm, _, err := s.getOrCreateRoom(ctx, room)
 	if err != nil {
 		return err
 	}
+	// Balance the inflight++ from getOrCreateRoom: this call uses rm
+	// synchronously and then returns, so a deferred release is correct
+	// (#193 review). Also protects rm from a concurrent eviction while in use.
+	defer s.releaseInflight(rm)
+	rm.clearIdle() // #183: Apply mutates the doc immediately; no registration delay.
 
 	origin := new(struct{})
 	var (
@@ -447,11 +461,32 @@ func (s *Server) CloseRoom(name string, force bool) error {
 		return ErrInvalidRoomName
 	}
 
+	// Find the room, waiting out any in-progress off-lock load (#182). Evicting a
+	// room whose loadRoom is still running would race the loader (which may still
+	// wire the persistence worker, or remove the placeholder on failure). A
+	// loading room has no peers yet, so waiting is safe; we release s.rmu across
+	// the wait so we neither reintroduce the global stall this fix removes nor
+	// deadlock the loader's failure-path delete (which needs s.rmu). After the
+	// wait we re-look-up: the load may have failed and removed the placeholder, or
+	// the room may have been evicted/replaced.
 	s.rmu.Lock()
-	rm, ok := s.rooms[name]
-	if !ok {
-		s.rmu.Unlock()
-		return ErrRoomNotFound
+	var rm *room
+	for {
+		r, ok := s.rooms[name]
+		if !ok {
+			s.rmu.Unlock()
+			return ErrRoomNotFound
+		}
+		select {
+		case <-r.ready:
+			rm = r
+		default:
+			s.rmu.Unlock()
+			<-r.ready
+			s.rmu.Lock()
+			continue
+		}
+		break
 	}
 
 	rm.mu.Lock()

@@ -18,11 +18,24 @@ import (
 // GetDoc, which exposes the room's *crdt.Doc.
 func (s *Server) GetAwareness(room string) (*awareness.Awareness, bool) {
 	s.rmu.RLock()
-	defer s.rmu.RUnlock()
-	if r, ok := s.rooms[room]; ok {
-		return r.awareness, true
+	r, ok := s.rooms[room]
+	s.rmu.RUnlock()
+	if !ok {
+		return nil, false
 	}
-	return nil, false
+	// A room still performing its off-lock load (#182), or one whose load failed
+	// (placeholder already removed), is reported as not-yet-resident — mirroring
+	// GetDoc's contract — so callers never see the awareness of a room that is not
+	// fully live.
+	select {
+	case <-r.ready:
+		if r.loadErr != nil {
+			return nil, false
+		}
+		return r.awareness, true
+	default:
+		return nil, false
+	}
 }
 
 // Rooms returns the names of all rooms currently resident in the server, in

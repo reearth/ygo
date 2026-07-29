@@ -3,6 +3,9 @@ package fuzz
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/reearth/ygo/crdt"
 )
 
@@ -65,4 +68,14 @@ func TestApplySync_DoesNotMixV1AndV2Inboxes(t *testing.T) {
 	if _, err := RunGo(Generate(0)); err != nil {
 		t.Fatalf("RunGo returned an error (V1/V2 inbox mixing regression): %v", err)
 	}
+}
+
+func TestApplyLocalOp_Move(t *testing.T) {
+	p := &peerState{doc: crdt.New(crdt.WithClientID(1))}
+	arr := p.doc.GetArray("a")
+	p.doc.Transact(func(txn *crdt.Transaction) { arr.Insert(txn, 0, []any{"A", "B", "C"}) })
+	applyLocalOp(p, Step{Kind: StepLocalOp, Peer: 0, Root: "a", TypeKind: KindArray, Op: OpMove, PosHint: 0, ToHint: 2})
+	b, err := arr.ToJSON()
+	require.NoError(t, err)
+	assert.Equal(t, `["B","C","A"]`, string(b)) // ygo Move(0,2): A to post-removal index 2 (end)
 }

@@ -1468,55 +1468,52 @@ func TestUnit_RelPos_AssocNeg_AtLastItem(t *testing.T) {
 	require.NotNil(t, rp.Item, "should anchor to last item's clock")
 }
 
-// ── storePosCache: circular-overwrite wrap (posCacheWr resets to 0) ──────────
+// ── search-marker cache: large sequential doc + end append ───────────────────
 
-func TestUnit_StorePosCache_CircularWrap(t *testing.T) {
-	// storePosCache's circular-overwrite path is only triggered when the cache
-	// is already FULL (posCacheLen==posLRUSize) and ONE MORE call is made.
-	// That requires a leftNeighbourAt scan of posLRUSize*2+1 items starting
-	// from an empty cache (i.e. after a remote apply, which doesn't populate
-	// the cache).
-	//
-	// Build a doc with posLRUSize*2+2 single-char items from client 2.
+func TestUnit_SearchMarker_LargeDocEndAppend(t *testing.T) {
+	// Regression carried over from the old posCache circular-wrap test: build a
+	// long document from many single-char items (well past maxSearchMarker so
+	// the marker cache saturates and starts evicting), apply it remotely (which
+	// clears markers), then a positioned append must still resolve correctly.
 	docSrc := newTestDoc(2)
 	txtSrc := docSrc.GetText("t")
-	total := posLRUSize*2 + 2
+	total := maxSearchMarker*2 + 2
 	for i := 0; i < total; i++ {
 		n := txtSrc.Len()
 		docSrc.Transact(func(txn *Transaction) { txtSrc.Insert(txn, n, "x", nil) })
 	}
 
-	// Apply remotely to docDst — leaves cache empty.
+	// Apply remotely to docDst — invalidatePosCache (→ clearMarkers) leaves the
+	// marker cache empty.
 	v1 := EncodeStateAsUpdateV1(docSrc, nil)
 	docDst := newTestDoc(1)
 	require.NoError(t, ApplyUpdateV1(docDst, v1, nil))
 
-	// Insert at the very end: leftNeighbourAt(total) scans all `total` items
-	// from start (cache is empty after remote apply). The first posLRUSize
-	// calls fill the cache; the next posLRUSize calls do circular writes
-	// (posCacheWr: 0→posLRUSize-1); the (2*posLRUSize+1)th call increments
-	// posCacheWr to posLRUSize → triggers the `posCacheWr = 0` wrap.
+	// Insert at the very end: leftNeighbourAt(total) walks from start (markers
+	// empty after remote apply), saturating and LRU-evicting markers along the
+	// way, and must resolve the append correctly.
 	txtDst := docDst.GetText("t")
 	docDst.Transact(func(txn *Transaction) { txtDst.Insert(txn, total, "Z", nil) })
 	assert.Equal(t, total+1, txtDst.Len())
 }
 
-// ── invalidatePosCacheFrom: keeps lower-index entries ────────────────────────
+// ── search-marker position lookup after partial invalidation ────────────────
 
-func TestUnit_InvalidatePosCacheFrom_KeepsLowerEntries(t *testing.T) {
+func TestUnit_SearchMarker_PartialInvalidation_KeepsLowerMarkers(t *testing.T) {
 	// Build two separate ContentString items so leftNeighbourAt stores two
-	// cache entries. Then insert at a position that invalidates only the higher
-	// one, exercising the "posCache[n] = posCache[i]" keep path.
+	// search markers. Then insert at a position that invalidates only the
+	// higher-index marker, exercising the marker-cache "keep entries below the
+	// invalidation point" path.
 	doc := newTestDoc(1)
 	txt := doc.GetText("t")
 	// Two separate transactions → two separate items after squashRuns.
 	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "abc", nil) })
 	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 3, "def", nil) })
-	// Insert at index 4 → leftNeighbourAt(4) scans both items and stores:
-	//   (3, item_abc) and (6, item_def) in the cache.
-	// integrate then calls invalidatePosCacheFrom(4):
-	//   entry (3, item_abc): 3 < 4 → KEPT   ← exercises the keep path
-	//   entry (6, item_def): 6 >= 4 → dropped
+	// Insert at index 4 → leftNeighbourAt(4) scans both items and stores search
+	// markers at (3, item_abc) and (6, item_def).
+	// integrate then invalidates markers from index 4:
+	//   marker (3, item_abc): 3 < 4 → KEPT   ← exercises the keep path
+	//   marker (6, item_def): 6 >= 4 → dropped
 	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 4, "X", nil) })
 	assert.Equal(t, 7, txt.Len())
 }

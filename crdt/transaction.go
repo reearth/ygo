@@ -226,8 +226,13 @@ func squashRuns(txn *Transaction) {
 				cs := left.Content.(*ContentString)
 				cs.Str = sb.String()
 				cs.utf16Len = utf16Len(cs.Str)
+				// A run squash absorbs the right items into left and splices them
+				// out of the linked list; a marker still pointing at an absorbed
+				// (now off-list) item would walk from a dangling node. Rendered
+				// positions are unchanged, but relocating each marker is Task 5's
+				// mergeWith concern — here we clear all markers (always safe).
 				if left.Parent != nil {
-					left.Parent.invalidatePosCache()
+					left.Parent.clearMarkers()
 				}
 				// Compact items slice: skip over all absorbed entries.
 				items = append(items[:i+1], items[j:]...)
@@ -404,8 +409,12 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if item.Right != nil {
 		item.Right.Left = left
 	}
+	// item is absorbed into left and removed from the list. A marker still
+	// pointing at item would be left dangling; rendered positions don't change,
+	// but marker relocation on merge is Task 5's mergeWith concern, so clear all
+	// markers here (always safe).
 	if left.Parent != nil {
-		left.Parent.invalidatePosCache()
+		left.Parent.clearMarkers()
 	}
 
 	// Remove item from the store's per-client slice.

@@ -7,8 +7,23 @@ import (
 
 var textAlphabets = []string{"abcdef", "αβγδ日本語", "🙂🎉ABC"} // ascii, multi-byte, emoji
 
-// Generate builds a deterministic Scenario from seed.
+// GenOpts controls opt-in fuzz-generation features that are unsafe for the
+// yjs cross-impl oracle (e.g. moves, which ygo encodes as a wire extension
+// the yjs oracle cannot decode) and so must never appear in default
+// generation.
+type GenOpts struct {
+	Moves bool // allow array move ops (ygo-only; breaks yjs cross-impl)
+}
+
+// Generate builds a deterministic Scenario from seed with unchanged, move-free
+// behaviour (equivalent to GenerateWith(seed, GenOpts{})). Kept byte-identical
+// so TestFuzzConvergence and TestFuzzCrossImpl are unaffected.
 func Generate(seed uint64) Scenario {
+	return GenerateWith(seed, GenOpts{})
+}
+
+// GenerateWith builds a deterministic Scenario from seed, honoring opts.
+func GenerateWith(seed uint64, opts GenOpts) Scenario {
 	r := rand.New(rand.NewSource(int64(seed))) //nolint:gosec // deterministic fuzz seed, not crypto
 	numPeers := 3 + r.Intn(3)                  // 3..5
 	numSteps := 60 + r.Intn(141)               // 60..200
@@ -27,7 +42,7 @@ func Generate(seed uint64) Scenario {
 			s.Steps = append(s.Steps, Step{Kind: StepGC, Peer: r.Intn(numPeers)})
 		default:
 			root := roots[r.Intn(len(roots))]
-			s.Steps = append(s.Steps, genLocalOp(r, numPeers, root.name, root.kind))
+			s.Steps = append(s.Steps, genLocalOp(r, numPeers, root.name, root.kind, opts))
 		}
 	}
 	return s
@@ -41,7 +56,7 @@ func genSync(r *rand.Rand, n int) Step {
 	return Step{Kind: StepSync, From: from, To: to, Method: methods[r.Intn(len(methods))]}
 }
 
-func genLocalOp(r *rand.Rand, n int, root string, kind TypeKind) Step {
+func genLocalOp(r *rand.Rand, n int, root string, kind TypeKind, opts GenOpts) Step {
 	st := Step{Kind: StepLocalOp, Peer: r.Intn(n), Root: root, TypeKind: kind}
 	switch kind {
 	case KindText:
@@ -53,13 +68,20 @@ func genLocalOp(r *rand.Rand, n int, root string, kind TypeKind) Step {
 			st.Op, st.PosHint, st.LenHint = OpDelete, r.Intn(50), 1+r.Intn(3)
 		}
 	case KindArray:
-		switch r.Intn(3) {
+		moveOK := opts.Moves
+		pick := r.Intn(3)
+		if moveOK {
+			pick = r.Intn(4) // 0..3, add the move branch
+		}
+		switch pick {
 		case 0:
 			st.Op, st.PosHint, st.JSONVal = OpInsert, r.Intn(50), randScalarJSON(r)
 		case 1:
 			st.Op, st.JSONVal = OpPush, randScalarJSON(r)
-		default:
+		case 2:
 			st.Op, st.PosHint, st.LenHint = OpDelete, r.Intn(50), 1+r.Intn(3)
+		default: // move
+			st.Op, st.PosHint, st.ToHint = OpMove, r.Intn(50), r.Intn(50)
 		}
 	case KindMap:
 		if r.Intn(100) < 70 {

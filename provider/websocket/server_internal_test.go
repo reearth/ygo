@@ -163,7 +163,7 @@ func awarenessUpdateFor(id uint64) []byte {
 func TestServer_MaxAwarenessClientsPerRoom_IsWired(t *testing.T) {
 	s := NewServer()
 	s.MaxAwarenessClientsPerRoom = 2
-	rm, err := s.getOrCreateRoom(context.Background(), "room")
+	rm, _, err := s.getOrCreateRoom(context.Background(), "room")
 	if err != nil {
 		t.Fatalf("getOrCreateRoom: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestServer_AwarenessExpiry_GoroutineStoppedOnEvict(t *testing.T) {
 	s.AwarenessExpiry = 50 * time.Millisecond
 
 	before := runtime.NumGoroutine()
-	rm, err := s.getOrCreateRoom(context.Background(), "room")
+	rm, _, err := s.getOrCreateRoom(context.Background(), "room")
 	if err != nil {
 		t.Fatalf("getOrCreateRoom: %v", err)
 	}
@@ -205,6 +205,56 @@ func TestServer_AwarenessExpiry_GoroutineStoppedOnEvict(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("expiry goroutine leaked: before=%d after=%d", before, runtime.NumGoroutine())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestServer_Shutdown_DestroysAwarenessOfResidentRooms verifies that Shutdown
+// stops the auto-expiry goroutine of a room that is still RESIDENT (never
+// evicted) at shutdown time — the #183 gap where an idle-resident room
+// (RoomIdleTimeout>0) sat in s.rooms with no peers, so neither eviction path
+// (which calls awareness.Destroy) ever ran for it. The room here is created
+// via getOrCreateRoom and never joined/left by a peer, so its idleSince stays
+// zero and the idle sweeper's candidate scan never picks it up — any Destroy
+// of its awareness must come from Shutdown itself.
+func TestServer_Shutdown_DestroysAwarenessOfResidentRooms(t *testing.T) {
+	s := NewServer()
+	s.AwarenessExpiry = 50 * time.Millisecond
+	s.RoomIdleTimeout = time.Hour // large enough that the sweeper (if started) never evicts
+
+	before := runtime.NumGoroutine()
+	rm, _, err := s.getOrCreateRoom(context.Background(), "room")
+	if err != nil {
+		t.Fatalf("getOrCreateRoom: %v", err)
+	}
+	if rm.awareness == nil {
+		t.Fatal("room has no awareness")
+	}
+
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	// Room must still be resident (Shutdown must not evict) — only its
+	// awareness sweep should have stopped.
+	s.rmu.RLock()
+	_, present := s.rooms["room"]
+	s.rmu.RUnlock()
+	if !present {
+		t.Fatal("Shutdown must not remove a resident room from s.rooms")
+	}
+
+	// Poll until the goroutine count returns to baseline (the expiry goroutine
+	// exits when Destroy stops it). Condition-based wait avoids flakiness.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		runtime.Gosched()
+		if runtime.NumGoroutine() <= before+1 { // +1 tolerance for scheduler noise
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expiry goroutine of a resident room leaked past Shutdown: before=%d after=%d", before, runtime.NumGoroutine())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -130,7 +130,7 @@ func TestPersistCoalesce_BurstMergesToOneStore(t *testing.T) {
 	a := &recordAdapter{}
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 
 	const n = 5
@@ -160,7 +160,7 @@ func TestPersistCoalesce_DisabledIsPerUpdate(t *testing.T) {
 	a := &recordAdapter{}
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, -1, 0)
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 
 	for i := 0; i < 3; i++ {
@@ -176,7 +176,7 @@ func TestPersistCoalesce_MaxWaitFlushes(t *testing.T) {
 	a := &recordAdapter{}
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 
 	const n = 4
@@ -198,7 +198,7 @@ func TestPersistCoalesce_ShutdownFlushesWithLiveCtx(t *testing.T) {
 	a := &recordAdapter{}
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 
 	const n = 3
@@ -256,7 +256,7 @@ func TestPersistCoalesce_RetainsBatchOnFailedFlush(t *testing.T) {
 	a := &failFirstAdapter{}
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 
 	const n = 3
@@ -314,7 +314,7 @@ func TestPersistCompact_CountTrigger(t *testing.T) {
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
 	s.CompactEvery = 2
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 
 	// 2 separate flushes: edit → window fire → edit → window fire.
@@ -334,7 +334,7 @@ func TestPersistCompact_ZeroNoCountTrigger(t *testing.T) {
 	a := &compactAdapter{}
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond) // CompactEvery=0
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 	applyEdit(r, "x", 0)
 	fc.nextTimerOfDur(t, 50*time.Millisecond).fire()
@@ -348,7 +348,7 @@ func TestPersistCompact_OnUnload(t *testing.T) {
 	a := &compactAdapter{}
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 	applyEdit(r, "x", 0)
 	fc.nextTimerOfDur(t, 50*time.Millisecond) // batched, do not fire
@@ -363,7 +363,7 @@ func TestPersistCompact_NonCompactableAdapterSafe(t *testing.T) {
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
 	s.CompactEvery = 1
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 	applyEdit(r, "x", 0)
 	fc.nextTimerOfDur(t, 50*time.Millisecond).fire()
@@ -395,7 +395,7 @@ func TestPersistFlushReq_MakesPendingBatchDurable(t *testing.T) {
 	a := &recordAdapter{}
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 
 	const n = 3
@@ -418,7 +418,7 @@ func TestPersistFlushReq_DisabledPath(t *testing.T) {
 	a := &recordAdapter{}
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, -1, 0) // disabled
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 	applyEdit(r, "y", 0)
 	assert.Eventually(t, func() bool { return a.count() == 1 }, time.Second, 5*time.Millisecond)
@@ -432,7 +432,7 @@ func TestPersistCoalesce_MergeFailureFallsBack(t *testing.T) {
 	fc := newFakeClock()
 	s := newCoalesceServer(a, fc, 50*time.Millisecond, 500*time.Millisecond)
 	s.mergeFn = func(...[]byte) ([]byte, error) { return nil, errors.New("boom") }
-	r, err := s.getOrCreateRoom(context.Background(), "doc1")
+	r, _, err := s.getOrCreateRoom(context.Background(), "doc1")
 	require.NoError(t, err)
 
 	const n = 3

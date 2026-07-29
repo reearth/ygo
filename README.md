@@ -28,7 +28,7 @@ ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (
 - Native iOS/Android embedding via `gomobile` (the `mobile/` subpackage) — no JS runtime, no CGO
 - Snapshots, garbage collection, undo manager, persistence adapters
 
-The current release is **v1.38.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
+The current release is **v1.39.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
 
 ## Features
 
@@ -72,6 +72,8 @@ Post-v1.0 hardening:
 - **Subdocument lifecycle** (#63). A `Doc` can embed another `Doc` as a subdocument via `YMap.Set(txn, key, subdoc)`; `GetSubdocs`/`GetSubdocGUIDs`/`OnSubdocs`/`Load` plus `WithAutoLoad`/`WithShouldLoad`/`WithCollectionID` track and drive the add/remove/load lifecycle — the local half of Yjs's subdocuments feature. Also: `New()` now defaults a Doc's `guid` to a random uuidv4 instead of `""` (Yjs parity). Live cross-peer subdoc sync is a separate, tracked follow-up (#142). See [Subdocuments](#subdocuments) below.
 - **Coalesced persistence** (v1.36.0). The websocket server's persistence worker now debounces backing-store writes by default — a 2s window, capped by a 10s max wait — merging bursts into a single `StoreUpdate` instead of one write per update (Hocuspocus parity). This is a behaviour change for servers with a `PersistenceAdapter` configured; set `Server.PersistCoalesceWindow = -1` to restore strict per-update writes (#175).
 - **Persistence durability + compaction** (v1.37.0). The room-teardown paths now flush a pending coalesced batch durably before evicting the room, closing a gap where a fast reconnect could reload stale state and miss the just-made edit. Adapters can also bound stored-version growth by implementing `CompactableAdapter`, driven by `Server.CompactEvery` (`persistence.LegacyAdapter` supports this via its new `KeepVersions` field) (#175).
+- **Positional-access performance** (v1.39.0). `YText`/`YArray` positional operations (`Get`, `Slice`, positional insert/delete, `Format`, `ApplyDelta`) now route through a Yjs-style bidirectional, move-aware search-marker cache instead of the old forward-only position cache — internal only, no public API change. Measured on a 100k-node document: random-position insert ~101× faster, reverse insert ~916× faster (the old cache's O(n²) worst case), random `Get` ~114× faster. Also fixes a `YText.ApplyDelta` bug where an attribute-less `insert` could inherit a preceding retain's `attributes` (Yjs/Quill-aligned fix; behaviour change for callers relying on the old bleed-through) (#181).
+- **Room load off the global lock + idle-room residency** (v1.39.0). Concurrent connects to distinct rooms now load in parallel instead of serializing behind the server's single rooms lock (#182). New `Server.RoomIdleTimeout`/`Server.MaxResidentRooms` let a room stay warm in memory for a bounded time (and bounded count) after its last peer leaves so a quick reconnect reuses the live doc instead of reloading; both default to zero, preserving the previous eager-evict behaviour (#183).
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release picture.
 
@@ -384,6 +386,8 @@ By default (v1.36.0) these writes are coalesced: the worker debounces bursts of 
 
 A room's pending coalesced batch is flushed durably before the room unloads (v1.37.0), so a peer that reconnects during a quick refresh reuses the live document instead of racing a stale reload from the backing store. Adapters that also want to bound stored-version growth can implement `CompactableAdapter` (`Compact(ctx, room) error`); the server invokes it on room unload and, when `Server.CompactEvery > 0`, after every N persistence flushes. `persistence.LegacyAdapter` implements this via its `KeepVersions` field.
 
+`Server.RoomIdleTimeout` (v1.39.0) goes a step further: instead of unloading a room the instant its last peer disconnects, it keeps the room resident — the durable flush above still runs immediately, but the worker and in-memory doc stay warm — so a peer that reconnects within the timeout reuses the live doc with no `LoadDoc` at all. `Server.MaxResidentRooms` puts an LRU bound on how many idle rooms stay warm at once. Both default to zero, which is the original eager-evict-on-last-peer behaviour; see [Resource limits](#resource-limits) below for the field details.
+
 For a ready-made durable backend, [`persistence/sqlite`](persistence/sqlite/) provides a pure-Go (CGO-free, `modernc.org/sqlite`) `VersionedPersistence` store with WAL mode, full versioned history, and a crash-safe two-phase prune. Open it with `sqlite.Open("data.db")`.
 
 For backend examples (Postgres, Redis, file-system) and the v1.7.0 context-aware extension that lets adapters abort in-flight writes during `Server.Shutdown`, see [docs/PERSISTENCE.md](docs/PERSISTENCE.md).
@@ -504,6 +508,8 @@ All hard-capped (semaphore-backed for connection counts):
 - `Server.MaxPendingItems` — per-document cap on items parked in the out-of-order pending queue (default 100,000). When the cap is reached, updates that would park additional items return `ErrInvalidUpdate`. Defends against a crafted update full of far-future-clock items that would otherwise grow the queue unboundedly. Same cap is available at the doc level via `crdt.WithMaxPendingItems(n)`.
 - `Server.HandshakeTimeout` — first-read deadline applied after WebSocket upgrade (default 30s). Closes connections that complete the handshake but never send a message (slow-loris defense). Cleared after the first successful read.
 - `Server.MaxAwarenessBytesPerRoom` — cap on the cumulative byte size of awareness state held in one room across all remote clients (default unlimited; suggested production value: 100 MiB). Without this cap, a single peer can claim up to 10,000 clientIDs each holding the 1 MiB per-state maximum. Forwarded to each room's `Awareness` via `awareness.Awareness.SetMaxBytes`.
+- `Server.RoomIdleTimeout` (v1.39.0) — keeps a room resident and warm (durably flushed, in-memory doc intact) for this long after its last peer disconnects, so a quick reconnect skips a full `LoadDoc` reload. Default 0: evict immediately, matching prior releases.
+- `Server.MaxResidentRooms` (v1.39.0) — LRU bound on how many idle-resident rooms stay warm at once when `RoomIdleTimeout > 0`; a background sweeper evicts the least-recently-idle room first once the count is exceeded. Default 0: unbounded.
 
 Each defaults to a sensible value or unlimited where noted.
 
