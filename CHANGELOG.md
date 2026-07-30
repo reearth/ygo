@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [Unreleased]
+
+### Added
+
+- **`SnapshotStore`: enumerable, individually-deletable labelled snapshots**
+  (`persistence/snapshots.go`): a new optional extension interface with
+  `SaveSnapshot`/`ListSnapshots`/`GetSnapshotState`/`DeleteSnapshot`, plus
+  `SnapshotInfo{ID, Label, CreatedAt, Size}` and
+  `SnapshotVersionedPersistence`. Implemented by the memory, file, and sqlite
+  backends and covered by a new shared conformance suite
+  (`RunSnapshotStoreConformance`).
+
+  This closes a lifecycle gap in the existing name-keyed
+  `CaptureSnapshot`/`RestoreSnapshot` pair, which could be written and read by
+  exact name but **not enumerated, not individually deleted, and carried no
+  metadata** — making labelled snapshots an unbounded, unreclaimable resource
+  that only `Delete(room)` could clear. Applications building a user-facing
+  version history needed all four operations, and previously had to maintain
+  their own parallel index with no way to reconcile it against storage.
+
+  Snapshots are ID-keyed with **non-unique** labels, so repeated saves under the
+  same label create distinct snapshots instead of overwriting. IDs are unique
+  and monotonic *within a room* and are never reused there, but are not
+  guaranteed globally unique — always carry the room alongside the ID.
+  `ListSnapshots` returns newest-first, matching `ListVersions`, and does not
+  read state blobs so listing stays cheap. The older name-keyed pair is
+  unchanged and still supported, but is superseded for new code.
+
+### Fixed
+
+- **sqlite `Delete(room)` now also removes labelled snapshots**: the
+  `snapshot_versions` rows for a room survived a room delete, contrary to the
+  documented "removes all data for room" contract. The memory and file backends
+  were already correct. Caught by the new conformance suite.
+
 ## [1.40.0] — 2026-07-28
 
 ### Fixed
@@ -80,6 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   how many idle-resident rooms stay warm at once — once the count exceeds it,
   a background sweeper evicts the least-recently-idle rooms first; zero is
   unbounded and only meaningful together with `RoomIdleTimeout > 0`.
+
 
 ## [1.38.0] — 2026-07-24
 

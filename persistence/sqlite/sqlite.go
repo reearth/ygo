@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS snapshots (
   state   BLOB    NOT NULL,
   PRIMARY KEY (room, name)
 );
+CREATE TABLE IF NOT EXISTS snapshot_versions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  room       TEXT    NOT NULL,
+  label      TEXT    NOT NULL,
+  created_at INTEGER NOT NULL,
+  state      BLOB    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_snapshot_versions_room ON snapshot_versions (room, id DESC);
 CREATE TABLE IF NOT EXISTS checkpoints (
   room             TEXT    NOT NULL PRIMARY KEY,
   target           INTEGER NOT NULL,
@@ -208,7 +216,9 @@ func (s *Store) Reopen() (persistence.VersionedPersistence, error) {
 // Compile-time assertions that *Store satisfies the persistence contract and the
 // optional crash-safety hooks the conformance suite exercises.
 var (
-	_ persistence.VersionedPersistence = (*Store)(nil)
-	_ persistence.CrashInjector        = (*Store)(nil)
-	_ persistence.Reopener             = (*Store)(nil)
+	_ persistence.VersionedPersistence         = (*Store)(nil)
+	_ persistence.SnapshotStore                = (*Store)(nil)
+	_ persistence.SnapshotVersionedPersistence = (*Store)(nil)
+	_ persistence.CrashInjector                = (*Store)(nil)
+	_ persistence.Reopener                     = (*Store)(nil)
 )

@@ -38,11 +38,24 @@ type memRoom struct {
 	// the room after a prune so Load reflects target state even if a crash left
 	// stale records behind.
 	rolledBack []byte
+	// snapVersions holds SnapshotStore entries ascending by id. nextSnapID is
+	// monotonic and never rewound, so an id is not reused after a delete.
+	snapVersions []labelledSnapshot
+	nextSnapID   int64
 }
 
 type snapshot struct {
 	state   []byte
 	version Version
+}
+
+// labelledSnapshot is one SnapshotStore entry: ID-keyed, with a non-unique
+// label, independent of the update log.
+type labelledSnapshot struct {
+	id        int64
+	label     string
+	createdAt time.Time
+	state     []byte
 }
 
 // MemoryPersistence is an in-memory VersionedPersistence. It is the reference
@@ -89,7 +102,7 @@ func (r *memRoom) visibleRecords() []record {
 func (m *MemoryPersistence) getRoom(room string) *memRoom {
 	r, ok := m.rooms[room]
 	if !ok {
-		r = &memRoom{nextVer: 1, snapshots: make(map[string]snapshot)}
+		r = &memRoom{nextVer: 1, snapshots: make(map[string]snapshot), nextSnapID: 1}
 		m.rooms[room] = r
 	}
 	return r
@@ -396,5 +409,90 @@ func (m *MemoryPersistence) Delete(ctx context.Context, room string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.rooms, room)
+	return nil
+}
+
+// SaveSnapshot stores state as a new labelled snapshot and returns its ID.
+func (m *MemoryPersistence) SaveSnapshot(ctx context.Context, room, label string, state []byte) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if len(state) == 0 {
+		return 0, ErrEmptySnapshot
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := m.getRoom(room)
+	id := r.nextSnapID
+	r.nextSnapID++
+	r.snapVersions = append(r.snapVersions, labelledSnapshot{
+		id:        id,
+		label:     label,
+		createdAt: time.Now().UTC(),
+		state:     append([]byte(nil), state...),
+	})
+	return id, nil
+}
+
+// ListSnapshots returns snapshot metadata newest-first.
+func (m *MemoryPersistence) ListSnapshots(ctx context.Context, room string) ([]SnapshotInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.rooms[room]
+	if !ok {
+		return []SnapshotInfo{}, nil
+	}
+	out := make([]SnapshotInfo, 0, len(r.snapVersions))
+	for i := len(r.snapVersions) - 1; i >= 0; i-- { // newest first
+		s := r.snapVersions[i]
+		out = append(out, SnapshotInfo{
+			ID:        s.id,
+			Label:     s.label,
+			CreatedAt: s.createdAt,
+			Size:      int64(len(s.state)),
+		})
+	}
+	return out, nil
+}
+
+// GetSnapshotState returns one snapshot's state blob.
+func (m *MemoryPersistence) GetSnapshotState(ctx context.Context, room string, id int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.rooms[room]
+	if !ok {
+		return nil, ErrSnapshotNotFound
+	}
+	for _, s := range r.snapVersions {
+		if s.id == id {
+			return append([]byte(nil), s.state...), nil
+		}
+	}
+	return nil, ErrSnapshotNotFound
+}
+
+// DeleteSnapshot removes one snapshot. Deleting an unknown snapshot is a no-op.
+func (m *MemoryPersistence) DeleteSnapshot(ctx context.Context, room string, id int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.rooms[room]
+	if !ok {
+		return nil
+	}
+	for i, s := range r.snapVersions {
+		if s.id == id {
+			r.snapVersions = append(r.snapVersions[:i], r.snapVersions[i+1:]...)
+			return nil
+		}
+	}
 	return nil
 }

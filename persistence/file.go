@@ -587,3 +587,166 @@ func (f *FilePersistence) Delete(ctx context.Context, room string) error {
 	defer f.mu.Unlock()
 	return os.RemoveAll(f.roomDir(room))
 }
+
+// snapVersionsDir holds SnapshotStore entries: <id>.bin per snapshot plus a
+// "nextid" file so ids are not reused after a delete.
+func (f *FilePersistence) snapVersionsDir(room string) string {
+	return filepath.Join(f.roomDir(room), "snapversions")
+}
+
+func (f *FilePersistence) snapVersionPath(room string, id int64) string {
+	return filepath.Join(f.snapVersionsDir(room), strconv.FormatInt(id, 10)+".bin")
+}
+
+func (f *FilePersistence) snapNextIDPath(room string) string {
+	return filepath.Join(f.snapVersionsDir(room), "nextid")
+}
+
+// encodeSnapVersion frames a snapshot as
+// [8 createdAt unix-nano][4 labelLen][label][state].
+func encodeSnapVersion(createdAt time.Time, label string, state []byte) []byte {
+	lb := []byte(label)
+	buf := make([]byte, 8+4+len(lb)+len(state))
+	binary.BigEndian.PutUint64(buf[:8], uint64(createdAt.UnixNano()))
+	binary.BigEndian.PutUint32(buf[8:12], uint32(len(lb)))
+	copy(buf[12:], lb)
+	copy(buf[12+len(lb):], state)
+	return buf
+}
+
+// decodeSnapVersion is encodeSnapVersion's inverse.
+func decodeSnapVersion(buf []byte) (createdAt time.Time, label string, state []byte, err error) {
+	if len(buf) < 12 {
+		return time.Time{}, "", nil, fmt.Errorf("persistence: snapshot record too short (%d bytes)", len(buf))
+	}
+	createdAt = time.Unix(0, int64(binary.BigEndian.Uint64(buf[:8]))).UTC()
+	n := int(binary.BigEndian.Uint32(buf[8:12]))
+	if 12+n > len(buf) {
+		return time.Time{}, "", nil, fmt.Errorf("persistence: snapshot label length %d exceeds record", n)
+	}
+	label = string(buf[12 : 12+n])
+	state = buf[12+n:]
+	return createdAt, label, state, nil
+}
+
+// readSnapNextID returns the next id to assign (1 when unset). Caller holds mu.
+func (f *FilePersistence) readSnapNextID(room string) (int64, error) {
+	b, err := os.ReadFile(f.snapNextIDPath(room))
+	if errors.Is(err, os.ErrNotExist) {
+		return 1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if len(b) < 8 {
+		return 1, nil
+	}
+	id := int64(binary.BigEndian.Uint64(b[:8]))
+	if id < 1 {
+		id = 1
+	}
+	return id, nil
+}
+
+// SaveSnapshot stores state as a new labelled snapshot and returns its ID.
+func (f *FilePersistence) SaveSnapshot(ctx context.Context, room, label string, state []byte) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if len(state) == 0 {
+		return 0, ErrEmptySnapshot
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := os.MkdirAll(f.snapVersionsDir(room), 0o755); err != nil {
+		return 0, err
+	}
+	id, err := f.readSnapNextID(room)
+	if err != nil {
+		return 0, err
+	}
+	// Bump the counter BEFORE writing the record: a crash in between leaks an id
+	// (harmless) rather than risking two snapshots sharing one.
+	var next [8]byte
+	binary.BigEndian.PutUint64(next[:], uint64(id+1))
+	if err := atomicWrite(f.snapNextIDPath(room), next[:]); err != nil {
+		return 0, err
+	}
+	rec := encodeSnapVersion(time.Now().UTC(), label, state)
+	if err := atomicWrite(f.snapVersionPath(room, id), rec); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// ListSnapshots returns snapshot metadata newest-first.
+func (f *FilePersistence) ListSnapshots(ctx context.Context, room string) ([]SnapshotInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	entries, err := os.ReadDir(f.snapVersionsDir(room))
+	if errors.Is(err, os.ErrNotExist) {
+		return []SnapshotInfo{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SnapshotInfo, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".bin") {
+			continue
+		}
+		id, perr := strconv.ParseInt(strings.TrimSuffix(e.Name(), ".bin"), 10, 64)
+		if perr != nil {
+			continue
+		}
+		b, rerr := os.ReadFile(f.snapVersionPath(room, id))
+		if rerr != nil {
+			return nil, rerr
+		}
+		createdAt, label, state, derr := decodeSnapVersion(b)
+		if derr != nil {
+			return nil, derr
+		}
+		out = append(out, SnapshotInfo{ID: id, Label: label, CreatedAt: createdAt, Size: int64(len(state))})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID }) // newest first
+	return out, nil
+}
+
+// GetSnapshotState returns one snapshot's state blob.
+func (f *FilePersistence) GetSnapshotState(ctx context.Context, room string, id int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, err := os.ReadFile(f.snapVersionPath(room, id))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrSnapshotNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	_, _, state, err := decodeSnapVersion(b)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), state...), nil
+}
+
+// DeleteSnapshot removes one snapshot. Deleting an unknown snapshot is a no-op.
+func (f *FilePersistence) DeleteSnapshot(ctx context.Context, room string, id int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	err := os.Remove(f.snapVersionPath(room, id))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}

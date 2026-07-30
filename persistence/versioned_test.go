@@ -22,3 +22,20 @@ func TestConformance_File(t *testing.T) {
 		return p
 	})
 }
+
+func TestSnapshotStoreConformance_Memory(t *testing.T) {
+	persistence.RunSnapshotStoreConformance(t, func() persistence.SnapshotStore {
+		return persistence.NewMemoryPersistence()
+	})
+}
+
+func TestSnapshotStoreConformance_File(t *testing.T) {
+	persistence.RunSnapshotStoreConformance(t, func() persistence.SnapshotStore {
+		dir := t.TempDir()
+		p, err := persistence.NewFilePersistence(dir)
+		if err != nil {
+			t.Fatalf("NewFilePersistence: %v", err)
+		}
+		return p
+	})
+}
