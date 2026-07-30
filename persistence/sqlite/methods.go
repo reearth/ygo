@@ -416,3 +416,30 @@ func (s *Store) DeleteSnapshot(ctx context.Context, room string, id int64) error
 		`DELETE FROM snapshot_versions WHERE room = ? AND id = ?`, room, id)
 	return err
 }
+
+// ListRooms returns every room holding at least one update or snapshot.
+func (s *Store) ListRooms(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT room FROM updates
+		 UNION SELECT room FROM snapshots
+		 UNION SELECT room FROM snapshot_versions`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := []string{}
+	for rows.Next() {
+		var room string
+		if err := rows.Scan(&room); err != nil {
+			return nil, err
+		}
+		out = append(out, room)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

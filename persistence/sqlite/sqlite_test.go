@@ -519,3 +519,9 @@ func TestSnapshotStoreConformance_SQLite(t *testing.T) {
 		return mustOpen(t, filepath.Join(t.TempDir(), "snap.db"))
 	})
 }
+
+func TestRoomListerConformance_SQLite(t *testing.T) {
+	persistence.RunRoomListerConformance(t, func() persistence.SnapshotVersionedPersistence {
+		return mustOpen(t, filepath.Join(t.TempDir(), "rooms.db"))
+	})
+}

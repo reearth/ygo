@@ -496,3 +496,22 @@ func (m *MemoryPersistence) DeleteSnapshot(ctx context.Context, room string, id 
 	}
 	return nil
 }
+
+// ListRooms returns every room holding at least one update or snapshot.
+func (m *MemoryPersistence) ListRooms(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.rooms))
+	for name, r := range m.rooms {
+		// Skip a room whose entry exists but holds nothing (e.g. pruned to empty):
+		// the contract is "has persisted data", not "was ever touched".
+		if len(r.records) == 0 && len(r.snapshots) == 0 && len(r.snapVersions) == 0 {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out, nil
+}

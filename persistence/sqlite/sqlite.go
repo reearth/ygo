@@ -219,6 +219,7 @@ var (
 	_ persistence.VersionedPersistence         = (*Store)(nil)
 	_ persistence.SnapshotStore                = (*Store)(nil)
 	_ persistence.SnapshotVersionedPersistence = (*Store)(nil)
+	_ persistence.RoomLister                   = (*Store)(nil)
 	_ persistence.CrashInjector                = (*Store)(nil)
 	_ persistence.Reopener                     = (*Store)(nil)
 )

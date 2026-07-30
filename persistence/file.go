@@ -750,3 +750,33 @@ func (f *FilePersistence) DeleteSnapshot(ctx context.Context, room string, id in
 	}
 	return nil
 }
+
+// ListRooms returns every room directory under the root, decoding the on-disk
+// hex names back to the original room names.
+func (f *FilePersistence) ListRooms(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	entries, err := os.ReadDir(f.root)
+	if errors.Is(err, os.ErrNotExist) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// Room dirs are hex(roomName); anything else is not ours.
+		raw, derr := hex.DecodeString(e.Name())
+		if derr != nil {
+			continue
+		}
+		out = append(out, string(raw))
+	}
+	return out, nil
+}
