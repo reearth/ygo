@@ -290,6 +290,7 @@ func (s *Store) Delete(ctx context.Context, room string) error {
 	for _, q := range []string{
 		`DELETE FROM updates WHERE room = ?`,
 		`DELETE FROM snapshots WHERE room = ?`,
+		`DELETE FROM snapshot_versions WHERE room = ?`,
 		`DELETE FROM checkpoints WHERE room = ?`,
 	} {
 		if _, err := tx.ExecContext(ctx, q, room); err != nil {
@@ -331,4 +332,114 @@ func (s *Store) PruneAfter(ctx context.Context, room string, target persistence.
 
 	// Phase 2: delete future updates, then clear the checkpoint.
 	return s.finishPrune(ctx, room, target)
+}
+
+// SaveSnapshot stores state as a new labelled snapshot of room and returns its
+// ID. AUTOINCREMENT guarantees the id is monotonic and never reused.
+func (s *Store) SaveSnapshot(ctx context.Context, room, label string, state []byte) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if len(state) == 0 {
+		return 0, persistence.ErrEmptySnapshot
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO snapshot_versions (room, label, created_at, state) VALUES (?, ?, ?, ?)`,
+		room, label, time.Now().UnixNano(), state)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ListSnapshots returns snapshot metadata for room, newest-first. The state blob
+// is not read: only its length, so listing stays cheap for large snapshots.
+func (s *Store) ListSnapshots(ctx context.Context, room string) ([]persistence.SnapshotInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, label, created_at, length(state) FROM snapshot_versions
+		 WHERE room = ? ORDER BY id DESC`, room)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := []persistence.SnapshotInfo{}
+	for rows.Next() {
+		var id, ns, size int64
+		var label string
+		if err := rows.Scan(&id, &label, &ns, &size); err != nil {
+			return nil, err
+		}
+		out = append(out, persistence.SnapshotInfo{
+			ID:        id,
+			Label:     label,
+			CreatedAt: time.Unix(0, ns).UTC(),
+			Size:      size,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetSnapshotState returns the state blob of one snapshot.
+// persistence.ErrSnapshotNotFound when (room, id) is unknown.
+func (s *Store) GetSnapshotState(ctx context.Context, room string, id int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var state []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT state FROM snapshot_versions WHERE room = ? AND id = ?`, room, id).Scan(&state)
+	if err == sql.ErrNoRows {
+		return nil, persistence.ErrSnapshotNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+// DeleteSnapshot removes one snapshot. Deleting an unknown snapshot is a no-op.
+func (s *Store) DeleteSnapshot(ctx context.Context, room string, id int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM snapshot_versions WHERE room = ? AND id = ?`, room, id)
+	return err
+}
+
+// ListRooms returns every room holding at least one update or snapshot.
+func (s *Store) ListRooms(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT room FROM updates
+		 UNION SELECT room FROM snapshots
+		 UNION SELECT room FROM snapshot_versions`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := []string{}
+	for rows.Next() {
+		var room string
+		if err := rows.Scan(&room); err != nil {
+			return nil, err
+		}
+		out = append(out, room)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

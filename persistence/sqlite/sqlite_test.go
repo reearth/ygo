@@ -513,3 +513,15 @@ func TestInMemoryMode(t *testing.T) {
 		t.Fatalf("in-memory load v=%d want 1", lr.Version)
 	}
 }
+
+func TestSnapshotStoreConformance_SQLite(t *testing.T) {
+	persistence.RunSnapshotStoreConformance(t, func() persistence.SnapshotStore {
+		return mustOpen(t, filepath.Join(t.TempDir(), "snap.db"))
+	})
+}
+
+func TestRoomListerConformance_SQLite(t *testing.T) {
+	persistence.RunRoomListerConformance(t, func() persistence.SnapshotVersionedPersistence {
+		return mustOpen(t, filepath.Join(t.TempDir(), "rooms.db"))
+	})
+}

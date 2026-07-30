@@ -9,15 +9,20 @@ type wsTimer interface {
 	stop()
 }
 
-// wsClock creates wsTimers. Server.clock is nil in production and resolves to
-// realClock{}; tests inject a fake for deterministic debounce behaviour.
+// wsClock creates wsTimers and reads the current time. Server.clock is nil in
+// production and resolves to realClock{}; tests inject a fake for deterministic
+// debounce and auto-version behaviour.
 type wsClock interface {
 	newTimer(d time.Duration) wsTimer
+	// now is the clock's current time, used for elapsed-interval decisions
+	// (auto-versioning) that must be deterministic under test.
+	now() time.Time
 }
 
 type realClock struct{}
 
 func (realClock) newTimer(d time.Duration) wsTimer { return &realTimer{t: time.NewTimer(d)} }
+func (realClock) now() time.Time                   { return time.Now() }
 
 type realTimer struct{ t *time.Timer }
 

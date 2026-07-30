@@ -1,6 +1,9 @@
 package persistence
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // LegacyAdapter adapts a VersionedPersistence to the provider/websocket
 // PersistenceAdapter contract (LoadDoc / StoreUpdate), so a versioned store can
@@ -27,7 +30,23 @@ type LegacyAdapter struct {
 	// trim to the newest KeepVersions updates on each compaction. Adapter-side
 	// retention policy; set before serving.
 	KeepVersions int
+
+	// KeepSnapshots bounds retained labelled snapshots when the websocket server
+	// asks the adapter to save a version (see the provider's VersionableAdapter /
+	// AutoVersionEvery). 0 (default) keeps every version, matching KeepVersions.
+	// Set > 0 to trim to the newest KeepSnapshots after each save, so an
+	// always-connected document cannot grow an unbounded history.
+	//
+	// Note this is retention over VERSIONS (SnapshotStore entries), which is a
+	// different axis from KeepVersions' retention over the raw update log.
+	KeepSnapshots int
 }
+
+// ErrSnapshotsUnsupported is returned by LegacyAdapter.SaveVersion when the
+// wrapped store does not implement SnapshotStore, so there is nowhere to record
+// a version. It is surfaced rather than ignored: silently discarding versions
+// would look like auto-versioning is working when it is not.
+var ErrSnapshotsUnsupported = errors.New("persistence: store does not implement SnapshotStore")
 
 // NewLegacyAdapter wraps store. The provider's LoadDoc/StoreUpdate are
 // context-free; the adapter uses context.Background() for the underlying calls.
@@ -85,4 +104,53 @@ func (a *LegacyAdapter) Compact(ctx context.Context, room string) error {
 // legacy provider integration.
 func (a *LegacyAdapter) Store() VersionedPersistence {
 	return a.store
+}
+
+// SaveVersion satisfies the provider's optional VersionableAdapter interface. It
+// materializes the room's current head and records it as a labelled snapshot via
+// the wrapped store's SnapshotStore, then applies KeepSnapshots retention.
+//
+// An empty room is a no-op returning (0, nil): there is no state worth
+// versioning, and creating an empty version on every idle room would be exactly
+// the history noise auto-versioning exists to avoid.
+//
+// Retention failures are deliberately NOT propagated: the version is already
+// durable at that point, and reporting an error would make the provider log a
+// failure for an operation that actually succeeded. A trim that does not happen
+// is retried after the next save.
+func (a *LegacyAdapter) SaveVersion(ctx context.Context, room, label string) (int64, error) {
+	ss, ok := a.store.(SnapshotStore)
+	if !ok {
+		return 0, ErrSnapshotsUnsupported
+	}
+	res, err := a.store.Load(ctx, room)
+	if err != nil {
+		return 0, err
+	}
+	if len(res.Update) == 0 {
+		return 0, nil
+	}
+	id, err := ss.SaveSnapshot(ctx, room, label, res.Update)
+	if err != nil {
+		return 0, err
+	}
+	a.trimSnapshots(ctx, ss, room)
+	return id, nil
+}
+
+// trimSnapshots deletes the oldest snapshots beyond KeepSnapshots. Best-effort:
+// see the SaveVersion doc for why errors are swallowed.
+func (a *LegacyAdapter) trimSnapshots(ctx context.Context, ss SnapshotStore, room string) {
+	if a.KeepSnapshots <= 0 {
+		return
+	}
+	snaps, err := ss.ListSnapshots(ctx, room)
+	if err != nil || len(snaps) <= a.KeepSnapshots {
+		return
+	}
+	// ListSnapshots is newest-first, so everything at or past KeepSnapshots is
+	// surplus.
+	for _, sn := range snaps[a.KeepSnapshots:] {
+		_ = ss.DeleteSnapshot(ctx, room, sn.ID)
+	}
 }

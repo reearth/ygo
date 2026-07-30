@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [1.41.0] — 2026-07-30
+
+### Added
+
+- **`SnapshotStore`: enumerable, individually-deletable labelled snapshots**
+  (`persistence/snapshots.go`): a new optional extension interface with
+  `SaveSnapshot`/`ListSnapshots`/`GetSnapshotState`/`DeleteSnapshot`, plus
+  `SnapshotInfo{ID, Label, CreatedAt, Size}` and
+  `SnapshotVersionedPersistence`. Implemented by the memory, file, and sqlite
+  backends and covered by a new shared conformance suite
+  (`RunSnapshotStoreConformance`).
+
+  This closes a lifecycle gap in the existing name-keyed
+  `CaptureSnapshot`/`RestoreSnapshot` pair, which could be written and read by
+  exact name but **not enumerated, not individually deleted, and carried no
+  metadata** — making labelled snapshots an unbounded, unreclaimable resource
+  that only `Delete(room)` could clear. Applications building a user-facing
+  version history needed all four operations, and previously had to maintain
+  their own parallel index with no way to reconcile it against storage.
+
+  Snapshots are ID-keyed with **non-unique** labels, so repeated saves under the
+  same label create distinct snapshots instead of overwriting. IDs are unique
+  and monotonic *within a room* and are never reused there, but are not
+  guaranteed globally unique — always carry the room alongside the ID.
+  `ListSnapshots` returns newest-first, matching `ListVersions`, and does not
+  read state blobs so listing stays cheap. The older name-keyed pair is
+  unchanged and still supported, but is superseded for new code.
+
+- **`RoomLister`: store-wide room enumeration** (`persistence/rooms.go`): a new
+  optional `ListRooms` extension implemented by the memory, file and sqlite
+  backends, with its own conformance suite. `VersionedPersistence` could only be
+  addressed one room at a time, so store-wide retention, cleanup, migration and
+  reconciliation all required an external index of room names with no way to
+  detect drift against what was actually persisted. It reports every room holding
+  at least one update or snapshot, so a snapshot-only room stays reclaimable, and
+  returns the original room name rather than a backend's on-disk encoding.
+
+- **Auto-versioning: `VersionableAdapter` + `Server.AutoVersionEvery`**
+  (`provider/websocket`): the server can now drive a user-facing version history
+  itself instead of leaving every application to build one. When the persistence
+  adapter implements `VersionableAdapter` and `AutoVersionEvery > 0`, the server
+  asks it to capture a labelled version (`AutoVersionLabel`, `"auto"`) at most
+  once per interval per room, **and only when the room actually changed**, plus
+  once on room unload if it changed after the last version. A quiet room is never
+  versioned. That pairing is the point: versioning per update is what makes a
+  history panel unusable.
+
+  `persistence.LegacyAdapter` implements it over `SnapshotStore`, with a new
+  `KeepSnapshots` field bounding retained versions (0 = keep all, matching
+  `KeepVersions`, which is the separate update-log axis). A store without
+  `SnapshotStore` support returns the new `ErrSnapshotsUnsupported` rather than
+  silently discarding versions.
+
+  The hook lives in the persistence worker's `store()` helper, so both the
+  coalescing and the strict per-update paths are covered without touching either
+  select loop, and all of its state is owned by that one goroutine.
+
+### Performance
+
+- **`FilePersistence.ListSnapshots` no longer reads snapshot state blobs**: it
+  read each record in full via `os.ReadFile` just to report metadata, making
+  listing O(total snapshot bytes) and contradicting the `SnapshotStore` contract's
+  promise that listing stays cheap. It now reads only the 12-byte header plus the
+  label and derives `Size` from the directory entry, so listing is O(records).
+
+### Fixed
+
+- **sqlite `Delete(room)` now also removes labelled snapshots**: the
+  `snapshot_versions` rows for a room survived a room delete, contrary to the
+  documented "removes all data for room" contract. The memory and file backends
+  were already correct. Caught by the new conformance suite.
+
+### Testing
+
+- **Honest performance and scalability benchmark suite**
+  ([#180](https://github.com/reearth/ygo/issues/180)): the full
+  `dmonad/crdt-benchmarks` B1-B4 set plus cluster-relay, persistence and
+  websocket scale benchmarks, a `benchmark` CI workflow, and `BENCHMARKS.md`
+  publishing the results with their caveats rather than only the flattering
+  numbers.
+
+- Two new shared conformance suites, `RunSnapshotStoreConformance` and
+  `RunRoomListerConformance`, run against all three backends so a third-party
+  backend can self-verify the new contracts.
+
 ## [1.40.0] — 2026-07-28
 
 ### Fixed
@@ -80,6 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   how many idle-resident rooms stay warm at once — once the count exceeds it,
   a background sweeper evicts the least-recently-idle rooms first; zero is
   unbounded and only meaningful together with `RoomIdleTimeout > 0`.
+
 
 ## [1.38.0] — 2026-07-24
 

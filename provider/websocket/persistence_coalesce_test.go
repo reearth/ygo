@@ -35,9 +35,31 @@ type fakeClock struct {
 
 	mu      sync.Mutex
 	pending []*fakeTimer // non-matching timers set aside by nextTimerOfDur
+	nowT    time.Time    // controllable wall clock for now()
 }
 
-func newFakeClock() *fakeClock { return &fakeClock{created: make(chan *fakeTimer, 256)} }
+func newFakeClock() *fakeClock {
+	return &fakeClock{
+		created: make(chan *fakeTimer, 256),
+		// Non-zero base so "elapsed since worker start" arithmetic is realistic.
+		nowT: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+// now returns the fake wall clock.
+func (f *fakeClock) now() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.nowT
+}
+
+// advance moves the fake wall clock forward. It does NOT fire timers; timers are
+// driven explicitly via fakeTimer.fire().
+func (f *fakeClock) advance(d time.Duration) {
+	f.mu.Lock()
+	f.nowT = f.nowT.Add(d)
+	f.mu.Unlock()
+}
 
 func (f *fakeClock) newTimer(d time.Duration) wsTimer {
 	t := &fakeTimer{c: make(chan time.Time, 1), dur: d}
