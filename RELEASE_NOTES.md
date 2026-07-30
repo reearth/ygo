@@ -1,3 +1,86 @@
+## v1.41.0
+
+Three additions that together let an application build a real, bounded,
+user-facing version history instead of hand-rolling one, plus a published
+benchmark suite. Labelled snapshots can now be enumerated and individually
+deleted, a store can report which rooms it holds, and the websocket server can
+capture versions on its own on a throttled, change-driven cadence. All three are
+optional extension interfaces, so no existing interface gained a method and
+every third-party backend keeps compiling. Everything is off by default. No
+breaking API changes.
+
+### Added
+
+- **`SnapshotStore`: enumerable, individually-deletable labelled snapshots.** The
+  existing name-keyed `CaptureSnapshot`/`RestoreSnapshot` pair could be written
+  and read by exact name but never enumerated, never individually deleted, and
+  carried no metadata, so labelled snapshots were an unbounded, unreclaimable
+  resource that only `Delete(room)` could clear. New interface:
+  `SaveSnapshot`/`ListSnapshots`/`GetSnapshotState`/`DeleteSnapshot`, plus
+  `SnapshotInfo{ID, Label, CreatedAt, Size}` and `SnapshotVersionedPersistence`.
+  Snapshots are ID-keyed with non-unique labels, so repeated saves create distinct
+  versions rather than overwriting. IDs are unique and monotonic within a room and
+  never reused there, but are not globally unique. `ListSnapshots` is newest-first
+  and never reads state blobs. The older name-keyed pair is unchanged and still
+  supported, superseded for new code.
+
+- **`RoomLister`: store-wide room enumeration.** `VersionedPersistence` could only
+  be addressed one room at a time, so store-wide retention, cleanup, migration and
+  reconciliation all needed an external index of room names with no way to detect
+  drift against what was actually persisted. `ListRooms` reports every room
+  holding at least one update or snapshot, so a snapshot-only room stays
+  reclaimable, and returns the original room name rather than a backend's on-disk
+  encoding.
+
+- **Auto-versioning: `VersionableAdapter` + `Server.AutoVersionEvery`.** The
+  server can now drive a version history itself. When the adapter implements
+  `VersionableAdapter` and `AutoVersionEvery > 0`, it captures a labelled version
+  (`AutoVersionLabel`, `"auto"`) at most once per interval per room **and only
+  when the room actually changed**, plus one final version on room unload if it
+  changed after the last one. A quiet room is never versioned. That pairing is the
+  point: versioning per update is what makes a history panel unusable.
+  `persistence.LegacyAdapter` implements it over `SnapshotStore` and gains
+  `KeepSnapshots` to bound retained versions (0 = keep all, mirroring
+  `KeepVersions`, which is the separate update-log axis). A store lacking
+  `SnapshotStore` returns the new `ErrSnapshotsUnsupported` rather than silently
+  discarding versions, so a misconfiguration is visible instead of appearing to
+  work.
+
+### Performance
+
+- **`FilePersistence.ListSnapshots` no longer reads snapshot state blobs.** It
+  read each record in full just to report metadata, making listing O(total
+  snapshot bytes) and contradicting the `SnapshotStore` contract's own promise
+  that listing stays cheap. It now reads only the 12-byte header plus the label
+  and derives `Size` from the directory entry.
+
+### Fixed
+
+- **sqlite `Delete(room)` now also removes labelled snapshots.** The
+  `snapshot_versions` rows for a room survived a room delete, contrary to the
+  documented "removes all data for room" contract. The memory and file backends
+  were already correct. Caught by the new conformance suite.
+
+### Testing
+
+- **Honest performance and scalability benchmark suite**
+  ([#180](https://github.com/reearth/ygo/issues/180)): the full
+  `dmonad/crdt-benchmarks` B1-B4 set plus cluster-relay, persistence and websocket
+  scale benchmarks, a `benchmark` CI workflow, and `BENCHMARKS.md` publishing the
+  results with their caveats rather than only the flattering numbers.
+
+- Two new shared conformance suites, `RunSnapshotStoreConformance` and
+  `RunRoomListerConformance`, run against all three backends so a third-party
+  backend can self-verify the new contracts.
+
+## Install
+
+```
+go get github.com/reearth/ygo@v1.41.0
+```
+
+See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
+
 ## v1.40.0
 
 Two convergence/lifecycle fixes plus new fuzz coverage. `YArray.Move` could

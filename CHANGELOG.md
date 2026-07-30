@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [Unreleased]
+## [1.41.0] — 2026-07-30
 
 ### Added
 
@@ -63,12 +63,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coalescing and the strict per-update paths are covered without touching either
   select loop, and all of its state is owned by that one goroutine.
 
+### Performance
+
+- **`FilePersistence.ListSnapshots` no longer reads snapshot state blobs**: it
+  read each record in full via `os.ReadFile` just to report metadata, making
+  listing O(total snapshot bytes) and contradicting the `SnapshotStore` contract's
+  promise that listing stays cheap. It now reads only the 12-byte header plus the
+  label and derives `Size` from the directory entry, so listing is O(records).
+
 ### Fixed
 
 - **sqlite `Delete(room)` now also removes labelled snapshots**: the
   `snapshot_versions` rows for a room survived a room delete, contrary to the
   documented "removes all data for room" contract. The memory and file backends
   were already correct. Caught by the new conformance suite.
+
+### Testing
+
+- **Honest performance and scalability benchmark suite**
+  ([#180](https://github.com/reearth/ygo/issues/180)): the full
+  `dmonad/crdt-benchmarks` B1-B4 set plus cluster-relay, persistence and
+  websocket scale benchmarks, a `benchmark` CI workflow, and `BENCHMARKS.md`
+  publishing the results with their caveats rather than only the flattering
+  numbers.
+
+- Two new shared conformance suites, `RunSnapshotStoreConformance` and
+  `RunRoomListerConformance`, run against all three backends so a third-party
+  backend can self-verify the new contracts.
 
 ## [1.40.0] — 2026-07-28
 
