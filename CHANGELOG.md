@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Public prelim constructors for `Y.Map`, `Y.Text` and `Y.Array`**: `NewMapPrelim`,
+  `NewTextPrelim`, `NewArrayPrelim` and `YArray.PushType` let code outside the
+  package construct a detached nested type and attach it to a document. This
+  generalises to the core types what [#147](https://github.com/reearth/ygo/pull/147)
+  and [#170](https://github.com/reearth/ygo/pull/170) established for `YXml`, and
+  closes the API asymmetry recorded in `crdt/nested_map_yjs_interop_test.go`.
+- **`YMap.Set` buffers while detached**, replaying on attach (parity with
+  `YText.pending`), so nested children materialise top-down with parent-first
+  clocks — the ordering genuine Yjs produces and can decode.
+
+### Fixed
+
+- **`YMap.Get` returns nested types**: a key holding a `Y.Text`, `Y.Map` or
+  `Y.Array` previously read back as `(nil, false)` despite being fully
+  materialised and visible through `ToJSON`, because `Get` handled only
+  `ContentDoc` and `ContentAny`. It now mirrors `YArray.Get`.
 
 ## [1.42.0] — 2026-08-01
 
@@ -216,6 +236,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RunRoomListerConformance`, run against all three backends so a third-party
   backend can self-verify the new contracts.
 
+||||||| parent of 47077af (feat(crdt): public prelim constructors for Map, Text and Array)
 ## [1.40.0] — 2026-07-28
 
 ### Fixed

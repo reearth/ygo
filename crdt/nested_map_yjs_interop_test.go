@@ -19,12 +19,15 @@ import (
 // format, and a cross V1<->V2 persist-then-serve cycle. It also pins how ygo
 // handles a non-finite float (NaN) inside a nested map.
 //
-// API-asymmetry note (a finding worth recording): ygo exposes no public API to
-// construct a nested Y.Map/Y.Array and attach it to a map already in the doc
-// (YMap.Set wraps Go values into ContentAny; only YXml has public prelim
-// constructors). So ygo never *creates* these nested maps itself; it only
-// relays the binary updates a yjs client produces. Feeding it genuine yjs bytes
-// is therefore the only faithful reproduction.
+// API-asymmetry note (RESOLVED): ygo used to expose no public API for
+// constructing a nested Y.Map/Y.Array and attaching it to a map already in the
+// doc — YMap.Set wrapped Go values into ContentAny, and only YXml had public
+// prelim constructors. crdt/prelim.go now provides NewMapPrelim, NewTextPrelim,
+// NewArrayPrelim and YArray.PushType, so ygo can construct these shapes itself.
+//
+// The fixtures below stand regardless: feeding ygo genuine yjs bytes remains the
+// faithful reproduction of the downstream bug this suite guards, and is a
+// stronger interop check than round-tripping our own output.
 //
 // Fixtures are genuine yjs@13.6.31 output for the doc shape:
 //

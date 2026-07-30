@@ -9,6 +9,15 @@ func contentForValue(value any) Content {
 	if d, ok := value.(*Doc); ok {
 		return NewContentDoc(d)
 	}
+	// A DETACHED shared type becomes a nested ContentType, so
+	// Set(key, NewTextPrelim()) builds a real Y.Text child rather than a
+	// ContentAny blob. item.integrate links it, assigns its doc and calls
+	// flushPrelim, so nothing further is needed here.
+	if st, ok := value.(sharedType); ok {
+		if bt := st.baseType(); bt.detached() {
+			return NewContentType(bt)
+		}
+	}
 	return NewContentAny(value)
 }
 
@@ -26,6 +35,21 @@ type YMap struct {
 	abstractType
 	subIDGen  uint64
 	observers []mapSub
+	// pending buffers Sets issued while this map is detached, replayed when the
+	// container item integrates (prelimFlusher parity with YText.pending). The
+	// buffering is what keeps child clocks ABOVE the container item's clock —
+	// the ordering genuine Yjs produces and can decode.
+	pending []func(txn *Transaction)
+}
+
+// flushPrelim replays Sets buffered while this map was detached.
+// Called by item.integrate when the container item integrates.
+func (m *YMap) flushPrelim(txn *Transaction) {
+	ops := m.pending
+	m.pending = nil
+	for _, op := range ops {
+		op(txn)
+	}
 }
 
 func (m *YMap) baseType() *abstractType { return &m.abstractType }
@@ -140,6 +164,12 @@ func extractMapValue(item *Item) any {
 func (m *YMap) Set(txn *Transaction, key string, value any) {
 	t := &m.abstractType
 
+	// Detached: buffer for replay at attach time (see pending).
+	if t.detached() {
+		m.pending = append(m.pending, func(txn *Transaction) { m.Set(txn, key, value) })
+		return
+	}
+
 	// Establish a causal link from the previous value for this key so that
 	// YATA places the new item right after the old one — not at the list head.
 	var left *Item
@@ -183,6 +213,12 @@ func (m *YMap) Get(key string) (any, bool) {
 	}
 	if cd, ok := item.Content.(*ContentDoc); ok {
 		return cd.Doc, cd.Doc != nil
+	}
+	// Expose nested types, mirroring YArray.Get. Without this a key holding a
+	// nested Y.Text/Y.Map/Y.Array reads back as (nil, false) even though the
+	// type is fully materialised and reachable via ToJSON.
+	if ct, ok := item.Content.(*ContentType); ok {
+		return ct.Type.owner, ct.Type.owner != nil
 	}
 	ca, ok := item.Content.(*ContentAny)
 	if !ok || len(ca.Vals) == 0 {
