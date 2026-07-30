@@ -146,6 +146,48 @@ func RunSnapshotStoreConformance(t *testing.T, factory func() SnapshotStore) {
 		}
 	})
 
+	// Size must be the state length exactly, with neither a record header nor the
+	// label counted in. A backend that derives Size from a file size (the file
+	// backend does, to keep listing cheap) gets its arithmetic checked here, with
+	// a deliberately non-round length and both a long and an empty label.
+	t.Run("SizeIsExactRegardlessOfLabel", func(t *testing.T) {
+		s := factory()
+		big := bytes.Repeat([]byte("q"), 64*1024+7)
+
+		labelled, err := s.SaveSnapshot(ctx, "room", "a-deliberately-long-label", big)
+		if err != nil {
+			t.Fatalf("SaveSnapshot(labelled): %v", err)
+		}
+		unlabelled, err := s.SaveSnapshot(ctx, "room", "", big)
+		if err != nil {
+			t.Fatalf("SaveSnapshot(unlabelled): %v", err)
+		}
+
+		got, err := s.ListSnapshots(ctx, "room")
+		if err != nil {
+			t.Fatalf("ListSnapshots: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2", len(got))
+		}
+		for _, info := range got {
+			if info.Size != int64(len(big)) {
+				t.Fatalf("id %d (label %q) Size = %d, want %d", info.ID, info.Label, info.Size, len(big))
+			}
+		}
+
+		// The payload itself must still round-trip byte-for-byte.
+		for _, id := range []int64{labelled, unlabelled} {
+			state, err := s.GetSnapshotState(ctx, "room", id)
+			if err != nil {
+				t.Fatalf("GetSnapshotState(%d): %v", id, err)
+			}
+			if !bytes.Equal(state, big) {
+				t.Fatalf("id %d state differs: got %d bytes, want %d", id, len(state), len(big))
+			}
+		}
+	})
+
 	t.Run("EmptyStateRejected", func(t *testing.T) {
 		s := factory()
 		if _, err := s.SaveSnapshot(ctx, "room", "lbl", nil); !errors.Is(err, ErrEmptySnapshot) {

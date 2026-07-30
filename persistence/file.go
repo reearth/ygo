@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -629,6 +630,34 @@ func decodeSnapVersion(buf []byte) (createdAt time.Time, label string, state []b
 	return createdAt, label, state, nil
 }
 
+// readSnapVersionMeta reads ONLY a snapshot record's header and label, deriving
+// the state size from fileSize rather than reading the state blob. This is what
+// keeps ListSnapshots cheap (O(records), not O(total snapshot bytes)) as the
+// SnapshotStore contract promises; decodeSnapVersion is still used by
+// GetSnapshotState, which genuinely needs the payload.
+func readSnapVersionMeta(path string, fileSize int64) (time.Time, string, int64, error) {
+	fh, err := os.Open(path) //nolint:gosec // path is built from our own layout
+	if err != nil {
+		return time.Time{}, "", 0, err
+	}
+	defer func() { _ = fh.Close() }()
+
+	var hdr [12]byte
+	if _, err := io.ReadFull(fh, hdr[:]); err != nil {
+		return time.Time{}, "", 0, fmt.Errorf("persistence: snapshot record %q header: %w", path, err)
+	}
+	createdAt := time.Unix(0, int64(binary.BigEndian.Uint64(hdr[:8]))).UTC()
+	labelLen := int64(binary.BigEndian.Uint32(hdr[8:12]))
+	if int64(len(hdr))+labelLen > fileSize {
+		return time.Time{}, "", 0, fmt.Errorf("persistence: snapshot label length %d exceeds record %q", labelLen, path)
+	}
+	label := make([]byte, labelLen)
+	if _, err := io.ReadFull(fh, label); err != nil {
+		return time.Time{}, "", 0, fmt.Errorf("persistence: snapshot record %q label: %w", path, err)
+	}
+	return createdAt, string(label), fileSize - int64(len(hdr)) - labelLen, nil
+}
+
 // readSnapNextID returns the next id to assign (1 when unset). Caller holds mu.
 func (f *FilePersistence) readSnapNextID(room string) (int64, error) {
 	b, err := os.ReadFile(f.snapNextIDPath(room))
@@ -702,15 +731,16 @@ func (f *FilePersistence) ListSnapshots(ctx context.Context, room string) ([]Sna
 		if perr != nil {
 			continue
 		}
-		b, rerr := os.ReadFile(f.snapVersionPath(room, id))
-		if rerr != nil {
-			return nil, rerr
+		// Size comes from the directory entry, so the state blob is never read.
+		fi, ierr := e.Info()
+		if ierr != nil {
+			return nil, ierr
 		}
-		createdAt, label, state, derr := decodeSnapVersion(b)
+		createdAt, label, size, derr := readSnapVersionMeta(f.snapVersionPath(room, id), fi.Size())
 		if derr != nil {
 			return nil, derr
 		}
-		out = append(out, SnapshotInfo{ID: id, Label: label, CreatedAt: createdAt, Size: int64(len(state))})
+		out = append(out, SnapshotInfo{ID: id, Label: label, CreatedAt: createdAt, Size: size})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID }) // newest first
 	return out, nil
