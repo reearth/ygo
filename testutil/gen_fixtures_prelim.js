@@ -76,6 +76,22 @@ const fixtures = [
     }
   ),
   authored(
+    'two_cells_pushed_in_sequence',
+    'Two notebook cells pushed into the same array — the second push must anchor after the first cell, not at the list head.',
+    (doc) => {
+      const cells = doc.getArray('cells')
+      doc.transact(() => {
+        for (const text of ['first cell', 'second cell']) {
+          const cell = new Y.Map()
+          const src = new Y.Text()
+          src.insert(0, text)
+          cell.set('source', src)
+          cells.push([cell])
+        }
+      })
+    }
+  ),
+  authored(
     'array_nested_in_map',
     'Y.Map holding a Y.Array of scalars, built detached.',
     (doc) => {

@@ -15,6 +15,13 @@
       "expectedJSON": "{\"root\":[\"hello\"]}"
     },
     {
+      "name": "two_cells_pushed_in_sequence",
+      "description": "Two notebook cells pushed into the same array — the second push must anchor after the first cell, not at the list head.",
+      "clientID": 3735928559,
+      "updateV1": "0106effdb6f50d0007010563656c6c73012700effdb6f50d0006736f75726365020400effdb6f50d010a66697273742063656c6c87effdb6f50d00012700effdb6f50d0c06736f75726365020400effdb6f50d0d0b7365636f6e642063656c6c00",
+      "expectedJSON": "{\"cells\":[{\"source\":\"first cell\"},{\"source\":\"second cell\"}]}"
+    },
+    {
       "name": "array_nested_in_map",
       "description": "Y.Map holding a Y.Array of scalars, built detached.",
       "clientID": 3735928559,

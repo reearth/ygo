@@ -66,6 +66,18 @@ var prelimBuilders = map[string]func(*Doc){
 			root.PushType(txn, t)
 		})
 	},
+	"two_cells_pushed_in_sequence": func(doc *Doc) {
+		cells := doc.GetArray("cells")
+		doc.Transact(func(txn *Transaction) {
+			for _, text := range []string{"first cell", "second cell"} {
+				cell := NewMapPrelim()
+				src := NewTextPrelim()
+				src.Insert(txn, 0, text, nil)
+				cell.Set(txn, "source", src)
+				cells.PushType(txn, cell)
+			}
+		})
+	},
 	"array_nested_in_map": func(doc *Doc) {
 		root := doc.GetArray("root")
 		doc.Transact(func(txn *Transaction) {
