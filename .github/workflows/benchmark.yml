@@ -9,10 +9,16 @@ name: Benchmark
 #
 #   2. Nightly on a cron schedule. Runs the suite on whatever main currently is
 #      and uploads the raw output as a 30-day artifact. Lets us spot slow drift
-#      that no single PR introduces.
+#      that no single PR introduces. Nightly AND manual runs additionally
+#      exercise the benchheavy-tagged heavy tier (100k-scale + conflict
+#      benches, see #180) and the websocket scaling probe (TestScaleProbe) —
+#      both too slow for the PR gate — and upload their output alongside the
+#      light-tier run.
 #
 #   3. Manually via workflow_dispatch. Use this when a non-hot-path PR genuinely
-#      needs measurement, or to spot-check main on demand.
+#      needs measurement, or to spot-check main on demand — this also runs the
+#      heavy tier and scaling probe (see #2), so a manual dispatch gets the
+#      full picture, not just the light tier.
 #
 # Rationale: previously this ran on every PR (~20 min per run). Most PRs don't
 # touch the hot paths, so the comparison was noise. See PR #80.
@@ -56,10 +62,23 @@ jobs:
       - name: Compare PR vs base
         if: github.event_name == 'pull_request'
         run: benchstat /tmp/old.txt /tmp/new.txt
+      - name: Heavy-tier benchmarks (nightly + manual)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -o pipefail
+          go test -tags benchheavy -bench=. -benchmem -count=6 ./... | tee /tmp/heavy.txt
+      - name: Scaling probe (nightly + manual)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -o pipefail
+          go test -tags benchheavy -run TestScaleProbe -v ./provider/websocket/ | tee /tmp/scaleprobe.txt
       - name: Upload nightly/dispatch output
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-${{ github.run_id }}
-          path: /tmp/new.txt
+          path: |
+            /tmp/new.txt
+            /tmp/heavy.txt
+            /tmp/scaleprobe.txt
           retention-days: 30

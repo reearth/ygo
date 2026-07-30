@@ -676,3 +676,182 @@ func TestBenchSearchMarker_ArrayGetHelperMatchesCold(t *testing.T) {
 		t.Fatalf("marker/cold divergence:\n got  %v\n want %v", got, want)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Engine light-tier slow-path benchmarks (Task 1, #180).
+//
+// These mirror the dmonad/crdt-benchmarks B1 scenario shapes (append is
+// already covered by BenchmarkYText_Insert above; prepend/random/word/
+// insert-then-delete/mixed follow here) at light-tier sizes (nLight ops,
+// fixed-seed RNG) so the PR gate stays fast and deterministic. Heavy-tier
+// (100k) equivalents live behind the benchheavy build tag elsewhere.
+// ---------------------------------------------------------------------------
+
+const benchSeed = 42
+const nLight = 2000
+
+// BenchmarkYText_Prepend inserts at index 0 repeatedly — the worst case for a
+// forward-only cursor/cache, since every insert lands behind everything
+// already in the document.
+func BenchmarkYText_Prepend(b *testing.B) {
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *Transaction) {
+			for j := 0; j < nLight; j++ {
+				txt.Insert(txn, 0, "x", nil)
+			}
+		})
+	}
+}
+
+// BenchmarkYText_RandomInsert inserts nLight characters at seeded-random
+// positions into a growing document.
+func BenchmarkYText_RandomInsert(b *testing.B) {
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		r := rand.New(rand.NewSource(benchSeed))
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *Transaction) {
+			for j := 0; j < nLight; j++ {
+				txt.Insert(txn, r.Intn(txt.Len()+1), "x", nil)
+			}
+		})
+	}
+}
+
+// BenchmarkYText_InsertThenDelete inserts nLight characters at seeded-random
+// positions, then deletes them one at a time from seeded-random positions
+// until the document is empty again.
+func BenchmarkYText_InsertThenDelete(b *testing.B) {
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		r := rand.New(rand.NewSource(benchSeed))
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *Transaction) {
+			for j := 0; j < nLight; j++ {
+				txt.Insert(txn, r.Intn(txt.Len()+1), "x", nil)
+			}
+		})
+		for txt.Len() > 0 {
+			doc.Transact(func(txn *Transaction) {
+				txt.Delete(txn, r.Intn(txt.Len()), 1)
+			})
+		}
+	}
+}
+
+// BenchmarkYText_WordInsert inserts nLight short "words" at the current end
+// of the document, one Transact per word.
+func BenchmarkYText_WordInsert(b *testing.B) {
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+		for j := 0; j < nLight; j++ {
+			doc.Transact(func(txn *Transaction) {
+				txt.Insert(txn, txt.Len(), "lorem ", nil)
+			})
+		}
+	}
+}
+
+// BenchmarkYText_MixedEdits runs a seeded walk of nLight steps: 70% insert a
+// character at a random position, 30% delete one character at a random
+// position (an insert is forced whenever the document is empty).
+func BenchmarkYText_MixedEdits(b *testing.B) {
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		r := rand.New(rand.NewSource(benchSeed))
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *Transaction) {
+			for j := 0; j < nLight; j++ {
+				if txt.Len() == 0 || r.Float64() < 0.7 {
+					txt.Insert(txn, r.Intn(txt.Len()+1), "x", nil)
+				} else {
+					txt.Delete(txn, r.Intn(txt.Len()), 1)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkYText_Format seeds an nLight-character document once (outside the
+// timed loop, so setup cost isn't attributed to the format op) and then
+// repeatedly formats a random 10-character span within it.
+func BenchmarkYText_Format(b *testing.B) {
+	b.ReportAllocs()
+
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, strings.Repeat("x", nLight), nil)
+	})
+	r := rand.New(rand.NewSource(benchSeed))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		doc.Transact(func(txn *Transaction) {
+			txt.Format(txn, r.Intn(txt.Len()-10), 10, Attributes{"bold": true})
+		})
+	}
+}
+
+// BenchmarkYText_ApplyDelta applies a fixed retain/delete/insert/format delta
+// (the shape a rich-text editor emits for a single user edit) to a fresh
+// small document on every iteration.
+func BenchmarkYText_ApplyDelta(b *testing.B) {
+	b.ReportAllocs()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *Transaction) {
+			txt.Insert(txn, 0, "Hello World", nil)
+		})
+		b.StartTimer()
+
+		doc.Transact(func(txn *Transaction) {
+			txt.ApplyDelta(txn, []Delta{
+				{Op: DeltaOpRetain, Retain: 6},
+				{Op: DeltaOpDelete, Delete: 5},
+				{Op: DeltaOpInsert, Insert: "Go", Attributes: Attributes{"bold": true}},
+			})
+		})
+	}
+}
+
+// benchObservedTxn measures the cost of a single-character append transaction
+// with (withObserver=true) and without an active YText.Observe subscriber.
+// The delta between BenchmarkObservedTxn_Apply and _ApplyBaseline IS the
+// signal: it isolates the marginal cost of computing and dispatching the
+// observer event on every transaction commit.
+func benchObservedTxn(b *testing.B, withObserver bool) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "seed", nil) })
+	if withObserver {
+		unsub := txt.Observe(func(YTextEvent) {}) // minimal observer
+		defer unsub()
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, txt.Len(), "x", nil) })
+	}
+}
+
+func BenchmarkObservedTxn_Apply(b *testing.B)         { benchObservedTxn(b, true) }
+func BenchmarkObservedTxn_ApplyBaseline(b *testing.B) { benchObservedTxn(b, false) }
