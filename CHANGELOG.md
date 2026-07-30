@@ -34,6 +34,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read state blobs so listing stays cheap. The older name-keyed pair is
   unchanged and still supported, but is superseded for new code.
 
+- **`RoomLister`: store-wide room enumeration** (`persistence/rooms.go`): a new
+  optional `ListRooms` extension implemented by the memory, file and sqlite
+  backends, with its own conformance suite. `VersionedPersistence` could only be
+  addressed one room at a time, so store-wide retention, cleanup, migration and
+  reconciliation all required an external index of room names with no way to
+  detect drift against what was actually persisted. It reports every room holding
+  at least one update or snapshot, so a snapshot-only room stays reclaimable, and
+  returns the original room name rather than a backend's on-disk encoding.
+
+- **Auto-versioning: `VersionableAdapter` + `Server.AutoVersionEvery`**
+  (`provider/websocket`): the server can now drive a user-facing version history
+  itself instead of leaving every application to build one. When the persistence
+  adapter implements `VersionableAdapter` and `AutoVersionEvery > 0`, the server
+  asks it to capture a labelled version (`AutoVersionLabel`, `"auto"`) at most
+  once per interval per room, **and only when the room actually changed**, plus
+  once on room unload if it changed after the last version. A quiet room is never
+  versioned. That pairing is the point: versioning per update is what makes a
+  history panel unusable.
+
+  `persistence.LegacyAdapter` implements it over `SnapshotStore`, with a new
+  `KeepSnapshots` field bounding retained versions (0 = keep all, matching
+  `KeepVersions`, which is the separate update-log axis). A store without
+  `SnapshotStore` support returns the new `ErrSnapshotsUnsupported` rather than
+  silently discarding versions.
+
+  The hook lives in the persistence worker's `store()` helper, so both the
+  coalescing and the strict per-update paths are covered without touching either
+  select loop, and all of its state is owned by that one goroutine.
+
 ### Fixed
 
 - **sqlite `Delete(room)` now also removes labelled snapshots**: the

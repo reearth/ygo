@@ -34,6 +34,12 @@ import (
 // When s.persistence also implements CompactableAdapter, Compact is invoked
 // on room unload (including server shutdown) and, when s.CompactEvery > 0,
 // after every N persistence flushes on the coalescing path.
+//
+// When s.persistence also implements VersionableAdapter and s.AutoVersionEvery
+// > 0, SaveVersion is invoked at most once per AutoVersionEvery per room, and
+// only when the room changed since its last version, plus once on room unload if
+// it changed after that. The hook lives in store() rather than in either select
+// loop, so both the coalescing and the strict per-update paths get it.
 func (s *Server) startPersistenceWorker(r *room, name string) {
 	clock := s.clock
 	if clock == nil {
@@ -44,6 +50,19 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 		mergeFn = crdt.MergeUpdatesV1
 	}
 	enabled, window, maxWait := resolveCoalesceConfig(s.PersistCoalesceWindow, s.PersistCoalesceMaxWait)
+
+	// Auto-versioning setup, resolved BEFORE the goroutine starts. versioner is
+	// left nil when the feature is off or unsupported, which makes maybeVersion a
+	// cheap no-op on the hot path.
+	versioner, _ := s.persistence.(VersionableAdapter)
+	autoVersionEvery := s.AutoVersionEvery
+	if autoVersionEvery <= 0 {
+		versioner = nil
+	}
+	// lastVersion is stamped here, not inside the goroutine, so the interval is
+	// measured from when the worker was CREATED rather than from whenever its
+	// goroutine happened to be scheduled.
+	lastVersion := clock.now()
 
 	go func() {
 		defer close(r.persistDone)
@@ -63,6 +82,42 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 		compactor, _ := s.persistence.(CompactableAdapter)
 		compactEvery := s.CompactEvery
 		flushCount := 0
+
+		// dirtySinceVersion, like lastVersion above, is mutated only from
+		// store()/maybeVersion on THIS goroutine, so it needs no synchronisation.
+		dirtySinceVersion := false
+
+		// maybeVersion asks the adapter for a labelled version, but only when the
+		// room actually changed since the last one (dirtySinceVersion) and either
+		// the interval has elapsed or force is set (room unload). That pairing is
+		// the anti-churn guarantee: a quiet room is never versioned, and an active
+		// room yields at most one version per AutoVersionEvery.
+		//
+		// Contained by recover; errors and panics are logged and never fatal.
+		// On failure lastVersion is still advanced so a permanently failing adapter
+		// is retried once per interval rather than on every flush, while
+		// dirtySinceVersion stays set so the change is not forgotten.
+		maybeVersion := func(force bool) {
+			if versioner == nil || !dirtySinceVersion {
+				return
+			}
+			if !force && clock.now().Sub(lastVersion) < autoVersionEvery {
+				return
+			}
+			defer func() {
+				if rv := recover(); rv != nil {
+					lastVersion = clock.now()
+					log.Printf("ygo/websocket: SaveVersion panic for room %q: %v", name, rv)
+				}
+			}()
+			_, err := versioner.SaveVersion(context.Background(), name, AutoVersionLabel)
+			lastVersion = clock.now()
+			if err != nil {
+				log.Printf("ygo/websocket: SaveVersion for room %q: %v", name, err)
+				return
+			}
+			dirtySinceVersion = false
+		}
 
 		// maybeCompact calls the adapter's Compact (if any) with a background
 		// ctx, contained by recover; errors/panics are logged, never fatal.
@@ -109,8 +164,14 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 			}
 			if err != nil {
 				log.Printf("ygo/websocket: StoreUpdate for room %q: %v", name, err)
+				return err
 			}
-			return err
+			// A durable write is the one signal that the room changed, and it is
+			// common to BOTH the coalescing and the strict per-update paths, so
+			// auto-versioning hooks in here rather than in either select loop.
+			dirtySinceVersion = true
+			maybeVersion(false)
+			return nil
 		}
 
 		// flush merges batch into one update and stores it. On merge failure it
@@ -167,10 +228,12 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 					ack <- ok
 				case <-r.persistStop:
 					drain()
+					maybeVersion(true)
 					maybeCompact()
 					return
 				case <-s.shutdownCh:
 					drain()
+					maybeVersion(true)
 					maybeCompact()
 					return
 				}
@@ -268,12 +331,14 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				drainBuffered()
 				flush(context.Background(), batch) // non-cancelled: survive shutdown
 				clearTimers()                      // release any pending timers before exit
+				maybeVersion(true)
 				maybeCompact()
 				return
 			case <-s.shutdownCh:
 				drainBuffered()
 				flush(context.Background(), batch)
 				clearTimers() // release any pending timers before exit
+				maybeVersion(true)
 				maybeCompact()
 				return
 			}

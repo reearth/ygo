@@ -223,6 +223,40 @@ type CompactableAdapter interface {
 	Compact(ctx context.Context, room string) error
 }
 
+// VersionableAdapter is an optional extension to PersistenceAdapter. When the
+// adapter implements it AND Server.AutoVersionEvery > 0, the server asks it to
+// capture a labelled point-in-time version of a room's state, so an application
+// gets a user-facing version history without driving one itself.
+//
+// The distinction from CompactableAdapter matters: Compact collapses the update
+// log (a durability/space concern), while SaveVersion records a version a human
+// would want to browse and restore. An adapter typically implements this over
+// persistence.SnapshotStore.
+//
+// Cadence and the anti-churn guarantee: SaveVersion is called from the room's
+// persistence worker, at most once per AutoVersionEvery per room, and ONLY when
+// the room actually changed since the last version. A quiet room is never
+// versioned. This is deliberate: versioning per update is what makes a history
+// panel unusable. One final version is also captured on room unload if there
+// were changes after the last one, so a session's end state is not lost.
+//
+// Like Compact, SaveVersion is invoked from the room's persistence worker
+// goroutine, serialised with StoreUpdate for that room, so implementations need
+// no extra locking against concurrent writes to the same room. It is
+// best-effort: a returned error (or panic) is logged and never aborts
+// persistence. Retention (how many versions to keep) is the adapter's concern.
+//
+// It is invoked with context.Background() (not cancelled by Server.Shutdown),
+// so a slow SaveVersion delays that room's teardown, exactly as Compact does.
+type VersionableAdapter interface {
+	SaveVersion(ctx context.Context, room, label string) (int64, error)
+}
+
+// AutoVersionLabel is the label the server passes to
+// VersionableAdapter.SaveVersion for versions it creates on its own, so they can
+// be told apart from versions a user explicitly named.
+const AutoVersionLabel = "auto"
+
 // MemoryPersistence is a thread-safe in-memory PersistenceAdapter that merges
 // all updates into a single V1 snapshot per room. It is the default adapter
 // used when no external persistence is configured and is primarily useful in
@@ -662,6 +696,23 @@ type Server struct {
 	// only). Like the other config fields, set it before serving; it is read
 	// without synchronisation.
 	CompactEvery int
+
+	// AutoVersionEvery, when > 0, asks a VersionableAdapter to capture a labelled
+	// version of a room at most this often, and only when the room changed since
+	// the last version, giving a user-facing history that does not grow one entry
+	// per edit. A room with no activity is never versioned; a room that changed
+	// after its last version is versioned once more on unload so the session's
+	// end state survives.
+	//
+	// The interval is measured from the previous version (or from worker start),
+	// and is evaluated on persistence flushes rather than on a timer, so it is
+	// checked only when there is something to version. That means the actual gap
+	// between versions is AutoVersionEvery rounded up to the next flush.
+	//
+	// 0 (default) disables auto-versioning entirely. Ignored when the adapter does
+	// not implement VersionableAdapter. Set before serving; read without
+	// synchronisation.
+	AutoVersionEvery time.Duration
 
 	// clock creates timers for the persistence worker. nil in production
 	// (resolves to realClock). Tests inject a fake for deterministic debounce.
