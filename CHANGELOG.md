@@ -15,9 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalises to the core types what [#147](https://github.com/reearth/ygo/pull/147)
   and [#170](https://github.com/reearth/ygo/pull/170) established for `YXml`, and
   closes the API asymmetry recorded in `crdt/nested_map_yjs_interop_test.go`.
-- **`YMap.Set` buffers while detached**, replaying on attach (parity with
-  `YText.pending`), so nested children materialise top-down with parent-first
-  clocks — the ordering genuine Yjs produces and can decode.
+- **`YMap.Set` and `YArray` mutations buffer while detached**, replaying on
+  attach (parity with `YText.pending`), so nested children materialise top-down
+  with parent-first clocks — the ordering genuine Yjs produces and can decode.
+- **Cross-language conformance fixtures for prelim construction**
+  (`testutil/gen_fixtures_prelim.js`, `crdt/prelim_yjs_conformance_test.go`):
+  authored-sequence fixtures with a pinned clientID, in the same shape
+  `gen_fixtures_yxml.js` uses. Go replays each build and must produce
+  byte-identical V1 bytes to `yjs@13.6.30`, and must decode Yjs's own output to
+  the same canonical JSON. Plus a fuzz target over nested prelim shapes.
 
 ### Fixed
 

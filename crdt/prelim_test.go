@@ -3,6 +3,7 @@ package crdt
 import (
 	"encoding/json"
 	"testing"
+	"unicode/utf8"
 )
 
 // buildCell constructs the shape a Jupyter notebook cell has — a Y.Map holding a
@@ -167,4 +168,52 @@ func TestPrelimArrayNestsInsideAMap(t *testing.T) {
 	if arr.Len() != 2 {
 		t.Fatalf("outputs len = %d, want 2", arr.Len())
 	}
+}
+
+// FuzzPrelimNestedRoundTrip builds arbitrary nested prelim shapes, attaches
+// them, and requires the encoded update to decode into an equivalent document.
+// The property under test is wire-ordering: a child materialised before its
+// container carries a lower clock, which genuine Yjs never emits and
+// Y.applyUpdate cannot decode — so a failure here surfaces as a decode error.
+func FuzzPrelimNestedRoundTrip(f *testing.F) {
+	f.Add("hello", "markdown", 2)
+	f.Add("", "code", 0)
+	f.Add("multi\nline\ttext", "raw", 5)
+
+	f.Fuzz(func(t *testing.T, text, kind string, n int) {
+		if n < 0 || n > 32 {
+			t.Skip()
+		}
+		// Constrain to valid UTF-8. Go strings may hold arbitrary bytes, but
+		// ygo's varstring encoding rejects non-UTF-8 on decode — a pre-existing
+		// property unrelated to prelim construction, and letting it through
+		// would make this target test string encoding instead of wire ordering.
+		if !utf8.ValidString(text) || !utf8.ValidString(kind) {
+			t.Skip()
+		}
+		src := New()
+		cells := src.GetArray("cells")
+		src.Transact(func(txn *Transaction) {
+			cell := NewMapPrelim()
+			body := NewTextPrelim()
+			body.Insert(txn, 0, text, nil)
+			cell.Set(txn, "cell_type", kind)
+			cell.Set(txn, "source", body)
+
+			outputs := NewArrayPrelim()
+			for i := 0; i < n; i++ {
+				outputs.Push(txn, []any{"o"})
+			}
+			cell.Set(txn, "outputs", outputs)
+			cells.PushType(txn, cell)
+		})
+
+		dst := New()
+		if err := dst.ApplyUpdate(src.EncodeStateAsUpdate()); err != nil {
+			t.Fatalf("update failed to decode (child/container clock ordering): %v", err)
+		}
+		if got := dst.GetArray("cells").Len(); got != 1 {
+			t.Fatalf("decoded %d cells, want 1", got)
+		}
+	})
 }

@@ -16,6 +16,21 @@ type YArray struct {
 	abstractType
 	subIDGen  uint64
 	observers []arraySub
+	// pending buffers mutations issued while this array is detached, replayed
+	// when the container item integrates (prelimFlusher parity with YText and
+	// YMap). Materialising immediately would give children clocks BELOW the
+	// future container item's — an ordering genuine Yjs never produces.
+	pending []func(txn *Transaction)
+}
+
+// flushPrelim replays mutations buffered while this array was detached.
+// Called by item.integrate when the container item integrates.
+func (a *YArray) flushPrelim(txn *Transaction) {
+	ops := a.pending
+	a.pending = nil
+	for _, op := range ops {
+		op(txn)
+	}
 }
 
 func (a *YArray) baseType() *abstractType { return &a.abstractType }
@@ -175,6 +190,10 @@ func (a *YArray) Len() int { return a.length }
 
 // Insert inserts vals at logical position index (0 = prepend, Len() = append).
 func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
+	if a.detached() {
+		a.pending = append(a.pending, func(txn *Transaction) { a.Insert(txn, index, vals) })
+		return
+	}
 	t := &a.abstractType
 	left, offset := t.leftNeighbourAt(index)
 	if offset > 0 {
@@ -231,6 +250,10 @@ func (a *YArray) insertAfterItem(txn *Transaction, left *Item, vals []any, hintI
 // a Yjs peer would order the two results differently — a convergence divergence
 // surfaced by the #70 cross-impl fuzz oracle.
 func (a *YArray) Push(txn *Transaction, vals []any) {
+	if a.detached() {
+		a.pending = append(a.pending, func(txn *Transaction) { a.Push(txn, vals) })
+		return
+	}
 	t := &a.abstractType
 	// Start from the last live item (fast, pos-cached) then walk past any
 	// trailing tombstones to the physical tail. When there are no trailing
@@ -295,6 +318,10 @@ func (a *YArray) Get(index int) any {
 
 // Delete removes length elements starting at logical position index.
 func (a *YArray) Delete(txn *Transaction, index, length int) {
+	if a.detached() {
+		a.pending = append(a.pending, func(txn *Transaction) { a.Delete(txn, index, length) })
+		return
+	}
 	deleteRange(&a.abstractType, txn, index, length)
 }
 
@@ -541,6 +568,10 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 // deadlock that would occur if RLock were acquired on top of the write lock held
 // by the enclosing Transact callback.
 func (a *YArray) Move(txn *Transaction, fromIndex, toIndex int) {
+	if a.detached() {
+		a.pending = append(a.pending, func(txn *Transaction) { a.Move(txn, fromIndex, toIndex) })
+		return
+	}
 	if fromIndex == toIndex {
 		return
 	}
