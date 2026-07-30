@@ -28,6 +28,13 @@ package crdt
 // Accessors that read shared state (Keys, Has, ToJSON) are likewise not safe
 // from inside a Transact callback.
 
+// Buffered mutations replay call-by-call at attach: each buffered op emits its
+// own item, where Yjs coalesces detached content (_prelimContent) and emits
+// the net result. A multi-call build — two Pushes, a key set twice, a
+// set-then-delete — therefore converges with Yjs but is not byte-identical to
+// it. The conformance fixtures pin the shapes that are. Reads on a detached
+// type (Len, Get, Keys) see none of the buffered state until attach.
+
 // NewTextPrelim returns a DETACHED YText. Mutations are buffered until it is
 // attached (via YMap.Set or YArray.PushType) and replayed then, so its items
 // get clocks above the container item's — the ordering genuine Yjs produces.

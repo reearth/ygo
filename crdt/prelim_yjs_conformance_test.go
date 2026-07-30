@@ -78,6 +78,25 @@ var prelimBuilders = map[string]func(*Doc){
 			}
 		})
 	},
+	"pushtype_after_plain_values": func(doc *Doc) {
+		root := doc.GetArray("root")
+		doc.Transact(func(txn *Transaction) {
+			root.Push(txn, []any{"a"})
+			m := NewMapPrelim()
+			m.Set(txn, "k", "v")
+			root.PushType(txn, m)
+		})
+	},
+	"pushtype_after_tombstone": func(doc *Doc) {
+		root := doc.GetArray("root")
+		doc.Transact(func(txn *Transaction) {
+			root.Push(txn, []any{"a"})
+			root.Delete(txn, 0, 1)
+			m := NewMapPrelim()
+			m.Set(txn, "k", "v")
+			root.PushType(txn, m)
+		})
+	},
 	"array_nested_in_map": func(doc *Doc) {
 		root := doc.GetArray("root")
 		doc.Transact(func(txn *Transaction) {

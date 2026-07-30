@@ -22,6 +22,20 @@
       "expectedJSON": "{\"cells\":[{\"source\":\"first cell\"},{\"source\":\"second cell\"}]}"
     },
     {
+      "name": "pushtype_after_plain_values",
+      "description": "A nested map pushed after plain values — PushType anchors after the ContentAny item.",
+      "clientID": 3735928559,
+      "updateV1": "0103effdb6f50d00080104726f6f740177016187effdb6f50d00012800effdb6f50d01016b0177017600",
+      "expectedJSON": "{\"root\":[\"a\",{\"k\":\"v\"}]}"
+    },
+    {
+      "name": "pushtype_after_tombstone",
+      "description": "A nested map pushed after a deleted trailing element — PushType anchors past the tombstone, the trailing-tombstone rule from #70.",
+      "clientID": 3735928559,
+      "updateV1": "0103effdb6f50d00010104726f6f740187effdb6f50d00012800effdb6f50d01016b0177017601effdb6f50d010001",
+      "expectedJSON": "{\"root\":[{\"k\":\"v\"}]}"
+    },
+    {
       "name": "array_nested_in_map",
       "description": "Y.Map holding a Y.Array of scalars, built detached.",
       "clientID": 3735928559,

@@ -92,6 +92,33 @@ const fixtures = [
     }
   ),
   authored(
+    'pushtype_after_plain_values',
+    'A nested map pushed after plain values — PushType anchors after the ContentAny item.',
+    (doc) => {
+      const root = doc.getArray('root')
+      doc.transact(() => {
+        root.push(['a'])
+        const m = new Y.Map()
+        m.set('k', 'v')
+        root.push([m])
+      })
+    }
+  ),
+  authored(
+    'pushtype_after_tombstone',
+    'A nested map pushed after a deleted trailing element — PushType anchors past the tombstone, the trailing-tombstone rule from #70.',
+    (doc) => {
+      const root = doc.getArray('root')
+      doc.transact(() => {
+        root.push(['a'])
+        root.delete(0, 1)
+        const m = new Y.Map()
+        m.set('k', 'v')
+        root.push([m])
+      })
+    }
+  ),
+  authored(
     'array_nested_in_map',
     'Y.Map holding a Y.Array of scalars, built detached.',
     (doc) => {
