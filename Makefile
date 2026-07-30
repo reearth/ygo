@@ -48,6 +48,7 @@ bench-heavy:
 fixtures:
 	node testutil/gen_conformance_fixtures.js
 	node testutil/gen_fixtures_yxml.js
+	node testutil/gen_fixtures_prelim.js
 
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest

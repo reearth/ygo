@@ -392,10 +392,13 @@ func TestInteg_YArray_Move_TwoPeer_SameItem(t *testing.T) {
 func TestUnit_YArray_Get_NestedYMap_ReturnsType(t *testing.T) {
 	doc := newTestDoc(1)
 	arr := doc.GetArray("a")
-	nested := doc.GetMap("nested")
+	// Built detached and attached via PushType. The previous form (Push of an
+	// attached root map as a plain value) now panics rather than storing a
+	// ContentAny blob that fails at encode time.
+	nested := NewMapPrelim()
 	doc.Transact(func(txn *Transaction) {
 		nested.Set(txn, "key", "val")
-		arr.Push(txn, []any{nested})
+		arr.PushType(txn, nested)
 	})
 	got := arr.Get(0)
 	require.NotNil(t, got, "Get() must return nested type, not nil")

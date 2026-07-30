@@ -1,4 +1,0 @@
-go test fuzz v1
-string("\x8b")
-string("0")
-int(2)

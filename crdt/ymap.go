@@ -12,11 +12,16 @@ func contentForValue(value any) Content {
 	// A DETACHED shared type becomes a nested ContentType, so
 	// Set(key, NewTextPrelim()) builds a real Y.Text child rather than a
 	// ContentAny blob. item.integrate links it, assigns its doc and calls
-	// flushPrelim, so nothing further is needed here.
+	// flushPrelim, so nothing further is needed here. An ATTACHED type must be
+	// rejected here rather than fall through: a ContentAny holding a shared
+	// type only fails at encode time — inside Doc.Transact when an OnUpdate
+	// hook triggers commit-time encoding.
 	if st, ok := value.(sharedType); ok {
-		if bt := st.baseType(); bt.detached() {
-			return NewContentType(bt)
+		bt := st.baseType()
+		if !bt.detached() {
+			panic("crdt: Set requires a detached type; a shared type attaches once (build a new prelim instead)")
 		}
+		return NewContentType(bt)
 	}
 	return NewContentAny(value)
 }
@@ -194,6 +199,12 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 // Delete removes the entry for key if it exists.
 func (m *YMap) Delete(txn *Transaction, key string) {
 	t := &m.abstractType
+	// Detached: buffer like Set, or the buffered Set for this key would replay
+	// at attach and resurrect it.
+	if t.detached() {
+		m.pending = append(m.pending, func(txn *Transaction) { m.Delete(txn, key) })
+		return
+	}
 	if item, ok := t.itemMap[key]; ok && !item.Deleted {
 		item.delete(txn)
 	}

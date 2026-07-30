@@ -188,8 +188,22 @@ func arrayValuesFromItem(item *Item) []any {
 // Len returns the number of non-deleted elements.
 func (a *YArray) Len() int { return a.length }
 
+// rejectSharedVals guards the plain-value entry points. A shared type batched
+// into a ContentAny only fails at encode time — inside Doc.Transact when an
+// OnUpdate hook triggers commit-time encoding — so fail at the call site
+// instead. Runs before the detached gate so a buffered call cannot defer the
+// panic to attach time.
+func rejectSharedVals(vals []any) {
+	for _, v := range vals {
+		if _, ok := v.(sharedType); ok {
+			panic("crdt: a shared type cannot be inserted as a plain value; use PushType")
+		}
+	}
+}
+
 // Insert inserts vals at logical position index (0 = prepend, Len() = append).
 func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
+	rejectSharedVals(vals)
 	if a.detached() {
 		a.pending = append(a.pending, func(txn *Transaction) { a.Insert(txn, index, vals) })
 		return
@@ -250,6 +264,7 @@ func (a *YArray) insertAfterItem(txn *Transaction, left *Item, vals []any, hintI
 // a Yjs peer would order the two results differently — a convergence divergence
 // surfaced by the #70 cross-impl fuzz oracle.
 func (a *YArray) Push(txn *Transaction, vals []any) {
+	rejectSharedVals(vals)
 	if a.detached() {
 		a.pending = append(a.pending, func(txn *Transaction) { a.Push(txn, vals) })
 		return

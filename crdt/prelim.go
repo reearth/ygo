@@ -34,6 +34,7 @@ package crdt
 func NewTextPrelim() *YText {
 	t := &YText{}
 	t.owner = t
+	t.itemMap = make(map[string]*Item)
 	return t
 }
 
@@ -49,6 +50,7 @@ func NewMapPrelim() *YMap {
 func NewArrayPrelim() *YArray {
 	a := &YArray{}
 	a.owner = a
+	a.itemMap = make(map[string]*Item)
 	return a
 }
 
@@ -63,6 +65,10 @@ func (a *YArray) PushType(txn *Transaction, st sharedType) {
 	bt := st.baseType()
 	if !bt.detached() {
 		panic("crdt: PushType requires a detached type (use NewMapPrelim/NewTextPrelim)")
+	}
+	if a.detached() {
+		a.pending = append(a.pending, func(txn *Transaction) { a.PushType(txn, st) })
+		return
 	}
 	t := &a.abstractType
 

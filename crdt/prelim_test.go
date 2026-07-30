@@ -230,6 +230,103 @@ func TestPrelimArrayBuffersMutationsUntilAttached(t *testing.T) {
 	assertSlice("decoded array", inner)
 }
 
+func TestPushTypeBuffersWhenArrayDetached(t *testing.T) {
+	// A nested type pushed into a DETACHED array must buffer like every other
+	// mutation, or the child materialises with a clock below the container's —
+	// an update ygo silently decodes to an empty root and real Yjs rejects.
+	doc := New()
+	root := doc.GetArray("root")
+	outer := NewArrayPrelim()
+	inner := NewMapPrelim()
+	doc.Transact(func(txn *Transaction) {
+		inner.Set(txn, "k", "v")
+		outer.PushType(txn, inner)
+		root.PushType(txn, outer)
+	})
+
+	dst := New()
+	if err := dst.ApplyUpdate(doc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("ApplyUpdate: %v", err)
+	}
+	got, err := dst.GetArray("root").ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `[[{"k":"v"}]]` {
+		t.Fatalf("decoded root = %s, want [[{\"k\":\"v\"}]]", got)
+	}
+}
+
+func TestSetRejectsAnAttachedType(t *testing.T) {
+	// An attached type stored again would fall through to ContentAny and only
+	// blow up at encode time — inside Doc.Transact when an OnUpdate hook is
+	// registered. Reject it loudly at Set, like PushType already does.
+	doc := New()
+	m := doc.GetMap("m")
+	child := NewTextPrelim()
+	doc.Transact(func(txn *Transaction) { m.Set(txn, "a", child) })
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Set accepted an already-attached type; want panic")
+		}
+	}()
+	doc.Transact(func(txn *Transaction) { m.Set(txn, "b", child) })
+}
+
+func TestPushRejectsASharedType(t *testing.T) {
+	// Push(txn, []any{prelim}) is the literal translation of Yjs's
+	// cells.push([cell]) — it must fail loudly and point at PushType, not
+	// store a blob that panics the encoder later.
+	doc := New()
+	root := doc.GetArray("root")
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Push accepted a shared type as a plain value; want panic")
+		}
+	}()
+	doc.Transact(func(txn *Transaction) { root.Push(txn, []any{NewMapPrelim()}) })
+}
+
+func TestInsertRejectsASharedType(t *testing.T) {
+	doc := New()
+	root := doc.GetArray("root")
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Insert accepted a shared type as a plain value; want panic")
+		}
+	}()
+	doc.Transact(func(txn *Transaction) { root.Insert(txn, 0, []any{NewTextPrelim()}) })
+}
+
+func TestPrelimMapDeleteBuffersUntilAttached(t *testing.T) {
+	// Delete on a detached map must buffer like Set, or the buffered Set
+	// replays at attach and resurrects the deleted key. Yjs yields {} here.
+	doc := New()
+	root := doc.GetArray("root")
+	m := NewMapPrelim()
+	doc.Transact(func(txn *Transaction) {
+		m.Set(txn, "a", "1")
+		m.Delete(txn, "a")
+	})
+	doc.Transact(func(txn *Transaction) { root.PushType(txn, m) })
+	if got := len(m.Keys()); got != 0 {
+		t.Fatalf("attached map has %d keys, want 0 (buffered Delete must replay after Set)", got)
+	}
+
+	dst := New()
+	if err := dst.ApplyUpdate(doc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("ApplyUpdate: %v", err)
+	}
+	got, err := dst.GetArray("root").ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `[{}]` {
+		t.Fatalf("decoded root = %s, want [{}]", got)
+	}
+}
+
 func TestPrelimArrayNestsInsideAMap(t *testing.T) {
 	doc := New()
 	root := doc.GetArray("root")
