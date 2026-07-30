@@ -147,6 +147,89 @@ func TestPushTypeRejectsAnAttachedType(t *testing.T) {
 	doc.Transact(func(txn *Transaction) { b.PushType(txn, m) })
 }
 
+func TestPushTypeAppendsAfterExistingItems(t *testing.T) {
+	// A notebook is many cells, so consecutive PushType calls must anchor each
+	// new item after the previous physical tail — the non-empty-array path in
+	// PushType, which the single-cell tests never reach.
+	src := New()
+	cells := src.GetArray("cells")
+	src.Transact(func(txn *Transaction) {
+		for _, text := range []string{"first", "second", "third"} {
+			cell := NewMapPrelim()
+			body := NewTextPrelim()
+			body.Insert(txn, 0, text, nil)
+			cell.Set(txn, "source", body)
+			cells.PushType(txn, cell)
+		}
+	})
+
+	dst := New()
+	if err := dst.ApplyUpdate(src.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("ApplyUpdate: %v", err)
+	}
+	got, err := dst.GetArray("cells").ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("decoding %s: %v", got, err)
+	}
+	if len(decoded) != 3 {
+		t.Fatalf("got %d cells, want 3", len(decoded))
+	}
+	for i, want := range []string{"first", "second", "third"} {
+		if decoded[i]["source"] != want {
+			t.Fatalf("cells[%d].source = %v, want %q (push order must hold)", i, decoded[i]["source"], want)
+		}
+	}
+}
+
+func TestPrelimArrayBuffersMutationsUntilAttached(t *testing.T) {
+	// Insert, Delete and Move on a detached array must buffer and replay on
+	// attach, like Push — otherwise their items would carry clocks below the
+	// container's. Verified end to end: the update must decode elsewhere.
+	doc := New()
+	root := doc.GetArray("root")
+	arr := NewArrayPrelim()
+	doc.Transact(func(txn *Transaction) {
+		arr.Push(txn, []any{"b", "d"})
+		arr.Insert(txn, 0, []any{"a"})
+		arr.Insert(txn, 2, []any{"c"}) // a b c d
+		arr.Delete(txn, 3, 1)          // a b c
+		arr.Move(txn, 0, 3)            // b c a
+	})
+	if got := arr.Len(); got != 0 {
+		t.Fatalf("detached array has len %d, want 0 (mutations must buffer)", got)
+	}
+
+	doc.Transact(func(txn *Transaction) { root.PushType(txn, arr) })
+	want := []any{"b", "c", "a"}
+	assertSlice := func(label string, a *YArray) {
+		t.Helper()
+		got := a.ToSlice()
+		if len(got) != len(want) {
+			t.Fatalf("%s = %v, want %v", label, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s = %v, want %v", label, got, want)
+			}
+		}
+	}
+	assertSlice("attached array", arr)
+
+	dst := New()
+	if err := dst.ApplyUpdate(doc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("ApplyUpdate: %v", err)
+	}
+	inner, ok := dst.GetArray("root").Get(0).(*YArray)
+	if !ok {
+		t.Fatalf("root[0] is %T, want *YArray", dst.GetArray("root").Get(0))
+	}
+	assertSlice("decoded array", inner)
+}
+
 func TestPrelimArrayNestsInsideAMap(t *testing.T) {
 	doc := New()
 	root := doc.GetArray("root")

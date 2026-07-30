@@ -71,27 +71,21 @@ func (a *YArray) PushType(txn *Transaction, st sharedType) {
 		last = it
 	}
 
+	// The walk ends at the physical tail, so there is never a right
+	// neighbour: OriginRight stays nil and last is nil only when the list is
+	// empty.
 	var origin *ID
-	var originRight *ID
 	if last != nil {
 		end := last.ID.Clock + uint64(last.Content.Len()) - 1
 		origin = &ID{Client: last.ID.Client, Clock: end}
-		if last.Right != nil {
-			id := last.Right.ID
-			originRight = &id
-		}
-	} else if t.start != nil {
-		id := t.start.ID
-		originRight = &id
 	}
 
 	item := &Item{
-		ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
-		Origin:      origin,
-		OriginRight: originRight,
-		Left:        last,
-		Parent:      t,
-		Content:     NewContentType(bt),
+		ID:      ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
+		Origin:  origin,
+		Left:    last,
+		Parent:  t,
+		Content: NewContentType(bt),
 	}
 	// item.integrate sets bt.item, assigns bt.doc, and calls flushPrelim on
 	// the owner — so buffered children materialise top-down from here.
