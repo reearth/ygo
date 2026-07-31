@@ -333,9 +333,9 @@ func TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray(t *testing.T) {
 // TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray, confirming the
 // router no longer distinguishes the two cases at all: a room this relay
 // counts as active (activeRooms>0) but that has no entry in r.workers still
-// drops on a miss, same as an inactive room. Before Task 4's carried-forward
-// router simplification, this case used to call isRoomActive + workerFor to
-// recreate the worker — that was what made lazy recreation after an
+// drops on a miss, same as an inactive room. Before the router was simplified
+// to remove lazy worker recreation, this case used to call isRoomActive +
+// workerFor to recreate the worker — that was what made lazy recreation after an
 // explicit reap work (see the now-renamed
 // TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated below). Removing
 // that call means workerForInbound is a plain hit-or-drop lookup against
@@ -360,9 +360,9 @@ func TestUnit_WorkerForInbound_MissOnActiveRoom_Drops(t *testing.T) {
 
 // TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated replaces the former
 // TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom, whose name and
-// assertions described behaviour Task 4's carried-forward router
-// simplification removed. workerForInbound no longer creates a worker on a
-// miss (see worker.go), so an explicitly reaped room — stopWorker called
+// assertions described behaviour the router simplification above removed.
+// workerForInbound no longer creates a worker on a miss (see worker.go), so
+// an explicitly reaped room — stopWorker called
 // directly, leaving the Redis subscription and the activeRooms refcount
 // both untouched — now DROPS inbound messages instead of lazily recreating
 // its worker.

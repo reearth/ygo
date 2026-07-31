@@ -351,9 +351,10 @@ func (s *Server) stopRelayLane(room string, l *relayRoomLane) {
 // heartbeat still gets relayed cross-node. Using OnChange here would drop
 // heartbeats from the relay (OnChange only fires on content changes), leaving a
 // remote node's view of this client's liveness stale and causing it to falsely
-// expire a still-alive client. Must be called with s.rmu.Lock held (from
-// getOrCreateRoomLocked). The unsubscribe functions are stored on the room and
-// invoked by teardownRelayRoom.
+// expire a still-alive client. Called from loadRoom, AFTER the bootstrap
+// decode but BEFORE close(r.ready), with s.rmu released (loadRoom runs off the
+// global rooms lock — see server.go). The unsubscribe functions are stored on
+// the room and invoked by teardownRelayRoom.
 func (s *Server) registerRelayObservers(r *room, name string) {
 	sentinel := s.relaySentinel
 	// Create the outbound lane before the observers that feed it. This runs
@@ -435,7 +436,7 @@ func (s *Server) registerRelayObservers(r *room, name string) {
 // dropped update would park every later edit from that client on the peer
 // node. Coalescing avoids that. A hard drop remains possible only if the
 // merge itself repeatedly fails; it is counted (relaylane.Stats.HardDrops)
-// and surfaced via RelayStats (Task 6).
+// and surfaced via RelayStats.
 //
 // relayLaneFor can legitimately return nil here: no relay is attached, or —
 // see relayLaneFor's and ensureRelayLane's docs for the full detail — this

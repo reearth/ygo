@@ -91,7 +91,7 @@ func syncUpdate(t *testing.T, s string) []byte {
 // doc comments for the full mechanism and TestUnit_Apply_RelaysToOtherNodes
 // in inject_test.go for the regression coverage). Kept as a direct
 // crdt.ApplyUpdateV1 call rather than switched to srv.Apply now, simply to
-// keep this file's helper scoped to what Task 5's outbound-lane tests
+// keep this file's helper scoped to what this file's outbound-lane tests
 // actually need to exercise.
 func applyLocal(t *testing.T, ts *httptest.Server, srv *ygws.Server, room, text string) {
 	t.Helper()

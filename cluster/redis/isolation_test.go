@@ -175,8 +175,8 @@ func TestInteg_Subscriber_PreservesPerRoomOrder(t *testing.T) {
 // relay itself DOES activate the room (RoomActivated below), which
 // pre-creates its worker — this test exercises the Sink-layer auto-create
 // guarantee via the router's normal hit path (workerForInbound finds the
-// worker RoomActivated pre-created). It does NOT exercise a miss: since
-// Task 4's carried-forward router simplification, workerForInbound never
+// worker RoomActivated pre-created). It does NOT exercise a miss: the router
+// was simplified to remove lazy worker recreation, so workerForInbound never
 // creates a worker on a miss at all (it is a plain hit-or-drop lookup — see
 // worker.go), so there is no "lazy worker-creation branch" left to cover.
 // The miss/drop path is covered by

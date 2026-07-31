@@ -76,6 +76,13 @@ type Sink interface {
 	// is applied to the room's crdt.Doc with the relay sentinel origin and
 	// rebroadcast to local peers; for KindAwareness it is merged into the
 	// room's awareness.Awareness with the relay sentinel origin.
+	//
+	// Inject MAY BE CALLED CONCURRENTLY for distinct rooms: relays deliver
+	// each room on its own goroutine so one slow room cannot stall the others
+	// (#187). Calls for the SAME room are serialised and arrive in publish
+	// order. Implementations must therefore be safe for concurrent use across
+	// rooms; *websocket.Server is (it is the same path concurrent connections
+	// already take).
 	Inject(ctx context.Context, in Inbound) error
 	// Rooms returns the names of rooms currently resident on this node.
 	Rooms() []string
@@ -101,9 +108,22 @@ type Relay interface {
 	Start(ctx context.Context, sink Sink) error
 	// RoomActivated tells the relay a room became resident on this node, so it
 	// may begin subscribing to / delivering that room's traffic. Idempotent.
+	//
+	// Implementations MUST tolerate a successor room instance activating the
+	// same name before a predecessor's RoomDeactivated for that name has been
+	// called. During a room's eviction/reload window, the websocket provider's
+	// teardown and lookup paths are decoupled enough that a fresh room
+	// instance can call RoomActivated(name) while the outgoing instance's
+	// teardown — which calls RoomDeactivated(name) — is still in flight, in
+	// either order. A Relay that reference-counts activations per name (both
+	// shipped relays do: cluster/redis via its activeRooms counter, MemRelay
+	// trivially since both calls are no-ops) rides this out correctly; one
+	// that treats RoomDeactivated as an unconditional unsubscribe would drop
+	// a live successor room's subscription.
 	RoomActivated(room string)
 	// RoomDeactivated tells the relay a room is no longer resident on this
-	// node. Idempotent.
+	// node. Idempotent. See RoomActivated's doc for the activation-overlap
+	// requirement this call is one half of.
 	RoomDeactivated(room string)
 	// Close stops the relay and releases its resources. After Close, Publish
 	// returns ErrRelayClosed and no further inbound changes are delivered.

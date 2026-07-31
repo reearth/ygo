@@ -22,16 +22,33 @@
 // drops payloads whose nodeID matches its own, so the local node never pays
 // the decode + Inject + observer round trip for its own writes.
 //
-// # Delivery guarantee
+// # Delivery guarantee — at-most-once
 //
-// Redis pub/sub is fire-and-forget. A node that subscribes AFTER a publish
-// will not receive that publish — there is no replay. ygo's existing
-// versioned-persistence layer (provider/persistence) is the right place for
-// late-joiner catch-up: a node that comes online late loads the head state
-// from persistence and only THEN starts relying on the relay for incremental
-// updates. The Redis relay does not attempt to provide at-least-once
-// semantics; if a deployment needs that, Redis Streams or a different bus
-// would replace this adapter.
+// Redis pub/sub is fire-and-forget and AT-MOST-ONCE by Redis's own definition:
+// if a subscriber cannot handle a message — an error, a network blip, or Redis
+// disconnecting a subscriber whose output buffer overflowed — the message is
+// forever lost. That is a property of the transport, not of this adapter: no
+// amount of client-side buffering can make pub/sub lossless.
+//
+// A lost update is worse than one missing edit. Updates carry causal
+// dependencies, so a dropped update parks every LATER edit from that client on
+// the receiving node — the apply reports no error, the node simply stops
+// converging for that client. The versioned persistence layer
+// (provider/persistence) heals this only when the room is next RELOADED, and a
+// hot room (always at least one connected client) is never reloaded. ygo's idle
+// residency (#183) deliberately keeps rooms resident longer, which lengthens
+// that window rather than shortening it.
+//
+// What this adapter DOES guarantee, since #187: one slow room never stalls
+// delivery for another room (each room is delivered on its own worker), and a
+// saturated room coalesces its backlog via crdt.MergeUpdatesV1 rather than
+// dropping it. Watch Relay.Stats: Coalesced non-zero means a room fell behind,
+// HardDrops non-zero means data was lost.
+//
+// Deployments that cannot tolerate at-most-once need a durable, replayable
+// transport (Redis Streams, or a log like NATS JetStream) rather than pub/sub.
+// A late-joining node gets no replay here: it must load head state from
+// persistence first and only then rely on the relay for increments.
 //
 // # Echo guard
 //

@@ -6,6 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.42.0] — 2026-07-31
+
+### Fixed
+
+- **cluster: `Server.Apply` writes were silently never relayed to other nodes, since v1.20.0.**
+  `Server.Apply` and `AttachRelay` each minted their origin sentinel with
+  `new(struct{})`. Go's zero-size-allocation guarantee lets the runtime
+  satisfy every such allocation from the same `runtime.zerobase` address, so
+  the two "distinct" sentinel pointers compared equal. The relay's echo guard
+  then misidentified every `Apply`-driven commit as its own echo and dropped
+  it before publish — permanent, silent cross-node divergence for any
+  deployment combining `Server.Apply` with a relay, present since the
+  cluster relay's introduction and not caused by this release. Fixed by
+  giving each sentinel its own named, non-zero-size, unexported type
+  (`relayOriginSentinel`, `applyOriginSentinel`).
+- **cluster: head-of-line blocking in relay delivery, both directions (#187).**
+  `cluster/redis`'s subscriber called `Sink.Inject` synchronously in its receive
+  loop, so one slow room stalled inbound delivery for every room on the node.
+  `provider/websocket` had the mirror-image defect outbound: one shared queue
+  and one worker for all rooms. Each room now has its own bounded lane and
+  worker in both directions, identity-guarded across room eviction/reload.
+- **cluster: relay updates are coalesced instead of dropped under saturation.**
+  A full lane merges its queued `KindSync` backlog via `crdt.MergeUpdatesV1`
+  rather than dropping it. The previous outbound drop was justified in-comment
+  by "peers reconcile via sync step 1/2", which does not hold for a hot room —
+  reconciliation requires a room reload, and a room with a connected client
+  never reloads. This does not make the commit path merge-free: once a room's
+  queued backlog exceeds its cap, `Lane.Push` collapses it synchronously, on
+  the publishing goroutine, before returning — the actual guarantee is that
+  the commit path never *blocks*, not that it never merges (the merge cost
+  itself is tracked separately as #184). A hard drop remains possible, but
+  only when the merge keeps failing — a saturated lane can no longer drop from
+  volume alone, so `HardDrops` now signals merge failure specifically, not
+  exhausted capacity.
+
+### Added
+
+- `cluster/redis.Config.RoomQueueSize`, `cluster/redis.Relay.Stats()`, and
+  `websocket.Server.RelayStats()` — coalesce, awareness-supersede, and
+  hard-drop counters. Both `Stats()` methods are guaranteed monotonic across
+  the life of the relay/server but not guaranteed exact: a small number of
+  documented, benign race windows can undercount (never overcount, never
+  decrease) — see their doc comments. `relayDropped` was previously
+  incremented and read nowhere, making outbound relay loss invisible.
+
+### Changed
+
+- **`cluster.Sink.Inject` may now be called concurrently for distinct rooms.**
+  Calls for the same room remain serialised and in publish order.
+  `*websocket.Server` is already safe (it is the same path concurrent
+  connections already take); third-party `Sink` implementations must confirm
+  they are.
+- `cluster/redis`'s package documentation now states the at-most-once delivery
+  reality explicitly: a dropped update parks every later edit from that client
+  on the receiving node, persistence heals that only on room reload, and idle
+  residency (#183) lengthens that window rather than shortening it.
+- `cluster.Relay`'s `RoomActivated`/`RoomDeactivated` contract now documents a
+  pre-existing implementer requirement: during a room's eviction/reload window
+  a successor room instance can activate the same name before the
+  predecessor's deactivate call for that name has landed. A `Relay` must
+  reference-count activations per name (or otherwise tolerate the overlap)
+  rather than treat `RoomDeactivated` as an unconditional unsubscribe. Both
+  shipped relays (`cluster/redis`, `MemRelay`) already do; this was previously
+  undocumented on the interface.
+
 ## [1.41.0] — 2026-07-30
 
 ### Added
