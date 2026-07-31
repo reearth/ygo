@@ -156,6 +156,24 @@ type Config struct {
 	RoomQueueSize int
 }
 
+// Stats is a point-in-time snapshot of the relay's inbound degraded-path
+// counters, summed across every live room worker. Retired workers' counters
+// are not retained.
+//
+// Coalesced going non-zero means at least one room's delivery has fallen
+// behind and updates were merged (lossless). HardDrops going non-zero means
+// data was lost and nodes may be diverged — alert on it.
+type Stats struct {
+	// Coalesced counts inbound KindSync updates absorbed into another blob
+	// by a merge.
+	Coalesced uint64
+	// AwarenessSuperseded counts awareness blobs replaced before delivery.
+	// Benign: awareness is idempotent heartbeat state.
+	AwarenessSuperseded uint64
+	// HardDrops counts payloads lost outright. Should always be zero.
+	HardDrops uint64
+}
+
 // Relay is the Redis-backed cluster.Relay.
 type Relay struct {
 	client   *goredis.Client
@@ -190,10 +208,18 @@ type Relay struct {
 
 	// workers holds one delivery worker per room. Guarded by workersMu, which
 	// is separate from mu: the router takes it on the hot path and must not
-	// contend with lifecycle ops. A worker is created on RoomActivated AND
-	// lazily on first message — the latter matters because Sink.Inject
-	// auto-creates non-resident rooms, so dropping unknown-room messages
-	// would regress that guarantee.
+	// contend with lifecycle ops (in particular it must never take r.mu,
+	// which the Redis SUBSCRIBE/UNSUBSCRIBE RPCs hold — see mu's doc above).
+	// A worker is created on RoomActivated, before the SUBSCRIBE RPC, so a
+	// message that arrives the instant the broker has us subscribed finds a
+	// live lane. The router (workerForInbound) does NOT create workers on a
+	// miss: it is a pure hit-or-drop lookup. Sink.Inject's non-resident-room
+	// auto-create guarantee is preserved through a different mechanism —
+	// activeRooms, not unconditional worker creation — so a message for a
+	// room this relay has activated is delivered even if the Sink has never
+	// heard of it; a message for a room this relay has not (or no longer)
+	// activated is dropped, the same acceptable-drop class as the
+	// self-delivery drop in runSubscriber.
 	workersMu sync.Mutex
 	workers   map[string]*roomWorker
 	laneCap   int
@@ -263,6 +289,30 @@ func (r *Relay) channelFor(room string) string {
 // test purposes; production callers shouldn't need it.
 func (r *Relay) NodeID() []byte {
 	return append([]byte(nil), r.nodeID...)
+}
+
+// Stats returns a snapshot of the inbound delivery counters, summed across
+// every currently live room worker. Safe to call concurrently, including
+// before Start (no workers yet, so a zero Stats) and after Close (workers
+// have all exited but their counters, held in each Lane, are still readable
+// memory — no lock is taken beyond the brief workersMu snapshot below and
+// each Lane's own mutex inside Stats()).
+func (r *Relay) Stats() Stats {
+	r.workersMu.Lock()
+	workers := make([]*roomWorker, 0, len(r.workers))
+	for _, w := range r.workers {
+		workers = append(workers, w)
+	}
+	r.workersMu.Unlock()
+
+	var out Stats
+	for _, w := range workers {
+		s := w.lane.Stats()
+		out.Coalesced += s.Coalesced
+		out.AwarenessSuperseded += s.AwarenessSuperseded
+		out.HardDrops += s.HardDrops
+	}
+	return out
 }
 
 // Start binds the relay to a Sink and starts the subscriber + publisher
@@ -372,8 +422,8 @@ func (r *Relay) runSubscriber(ctx context.Context) {
 			// Hand off and go straight back to reading. This loop must never
 			// call Inject: doing so is exactly the head-of-line stall #187
 			// reports, because one room's slow Inject would block every room.
-			// A miss that turns out to be an inactive room (see
-			// workerForInbound) is dropped here, symmetric with H2 above.
+			// A miss (no worker for this room — see workerForInbound) is
+			// dropped here, symmetric with H2 above.
 			if w, ok := r.workerForInbound(room); ok {
 				w.lane.Push(kind, data)
 			}

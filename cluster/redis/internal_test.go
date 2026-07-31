@@ -329,13 +329,19 @@ func TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray(t *testing.T) {
 	assert.False(t, present, "a miss for an inactive room must not create a worker")
 }
 
-// TestUnit_WorkerForInbound_MissOnActiveRoom_Creates is the mirror image:
-// a room this relay IS active for must still get a worker on a miss. This is
-// what makes lazy recreation after an explicit reap work (see
-// TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom) — "active on the
-// relay" and "resident on the Sink" are different things, and this check
-// must track only the former.
-func TestUnit_WorkerForInbound_MissOnActiveRoom_Creates(t *testing.T) {
+// TestUnit_WorkerForInbound_MissOnActiveRoom_Drops is the mirror image of
+// TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray, confirming the
+// router no longer distinguishes the two cases at all: a room this relay
+// counts as active (activeRooms>0) but that has no entry in r.workers still
+// drops on a miss, same as an inactive room. Before Task 4's carried-forward
+// router simplification, this case used to call isRoomActive + workerFor to
+// recreate the worker — that was what made lazy recreation after an
+// explicit reap work (see the now-renamed
+// TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated below). Removing
+// that call means workerForInbound is a plain hit-or-drop lookup against
+// r.workers only; "active on the relay" and "resident in r.workers" are no
+// longer treated differently by the router.
+func TestUnit_WorkerForInbound_MissOnActiveRoom_Drops(t *testing.T) {
 	r := newTestRelayNoStart()
 	t.Cleanup(func() { close(r.done) })
 	r.mu.Lock()
@@ -343,24 +349,33 @@ func TestUnit_WorkerForInbound_MissOnActiveRoom_Creates(t *testing.T) {
 	r.mu.Unlock()
 
 	w, ok := r.workerForInbound("room")
-	require.True(t, ok)
-	require.NotNil(t, w)
+	assert.False(t, ok, "a miss must be reported as not-ok even for an active room")
+	assert.Nil(t, w)
 
 	r.workersMu.Lock()
 	_, present := r.workers["room"]
 	r.workersMu.Unlock()
-	assert.True(t, present, "a miss for an active room must create a worker")
+	assert.False(t, present, "a miss must never create a worker, active room or not")
 }
 
-// TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom verifies the
-// lazy-worker-creation branch in workerFor. RoomDeactivated's own stopWorker
-// call always pairs with an UNSUBSCRIBE, so a room can never legitimately be
-// "subscribed but workerless" through the exported API alone — that is why
-// this test lives here (package redis, where stopWorker is reachable) rather
-// than in redis_test: it calls stopWorker directly to reap the worker while
-// deliberately leaving the Redis subscription untouched, then publishes and
-// checks that delivery still arrives via a lazily recreated worker.
-func TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom(t *testing.T) {
+// TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated replaces the former
+// TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom, whose name and
+// assertions described behaviour Task 4's carried-forward router
+// simplification removed. workerForInbound no longer creates a worker on a
+// miss (see worker.go), so an explicitly reaped room — stopWorker called
+// directly, leaving the Redis subscription and the activeRooms refcount
+// both untouched — now DROPS inbound messages instead of lazily recreating
+// its worker.
+//
+// RoomDeactivated's own stopWorker call always pairs with an UNSUBSCRIBE and
+// a refcount drop to zero, so "subscribed and active, but workerless" can
+// never legitimately arise through the exported API alone — that is why this
+// test lives here (package redis, where stopWorker is reachable) rather than
+// in redis_test: it calls stopWorker directly to simulate that state, then
+// verifies (1) a publish while reaped is dropped, not delivered, and (2)
+// only a full RoomDeactivated→RoomActivated cycle — the legitimate exported
+// path, which recreates the worker before resubscribing — restores delivery.
+func TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated(t *testing.T) {
 	mr := miniredis.RunT(t)
 
 	pubClient := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
@@ -398,21 +413,51 @@ func TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom(t *testing.T) {
 	sub.workersMu.Unlock()
 	require.False(t, stillThere, "stopWorker must remove the room's worker from the map")
 
-	// The Redis subscription itself is untouched by stopWorker: publishing
-	// again must still arrive and lazily recreate the worker.
+	// The Redis subscription and activeRooms refcount are both untouched by
+	// stopWorker: publishing now must be DROPPED, not lazily recreate the
+	// worker (that behaviour was removed by this task's carried-forward
+	// router simplification).
 	require.NoError(t, pub.Publish(context.Background(), cluster.Outbound{
 		Room: "room", Kind: cluster.KindSync, Data: []byte{0x09},
 	}))
 
-	require.Eventually(t, func() bool {
-		return sink.count() == 1
-	}, 2*time.Second, 10*time.Millisecond,
-		"publish to a still-subscribed room after stopWorker must lazily recreate the worker and deliver")
+	// Give the message every chance to arrive if the old lazy-recreate
+	// behaviour still applied, then assert it did not: no delivery, no
+	// worker resurrected by the router.
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, 0, sink.count(),
+		"a message for a reaped-but-still-subscribed room must be dropped, not delivered")
+	sub.workersMu.Lock()
+	_, recreatedByMiss := sub.workers["room"]
+	sub.workersMu.Unlock()
+	require.False(t, recreatedByMiss, "a router miss must never recreate a worker")
+
+	// Recovery requires the real exported lifecycle: a full deactivate
+	// (unsubscribes; stopWorker no-ops since the worker is already gone)
+	// followed by a reactivate (creates a fresh worker, then resubscribes).
+	pub.RoomDeactivated("room")
+	sub.RoomDeactivated("room")
+	pub.RoomActivated("room")
+	sub.RoomActivated("room")
 
 	sub.workersMu.Lock()
 	_, recreated := sub.workers["room"]
 	sub.workersMu.Unlock()
-	require.True(t, recreated, "workerFor must have lazily recreated the room's worker")
+	require.True(t, recreated, "RoomActivated after a full deactivate/reactivate cycle must recreate the worker")
+
+	// miniredis (not real Redis) needs a settle gap after a rapid
+	// unsubscribe/resubscribe cycle before it reliably delivers again — see
+	// the identical note in isolation_test.go's
+	// TestInteg_RoomDeactivated_DrainsBacklog; this is a test-double
+	// artifact, not a cluster/redis correctness issue.
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, pub.Publish(context.Background(), cluster.Outbound{
+		Room: "room", Kind: cluster.KindSync, Data: []byte{0x0A},
+	}))
+	require.Eventually(t, func() bool {
+		return sink.count() == 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"publish after a real deactivate/reactivate cycle must deliver")
 }
 
 // Sanity: ensure the closed.Store path doesn't trip race detector under

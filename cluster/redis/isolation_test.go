@@ -174,10 +174,18 @@ func TestInteg_Subscriber_PreservesPerRoomOrder(t *testing.T) {
 // materialises converged state (provider/websocket/cluster.go:209-211). The
 // relay itself DOES activate the room (RoomActivated below), which
 // pre-creates its worker — this test exercises the Sink-layer auto-create
-// guarantee, not the router's lazy worker-creation branch. That branch is
-// covered separately by TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom
-// in internal_test.go, which needs stopWorker (unexported) to leave a
-// subscribed room legitimately without a worker.
+// guarantee via the router's normal hit path (workerForInbound finds the
+// worker RoomActivated pre-created). It does NOT exercise a miss: since
+// Task 4's carried-forward router simplification, workerForInbound never
+// creates a worker on a miss at all (it is a plain hit-or-drop lookup — see
+// worker.go), so there is no "lazy worker-creation branch" left to cover.
+// The miss/drop path is covered by
+// TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray and
+// TestUnit_WorkerForInbound_MissOnActiveRoom_Drops in internal_test.go, and
+// the end-to-end drop-then-recover behaviour of an explicitly reaped worker
+// by TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated there, which uses
+// stopWorker (unexported) to simulate a state ("subscribed but workerless")
+// that cannot legitimately arise through the exported API alone.
 func TestInteg_Subscriber_NonResidentRoom_StillInjects(t *testing.T) {
 	sink := newFakeSink() // no rooms registered
 	mr := newMiniRedis(t)
@@ -307,6 +315,36 @@ func TestInteg_RoomDeactivated_DrainsBacklog(t *testing.T) {
 		return sink.injectedCount() == backlog+2
 	}, 2*time.Second, 10*time.Millisecond,
 		"a re-activated room must deliver again")
+}
+
+// A saturated lane must be observable: Coalesced goes non-zero and
+// HardDrops stays zero (coalescing is lossless).
+func TestInteg_Stats_ReportsCoalescing(t *testing.T) {
+	const n = 30
+	sink := newBlockingSink("room", "room")
+	pub, sub := oneSubscriber(t, sink, ygoredis.Config{RoomQueueSize: 2}, "room")
+	t.Cleanup(func() { close(sink.release) })
+
+	src := crdt.New()
+	txt := src.GetText("t")
+	var updates [][]byte
+	unsub := src.OnUpdate(func(u []byte, _ any) {
+		updates = append(updates, append([]byte(nil), u...))
+	})
+	for i := 0; i < n; i++ {
+		src.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "x", nil) })
+	}
+	unsub()
+
+	for _, u := range updates {
+		publishSync(t, pub, "room", u)
+	}
+
+	require.Eventually(t, func() bool {
+		return sub.Stats().Coalesced > 0
+	}, 3*time.Second, 20*time.Millisecond,
+		"a saturated lane must report coalescing")
+	require.Zero(t, sub.Stats().HardDrops, "coalescing must not drop")
 }
 
 // Nothing may reach the Sink after Close returns.

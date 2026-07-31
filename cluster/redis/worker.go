@@ -143,62 +143,33 @@ func (r *Relay) stopWorker(room string) {
 	close(w.done)
 }
 
-// isRoomActive reports whether room currently has a positive activation
-// refcount on this relay (RoomActivated/RoomDeactivated) — a purely
-// relay-level notion, independent of whether the Sink knows about the room
-// at all (Sink.Inject auto-creates non-resident rooms; that is a separate
-// contract exercised by TestInteg_Subscriber_NonResidentRoom_StillInjects,
-// which itself RoomActivates the room, so it stays "active" here too).
-//
-// Takes r.mu, so it must never be called by a goroutine that already holds
-// r.mu. RoomActivated does not need it: by the time it would want to know
-// this, it has just incremented the counter itself.
-func (r *Relay) isRoomActive(room string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.activeRooms[room] > 0
-}
-
 // workerForInbound is the router's (runSubscriber's) entry point for
 // resolving a room's worker, as opposed to workerFor, which RoomActivated
-// uses directly. The hit path (existing worker in r.workers) is identical to
-// workerFor and, like it, touches only workersMu.
+// uses directly and which always creates unconditionally.
 //
-// The miss path differs: workerFor always creates unconditionally, which is
-// correct for RoomActivated (the room is, by construction, active) but wrong
-// for the router. A miss here is reachable in two ways: an explicit reap
-// while the room stays active (see
-// TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom, where recreating is
-// exactly the wanted behaviour), or a straggler message already buffered in
-// go-redis's Channel — or in flight across the UNSUBSCRIBE — for a room this
-// relay just deactivated. RoomDeactivated cannot reap a worker created by
-// the latter case: activeRooms is already back at zero, so a later
-// RoomDeactivated call for the same room just no-ops, and the stray would
-// otherwise live until Close. That is exactly the unbounded per-room growth
-// this task exists to stop, so a miss only creates a worker if the room is
-// still active; a message for an inactive room is dropped, symmetric with
-// the self-delivery drop (H2) in runSubscriber — expected, not a bug.
+// This is a plain hit-or-drop lookup: hit → deliver to the existing worker;
+// miss → drop, create nothing. It touches only workersMu, never r.mu — r.mu
+// is deliberately held across the Redis SUBSCRIBE/UNSUBSCRIBE RPCs (see its
+// doc in redis.go), so a router path that took it could stall on a slow or
+// unreachable Redis, which is exactly the head-of-line stall class #187
+// exists to eliminate.
 //
-// isRoomActive takes r.mu, but only on this (rare) miss path — the hit path
-// above never touches r.mu, so steady-state message routing does not
-// contend with lifecycle ops. There is a narrow residual race between the
-// isRoomActive check and workerFor's creation (RoomDeactivated could
-// complete in between): that would still create one stray worker, no
-// different from any other, which lives until Close if the room is never
-// reactivated. This does not reintroduce the leak — it narrows an
-// unconditional, routine occurrence down to a rare TOCTOU window between two
-// independent lock acquisitions.
+// The invariant that makes "miss → drop" correct rather than lossy:
+// RoomActivated creates the room's worker BEFORE it issues SUBSCRIBE (see
+// its doc), so activeRooms[room] > 0 implies workers[room] already exists.
+// A miss therefore only happens for a room this relay is not (or no longer)
+// active for — a straggler already buffered in go-redis's Channel, or in
+// flight across UNSUBSCRIBE, for a room just deactivated (or, rarely, one
+// that lands inside RoomActivated's own increment→create window) — and
+// dropping it is the same acceptable-drop class as the self-delivery drop
+// (H2) in runSubscriber. Sink.Inject's separate non-resident-room
+// auto-create guarantee is unaffected: it only depends on delivery
+// happening for an active room, which this preserves.
 func (r *Relay) workerForInbound(room string) (w *roomWorker, ok bool) {
 	r.workersMu.Lock()
 	w, ok = r.workers[room]
 	r.workersMu.Unlock()
-	if ok {
-		return w, true
-	}
-	if !r.isRoomActive(room) {
-		return nil, false
-	}
-	return r.workerFor(room), true
+	return w, ok
 }
 
 // inject hands one payload to the Sink, logging failures at Warn (a transient
