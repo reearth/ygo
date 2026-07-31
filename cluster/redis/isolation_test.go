@@ -347,6 +347,59 @@ func TestInteg_Stats_ReportsCoalescing(t *testing.T) {
 	require.Zero(t, sub.Stats().HardDrops, "coalescing must not drop")
 }
 
+// Deactivating a room whose lane holds non-zero degraded-path counters must
+// not lose them: Stats() folds a retired worker's final counters into a
+// running total at retirement time (see stopWorker's doc), specifically so
+// that a routine event like idle-eviction-driven RoomDeactivated cannot make
+// the sum go backwards. Before that fix, deactivating a saturated room
+// silently reset its Coalesced count to zero on every later Stats() call —
+// exactly the kind of decrease that defeats a Prometheus-style rate()/
+// increase() read (a decrease reads as a counter reset and discards the
+// delta across it).
+func TestInteg_Stats_MonotonicAcrossDeactivate(t *testing.T) {
+	const n = 30
+	sink := newBlockingSink("room", "room")
+	pub, sub := oneSubscriber(t, sink, ygoredis.Config{RoomQueueSize: 2}, "room")
+	t.Cleanup(func() {
+		select {
+		case <-sink.release:
+		default:
+			close(sink.release)
+		}
+	})
+
+	src := crdt.New()
+	txt := src.GetText("t")
+	var updates [][]byte
+	unsub := src.OnUpdate(func(u []byte, _ any) {
+		updates = append(updates, append([]byte(nil), u...))
+	})
+	for i := 0; i < n; i++ {
+		src.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "x", nil) })
+	}
+	unsub()
+
+	for _, u := range updates {
+		publishSync(t, pub, "room", u)
+	}
+
+	var before ygoredis.Stats
+	require.Eventually(t, func() bool {
+		before = sub.Stats()
+		return before.Coalesced > 0
+	}, 3*time.Second, 20*time.Millisecond, "must have coalesced before retiring the room can test anything")
+
+	// RoomDeactivated calls stopWorker synchronously, which folds the lane's
+	// counters into r.retired before returning — no need to wait for the
+	// worker's own (still-blocked-on-Inject) final drain to finish.
+	sub.RoomDeactivated("room")
+
+	after := sub.Stats()
+	require.GreaterOrEqual(t, after.Coalesced, before.Coalesced,
+		"Stats() must never decrease across a deactivate that retires a saturated lane")
+	require.GreaterOrEqual(t, after.HardDrops, before.HardDrops)
+}
+
 // Nothing may reach the Sink after Close returns.
 func TestInteg_Close_NothingFiresAfterReturn(t *testing.T) {
 	base := newFakeSink("room")

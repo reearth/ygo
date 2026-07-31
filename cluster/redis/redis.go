@@ -157,21 +157,43 @@ type Config struct {
 }
 
 // Stats is a point-in-time snapshot of the relay's inbound degraded-path
-// counters, summed across every live room worker. Retired workers' counters
-// are not retained.
+// counters, summed across every room worker this relay has ever had — both
+// currently live ones and ones since retired by RoomDeactivated (their final
+// counts are folded into the relay's running total before the worker is
+// discarded; see stopWorker). Every field here is therefore monotonically
+// non-decreasing for the life of the Relay: a room deactivating (e.g. via
+// idle eviction) never causes Stats() to go backwards, which matters because
+// operators are expected to alert on these with a Prometheus-style rate() /
+// increase() — a decrease reads as a counter reset and silently discards the
+// delta across it.
 //
-// Coalesced going non-zero means at least one room's delivery has fallen
-// behind and updates were merged (lossless). HardDrops going non-zero means
-// data was lost and nodes may be diverged — alert on it.
+// Coalesced going non-zero is routine, not alarming by itself: it increments
+// on every ordinary drain merge (2+ blobs queued between drains), which a
+// busy room hits far below its capacity, not only on the over-cap collapse.
+// Alert on its RATE trending up, not on its mere presence. HardDrops going
+// non-zero means data was lost and nodes may be diverged — alert on that by
+// presence; it should always be zero. RouterDrops going non-zero is also
+// routine (see its own doc) — alert on its rate, not its presence.
 type Stats struct {
 	// Coalesced counts inbound KindSync updates absorbed into another blob
-	// by a merge.
+	// by a merge. Expected to be non-zero on busy rooms; see the type doc.
 	Coalesced uint64
 	// AwarenessSuperseded counts awareness blobs replaced before delivery.
 	// Benign: awareness is idempotent heartbeat state.
 	AwarenessSuperseded uint64
 	// HardDrops counts payloads lost outright. Should always be zero.
 	HardDrops uint64
+	// RouterDrops counts inbound messages the subscriber router discarded
+	// because it found no live worker for the room (workerForInbound
+	// missed) — a straggler for a room this node no longer hosts, or one
+	// arriving inside RoomActivated's own increment-then-create window.
+	// This is a routine, expected event under ordinary room churn (rooms
+	// deactivating while a message is already in flight), not a data-loss
+	// signal: a message from a departed room reaching this node too late to
+	// matter is not a correctness problem in the way HardDrops is. Alert on
+	// its rate trending up (e.g. relative to churn volume), not its mere
+	// presence.
+	RouterDrops uint64
 }
 
 // Relay is the Redis-backed cluster.Relay.
@@ -214,15 +236,38 @@ type Relay struct {
 	// message that arrives the instant the broker has us subscribed finds a
 	// live lane. The router (workerForInbound) does NOT create workers on a
 	// miss: it is a pure hit-or-drop lookup. Sink.Inject's non-resident-room
-	// auto-create guarantee is preserved through a different mechanism —
-	// activeRooms, not unconditional worker creation — so a message for a
-	// room this relay has activated is delivered even if the Sink has never
-	// heard of it; a message for a room this relay has not (or no longer)
-	// activated is dropped, the same acceptable-drop class as the
-	// self-delivery drop in runSubscriber.
+	// auto-create guarantee is preserved by that pre-creation in
+	// RoomActivated, not by anything the router itself checks — so a
+	// message for a room this relay has activated is delivered even if the
+	// Sink has never heard of it; a message for a room this relay has not
+	// (or no longer) activated finds no worker and is dropped (counted in
+	// routerDrops), the same acceptable-drop class as the self-delivery drop
+	// in runSubscriber.
+	//
+	// retired accumulates the Coalesced/AwarenessSuperseded/HardDrops of
+	// every worker stopWorker has ever retired, folded in at retirement time
+	// while workersMu is already held (see stopWorker) — otherwise a
+	// deactivated room's counters would simply vanish from Stats(), letting
+	// the sum go backwards. There is one narrow, deliberately accepted race:
+	// if the router is mid-flight with a *stale* worker reference obtained
+	// from workerForInbound just before stopWorker removes it, and that
+	// Push (with its own possible coalesce) lands after stopWorker's
+	// snapshot, that increment is lost — Stats() can therefore very rarely
+	// undercount by a handful, but this ordering can never make it go
+	// backwards, which is the property Stats() promises.
 	workersMu sync.Mutex
 	workers   map[string]*roomWorker
+	retired   relaylane.Stats
 	laneCap   int
+
+	// routerDrops counts inbound messages the subscriber router discarded on
+	// a workerForInbound miss (see Stats.RouterDrops). A dedicated atomic
+	// rather than folding into retired/workersMu: it is incremented on the
+	// router's hot path for every miss, including misses that are not tied
+	// to any worker's lifecycle at all (e.g. a genuinely unknown room), so
+	// it has no natural home under a per-worker lock. A plain atomic counter
+	// is trivially monotonic and adds no contention to the hot path.
+	routerDrops atomic.Uint64
 
 	closeOnce sync.Once
 	closeErr  error
@@ -292,26 +337,33 @@ func (r *Relay) NodeID() []byte {
 }
 
 // Stats returns a snapshot of the inbound delivery counters, summed across
-// every currently live room worker. Safe to call concurrently, including
-// before Start (no workers yet, so a zero Stats) and after Close (workers
-// have all exited but their counters, held in each Lane, are still readable
-// memory — no lock is taken beyond the brief workersMu snapshot below and
-// each Lane's own mutex inside Stats()).
+// every room worker this relay has ever had — currently live ones plus the
+// running total folded in from retired ones (see the retired field's doc) —
+// so the result is monotonically non-decreasing across room deactivations.
+// Safe to call concurrently, including before Start (no workers yet, so a
+// zero Stats) and after Close (workers have all exited but their counters,
+// held in each Lane, are still readable memory — no lock is taken beyond the
+// brief workersMu snapshot below and each Lane's own mutex inside Stats()).
 func (r *Relay) Stats() Stats {
 	r.workersMu.Lock()
 	workers := make([]*roomWorker, 0, len(r.workers))
 	for _, w := range r.workers {
 		workers = append(workers, w)
 	}
+	out := Stats{
+		Coalesced:           r.retired.Coalesced,
+		AwarenessSuperseded: r.retired.AwarenessSuperseded,
+		HardDrops:           r.retired.HardDrops,
+	}
 	r.workersMu.Unlock()
 
-	var out Stats
 	for _, w := range workers {
 		s := w.lane.Stats()
 		out.Coalesced += s.Coalesced
 		out.AwarenessSuperseded += s.AwarenessSuperseded
 		out.HardDrops += s.HardDrops
 	}
+	out.RouterDrops = r.routerDrops.Load()
 	return out
 }
 
@@ -423,9 +475,13 @@ func (r *Relay) runSubscriber(ctx context.Context) {
 			// call Inject: doing so is exactly the head-of-line stall #187
 			// reports, because one room's slow Inject would block every room.
 			// A miss (no worker for this room — see workerForInbound) is
-			// dropped here, symmetric with H2 above.
+			// dropped here, symmetric with H2 above, and counted in
+			// routerDrops (Stats.RouterDrops) — an expected, routine event
+			// under ordinary room churn, not a data-loss signal.
 			if w, ok := r.workerForInbound(room); ok {
 				w.lane.Push(kind, data)
+			} else {
+				r.routerDrops.Add(1)
 			}
 		}
 	}

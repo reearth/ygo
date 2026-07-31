@@ -126,15 +126,26 @@ func (r *Relay) drainLane(ctx context.Context, w *roomWorker) {
 // nothing here can race it for the same queued payloads, and because that
 // goroutine is on r.wg, its final drain is joined by Close.
 //
-// This makes stopWorker itself fast and non-blocking (a map delete and a
-// channel close, nothing that can wait on Sink.Inject), so — unlike an
-// earlier version of this function — callers do not need to avoid holding
-// r.mu across it.
+// Before dropping the worker, its lane's current Coalesced /
+// AwarenessSuperseded / HardDrops counters are folded into r.retired (still
+// under workersMu) so Stats() keeps them after this room's worker is gone —
+// otherwise a deactivating room's counters would simply vanish from Stats(),
+// letting its running totals go backwards (see the retired field's doc on
+// Relay for the one narrow, accepted race this leaves).
+//
+// This makes stopWorker itself fast and non-blocking (a map delete, one
+// mutex-guarded read of the lane's own stats, and a channel close — nothing
+// that can wait on Sink.Inject), so — unlike an earlier version of this
+// function — callers do not need to avoid holding r.mu across it.
 func (r *Relay) stopWorker(room string) {
 	r.workersMu.Lock()
 	w, ok := r.workers[room]
 	if ok {
 		delete(r.workers, room)
+		s := w.lane.Stats()
+		r.retired.Coalesced += s.Coalesced
+		r.retired.AwarenessSuperseded += s.AwarenessSuperseded
+		r.retired.HardDrops += s.HardDrops
 	}
 	r.workersMu.Unlock()
 	if !ok {

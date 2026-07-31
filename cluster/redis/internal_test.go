@@ -431,6 +431,12 @@ func TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated(t *testing.T) {
 	_, recreatedByMiss := sub.workers["room"]
 	sub.workersMu.Unlock()
 	require.False(t, recreatedByMiss, "a router miss must never recreate a worker")
+	// The real runSubscriber goroutine decoded this message and hit the
+	// workerForInbound miss above via the router's actual hot path (not a
+	// simulated call) — so this is a faithful check that the drop is
+	// counted, not just silent.
+	require.Equal(t, uint64(1), sub.Stats().RouterDrops,
+		"a router-dropped message must be counted in Stats().RouterDrops")
 
 	// Recovery requires the real exported lifecycle: a full deactivate
 	// (unsubscribes; stopWorker no-ops since the worker is already gone)
