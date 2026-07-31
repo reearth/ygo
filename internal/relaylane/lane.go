@@ -26,6 +26,7 @@ package relaylane
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/reearth/ygo/cluster"
 	"github.com/reearth/ygo/crdt"
@@ -53,13 +54,36 @@ type Stats struct {
 // Lane is a bounded work queue for one room. Safe for concurrent use: one
 // producer (the transport) and one consumer (the room worker) is the intended
 // pattern, but any number of either is safe.
+//
+// The degraded-path counters (coalesced/awarenessSuperseded/hardDrops) are
+// plain atomics, deliberately NOT guarded by mu, even though every site that
+// mutates them already holds mu for other reasons (the queue mutations they
+// accompany). This is load-bearing: Stats() must be callable by a caller
+// already holding some OTHER lock (see provider/websocket's
+// Server.RelayStats() and cluster/redis's Relay.Stats(), both of which hold
+// a server-level map lock across every live lane's Stats() call to
+// guarantee monotonicity) without that call ever blocking on mu — Push and
+// TakeSync both hold mu across a potentially slow crdt.MergeUpdatesV1 call,
+// so a mutex-guarded Stats() could stall behind an in-flight merge on some
+// OTHER room's lane while the caller holds its own lock, reintroducing
+// exactly the cross-room coupling #187 removed (a slow room's merge would
+// then transitively stall a stats poll for every room, since the map lock
+// blocks new readers behind any pending writer). Atomics make Stats() lock-
+// free: it cannot block on anything, ever, regardless of what any lane's
+// Push/TakeSync is doing. Cross-field tearing between the three counters in
+// one Stats() call is immaterial: nothing needs a single instant's
+// consistent triple, only each field's own monotonic non-decrease.
 type Lane struct {
-	mu     sync.Mutex
-	cap    int
-	syncQ  [][]byte
-	aw     []byte
-	hasAw  bool
-	stats  Stats
+	mu    sync.Mutex
+	cap   int
+	syncQ [][]byte
+	aw    []byte
+	hasAw bool
+
+	coalesced           atomic.Uint64
+	awarenessSuperseded atomic.Uint64
+	hardDrops           atomic.Uint64
+
 	signal chan struct{}
 }
 
@@ -79,7 +103,7 @@ func (l *Lane) Push(kind cluster.Kind, data []byte) {
 	l.mu.Lock()
 	if kind == cluster.KindAwareness {
 		if l.hasAw {
-			l.stats.AwarenessSuperseded++
+			l.awarenessSuperseded.Add(1)
 		}
 		l.aw, l.hasAw = data, true
 	} else {
@@ -95,17 +119,24 @@ func (l *Lane) Push(kind cluster.Kind, data []byte) {
 // collapseLocked merges the whole sync backlog into one blob. On merge
 // failure the backlog is left intact (one entry over cap) rather than losing
 // data; only if it grows to twice the cap is the oldest entry dropped, which
-// is the last resort and is counted.
+// is the last resort and is counted. This can repeat on EVERY push once the
+// backlog is over cap and MergeUpdatesV1 keeps failing: nothing here clears
+// syncQ on failure, so the next push is still over cap and re-invokes this
+// same merge attempt — including forever, once past 2*cap, one hard-drop per
+// push. There is no point past which the storm self-resolves; it only stops
+// if MergeUpdatesV1 starts succeeding again (see enqueueRelayOutbound's doc
+// in provider/websocket/cluster.go for the amortized-cost analysis this
+// degenerate case is the exception to).
 func (l *Lane) collapseLocked() {
 	merged, err := crdt.MergeUpdatesV1(l.syncQ...)
 	if err != nil {
 		if len(l.syncQ) > 2*l.cap {
 			l.syncQ = l.syncQ[1:]
-			l.stats.HardDrops++
+			l.hardDrops.Add(1)
 		}
 		return
 	}
-	l.stats.Coalesced += uint64(len(l.syncQ) - 1)
+	l.coalesced.Add(uint64(len(l.syncQ) - 1))
 	l.syncQ = [][]byte{merged}
 }
 
@@ -134,7 +165,7 @@ func (l *Lane) TakeSync() ([]byte, bool) {
 		l.syncQ = l.syncQ[1:]
 		return b, true
 	}
-	l.stats.Coalesced += uint64(len(l.syncQ) - 1)
+	l.coalesced.Add(uint64(len(l.syncQ) - 1))
 	l.syncQ = l.syncQ[:0]
 	return merged, true
 }
@@ -164,11 +195,19 @@ func (l *Lane) Empty() bool {
 	return len(l.syncQ) == 0 && !l.hasAw
 }
 
-// Stats returns a snapshot of the degraded-path counters.
+// Stats returns a snapshot of the degraded-path counters. Lock-free by
+// design (see the counters' doc on the Lane struct): it never acquires mu,
+// so it cannot block behind Push/collapseLocked/TakeSync's crdt.MergeUpdatesV1
+// call, however slow that call is. The three fields are read independently
+// (three separate atomic loads, not one consistent snapshot) — callers only
+// need each field's own monotonic non-decrease, never a single instant's
+// consistent triple.
 func (l *Lane) Stats() Stats {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.stats
+	return Stats{
+		Coalesced:           l.coalesced.Load(),
+		AwarenessSuperseded: l.awarenessSuperseded.Load(),
+		HardDrops:           l.hardDrops.Load(),
+	}
 }
 
 func (l *Lane) notify() {

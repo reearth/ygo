@@ -383,9 +383,19 @@ func (r *Relay) NodeID() []byte {
 // relative to one that already ran. The cost of holding the lock this long
 // is that Stats() briefly blocks worker creation (workerFor) and retirement
 // (stopWorker) for the duration of the loop — acceptable because Stats() is
-// a polled diagnostic and each Lane.Stats() call is just a mutex acquire
-// plus a small struct copy, not anything that can block on Sink.Inject or
-// Redis I/O.
+// a polled diagnostic and each Lane.Stats() call is lock-free (three atomic
+// loads — see relaylane.Lane's doc), so it cannot itself block on anything:
+// not Sink.Inject, not Redis I/O, and — this matters specifically because
+// workersMu is held across the call — not on a concurrent Push/TakeSync's
+// own crdt.MergeUpdatesV1 either. An earlier version of Lane.Stats() DID
+// take the lane's own mutex, which could have blocked this loop on some
+// OTHER room's in-flight merge while workersMu was held, transitively
+// stalling workerFor/stopWorker for every room's worker for that merge's
+// duration — the same cross-room coupling #187 exists to remove, just
+// reached from the stats-polling side instead of the delivery side. Making
+// Lane.Stats() atomic-only (done for provider/websocket's identical
+// RelayStats() nesting — see relaylane.Lane's doc) closes this for both
+// sides at once, since they share the one Lane implementation.
 //
 // Safe to call concurrently, including before Start (no workers yet, so a
 // zero Stats) and after Close (workers have all exited but their counters,

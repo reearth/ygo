@@ -3,6 +3,7 @@ package websocket_test
 import (
 	"context"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -340,6 +341,13 @@ func TestRelayStats_Observable(t *testing.T) {
 // defeats a Prometheus-style rate()/increase() read (a decrease reads as a
 // counter reset and discards the delta across it). Mirrors
 // cluster/redis's TestInteg_Stats_MonotonicAcrossDeactivate.
+//
+// The sampling loop below asserts more than "no sample decreased": it also
+// requires that room "r" actually disappear from Server.Rooms() within the
+// window (review fix — an earlier version only polled for a fixed 3s and
+// would have passed vacuously, with zero regression signal, if eviction
+// never happened inside that window at all, e.g. under some future default
+// that delays teardown).
 func TestRelayStats_MonotonicAcrossRoomTeardown(t *testing.T) {
 	relay := newStallingRelay("r")
 	srv := ygws.NewServer()
@@ -375,18 +383,108 @@ func TestRelayStats_MonotonicAcrossRoomTeardown(t *testing.T) {
 	require.NoError(t, conn.Close())
 
 	// Sample repeatedly across the teardown window: every sample must be >=
-	// the one before it, and the pre-teardown Coalesced count must still be
-	// present once the room is gone.
-	deadline := time.Now().Add(3 * time.Second)
+	// the one before it, and the loop must actually observe "r" disappear
+	// from Server.Rooms() — the real eviction event, not merely an elapsed
+	// timer — before it is allowed to succeed.
+	var evicted bool
 	prev := before
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		cur := srv.RelayStats()
 		require.GreaterOrEqual(t, cur.Coalesced, prev.Coalesced,
 			"RelayStats().Coalesced must never decrease, including across the disconnecting room's teardown")
 		require.GreaterOrEqual(t, cur.HardDrops, prev.HardDrops)
 		prev = cur
+		if !slices.Contains(srv.Rooms(), "r") {
+			evicted = true
+			break
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	require.True(t, evicted,
+		`room "r" must actually disappear from Server.Rooms() within the window — otherwise this test `+
+			"never exercised stopRelayLane's fold at all and its non-decrease checks are vacuous")
 	require.GreaterOrEqual(t, prev.Coalesced, before.Coalesced,
 		"the coalesced count observed before teardown must still be present in RelayStats after it")
+
+	// stopRelayLane's own fold (see its doc) can lag slightly behind the
+	// room's removal from Server.rooms (that removal happens first, in
+	// handleDisconnect, strictly before the persistDone wait that gates
+	// teardownRelayRoom — see peer.go). Keep sampling briefly past confirmed
+	// eviction so this test also observes the fold itself land, not just the
+	// room's disappearance.
+	require.Eventually(t, func() bool {
+		return srv.RelayStats().Coalesced >= before.Coalesced
+	}, 1*time.Second, 5*time.Millisecond,
+		"RelayStats().Coalesced must reflect stopRelayLane's fold shortly after eviction")
+}
+
+// ensureRelayLane's predecessor-displacement handoff is the OTHER lane-
+// retirement site (besides stopRelayLane) that must fold a retiring lane's
+// counters into s.relayRetired — see ensureRelayLane's doc in cluster.go.
+// TestRelayOutbound_SurvivesEvictionRace already drives this exact
+// displacement window, but its relay only captures room "" (never stalls
+// "r"), so instance A's lane never builds a backlog large enough to
+// coalesce there. This test is deliberately separate (rather than bolted
+// onto that already-dense test) so it can wedge "r" specifically to force
+// coalescing, at the cost of ~15 lines of setup duplicated from both
+// TestRelayOutbound_SurvivesEvictionRace (the blockingCompactAdapter
+// stuck-teardown technique) and TestRelayStats_MonotonicAcrossRoomTeardown
+// (the wedge-and-backlog technique) — judged worth it for a focused,
+// unambiguous regression test over retrofitting an existing one.
+func TestRelayStats_MonotonicAcrossEnsureRelayLaneHandoff(t *testing.T) {
+	adapter := newBlockingCompactAdapter()
+	relay := newStallingRelay("r") // wedge "r" itself, unlike SurvivesEvictionRace's ""
+	srv := ygws.NewServerWithPersistence(adapter)
+	require.NoError(t, srv.AttachRelay(relay))
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		adapter.releaseCompact()
+		close(relay.release)
+		_ = srv.Shutdown(context.Background())
+		ts.Close()
+	})
+
+	// A joins "r" (instance A) and pushes a backlog large enough to coalesce
+	// while "r" is wedged.
+	connA := dial(t, ts, "r")
+	drainHandshake(t, connA, crdt.New())
+	for i := 0; i < 200; i++ {
+		require.NoError(t, crdt.ApplyUpdateV1(srv.GetDoc("r"), syncUpdate(t, "a"), nil))
+	}
+	var before ygws.RelayStats
+	require.Eventually(t, func() bool {
+		before = srv.RelayStats()
+		return before.Coalesced > 0
+	}, 3*time.Second, 20*time.Millisecond,
+		"instance A's lane must coalesce before eviction for this test to prove anything")
+
+	// A disconnects: eager eviction removes "r" from Server.rooms, but
+	// teardownRelayRoom(instance A) — which would otherwise retire instance
+	// A's lane via stopRelayLane — is held open by the blocked Compact call.
+	require.NoError(t, connA.Close())
+	select {
+	case <-adapter.blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for instance A's teardown to reach the blocked Compact call")
+	}
+
+	// B reconnects for the same room name while A's teardown is still stuck.
+	// Server.rooms has no entry for "r" (A already removed it), so this
+	// creates instance B and calls ensureRelayLane, which finds instance A's
+	// lane still sitting in s.relayLanes["r"] and must displace it — folding
+	// its Coalesced count into s.relayRetired itself, since stopRelayLane
+	// will never run for instance A's lane (ensureRelayLane's handoff beats
+	// it to the punch — see ensureRelayLane's doc).
+	connB := dial(t, ts, "r")
+	drainHandshake(t, connB, crdt.New())
+
+	require.Eventually(t, func() bool {
+		return srv.RelayStats().Coalesced >= before.Coalesced
+	}, 2*time.Second, 10*time.Millisecond,
+		"RelayStats().Coalesced must not fall across ensureRelayLane's predecessor-displacement handoff")
+
+	// Let instance A's stuck teardown finish so t.Cleanup's Shutdown isn't
+	// racing it unnecessarily.
+	adapter.releaseCompact()
 }
