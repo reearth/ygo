@@ -400,6 +400,84 @@ func TestInteg_Stats_MonotonicAcrossDeactivate(t *testing.T) {
 	require.GreaterOrEqual(t, after.HardDrops, before.HardDrops)
 }
 
+// TestInteg_Stats_MonotonicUnderConcurrentChurn is a supplementary stress
+// test, not a deterministic reproduction of the specific three-call race the
+// review identified (this method → stopWorker → a stale Push landing back in
+// this method before it unlocks). Reproducing that exact interleaving on
+// demand would require a synchronization hook inside stopWorker or Stats()
+// itself to pause at the precise instant, which would mean shipping
+// test-only coordination points in production code — declined; see the
+// fix-round report. Instead this drives real concurrent Publish +
+// RoomDeactivated/RoomActivated churn against one room (the same pattern
+// TestInteg_ConcurrentMixedActivateDeactivate_RefcountHolds already uses for
+// refcount safety) while repeatedly sampling Stats() from a separate
+// goroutine, and asserts the one property that must hold regardless of how
+// the races land: every sample is >= the one before it. Run under -race,
+// this also gives the "hold workersMu for Stats()'s entire computation" fix
+// a real concurrent workout, rather than only the single-deactivate case
+// above.
+func TestInteg_Stats_MonotonicUnderConcurrentChurn(t *testing.T) {
+	const churners = 4
+	const itersPerChurner = 60
+
+	sink := newBlockingSink("room", "room")
+	pub, sub := oneSubscriber(t, sink, ygoredis.Config{RoomQueueSize: 2}, "room")
+	t.Cleanup(func() { close(sink.release) })
+
+	var churnWG sync.WaitGroup
+	for i := 0; i < churners; i++ {
+		churnWG.Add(1)
+		go func(seed int) {
+			defer churnWG.Done()
+			for n := 0; n < itersPerChurner; n++ {
+				_ = pub.Publish(context.Background(), cluster.Outbound{
+					Room: "room", Kind: cluster.KindSync, Data: []byte{byte(n), byte(seed)},
+				})
+				if n%7 == seed%7 {
+					sub.RoomDeactivated("room")
+					sub.RoomActivated("room")
+				}
+			}
+		}(i)
+	}
+
+	// Poll Stats() concurrently with the churn above, recording every sample
+	// so the monotonicity check below runs after all goroutines have
+	// finished (keeping the assertions off the hot loop).
+	pollDone := make(chan struct{})
+	var samples []ygoredis.Stats
+	var pollWG sync.WaitGroup
+	pollWG.Add(1)
+	go func() {
+		defer pollWG.Done()
+		for {
+			samples = append(samples, sub.Stats())
+			select {
+			case <-pollDone:
+				samples = append(samples, sub.Stats()) // one last sample post-churn
+				return
+			default:
+			}
+		}
+	}()
+
+	churnWG.Wait()
+	close(pollDone)
+	pollWG.Wait()
+
+	require.NotEmpty(t, samples)
+	for i := 1; i < len(samples); i++ {
+		require.GreaterOrEqual(t, samples[i].Coalesced, samples[i-1].Coalesced,
+			"Coalesced must never decrease across sequential Stats() calls (sample %d)", i)
+		require.GreaterOrEqual(t, samples[i].AwarenessSuperseded, samples[i-1].AwarenessSuperseded,
+			"AwarenessSuperseded must never decrease across sequential Stats() calls (sample %d)", i)
+		require.GreaterOrEqual(t, samples[i].HardDrops, samples[i-1].HardDrops,
+			"HardDrops must never decrease across sequential Stats() calls (sample %d)", i)
+		require.GreaterOrEqual(t, samples[i].RouterDrops, samples[i-1].RouterDrops,
+			"RouterDrops must never decrease across sequential Stats() calls (sample %d)", i)
+	}
+}
+
 // Nothing may reach the Sink after Close returns.
 func TestInteg_Close_NothingFiresAfterReturn(t *testing.T) {
 	base := newFakeSink("room")

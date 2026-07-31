@@ -248,13 +248,22 @@ type Relay struct {
 	// every worker stopWorker has ever retired, folded in at retirement time
 	// while workersMu is already held (see stopWorker) — otherwise a
 	// deactivated room's counters would simply vanish from Stats(), letting
-	// the sum go backwards. There is one narrow, deliberately accepted race:
-	// if the router is mid-flight with a *stale* worker reference obtained
-	// from workerForInbound just before stopWorker removes it, and that
-	// Push (with its own possible coalesce) lands after stopWorker's
-	// snapshot, that increment is lost — Stats() can therefore very rarely
-	// undercount by a handful, but this ordering can never make it go
-	// backwards, which is the property Stats() promises.
+	// the sum go backwards. Stats() also holds workersMu across its entire
+	// computation (not just this map's snapshot), which is required for
+	// monotonicity — see Stats()'s doc for the three-call race that a
+	// narrower lock scope leaves open.
+	//
+	// One narrow, deliberately accepted gap remains even with that fix: if
+	// the router is mid-flight with a *stale* worker reference obtained from
+	// workerForInbound just before stopWorker removes it, and that Push
+	// (with its own possible coalesce) lands strictly after stopWorker's
+	// snapshot, that increment is lost for good — invisible to every Stats()
+	// call from then on, since the lane is no longer reachable from
+	// r.workers and its value was already folded into retired before the
+	// push landed. This makes Stats() an UNDERcount in that narrow window,
+	// never an OVERcount and — because the lost increment was never
+	// observed by any earlier call either — never a decrease relative to
+	// one. Monotonic: guaranteed. Exact: not guaranteed.
 	workersMu sync.Mutex
 	workers   map[string]*roomWorker
 	retired   relaylane.Stats
@@ -338,31 +347,63 @@ func (r *Relay) NodeID() []byte {
 
 // Stats returns a snapshot of the inbound delivery counters, summed across
 // every room worker this relay has ever had — currently live ones plus the
-// running total folded in from retired ones (see the retired field's doc) —
-// so the result is monotonically non-decreasing across room deactivations.
+// running total folded in from retired ones (see the retired field's doc).
+//
+// Coalesced/AwarenessSuperseded/HardDrops are guaranteed MONOTONIC across
+// sequential calls (never decrease) but not guaranteed EXACT: a message that
+// races a room's retirement — pushed onto a lane via a stale
+// workerForInbound reference after stopWorker has already folded that
+// lane's counters into r.retired and dropped it from r.workers — is
+// delivered but its contribution to these counters is lost for good (see
+// the retired field's doc for why this residual gap exists and can't be
+// closed without holding workersMu across the router's Push, which would
+// reintroduce lock contention on the hot path this whole change set exists
+// to remove). RouterDrops is exact (a single atomic counter, incremented
+// exactly once per drop) and therefore also monotonic.
+//
+// Getting monotonicity right requires holding workersMu for the ENTIRE
+// computation below, not just the map snapshot — an earlier version of this
+// method unlocked before summing the live lanes, which left a genuine
+// three-call race: (1) this method snapshots the map (including live worker
+// w) and reads retired, then unlocks; (2) stopWorker runs, folding w's
+// current stats into retired and removing w from the map; (3) a stale
+// router reference to that same w (obtained from workerForInbound just
+// before step 2 — the residual gap described above) pushes more data onto
+// it; (4) this method, still holding only its stale slice and no lock, reads
+// w.lane.Stats() through that reference and picks up the step-3 push,
+// returning a total that includes it; (5) a later call, with w now gone
+// from the map, returns retired alone — smaller than what step 4 returned,
+// a real decrease. Holding workersMu across the whole loop below closes
+// this: stopWorker cannot run between this method's retired-read and its
+// per-lane reads, so every value it sums is one a later call, seeded from
+// the resulting retired total, can only match or exceed. The remaining gap
+// (a step-3-style push landing AFTER stopWorker's own fold, once this
+// method is no longer involved at all) is the residual undercount described
+// above — invisible to every call from then on, but never a decrease
+// relative to one that already ran. The cost of holding the lock this long
+// is that Stats() briefly blocks worker creation (workerFor) and retirement
+// (stopWorker) for the duration of the loop — acceptable because Stats() is
+// a polled diagnostic and each Lane.Stats() call is just a mutex acquire
+// plus a small struct copy, not anything that can block on Sink.Inject or
+// Redis I/O.
+//
 // Safe to call concurrently, including before Start (no workers yet, so a
 // zero Stats) and after Close (workers have all exited but their counters,
-// held in each Lane, are still readable memory — no lock is taken beyond the
-// brief workersMu snapshot below and each Lane's own mutex inside Stats()).
+// held in each Lane, are still readable memory).
 func (r *Relay) Stats() Stats {
 	r.workersMu.Lock()
-	workers := make([]*roomWorker, 0, len(r.workers))
-	for _, w := range r.workers {
-		workers = append(workers, w)
-	}
 	out := Stats{
 		Coalesced:           r.retired.Coalesced,
 		AwarenessSuperseded: r.retired.AwarenessSuperseded,
 		HardDrops:           r.retired.HardDrops,
 	}
-	r.workersMu.Unlock()
-
-	for _, w := range workers {
+	for _, w := range r.workers {
 		s := w.lane.Stats()
 		out.Coalesced += s.Coalesced
 		out.AwarenessSuperseded += s.AwarenessSuperseded
 		out.HardDrops += s.HardDrops
 	}
+	r.workersMu.Unlock()
 	out.RouterDrops = r.routerDrops.Load()
 	return out
 }
