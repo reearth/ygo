@@ -380,6 +380,19 @@ If a deployment needs at-least-once delivery (no catch-up dependency on
 persistence), a Redis Streams-based adapter (`XADD` + last-read-id
 tracking) would replace this one. Tracked separately; not in v1.21.0.
 
+**`Shutdown` discards queued outbound updates, uncounted.** `Server.Shutdown`
+cancels the relay context before closing peer connections and before the
+persistence drain, so peers can keep committing for the rest of shutdown —
+potentially seconds — after outbound relay delivery has already stopped.
+Anything still queued in a room's outbound lane at that point, or enqueued
+afterward, is discarded with neither `Dropped` nor `HardDrops` incrementing:
+those counters reading zero after a `Shutdown` does not mean nothing was
+lost. This is pre-existing behaviour (the single shared outbound worker it
+replaced discarded the same way), not a regression from #187 — but it is
+worth calling out explicitly here, since the `Stats()`/`RelayStats()`
+section above establishes those same counters as the "always zero, alert on
+presence" signal for every other code path.
+
 ### Observability: `Stats()`
 
 Since #187, both sides of the relay expose health counters — watch these,

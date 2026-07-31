@@ -491,6 +491,14 @@ type RelayStats struct {
 	// relay attached at enqueue time, or a genuine straggler that lost its
 	// race against its lane's own retirement — see enqueueRelayOutbound's
 	// doc). Should always be zero in a healthy deployment.
+	//
+	// Exception: Server.Shutdown cancels the relay context before closing
+	// peer connections and before the persistence drain, so peers can keep
+	// committing for the rest of shutdown. Whatever is still queued in a
+	// room's outbound lane at that point, or enqueued afterward, is
+	// discarded without incrementing Dropped (or HardDrops) — see
+	// docs/CLUSTERING.md's "Delivery semantics" section. Dropped reading
+	// zero after a Shutdown does not mean nothing was lost.
 	Dropped uint64
 }
 

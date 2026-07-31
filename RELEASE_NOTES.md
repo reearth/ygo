@@ -59,6 +59,21 @@ capacity — watch `Relay.Stats()` / `RelayStats()` as the health signal:
 alert on their rate; `HardDrops`/outbound-only `Dropped` should always be
 zero, alert on presence.
 
+One exception to that "should always be zero" rule: `Shutdown` cancels the
+relay context before closing peer connections and before the persistence
+drain, so peers can keep committing for the rest of shutdown — potentially
+seconds — after outbound relay delivery has already stopped. Whatever is
+still queued in a room's outbound lane at that point, or arrives afterward,
+is discarded on `Shutdown` without incrementing `Dropped` or `HardDrops`, so
+those counters reading zero does not mean nothing was lost across a
+`Shutdown`. This is pre-existing behaviour, not new in this release — the
+single shared outbound worker it replaces discarded the same way — but it is
+newly *mis*-documented if left unstated, since this release is what
+establishes `Dropped`/`HardDrops` as the "always zero, alert on presence"
+signal. A fix (draining the outbound lanes, or reordering `relayCancel`
+relative to connection-close/persistence-drain) is out of scope here — it
+needs its own change, since reordering also delays inbound shutdown.
+
 ### Fixed
 
 - **`Server.Apply` writes were silently never relayed to other nodes, since
