@@ -182,8 +182,8 @@ Characteristics:
   so a slow `Inject` for one room stalls delivery for **every other room**
   on that node. This is exactly the head-of-line-blocking defect #187 fixed
   for `cluster/redis` (each room gets its own worker there); `MemRelay` does
-  not get that isolation and is not planned to — it is the in-process
-  reference implementation, not a production transport.
+  not (yet) get that isolation — it is the in-process reference
+  implementation, not a production transport.
 - **No per-room subscription**: `RoomActivated`/`RoomDeactivated` are no-ops;
   every node receives every room's traffic and applies only the rooms it hosts.
   (A production relay keyed by a real broker should subscribe per room.)
