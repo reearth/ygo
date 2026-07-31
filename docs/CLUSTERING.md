@@ -416,12 +416,17 @@ Alerting posture is the same on both sides:
   churn — a message for a room this node no longer hosts arriving just
   after `RoomDeactivated`. Alert on its rate, not its presence.
 
-All of these counters are **monotonic but not exact**: they are guaranteed
-to never decrease across the life of the relay/server, but a small number
-of documented, benign race windows around room retirement can *undercount*
-a value (never overcount, never decrease relative to a total already
-returned). See `Relay.Stats()`'s and `RelayStats()`'s own doc comments for
-the exact windows if you need the detail.
+`Coalesced`, `AwarenessSuperseded`, and `HardDrops` are **monotonic but not
+exact**: they are guaranteed to never decrease across the life of the
+relay/server, but a small number of documented, benign race windows around
+room retirement can *undercount* a value (never overcount, never decrease
+relative to a total already returned). See `Relay.Stats()`'s and
+`RelayStats()`'s own doc comments for the exact windows if you need the
+detail.
+
+`RouterDrops` (inbound) and `Dropped` (outbound) are different: each is a
+single atomic counter on a direct increment path with no fold-on-retirement
+step, so both are **exact**, not just monotonic.
 
 ### What's *not* in this adapter
 
