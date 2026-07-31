@@ -409,15 +409,19 @@ type Server struct {
 	// relayMu guards the attach handshake: AttachRelay only commits s.relay
 	// after relay.Start succeeds, so a Start failure leaves the server
 	// unattached and the call is retryable (no sync.Once latching a partial
-	// attach). relayOut is the bounded outbound queue the CRDT observers
-	// enqueue onto; a dedicated worker drains it and drives relay.Publish so
-	// the commit path never blocks on a slow relay. See cluster.go.
+	// attach). Outbound delivery (#187) is one lane + worker PER ROOM rather
+	// than one shared queue, so a relay that is slow for one room cannot
+	// stall Publish for any other room. relayLanesMu guards relayLanes;
+	// enqueueRelayOutbound (the CRDT commit path) only ever takes its read
+	// side — lane creation (ensureRelayLane, room-creation time) and teardown
+	// (stopRelayLane, room-eviction time) take the write side. See cluster.go.
 	relayMu       sync.Mutex
 	relay         clusterRelay
 	relaySentinel any
 	relayCtx      context.Context
 	relayCancel   context.CancelFunc
-	relayOut      chan relayOutbound
+	relayLanesMu  sync.RWMutex
+	relayLanes    map[string]*relayRoomLane
 	relayDropped  atomic.Uint64
 
 	shutdownOnce sync.Once
