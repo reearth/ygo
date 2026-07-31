@@ -1,18 +1,22 @@
 ## v1.42.0
 
-The one thing every adopter must act on: **`cluster.Sink.Inject` may now be
-called concurrently for distinct rooms.** Calls for the *same* room still
-stay serialised and in publish order, so this is safe for `*websocket.Server`
-without any change (it already takes concurrent connections down the same
-path), but a third-party `Sink` implementation written against a
-single-caller assumption must confirm it is safe for concurrent use across
-rooms before upgrading. This is a permission the interface now grants, not a
-guarantee every relay exercises: `cluster/redis`'s `Relay` takes advantage of
-it — delivering each room on its own goroutine so one slow room's `Inject`
-call can no longer stall inbound delivery for the others (#187) — but
-`MemRelay`, the in-process reference relay, still delivers every room from
-one goroutine per node and does not (yet) get that isolation from `MemRelay`
-itself.
+Two contract changes for anyone with custom clustering code — nothing to do
+here if you only use shipped components. **`cluster.Sink.Inject` may now be
+called concurrently for distinct rooms** (same-room calls still stay
+serialised and in publish order) — this is what a custom `Sink` must handle.
+**`cluster.Relay.Publish` may now be called concurrently for distinct rooms,
+and briefly twice for the SAME room** during a room's eviction/reload
+handoff, with no per-room ordering guaranteed at all — this is what a custom
+`Relay` must handle. `*websocket.Server` (the shipped `Sink`), `MemRelay`, and
+`cluster/redis` (the shipped `Relay`s) are already safe for both; a
+third-party `Sink` or `Relay` written against the old single-caller
+assumption must confirm it is safe for concurrent use before upgrading.
+Neither permission is a guarantee every relay exercises: `cluster/redis`
+takes advantage of both, with a dedicated goroutine per room on each side,
+so one slow room's `Inject`/`Publish` call can no longer stall delivery for
+others (#187); `MemRelay`, the in-process reference relay, still delivers
+every room from one goroutine per node and does not (yet) get that isolation
+on either side.
 
 Also fixed, and arguably the more consequential bug: a pre-existing defect,
 shipped since v1.20.0 (the cluster relay's introduction), where `Server.Apply`
