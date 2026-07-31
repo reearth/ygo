@@ -2,6 +2,7 @@ package redis_test
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +21,13 @@ type blockingSink struct {
 	*fakeSink
 	stallRoom string
 	release   chan struct{}
+
+	// started is closed the first time Inject enters the stall for
+	// stallRoom, so a test can deterministically wait until delivery is
+	// genuinely parked there (rather than guessing with a sleep) before
+	// queuing more work behind it.
+	started     chan struct{}
+	startedOnce sync.Once
 }
 
 func newBlockingSink(stallRoom string, rooms ...string) *blockingSink {
@@ -27,11 +35,13 @@ func newBlockingSink(stallRoom string, rooms ...string) *blockingSink {
 		fakeSink:  newFakeSink(rooms...),
 		stallRoom: stallRoom,
 		release:   make(chan struct{}),
+		started:   make(chan struct{}),
 	}
 }
 
 func (s *blockingSink) Inject(ctx context.Context, in cluster.Inbound) error {
 	if in.Room == s.stallRoom {
+		s.startedOnce.Do(func() { close(s.started) })
 		select {
 		case <-s.release:
 		case <-ctx.Done():
@@ -214,17 +224,66 @@ func (s *closeWatchSink) Inject(ctx context.Context, in cluster.Inbound) error {
 }
 
 // Deactivating a room must not silently discard work already queued for it.
+// The backlog here is genuine, not assumed: delivery is wedged on the first
+// payload (via blockingSink) so the payloads published after it provably
+// queue up in the lane, still undelivered, at the moment RoomDeactivated
+// runs. stopWorker does not drain them itself (it only signals the worker to
+// stop — see its doc comment); the worker's own goroutine performs the final
+// drain asynchronously once unblocked, and RoomDeactivated returns without
+// waiting for that, so the assertion below has to poll rather than check
+// immediately after RoomDeactivated returns.
 func TestInteg_RoomDeactivated_DrainsBacklog(t *testing.T) {
-	sink := newFakeSink("room")
+	sink := newBlockingSink("room", "room")
 	pub, sub := oneSubscriber(t, sink, ygoredis.Config{}, "room")
+	t.Cleanup(func() {
+		select {
+		case <-sink.release:
+		default:
+			close(sink.release)
+		}
+	})
 
 	publishSync(t, pub, "room", []byte{0x01})
-	// Give the router a moment to have queued it, then deactivate.
+	// Wait until delivery has genuinely parked inside Inject for msg 1 —
+	// not just "the router probably queued it by now" — so the next
+	// publishes are provably queuing up behind it rather than racing it.
 	require.Eventually(t, func() bool {
-		return sink.injectedCount() == 1
-	}, 2*time.Second, 5*time.Millisecond)
+		select {
+		case <-sink.started:
+			return true
+		default:
+			return false
+		}
+	}, 2*time.Second, 5*time.Millisecond, "delivery never parked on msg 1")
 
+	const backlog = 4 // msgs 2..5, queued behind the stalled msg 1
+	for i := 2; i <= backlog+1; i++ {
+		publishSync(t, pub, "room", []byte{byte(i)})
+	}
+	// publishSync only confirms pub enqueued the outbound Publish call, not
+	// that sub's router has since received and queued it — give the
+	// (fast, local, miniredis) round trip a moment so 2..5 have genuinely
+	// reached the lane before we deactivate. Without this, RoomDeactivated
+	// could unsubscribe before all of them arrive, understating the
+	// backlog rather than testing draining it.
+	time.Sleep(100 * time.Millisecond)
+
+	// Deactivate while msg 1 is still stalled and 2..5 are genuinely queued.
 	sub.RoomDeactivated("room")
+
+	// Unblock delivery; the worker's own final drain (triggered by
+	// stopWorker closing w.done) must still deliver the whole backlog.
+	close(sink.release)
+
+	require.Eventually(t, func() bool {
+		return sink.injectedCount() == backlog+1
+	}, 2*time.Second, 10*time.Millisecond,
+		"a backlog queued before deactivation must still be fully delivered")
+
+	got := sink.injectedSnapshot()
+	for i, in := range got {
+		require.Equal(t, []byte{byte(i + 1)}, in.Data, "backlog must be delivered in order")
+	}
 
 	// Re-activating must work and deliver again (worker recreated cleanly).
 	pub.RoomActivated("room")
@@ -243,9 +302,9 @@ func TestInteg_RoomDeactivated_DrainsBacklog(t *testing.T) {
 	// subscribe/unsubscribe cycles) have no equivalent gap, so this is a
 	// test-double artifact, not a cluster/redis correctness issue.
 	time.Sleep(100 * time.Millisecond)
-	publishSync(t, pub, "room", []byte{0x02})
+	publishSync(t, pub, "room", []byte{0xFF})
 	require.Eventually(t, func() bool {
-		return sink.injectedCount() == 2
+		return sink.injectedCount() == backlog+2
 	}, 2*time.Second, 10*time.Millisecond,
 		"a re-activated room must deliver again")
 }

@@ -336,9 +336,9 @@ func (r *Relay) runPublisher(ctx context.Context) {
 // at the moment Close fires does not leak past Close). This loop must never
 // call Inject itself: that is exactly the head-of-line stall #187 reports,
 // because one room's slow Inject would block delivery for every room on the
-// node. Instead it hands off to workerFor(room).lane, which never blocks,
-// and returns straight to reading; the per-room worker goroutine (worker.go)
-// does the actual Inject call.
+// node. Instead it hands off to workerForInbound(room)'s lane, which never
+// blocks, and returns straight to reading; the per-room worker goroutine
+// (worker.go) does the actual Inject call.
 func (r *Relay) runSubscriber(ctx context.Context) {
 	defer r.wg.Done()
 	ch := r.pubSub.Channel(goredis.WithChannelSize(r.chanSize))
@@ -372,7 +372,11 @@ func (r *Relay) runSubscriber(ctx context.Context) {
 			// Hand off and go straight back to reading. This loop must never
 			// call Inject: doing so is exactly the head-of-line stall #187
 			// reports, because one room's slow Inject would block every room.
-			r.workerFor(room).lane.Push(kind, data)
+			// A miss that turns out to be an inactive room (see
+			// workerForInbound) is dropped here, symmetric with H2 above.
+			if w, ok := r.workerForInbound(room); ok {
+				w.lane.Push(kind, data)
+			}
 		}
 	}
 }
@@ -465,51 +469,42 @@ func (r *Relay) RoomActivated(room string) {
 // via the relay's bound start context for the same reason: a stalled Redis
 // must not pin the websocket provider's room-teardown path.
 //
-// The worker teardown (stopWorker) drains whatever is still queued for the
-// room before stopping it, so a deactivation does not silently discard
-// delivered-but-not-yet-injected updates. That drain calls Sink.Inject and so
-// can — in the worst case of a Sink that ignores context cancellation — block
-// for a while; deliberately, that call happens AFTER releasing r.mu (see the
-// closure below), so a wedged Sink stalls only this call's own goroutine, not
-// every other lifecycle op on the relay. Only the reference-count bookkeeping
-// and the UNSUBSCRIBE RPC run under r.mu.
+// stopWorker is called last, still under r.mu (consistent with the
+// established r.mu → workersMu order: RoomActivated already nests workersMu
+// under r.mu the same way via workerFor). This is safe because stopWorker
+// only deletes a map entry and closes a channel — it does not drain the
+// lane or call Sink.Inject itself, so it cannot block on a wedged Sink; the
+// actual drain happens later, asynchronously, on the worker's own goroutine
+// (see runRoomWorker's w.done case), which Close's wg.Wait joins.
 func (r *Relay) RoomDeactivated(room string) {
-	shouldStop := func() bool {
-		r.mu.Lock()
-		defer r.mu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-		if !r.started.Load() || r.closed.Load() {
-			return false
-		}
-		select {
-		case <-r.startCtx.Done():
-			return false
-		default:
-		}
-		if r.activeRooms[room] <= 0 {
-			return false
-		}
-
-		r.activeRooms[room]--
-		count := r.activeRooms[room]
-		if count == 0 {
-			delete(r.activeRooms, room)
-		}
-		if count > 0 {
-			return false // still active elsewhere on this node
-		}
-		if err := r.pubSub.Unsubscribe(r.startCtx, r.channelFor(room)); err != nil {
-			r.log.Warn("cluster/redis: UNSUBSCRIBE failed", "room", room, "err", err)
-		}
-		return true
-	}()
-	if !shouldStop {
+	if !r.started.Load() || r.closed.Load() {
 		return
 	}
-	// Drain and retire the room's delivery worker, outside r.mu (see the
-	// doc comment above). Ordering still matters even though the lock is
-	// released: we unsubscribed above, under r.mu, before ever getting here,
-	// so no new payload can be routed to a worker we are about to stop.
+	select {
+	case <-r.startCtx.Done():
+		return
+	default:
+	}
+	if r.activeRooms[room] <= 0 {
+		return
+	}
+
+	r.activeRooms[room]--
+	count := r.activeRooms[room]
+	if count == 0 {
+		delete(r.activeRooms, room)
+	}
+	if count > 0 {
+		return // still active elsewhere on this node
+	}
+	if err := r.pubSub.Unsubscribe(r.startCtx, r.channelFor(room)); err != nil {
+		r.log.Warn("cluster/redis: UNSUBSCRIBE failed", "room", room, "err", err)
+	}
+	// Retire the room's delivery worker. Ordering matters: we unsubscribed
+	// above so no new payload can be routed to it, then stop it.
 	r.stopWorker(room)
 }
 

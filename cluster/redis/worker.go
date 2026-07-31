@@ -49,6 +49,15 @@ func (r *Relay) workerFor(room string) *roomWorker {
 
 // runRoomWorker drains one room's lane until the relay closes, the bound
 // context is cancelled, or the worker is stopped.
+//
+// The w.done case performs one final drainLane before returning, rather than
+// returning immediately. This worker is the lane's ONLY consumer for its
+// entire life — stopWorker (which closes w.done) deliberately does not touch
+// the lane itself, precisely so nothing else ever drains concurrently with
+// this goroutine. And because this goroutine is registered on r.wg (see
+// workerFor), that final drain is joined by Close's wg.Wait(): there is no
+// separate, unjoined goroutine that could still be mid-Inject after Close
+// returns.
 func (r *Relay) runRoomWorker(ctx context.Context, w *roomWorker) {
 	defer r.wg.Done()
 	for {
@@ -58,6 +67,7 @@ func (r *Relay) runRoomWorker(ctx context.Context, w *roomWorker) {
 		case <-ctx.Done():
 			return
 		case <-w.done:
+			r.drainLane(ctx, w)
 			return
 		case <-w.lane.Signal():
 			r.drainLane(ctx, w)
@@ -109,19 +119,17 @@ func (r *Relay) drainLane(ctx context.Context, w *roomWorker) {
 	}
 }
 
-// stopWorker removes the room's worker and stops it, draining whatever is
-// still queued first so a deactivation does not silently discard delivered-
-// but-not-yet-injected updates.
+// stopWorker removes the room's worker from the map and signals it to stop.
+// It deliberately does NOT drain the lane itself — see runRoomWorker's
+// w.done case, which performs the final drain on the worker's own goroutine
+// instead. That goroutine is the lane's sole consumer for its whole life, so
+// nothing here can race it for the same queued payloads, and because that
+// goroutine is on r.wg, its final drain is joined by Close.
 //
-// Callers MUST NOT hold r.mu here. The drain below calls Sink.Inject, and if
-// a Sink implementation ignores context cancellation (a pre-existing risk —
-// see Close's doc comment, which has always had the same exposure via
-// wg.Wait joining a worker stuck in the same call) that call can block this
-// goroutine indefinitely. That is an acceptable, pre-existing risk for the
-// caller of stopWorker to absorb, but it must never escalate into blocking
-// r.mu, which would stall every other lifecycle op (Start, Close,
-// RoomActivated/RoomDeactivated for unrelated rooms) on the relay.
-// RoomDeactivated enforces this by releasing r.mu before calling stopWorker.
+// This makes stopWorker itself fast and non-blocking (a map delete and a
+// channel close, nothing that can wait on Sink.Inject), so — unlike an
+// earlier version of this function — callers do not need to avoid holding
+// r.mu across it.
 func (r *Relay) stopWorker(room string) {
 	r.workersMu.Lock()
 	w, ok := r.workers[room]
@@ -132,10 +140,65 @@ func (r *Relay) stopWorker(room string) {
 	if !ok {
 		return
 	}
-	if !w.lane.Empty() {
-		r.drainLane(r.startCtx, w)
-	}
 	close(w.done)
+}
+
+// isRoomActive reports whether room currently has a positive activation
+// refcount on this relay (RoomActivated/RoomDeactivated) — a purely
+// relay-level notion, independent of whether the Sink knows about the room
+// at all (Sink.Inject auto-creates non-resident rooms; that is a separate
+// contract exercised by TestInteg_Subscriber_NonResidentRoom_StillInjects,
+// which itself RoomActivates the room, so it stays "active" here too).
+//
+// Takes r.mu, so it must never be called by a goroutine that already holds
+// r.mu. RoomActivated does not need it: by the time it would want to know
+// this, it has just incremented the counter itself.
+func (r *Relay) isRoomActive(room string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.activeRooms[room] > 0
+}
+
+// workerForInbound is the router's (runSubscriber's) entry point for
+// resolving a room's worker, as opposed to workerFor, which RoomActivated
+// uses directly. The hit path (existing worker in r.workers) is identical to
+// workerFor and, like it, touches only workersMu.
+//
+// The miss path differs: workerFor always creates unconditionally, which is
+// correct for RoomActivated (the room is, by construction, active) but wrong
+// for the router. A miss here is reachable in two ways: an explicit reap
+// while the room stays active (see
+// TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom, where recreating is
+// exactly the wanted behaviour), or a straggler message already buffered in
+// go-redis's Channel — or in flight across the UNSUBSCRIBE — for a room this
+// relay just deactivated. RoomDeactivated cannot reap a worker created by
+// the latter case: activeRooms is already back at zero, so a later
+// RoomDeactivated call for the same room just no-ops, and the stray would
+// otherwise live until Close. That is exactly the unbounded per-room growth
+// this task exists to stop, so a miss only creates a worker if the room is
+// still active; a message for an inactive room is dropped, symmetric with
+// the self-delivery drop (H2) in runSubscriber — expected, not a bug.
+//
+// isRoomActive takes r.mu, but only on this (rare) miss path — the hit path
+// above never touches r.mu, so steady-state message routing does not
+// contend with lifecycle ops. There is a narrow residual race between the
+// isRoomActive check and workerFor's creation (RoomDeactivated could
+// complete in between): that would still create one stray worker, no
+// different from any other, which lives until Close if the room is never
+// reactivated. This does not reintroduce the leak — it narrows an
+// unconditional, routine occurrence down to a rare TOCTOU window between two
+// independent lock acquisitions.
+func (r *Relay) workerForInbound(room string) (w *roomWorker, ok bool) {
+	r.workersMu.Lock()
+	w, ok = r.workers[room]
+	r.workersMu.Unlock()
+	if ok {
+		return w, true
+	}
+	if !r.isRoomActive(room) {
+		return nil, false
+	}
+	return r.workerFor(room), true
 }
 
 // inject hands one payload to the Sink, logging failures at Warn (a transient

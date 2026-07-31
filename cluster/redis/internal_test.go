@@ -303,7 +303,53 @@ func newTestRelayNoStart() *Relay {
 		done:        make(chan struct{}),
 		startCtx:    context.Background(),
 		activeRooms: make(map[string]int),
+		workers:     make(map[string]*roomWorker),
 	}
+}
+
+// TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray is the #187-leak
+// regression test: a router-triggered miss for a room this relay is not (or
+// no longer) active for must NOT create a worker. Before this fix, the
+// router created a worker unconditionally on any miss, so a straggler
+// message arriving after RoomDeactivated already unsubscribed would
+// re-create a worker that nothing could ever reap (a later RoomDeactivated
+// for the same room just no-ops, since activeRooms is already back at
+// zero) — the exact unbounded per-room growth this task exists to stop.
+func TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray(t *testing.T) {
+	r := newTestRelayNoStart()
+	t.Cleanup(func() { close(r.done) })
+
+	w, ok := r.workerForInbound("never-activated")
+	assert.False(t, ok, "a miss for an inactive room must be reported as not-ok")
+	assert.Nil(t, w)
+
+	r.workersMu.Lock()
+	_, present := r.workers["never-activated"]
+	r.workersMu.Unlock()
+	assert.False(t, present, "a miss for an inactive room must not create a worker")
+}
+
+// TestUnit_WorkerForInbound_MissOnActiveRoom_Creates is the mirror image:
+// a room this relay IS active for must still get a worker on a miss. This is
+// what makes lazy recreation after an explicit reap work (see
+// TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom) — "active on the
+// relay" and "resident on the Sink" are different things, and this check
+// must track only the former.
+func TestUnit_WorkerForInbound_MissOnActiveRoom_Creates(t *testing.T) {
+	r := newTestRelayNoStart()
+	t.Cleanup(func() { close(r.done) })
+	r.mu.Lock()
+	r.activeRooms["room"] = 1
+	r.mu.Unlock()
+
+	w, ok := r.workerForInbound("room")
+	require.True(t, ok)
+	require.NotNil(t, w)
+
+	r.workersMu.Lock()
+	_, present := r.workers["room"]
+	r.workersMu.Unlock()
+	assert.True(t, present, "a miss for an active room must create a worker")
 }
 
 // TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom verifies the
