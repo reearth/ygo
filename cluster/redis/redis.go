@@ -71,6 +71,7 @@ import (
 
 	"github.com/reearth/ygo/cluster"
 	"github.com/reearth/ygo/encoding"
+	"github.com/reearth/ygo/internal/relaylane"
 )
 
 // DefaultChannelPrefix is prepended to the room name to form the pub/sub
@@ -146,6 +147,13 @@ type Config struct {
 	// (the usual case) auto-generates 16 crypto-random bytes. Provide a
 	// stable value for tests that need deterministic identity.
 	NodeID []byte
+
+	// RoomQueueSize bounds how many inbound KindSync updates a single room
+	// may have queued for delivery before the relay starts coalescing them
+	// (merging the backlog into one update via crdt.MergeUpdatesV1). Zero
+	// uses relaylane.DefaultCap. Coalescing never loses an edit — it trades
+	// per-update delivery granularity for bounded memory on a wedged room.
+	RoomQueueSize int
 }
 
 // Relay is the Redis-backed cluster.Relay.
@@ -180,6 +188,16 @@ type Relay struct {
 	startCtx    context.Context //nolint:containedctx // captured intentionally: Publish blocks on its Done so callers don't hang after Shutdown
 	activeRooms map[string]int
 
+	// workers holds one delivery worker per room. Guarded by workersMu, which
+	// is separate from mu: the router takes it on the hot path and must not
+	// contend with lifecycle ops. A worker is created on RoomActivated AND
+	// lazily on first message — the latter matters because Sink.Inject
+	// auto-creates non-resident rooms, so dropping unknown-room messages
+	// would regress that guarantee.
+	workersMu sync.Mutex
+	workers   map[string]*roomWorker
+	laneCap   int
+
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -203,6 +221,9 @@ func New(client *goredis.Client, cfg Config) (*Relay, error) {
 	}
 	if cfg.ChannelSize <= 0 {
 		cfg.ChannelSize = DefaultChannelSize
+	}
+	if cfg.RoomQueueSize <= 0 {
+		cfg.RoomQueueSize = relaylane.DefaultCap
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -228,6 +249,8 @@ func New(client *goredis.Client, cfg Config) (*Relay, error) {
 		outbound:    make(chan cluster.Outbound, cfg.OutboundBuffer),
 		done:        make(chan struct{}),
 		activeRooms: make(map[string]int),
+		laneCap:     cfg.RoomQueueSize,
+		workers:     make(map[string]*roomWorker),
 	}, nil
 }
 
@@ -307,10 +330,15 @@ func (r *Relay) runPublisher(ctx context.Context) {
 	}
 }
 
-// runSubscriber reads from the PubSub channel and dispatches each message
-// to Sink.Inject — after skipping self-published payloads via nodeID
-// comparison and re-checking the closed flag (so a message buffered at the
-// moment Close fires does not leak past Close).
+// runSubscriber reads from the PubSub channel and routes each message to its
+// room's worker — after decoding, skipping self-published payloads via
+// nodeID comparison, and re-checking the closed flag (so a message buffered
+// at the moment Close fires does not leak past Close). This loop must never
+// call Inject itself: that is exactly the head-of-line stall #187 reports,
+// because one room's slow Inject would block delivery for every room on the
+// node. Instead it hands off to workerFor(room).lane, which never blocks,
+// and returns straight to reading; the per-room worker goroutine (worker.go)
+// does the actual Inject call.
 func (r *Relay) runSubscriber(ctx context.Context) {
 	defer r.wg.Done()
 	ch := r.pubSub.Channel(goredis.WithChannelSize(r.chanSize))
@@ -336,19 +364,15 @@ func (r *Relay) runSubscriber(ctx context.Context) {
 					"channel", msg.Channel, "err", err)
 				continue
 			}
-			// H2: drop self-deliveries before any further work.
+			// H2: drop self-deliveries before any further work — in the
+			// router, so a node's own payloads never consume lane capacity.
 			if bytes.Equal(srcNodeID, r.nodeID) {
 				continue
 			}
-			if err := r.sink.Inject(ctx, cluster.Inbound{
-				Room: room, Kind: kind, Data: data,
-			}); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return
-				}
-				r.log.Warn("cluster/redis: sink.Inject failed",
-					"room", room, "kind", kind, "err", err)
-			}
+			// Hand off and go straight back to reading. This loop must never
+			// call Inject: doing so is exactly the head-of-line stall #187
+			// reports, because one room's slow Inject would block every room.
+			r.workerFor(room).lane.Push(kind, data)
 		}
 	}
 }
@@ -427,6 +451,9 @@ func (r *Relay) RoomActivated(room string) {
 	if r.activeRooms[room] > 1 {
 		return // already subscribed
 	}
+	// Start the worker BEFORE SUBSCRIBE: once the broker has us subscribed a
+	// message can arrive immediately, and it must find a live lane.
+	r.workerFor(room)
 	if err := r.pubSub.Subscribe(r.startCtx, r.channelFor(room)); err != nil {
 		r.log.Warn("cluster/redis: SUBSCRIBE failed", "room", room, "err", err)
 	}
