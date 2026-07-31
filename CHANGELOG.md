@@ -88,6 +88,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they are. This is a permission the interface now grants, not a guarantee
   every relay exercises — `cluster/redis` delivers rooms concurrently,
   `MemRelay` currently does not.
+- **`cluster.Relay.Publish` may now be called concurrently for distinct
+  rooms, and two concurrent calls for the SAME room are possible.**
+  `provider/websocket` now drives `Publish` from one worker goroutine per
+  room (see the head-of-line fix above), not one per server, so distinct
+  rooms are expected to overlap; additionally, across a room's
+  eviction/reload handoff a predecessor lane's final drain can briefly
+  overlap with the successor lane's worker publishing for the same room
+  name. This was reviewed and accepted as benign — the `Relay` contract
+  imposes no per-room ordering, `KindSync` blobs are commutative and
+  idempotent, and stale awareness is dropped by the awareness clock gate —
+  but it means a third-party `Relay` written against the old implicit
+  single-caller assumption (e.g. an unlocked per-room sequence counter, or
+  appending to an unsynchronised buffer) must confirm it is safe for
+  concurrent use before upgrading, exactly as a custom `Sink` must. Both
+  shipped relays already are: `MemRelay.Publish` snapshots its node list
+  under its own mutex before sending; `cluster/redis`'s `Publish`
+  deliberately takes no lock and uses atomics plus channels.
 - `cluster/redis`'s package documentation now states the at-most-once delivery
   reality explicitly: a dropped update parks every later edit from that client
   on the receiving node, persistence heals that only on room reload, and idle

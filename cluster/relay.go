@@ -106,6 +106,32 @@ type Relay interface {
 	// Publish broadcasts a locally-originated change to all other nodes. It is
 	// the caller's responsibility (the provider wiring) to drop changes whose
 	// Origin is the relay sentinel before calling Publish.
+	//
+	// Publish MAY BE CALLED CONCURRENTLY for distinct rooms — the provider
+	// (provider/websocket) drives it from one worker goroutine per room, not
+	// one per server, so calls for different rooms are expected to overlap.
+	// Every Relay implementation must be safe for that.
+	//
+	// The contract imposes NO per-room ordering: implementations must not
+	// rely on receiving a room's publishes in any particular order relative
+	// to each other, and must tolerate TWO CONCURRENT Publish calls for the
+	// SAME room. That same-room overlap is narrow and short-lived — it can
+	// only happen across a room's eviction/reload handoff, where a
+	// predecessor lane's final drain briefly overlaps with the successor
+	// lane's worker publishing for the same room name — but it is a real
+	// possibility a third-party Relay must not assume away (e.g. by keeping
+	// an unlocked per-room sequence counter, or appending to an
+	// unsynchronised buffer). This was reviewed and accepted as benign at the
+	// provider level because the Relay contract imposes no per-room ordering,
+	// KindSync payloads are commutative/idempotent V1 update blobs regardless
+	// of arrival order, and a stale KindAwareness payload is dropped by the
+	// receiving Awareness's own per-client clock gate — but a Relay
+	// implementation still needs to be safe for the concurrent calls
+	// themselves, independent of that payload-level reasoning. Both shipped
+	// relays already are: MemRelay.Publish snapshots the node list under its
+	// own mutex, releases it, then sends on per-node channels; cluster/redis's
+	// Publish deliberately takes no lock at all and uses atomics plus
+	// channels.
 	Publish(ctx context.Context, out Outbound) error
 	// Start binds a Sink for one node and begins delivering inbound changes to
 	// it. Each node (each Server) calls Start once; a relay shared across

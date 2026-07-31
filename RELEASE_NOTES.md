@@ -98,6 +98,20 @@ zero, alert on presence.
   `*websocket.Server` is already safe; third-party `Sink` implementations must
   confirm they are before relying on this. `cluster/redis` exercises the new
   permission; `MemRelay` does not yet.
+- **`cluster.Relay.Publish` may now be called concurrently for distinct
+  rooms, and two concurrent calls for the SAME room are possible.**
+  `provider/websocket` drives `Publish` from one worker goroutine per room
+  (not one per server), so distinct rooms overlap by design; across a room's
+  eviction/reload handoff a predecessor lane's final drain can also briefly
+  overlap with the successor lane's worker publishing for the same room
+  name. Reviewed and accepted as benign — the `Relay` contract imposes no
+  per-room ordering, `KindSync` blobs are commutative/idempotent, and stale
+  awareness is dropped by the awareness clock gate — but a third-party
+  `Relay` built on the old single-caller assumption must confirm it is safe
+  for concurrent use, exactly as a custom `Sink` must. Both shipped relays
+  already are: `MemRelay.Publish` snapshots its node list under its own
+  mutex before sending; `cluster/redis`'s `Publish` takes no lock at all and
+  uses atomics plus channels.
 - `cluster/redis`'s package documentation states the at-most-once delivery
   reality explicitly, including that persistence heals a dropped update only
   on room reload and that idle residency (#183) lengthens that window rather
