@@ -221,15 +221,25 @@ type Stats struct {
 	// HardDrops counts payloads lost outright. Should always be zero.
 	HardDrops uint64
 	// RouterDrops counts inbound messages the subscriber router discarded
-	// because it found no live worker for the room (workerForInbound
-	// missed) — a straggler for a room this node no longer hosts, or one
-	// arriving inside RoomActivated's own increment-then-create window.
-	// This is a routine, expected event under ordinary room churn (rooms
-	// deactivating while a message is already in flight), not a data-loss
-	// signal: a message from a departed room reaching this node too late to
-	// matter is not a correctness problem in the way HardDrops is. Alert on
-	// its rate trending up (e.g. relative to churn volume), not its mere
-	// presence.
+	// before they ever reached a lane, for either of two reasons:
+	//
+	//   - No live worker for the room (workerForInbound missed) — a
+	//     straggler for a room this node no longer hosts, or one arriving
+	//     inside RoomActivated's own increment-then-create window. This is a
+	//     routine, expected event under ordinary room churn (rooms
+	//     deactivating while a message is already in flight), not a
+	//     data-loss signal: a message from a departed room reaching this
+	//     node too late to matter is not a correctness problem in the way
+	//     HardDrops is.
+	//   - An unrecognised cluster.Kind (see runSubscriber's H3) — a value
+	//     outside the known set, most plausibly a newer node's not-yet-
+	//     understood Kind during a rolling deploy. Dropping here is what
+	//     stands in for the old default: return nil an unknown kind used to
+	//     get in Sink.Inject, before the kind could be silently relabelled
+	//     on the way there.
+	//
+	// Alert on its rate trending up (e.g. relative to churn volume / deploy
+	// cadence), not its mere presence.
 	RouterDrops uint64
 }
 
@@ -557,6 +567,30 @@ func (r *Relay) runSubscriber(ctx context.Context) {
 			// H2: drop self-deliveries before any further work — in the
 			// router, so a node's own payloads never consume lane capacity.
 			if bytes.Equal(srcNodeID, r.nodeID) {
+				continue
+			}
+			// H3: reject a kind outside the known set before it ever reaches
+			// Push. Lane.Push has exactly two buckets — KindAwareness, and
+			// "everything else" filed as KindSync — so an unrecognised kind
+			// (a newer node's not-yet-understood value in a rolling deploy,
+			// or corruption) would otherwise be silently relabelled KindSync
+			// by the worker's drainLane and handed to crdt.ApplyUpdateV1 as
+			// if it were a real update. Worse, a payload that isn't a valid
+			// V1 update blob makes crdt.MergeUpdatesV1 fail (see
+			// TestLane_MergeFailure_DoesNotLose), and a lane whose merge
+			// keeps failing hard-drops on every push past 2x its cap — so
+			// one such payload can cost a room its legitimate updates, not
+			// just this one. Checked against the known set explicitly
+			// (KindSync/KindAwareness), not e.g. `kind > 1`, so this stays
+			// correct without a code change if cluster.Kind ever grows a
+			// third value: an old node must still ignore it, not guess.
+			switch kind {
+			case cluster.KindSync, cluster.KindAwareness:
+				// known kind, proceed
+			default:
+				r.log.Warn("cluster/redis: unrecognised kind; drop",
+					"channel", msg.Channel, "room", room, "kind", kind)
+				r.routerDrops.Add(1)
 				continue
 			}
 			// Hand off and go straight back to reading. This loop must never

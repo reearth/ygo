@@ -358,6 +358,74 @@ func TestUnit_WorkerForInbound_MissOnActiveRoom_Drops(t *testing.T) {
 	assert.False(t, present, "a miss must never create a worker, active room or not")
 }
 
+// TestInteg_RunSubscriber_UnrecognisedKind_DroppedNotInjected exercises the
+// real router hot path (runSubscriber -> decodeInbound -> workerForInbound ->
+// Push), not a helper in isolation, because that is exactly where the bug
+// lived: before this fix, an out-of-range cluster.Kind decoded off the wire
+// was pushed onto the room's lane unchecked, where Lane.Push's `else` branch
+// treats anything that isn't KindAwareness as a KindSync blob, and the
+// worker's drainLane then injects it with a hardcoded cluster.KindSync (see
+// worker.go's drainLane) — silently relabelling an unknown kind as a document
+// update instead of ignoring it. A garbage blob fed to
+// crdt.ApplyUpdateV1/MergeUpdatesV1 this way is not just mislabelled: per
+// TestLane_MergeFailure_DoesNotLose (internal/relaylane), a blob that fails to
+// merge makes every subsequent collapseLocked attempt on that room's lane
+// fail too, i.e. one malformed payload can jam legitimate updates for that
+// room behind it.
+//
+// This test publishes a payload with an out-of-range Kind through the real
+// Publish -> Redis pub/sub -> runSubscriber path and asserts the actual
+// observable contract: nothing reaches the Sink, and the drop is counted in
+// Stats().RouterDrops (mirroring the router's existing miss-drop, per the
+// fix's design) rather than silently disappearing.
+func TestInteg_RunSubscriber_UnrecognisedKind_DroppedNotInjected(t *testing.T) {
+	mr := miniredis.RunT(t)
+
+	pubClient := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = pubClient.Close() })
+	subClient := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = subClient.Close() })
+
+	pub, err := New(pubClient, Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pub.Close() })
+	require.NoError(t, pub.Start(context.Background(), &countingSink{}))
+
+	sink := &countingSink{}
+	sub, err := New(subClient, Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Close() })
+	require.NoError(t, sub.Start(context.Background(), sink))
+
+	pub.RoomActivated("room")
+	sub.RoomActivated("room")
+	require.Eventually(t, func() bool {
+		counts := mr.PubSubNumSub(DefaultChannelPrefix + "room")
+		return counts[DefaultChannelPrefix+"room"] >= 2
+	}, 2*time.Second, 5*time.Millisecond)
+
+	// cluster.Kind is a plain int with no wire-level enum enforcement, so a
+	// value outside {KindSync, KindAwareness} — e.g. a newer node's
+	// not-yet-understood third Kind, or corruption — can and does appear on
+	// the wire in a rolling deploy. Publish one directly.
+	require.NoError(t, pub.Publish(context.Background(), cluster.Outbound{
+		Room: "room", Kind: cluster.Kind(99), Data: []byte("not a real update"),
+	}))
+
+	require.Eventually(t, func() bool {
+		return sub.Stats().RouterDrops >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"an unrecognised kind must be dropped and counted in Stats().RouterDrops")
+
+	// Give any wrongful delivery every chance to land, then confirm it did
+	// not: this is the assertion that actually matters. Before the fix, this
+	// payload was pushed to the lane and injected as a mislabelled KindSync,
+	// so sink.count() would be 1 here.
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, 0, sink.count(),
+		"a payload with an unrecognised kind must never reach Sink.Inject")
+}
+
 // TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated replaces the former
 // TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom, whose name and
 // assertions described behaviour the router simplification above removed.
