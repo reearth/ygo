@@ -137,11 +137,30 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 // reconnect can create a brand new instance for the same name in that
 // window). This function always installs its OWN fresh lane in that slot and
 // retires the stale predecessor by closing its done channel — never by
-// draining it directly, which would let two goroutines call relay.Publish
-// for the same room concurrently (see relayLaneWorker's doc). The
+// draining it directly, which would let TWO GOROUTINES drain THE SAME LANE
+// concurrently (relayLaneWorker's doc explains why that specific case is
+// unwanted: it isn't about double-delivery, which Lane's mutex-guarded Take*
+// already rules out, but about not depending on relay implementations
+// tolerating concurrent Publish calls sharing one lane's backlog). The
 // predecessor's own worker goroutine observes its done close and performs
 // its own final drain before exiting, exactly as it would from its own
 // stopRelayLane call.
+//
+// That final drain is this handoff's one accepted overlap: it calls
+// relay.Publish(room, ...) for the OLD lane while the brand-new worker
+// spawned below can already be calling relay.Publish for the SAME room name
+// through the NEW lane — two different lanes, two different goroutines, one
+// room string, briefly concurrent. This is safe, not merely tolerated,
+// because cluster.Relay's contract imposes no per-room ordering or mutual
+// exclusion across Publish calls: KindSync payloads are V1 update blobs,
+// which are commutative and idempotent regardless of delivery order, and a
+// stale KindAwareness payload arriving after a newer one is dropped by the
+// receiving Awareness's own per-client clock gate (see awareness.go's
+// ApplyUpdate), not by any ordering guarantee this package provides. An
+// earlier version of this comment (and relayLaneWorker's/stopRelayLane's)
+// asserted "exactly one goroutine Publishes per room" as an invariant this
+// design upholds — that was wrong: it holds per LANE, never across this
+// handoff's brief two-lane overlap for the same room name.
 //
 // stopRelayLane and this function race safely on which one actually retires
 // a given lane: both resolve it via a single relayLanesMu-guarded identity
@@ -158,6 +177,20 @@ func (s *Server) ensureRelayLane(room string) *relayRoomLane {
 	prev, hadPrev := s.relayLanes[room]
 	l := &relayRoomLane{lane: relaylane.New(0), done: make(chan struct{})}
 	s.relayLanes[room] = l
+	if hadPrev {
+		// This is the OTHER place (besides stopRelayLane) a lane can be
+		// retired, so it needs the identical fold: without it, a predecessor
+		// displaced here — e.g. exactly the reconnect-during-teardown handoff
+		// TestRelayOutbound_SurvivesEvictionRace exercises — would have its
+		// counters silently vanish from RelayStats() the moment it's replaced,
+		// breaking the same monotonicity guarantee stopRelayLane's fold exists
+		// to protect. See RelayStats' doc in this file and relayRetired's doc
+		// in server.go.
+		st := prev.lane.Stats()
+		s.relayRetired.Coalesced += st.Coalesced
+		s.relayRetired.AwarenessSuperseded += st.AwarenessSuperseded
+		s.relayRetired.HardDrops += st.HardDrops
+	}
 	s.relayLanesMu.Unlock()
 
 	if hadPrev {
@@ -204,14 +237,19 @@ func (s *Server) relayLaneFor(room string) *relayRoomLane {
 // both cuts Publish calls and makes a full lane rare.
 //
 // The l.done case performs one final drainRelayLane before returning, rather
-// than returning immediately. This worker is the lane's ONLY consumer for its
-// entire life — stopRelayLane deliberately does not drain the lane itself,
-// precisely so nothing else ever calls relay.Publish for this room
-// concurrently with this goroutine (see stopRelayLane's doc for why that
-// matters: two drainers can never double-deliver the same payload — Lane's
-// Take* are mutex-guarded — but they could each independently and
-// concurrently call relay.Publish for the same room, which is an invariant
-// this design does not want to depend on relay implementations tolerating).
+// than returning immediately. This worker is l's ONLY consumer for its entire
+// life — stopRelayLane deliberately does not drain l itself, precisely so
+// nothing else ever drains l (and therefore calls relay.Publish with l's
+// backlog) concurrently with this goroutine (see stopRelayLane's doc for why
+// that matters: two drainers of the SAME lane could each independently and
+// concurrently call relay.Publish, which is an invariant this design does not
+// want to depend on relay implementations tolerating — even though they could
+// never double-deliver the same payload, since Lane's Take* are mutex-
+// guarded). This is a per-lane guarantee only: during the eviction handoff
+// (ensureRelayLane's doc), a predecessor lane's final drain and a brand-new
+// successor lane's worker CAN call relay.Publish for the same room name at
+// the same time — that is a different, deliberately accepted overlap between
+// two distinct lanes, not a violation of this one.
 func (s *Server) relayLaneWorker(ctx context.Context, room string, l *relayRoomLane) {
 	for {
 		select {
@@ -251,13 +289,15 @@ func (s *Server) publishRelay(ctx context.Context, room string, kind cluster.Kin
 // stopRelayLane retires l, the specific outbound lane the caller's room
 // instance created via ensureRelayLane (room.relayLane; nil is a valid no-op
 // input for "no relay was attached"). It does NOT drain the lane itself —
-// relayLaneWorker is this lane's sole consumer for its entire life, and
-// draining from this goroutine too would let two goroutines call
-// relay.Publish for the same room concurrently. Instead this only removes
-// the lane from the map (so no new Push can find it) and signals the worker
-// to stop; the worker's own l.done case performs the final drain before it
-// returns, so whatever is queued still reaches Publish rather than being
-// silently discarded.
+// relayLaneWorker is l's sole consumer for its entire life, and draining from
+// this goroutine too would let two goroutines drain l concurrently and each
+// independently call relay.Publish with l's backlog. Instead this only
+// removes the lane from the map (so no new Push can find it) and signals the
+// worker to stop; the worker's own l.done case performs the final drain
+// before it returns, so whatever is queued still reaches Publish rather than
+// being silently discarded. (That final drain can itself overlap with a
+// brand-new successor lane's Publish calls for the same room name — see
+// ensureRelayLane's doc for why that specific, cross-lane overlap is safe.)
 //
 // Deliberate deviation from a naive "check Empty() and drain here" teardown:
 // the inbound side (cluster/redis's stopWorker / runRoomWorker) already
@@ -274,6 +314,14 @@ func (s *Server) publishRelay(ctx context.Context, room string, kind cluster.Kin
 // resurrect an already-retired predecessor's map entry or — worse — rip out
 // a live successor's lane and kill its worker. See relayLaneFor's doc for the
 // one narrower race this identity check does not (and cannot) close.
+//
+// Before dropping l, its current Coalesced/AwarenessSuperseded/HardDrops
+// counters are folded into s.relayRetired (still under relayLanesMu) so
+// RelayStats() keeps them after this lane is gone — otherwise an evicted
+// room's counters would simply vanish from RelayStats(), letting its running
+// totals go backwards. Mirrors cluster/redis's stopWorker (see its own doc
+// for the identical reasoning and the one narrow, accepted race this leaves —
+// RelayStats' doc in cluster.go has the outbound-side restatement).
 func (s *Server) stopRelayLane(room string, l *relayRoomLane) {
 	if l == nil {
 		return // no relay was attached for this room instance
@@ -283,6 +331,10 @@ func (s *Server) stopRelayLane(room string, l *relayRoomLane) {
 	stillCurrent := ok && cur == l
 	if stillCurrent {
 		delete(s.relayLanes, room)
+		st := l.lane.Stats()
+		s.relayRetired.Coalesced += st.Coalesced
+		s.relayRetired.AwarenessSuperseded += st.AwarenessSuperseded
+		s.relayRetired.HardDrops += st.HardDrops
 	}
 	s.relayLanesMu.Unlock() // write side: teardown, not the commit path
 	if !stillCurrent {
@@ -356,12 +408,22 @@ func (s *Server) registerRelayObservers(r *room, name string) {
 // crdt.MergeUpdatesV1 synchronously, on THIS goroutine, before returning
 // (see relaylane.Lane.Push / collapseLocked). So under a sustained wedge —
 // this room's worker parked in a slow Publish — the commit path pays a
-// bounded, amortized cost: roughly one merge per DefaultCap pushes, not one
-// per push. That cost is real but small and infrequent, not a stall; #184
-// tracks MergeUpdatesV1 itself as a hot path worth optimizing, which would
-// directly shrink it further. The alternative — capping only on the Take*
-// (consumer) side and never on Push — would trade this bounded latency for
-// UNBOUNDED memory growth on a wedged room, which is worse.
+// bounded, amortized cost of roughly one merge per DefaultCap pushes, NOT one
+// per push — but only while that merge keeps SUCCEEDING. collapseLocked
+// leaves the backlog fully intact on a failed merge (it does not clear
+// syncQ), so every push after that stays over cap and re-triggers
+// collapseLocked again: from push cap+1 through 2*cap, a failing merge means
+// one full MergeUpdatesV1 attempt PER PUSH, not amortized at all, until the
+// backlog reaches 2*cap and the oldest entry is hard-dropped (see
+// collapseLocked). This degenerate case requires MergeUpdatesV1 itself to be
+// failing repeatedly — the same condition that produces HardDrops — so it is
+// already the unhealthy path RelayStats(Task 6).HardDrops exists to surface;
+// the amortized-cost claim above describes the healthy, expected case. That
+// cost is real but small and infrequent in the healthy case, not a stall;
+// #184 tracks MergeUpdatesV1 itself as a hot path worth optimizing, which
+// would directly shrink it further. The alternative — capping only on the
+// Take* (consumer) side and never on Push — would trade this bounded latency
+// for UNBOUNDED memory growth on a wedged room, which is worse.
 //
 // On a saturated lane the backlog is coalesced (merged), never silently
 // dropped: an update lost here is NOT recoverable in general. The old
@@ -387,6 +449,128 @@ func (s *Server) enqueueRelayOutbound(name string, out cluster.Outbound) {
 		return // no relay attached, or the room's lane was already retired
 	}
 	l.lane.Push(out.Kind, out.Data)
+}
+
+// RelayStats is a point-in-time snapshot of this server's OUTBOUND relay
+// health, summed across every room lane this server has ever had — live ones
+// plus ones since retired (by stopRelayLane's ordinary teardown or
+// ensureRelayLane's predecessor-displacement handoff; their final counts are
+// folded into s.relayRetired before the lane is dropped — see relayRetired's
+// doc in server.go), mirroring cluster/redis's Relay.Stats() / retired field
+// for the identical reason. For the inbound side, see the relay adapter's own
+// Stats (e.g. cluster/redis.Relay.Stats).
+//
+// Coalesced/AwarenessSuperseded/HardDrops must be kept in sync with
+// relaylane.Stats — see RelayStats' construction in the method below, and
+// TestPublicStatsCoverRelaylaneFields (cluster_redis_test.go), which reflects
+// over both this type and cluster/redis.Stats and fails if either falls out
+// of sync with relaylane.Stats's field set.
+//
+// Coalesced going non-zero means at least one room's publishes fell behind
+// and were merged (lossless). Dropped or HardDrops going non-zero means
+// updates were lost and peer nodes may be diverged — alert on both.
+//
+// Monotonicity: every field here is guaranteed to never decrease across the
+// life of the Server — see RelayStats()'s doc for exactly why, and for the
+// one narrow gap (not a decrease, just an occasional undercount) that
+// mirrors the inbound side's identical, accepted gap.
+type RelayStats struct {
+	// Coalesced counts outbound KindSync updates absorbed into another blob
+	// by a merge.
+	Coalesced uint64
+	// AwarenessSuperseded counts awareness blobs replaced before publish.
+	// Benign: awareness is idempotent heartbeat state.
+	AwarenessSuperseded uint64
+	// HardDrops counts payloads lost because a merge failed on a saturated
+	// lane. Should always be zero.
+	HardDrops uint64
+	// Dropped counts payloads discarded before ever reaching a lane (no
+	// relay attached at enqueue time, or a genuine straggler that lost its
+	// race against its lane's own retirement — see enqueueRelayOutbound's
+	// doc). Should always be zero in a healthy deployment.
+	Dropped uint64
+}
+
+// RelayStats returns a snapshot of outbound relay counters, safe to call
+// concurrently — including when no relay is attached (all zeroes) — and
+// never touching the Transact commit path (it is a polled diagnostic; see
+// the package invariant that nothing on doc.OnUpdate/awareness.OnUpdate may
+// gain new work because of this method's existence).
+//
+// Guarantee: Coalesced/AwarenessSuperseded/HardDrops are MONOTONIC across
+// sequential calls (never decrease) but not guaranteed EXACT — mirroring
+// cluster/redis's Relay.Stats() precisely, including its one accepted gap:
+// a straggling Push that lands on a lane by name (relayLaneFor) after
+// stopRelayLane has already folded that lane's counters into s.relayRetired
+// and dropped it from s.relayLanes contributes to the counters of a lane
+// nothing will ever read again — an undercount, never an overcount, and
+// never a decrease relative to any total already returned. Dropped is exact
+// (a single atomic counter) and therefore also monotonic.
+//
+// Monotonicity requires holding s.relayLanesMu for THIS METHOD'S ENTIRE
+// computation, not just the map snapshot — an earlier, narrower-locking
+// draft of this method left a genuine three-call race, identical in shape to
+// the one cluster/redis's Relay.Stats() doc documents in full: (1) call A
+// takes the lock, reads s.relayRetired (say 0, nothing retired yet) and the
+// live map (including lane L for room "r"), then releases the lock before
+// summing; (2) stopRelayLane(r, L) runs: takes the write lock, folds L's
+// current counters (say Coalesced=50) into s.relayRetired (now 50), deletes L
+// from the map, releases the lock; (3) call A, now lockless, calls
+// L.lane.Stats() through its own stale reference (the Lane object itself is
+// still valid Go memory even though it is no longer reachable from
+// s.relayLanes) and happens to read 50 there too (nothing pushed more onto it
+// in between) — call A returns retired(0, read in step 1) + 50 (from L) = 50,
+// which looks fine in isolation; (4) but a LATER call B takes the lock,
+// reads s.relayRetired = 50 (already folded) and finds L no longer in the
+// map, so it never adds L's contribution again — call B also returns 50, so
+// this particular interleaving is not itself a visible decrease. The version
+// that IS visible: if step 3's stale L.lane.Stats() read happens BEFORE
+// step 2's fold captures a value that is later increased further by a
+// straggling Push (see enqueueRelayOutbound's doc for exactly that
+// straggler), call A can return a total that already reflects that
+// straggler's contribution while a later call B, seeded only from the
+// smaller retired snapshot stopRelayLane folded in, returns less — a real
+// decrease across sequential calls. Holding s.relayLanesMu across the WHOLE
+// computation below closes this: stopRelayLane (which needs the write lock)
+// cannot run between this method's retired-read and its per-lane reads, so
+// every value this call sums is one that a later call, seeded from the
+// resulting retired total, can only match or exceed. Taking only the RLock
+// side (not the full write lock) is sufficient: this method never mutates
+// s.relayLanes or s.relayRetired, and RWMutex's readers-block-writer
+// semantics are all that is required to keep stopRelayLane (write side) from
+// interleaving with this method's read side.
+//
+// Deadlock trace: this method holds s.relayLanesMu (read) and, while holding
+// it, calls l.lane.Stats() for each live lane, which takes only that Lane's
+// own internal mutex — a distinct lock per lane, never s.relayLanesMu itself
+// (relaylane.Lane has no knowledge of Server). The only other place that
+// holds s.relayLanesMu across an l.lane.Stats() call is stopRelayLane, which
+// takes the WRITE side and also only ever acquires the Lane's own mutex
+// while already holding it — the same one-way order (Server-level lock, then
+// Lane-level lock, never the reverse). ensureRelayLane and relayLaneFor take
+// s.relayLanesMu alone, without ever touching a Lane's mutex. Push (the
+// commit-path hot loop), the worker's drain (TakeSync/TakeAwareness), and
+// publishRelay all take only a Lane's own mutex and never s.relayLanesMu. So
+// the full lock-acquisition graph has exactly one edge — relayLanesMu before
+// a Lane's mutex — with no path back from a Lane's mutex to relayLanesMu:
+// no cycle, hence no deadlock.
+func (s *Server) RelayStats() RelayStats {
+	s.relayLanesMu.RLock()
+	defer s.relayLanesMu.RUnlock()
+
+	out := RelayStats{
+		Coalesced:           s.relayRetired.Coalesced,
+		AwarenessSuperseded: s.relayRetired.AwarenessSuperseded,
+		HardDrops:           s.relayRetired.HardDrops,
+		Dropped:             s.relayDropped.Load(),
+	}
+	for _, l := range s.relayLanes {
+		st := l.lane.Stats()
+		out.Coalesced += st.Coalesced
+		out.AwarenessSuperseded += st.AwarenessSuperseded
+		out.HardDrops += st.HardDrops
+	}
+	return out
 }
 
 // changedAwarenessIDs returns the union of added/updated/removed client IDs.

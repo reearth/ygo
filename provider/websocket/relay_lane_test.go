@@ -168,9 +168,10 @@ func TestRelayOutbound_CrossRoomIsolation(t *testing.T) {
 // brand-new room instance for the same name — the Critical 1 regression this
 // file's TestRelayOutbound_SurvivesEvictionRace covers.
 type blockingCompactAdapter struct {
-	release chan struct{}
-	blocked chan struct{}
-	once    sync.Once
+	release     chan struct{}
+	blocked     chan struct{}
+	once        sync.Once // guards closing blocked, from Compact
+	releaseOnce sync.Once // guards closing release, from releaseCompact
 }
 
 func newBlockingCompactAdapter() *blockingCompactAdapter {
@@ -183,6 +184,24 @@ func (a *blockingCompactAdapter) Compact(_ context.Context, _ string) error {
 	a.once.Do(func() { close(a.blocked) })
 	<-a.release
 	return nil
+}
+
+// releaseCompact unblocks the Compact call exactly once; safe to call more
+// than once (e.g. once from the test body, once unconditionally from
+// t.Cleanup) — later calls are no-ops rather than a double-close panic.
+//
+// t.Cleanup must call this before srv.Shutdown, unconditionally, regardless
+// of whether the test body already did. Without it, a require.* failing
+// anywhere between newBlockingCompactAdapter and the test body's own
+// close(adapter.release) would return via t.FailNow without ever unblocking
+// Compact — and Server.Shutdown's persistDone wait only completes after
+// Compact returns (CompactableAdapter's doc: it runs synchronously in the
+// persistence worker's exit path), so Shutdown(context.Background()) would
+// then hang forever on an unbounded context instead of returning promptly, and
+// the run would die on go test's own timeout instead of reporting the actual
+// assertion failure as a clean FAIL.
+func (a *blockingCompactAdapter) releaseCompact() {
+	a.releaseOnce.Do(func() { close(a.release) })
 }
 
 var (
@@ -212,6 +231,11 @@ func TestRelayOutbound_SurvivesEvictionRace(t *testing.T) {
 	require.NoError(t, srv.AttachRelay(relay))
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
+		// Unconditionally, before Shutdown: if an assertion below failed
+		// early (before the test body's own releaseCompact call), Compact is
+		// still blocked, and Shutdown's persistDone wait would otherwise hang
+		// forever on it — see releaseCompact's doc.
+		adapter.releaseCompact()
 		_ = srv.Shutdown(context.Background())
 		ts.Close()
 	})
@@ -247,7 +271,7 @@ func TestRelayOutbound_SurvivesEvictionRace(t *testing.T) {
 
 	// Let instance A's teardown proceed to completion: persistDone closes,
 	// then teardownRelayRoom(instance A) retires instance A's lane.
-	close(adapter.release)
+	adapter.releaseCompact()
 
 	// Instance B must keep publishing AFTER instance A's teardown has fully
 	// run. Re-applying inside Eventually (rather than a fixed sleep before
@@ -261,4 +285,108 @@ func TestRelayOutbound_SurvivesEvictionRace(t *testing.T) {
 		return len(relay.roomsPublished()) >= 2
 	}, 2*time.Second, 20*time.Millisecond,
 		"instance B's outbound lane must survive instance A's teardown completing (#187 identity-guard regression)")
+}
+
+// Outbound relay health must be observable. Before this, relayDropped was
+// incremented and read nowhere outside tests, so loss was invisible.
+//
+// Deviates from the task brief's literal test body in one respect: the brief
+// drove the backlog with srv.BroadcastUpdate in a loop with no prior dial.
+// That does not compile-fail but always fails at runtime with
+// ErrRoomNotFound — BroadcastUpdate requires the room to already exist (see
+// its own doc comment) and, per applyLocal's doc comment above (already
+// established in this file for exactly this reason), never applies to the
+// room's doc or fires doc.OnUpdate, so it cannot reach the outbound relay
+// lane at all regardless of RelayStats's implementation. Verified empirically
+// during RED: with a stub RelayStats in place, the brief's literal body still
+// failed with "ygo/websocket: room not found" on the first loop iteration.
+// Using dial+drainHandshake (to create the room and wire relay observers,
+// exactly like applyLocal) plus a direct crdt.ApplyUpdateV1 against
+// srv.GetDoc (to fire doc.OnUpdate) is the same pattern this file's other
+// relay tests already use to reach the outbound path.
+func TestRelayStats_Observable(t *testing.T) {
+	relay := newStallingRelay("slow")
+	srv := ygws.NewServer()
+	require.NoError(t, srv.AttachRelay(relay))
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		close(relay.release)
+		_ = srv.Shutdown(context.Background())
+		ts.Close()
+	})
+
+	// Join once so the room exists and its relay observers are wired.
+	conn := dial(t, ts, "slow")
+	drainHandshake(t, conn, crdt.New())
+
+	// Wedge "slow" and pile up a backlog behind it so its lane coalesces.
+	for i := 0; i < 200; i++ {
+		require.NoError(t, crdt.ApplyUpdateV1(srv.GetDoc("slow"), syncUpdate(t, "a"), nil))
+	}
+
+	require.Eventually(t, func() bool {
+		return srv.RelayStats().Coalesced > 0
+	}, 3*time.Second, 20*time.Millisecond,
+		"a wedged room's lane must report coalescing")
+	require.Zero(t, srv.RelayStats().HardDrops)
+}
+
+// RelayStats totals must be monotonic across a room teardown: retiring a
+// saturated lane must fold its counters into a running total (see
+// stopRelayLane's fold into s.relayRetired) rather than let them vanish from
+// the sum. Without that fold, a routine event like this room's last peer
+// disconnecting (eager eviction) would make Coalesced silently drop back to
+// zero the instant the lane is retired — exactly the kind of decrease that
+// defeats a Prometheus-style rate()/increase() read (a decrease reads as a
+// counter reset and discards the delta across it). Mirrors
+// cluster/redis's TestInteg_Stats_MonotonicAcrossDeactivate.
+func TestRelayStats_MonotonicAcrossRoomTeardown(t *testing.T) {
+	relay := newStallingRelay("r")
+	srv := ygws.NewServer()
+	require.NoError(t, srv.AttachRelay(relay))
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		close(relay.release)
+		_ = srv.Shutdown(context.Background())
+		ts.Close()
+	})
+
+	conn := dial(t, ts, "r")
+	drainHandshake(t, conn, crdt.New())
+
+	// Wedge "r" and pile up a backlog so its lane coalesces before teardown.
+	for i := 0; i < 200; i++ {
+		require.NoError(t, crdt.ApplyUpdateV1(srv.GetDoc("r"), syncUpdate(t, "a"), nil))
+	}
+
+	var before ygws.RelayStats
+	require.Eventually(t, func() bool {
+		before = srv.RelayStats()
+		return before.Coalesced > 0
+	}, 3*time.Second, 20*time.Millisecond,
+		"must have coalesced before retiring the room can test anything")
+
+	// Disconnect the room's only peer: eager eviction (the default) fires,
+	// which — at some point during this closing sequence — retires "r"'s
+	// outbound lane via stopRelayLane/teardownRelayRoom. The lane's worker is
+	// still wedged inside Publish (release is not closed until Cleanup), so
+	// this exercises stopRelayLane's own fold rather than depending on the
+	// worker's final drain ever completing during the test.
+	require.NoError(t, conn.Close())
+
+	// Sample repeatedly across the teardown window: every sample must be >=
+	// the one before it, and the pre-teardown Coalesced count must still be
+	// present once the room is gone.
+	deadline := time.Now().Add(3 * time.Second)
+	prev := before
+	for time.Now().Before(deadline) {
+		cur := srv.RelayStats()
+		require.GreaterOrEqual(t, cur.Coalesced, prev.Coalesced,
+			"RelayStats().Coalesced must never decrease, including across the disconnecting room's teardown")
+		require.GreaterOrEqual(t, cur.HardDrops, prev.HardDrops)
+		prev = cur
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.GreaterOrEqual(t, prev.Coalesced, before.Coalesced,
+		"the coalesced count observed before teardown must still be present in RelayStats after it")
 }

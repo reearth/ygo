@@ -21,6 +21,7 @@ import (
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/reearth/ygo/internal/relaylane"
 	"github.com/reearth/ygo/internal/roomname"
 	ygsync "github.com/reearth/ygo/sync"
 )
@@ -442,6 +443,20 @@ type Server struct {
 	relayLanesMu  sync.RWMutex
 	relayLanes    map[string]*relayRoomLane
 	relayDropped  atomic.Uint64
+
+	// relayRetired accumulates the Coalesced/AwarenessSuperseded/HardDrops of
+	// every outbound lane this server has ever retired, folded in (under
+	// relayLanesMu, already held for the delete/replace) at retirement time —
+	// mirrors cluster/redis's Relay.retired field for the identical reason:
+	// without this, a room's counters would simply vanish from RelayStats()
+	// the moment its lane is retired, letting the running totals go
+	// backwards. There are TWO retirement sites, both folding into this same
+	// field: stopRelayLane (ordinary teardown — idle eviction, last peer
+	// disconnects) and ensureRelayLane's predecessor-displacement handoff
+	// (the reconnect-during-teardown race — see ensureRelayLane's doc). See
+	// RelayStats' doc in cluster.go for the monotonic-not-exact guarantee
+	// this buys.
+	relayRetired relaylane.Stats
 
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{} // closed by Shutdown

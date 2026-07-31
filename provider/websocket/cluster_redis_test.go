@@ -2,6 +2,7 @@ package websocket_test
 
 import (
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -12,9 +13,48 @@ import (
 
 	ygoredis "github.com/reearth/ygo/cluster/redis"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/internal/relaylane"
 	ygws "github.com/reearth/ygo/provider/websocket"
 	ygsync "github.com/reearth/ygo/sync"
 )
+
+// statsFieldNames returns the exported field names of a struct type.
+func statsFieldNames(t reflect.Type) map[string]bool {
+	out := make(map[string]bool, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		out[t.Field(i).Name] = true
+	}
+	return out
+}
+
+// Both the outbound public snapshot (websocket.RelayStats) and the inbound
+// one (cluster/redis.Stats) copy relaylane.Stats field-by-field with no
+// compile-time coupling to it — see each type's own doc comment. A new
+// counter added to relaylane.Stats would otherwise be silently invisible
+// through either public surface: it would keep accumulating inside every
+// Lane, but nothing built on top of Lane.Stats() would ever expose it,
+// and there is nothing that would fail to compile to catch that. This test
+// is the substitute for that missing compile-time coupling: it reflects over
+// relaylane.Stats and both public copies and fails if either copy is missing
+// a field relaylane.Stats has. It does not require the reverse (a public
+// type may have its own fields relaylane.Stats lacks — e.g. Dropped,
+// RouterDrops).
+func TestPublicStatsCoverRelaylaneFields(t *testing.T) {
+	laneFields := statsFieldNames(reflect.TypeOf(relaylane.Stats{}))
+	require.NotEmpty(t, laneFields, "sanity: relaylane.Stats must have at least one field")
+
+	for name, typ := range map[string]reflect.Type{
+		"websocket.RelayStats": reflect.TypeOf(ygws.RelayStats{}),
+		"cluster/redis.Stats":  reflect.TypeOf(ygoredis.Stats{}),
+	} {
+		got := statsFieldNames(typ)
+		for field := range laneFields {
+			assert.True(t, got[field],
+				"%s is missing field %q present in relaylane.Stats — "+
+					"a new relaylane counter must be mirrored in every public Stats copy", name, field)
+		}
+	}
+}
 
 // waitSubscribed polls miniredis until the channel hits at least n
 // subscribers, or fails the test after 2s. Replaces timing-dependent
