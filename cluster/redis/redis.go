@@ -39,11 +39,31 @@
 // residency (#183) deliberately keeps rooms resident longer, which lengthens
 // that window rather than shortening it.
 //
-// What this adapter DOES guarantee, since #187: one slow room never stalls
-// delivery for another room (each room is delivered on its own worker), and a
-// saturated room coalesces its backlog via crdt.MergeUpdatesV1 rather than
-// dropping it. Watch Relay.Stats: Coalesced non-zero means a room fell behind,
-// HardDrops non-zero means data was lost.
+// What this adapter DOES guarantee, since #187: Sink.Inject for one room never
+// waits behind another room's Inject call — each room is delivered by its own
+// worker, off the shared subscriber goroutine. That worker goroutine isolation
+// is not quite total: the shared subscriber goroutine still hands each message
+// to its room's lane via Lane.Push, and once a room's queued backlog is over
+// cap, Push collapses it synchronously via crdt.MergeUpdatesV1 before the
+// subscriber can read the next message — so a wedged room's merge attempts can
+// still delay delivery to every other room for as long as the merge takes:
+// bounded and amortized while merges keep succeeding, unbounded (one merge
+// attempt per message) while they keep failing. That degenerate case is the
+// same one that produces HardDrops, so it is already the unhealthy path Stats
+// exists to surface.
+//
+// A saturated room coalesces its KindSync backlog rather than dropping it;
+// KindAwareness is keep-latest, so a saturated lane replaces (never drops) the
+// queued awareness blob, counted in AwarenessSuperseded, not HardDrops.
+//
+// Watch Relay.Stats: Coalesced and AwarenessSuperseded going non-zero is
+// routine on a busy room (they increment on every ordinary drain merge / superseded
+// heartbeat, far below cap, not only on over-cap collapse) — alert on their
+// RATE trending up, not their mere presence. RouterDrops going non-zero is
+// also routine, expected under ordinary room churn (a message for a room this
+// node no longer hosts arriving after RoomDeactivated) — alert on its rate
+// too. HardDrops is the one field that should always be zero — alert on its
+// presence: it means data was lost and nodes may be diverged.
 //
 // Deployments that cannot tolerate at-most-once need a durable, replayable
 // transport (Redis Streams, or a log like NATS JetStream) rather than pub/sub.
@@ -607,8 +627,11 @@ func (r *Relay) Publish(ctx context.Context, out cluster.Outbound) error {
 // practice Server.relayCtx) so a slow/unreachable Redis cannot pin this
 // goroutine indefinitely — Server.Shutdown cancels the ctx and the SUBSCRIBE
 // returns promptly. Note that the websocket provider calls RoomActivated
-// under s.rmu.Lock during room creation; a non-cancelable Background ctx
-// here would let a Redis stall block the entire server's room-create path.
+// off-lock and post-ready (see getOrCreateRoom, #182/#133): s.rmu is NOT held
+// here, so a Redis stall does not block the server's room-create path for
+// any OTHER room — but it does still block the creating goroutine's own
+// return from getOrCreateRoom for THIS room, which is what the cancelable
+// context guards against.
 func (r *Relay) RoomActivated(room string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

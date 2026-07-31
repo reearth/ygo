@@ -77,12 +77,19 @@ type Sink interface {
 	// rebroadcast to local peers; for KindAwareness it is merged into the
 	// room's awareness.Awareness with the relay sentinel origin.
 	//
-	// Inject MAY BE CALLED CONCURRENTLY for distinct rooms: relays deliver
-	// each room on its own goroutine so one slow room cannot stall the others
-	// (#187). Calls for the SAME room are serialised and arrive in publish
-	// order. Implementations must therefore be safe for concurrent use across
-	// rooms; *websocket.Server is (it is the same path concurrent connections
-	// already take).
+	// Inject MAY BE CALLED CONCURRENTLY for distinct rooms — a relay is not
+	// required to deliver every room from a single goroutine, and every Sink
+	// implementation must be safe for that regardless of which relay ends up
+	// attached. *websocket.Server is (it is the same path concurrent
+	// connections already take). Calls for the SAME room must still be
+	// serialised and delivered in publish order.
+	//
+	// This is a permission on the interface, not a guarantee every relay
+	// exercises: cluster/redis's Relay takes advantage of it — it delivers
+	// each room on its own goroutine so one slow room cannot stall inbound
+	// delivery for the others (#187) — but MemRelay does not (yet): it still
+	// delivers every room from one goroutine per node, so a Sink attached
+	// only to a MemRelay does not get that isolation from MemRelay itself.
 	Inject(ctx context.Context, in Inbound) error
 	// Rooms returns the names of rooms currently resident on this node.
 	Rooms() []string

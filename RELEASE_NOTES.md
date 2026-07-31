@@ -1,39 +1,59 @@
 ## v1.42.0
 
 The one thing every adopter must act on: **`cluster.Sink.Inject` may now be
-called concurrently** — one goroutine per room, instead of a single serial
-delivery loop for the whole node — so one slow or stalled room can no longer
-delay delivery to every other room. Calls for the *same* room stay serialised
-and in publish order, so this is safe for `*websocket.Server` without any
-change (it already takes concurrent connections down the same path), but a
-third-party `Sink` implementation written against the old single-caller
-assumption must confirm it is safe for concurrent use across rooms before
-upgrading.
+called concurrently for distinct rooms.** Calls for the *same* room still
+stay serialised and in publish order, so this is safe for `*websocket.Server`
+without any change (it already takes concurrent connections down the same
+path), but a third-party `Sink` implementation written against a
+single-caller assumption must confirm it is safe for concurrent use across
+rooms before upgrading. This is a permission the interface now grants, not a
+guarantee every relay exercises: `cluster/redis`'s `Relay` takes advantage of
+it — delivering each room on its own goroutine so one slow room's `Inject`
+call can no longer stall inbound delivery for the others (#187) — but
+`MemRelay`, the in-process reference relay, still delivers every room from
+one goroutine per node and does not (yet) get that isolation from `MemRelay`
+itself.
 
 Also fixed, and arguably the more consequential bug: a pre-existing defect,
 shipped since v1.20.0 (the cluster relay's introduction), where `Server.Apply`
 and the relay's echo-guard sentinel could both be satisfied from the same
 address by Go's zero-size-allocation guarantee (`new(struct{})` twice), so the
-two "distinct" origin markers compared equal. The relay's echo guard then
-mistook every `Apply`-driven write for its own echo and silently dropped it
-before it ever reached the wire — any deployment calling `Server.Apply` on a
-server with a relay attached has never actually replicated those writes to
-other nodes. Fixed by giving each sentinel its own named, non-zero-size type.
+two "distinct" origin markers compared equal. Two silent consequences: the
+relay's echo guard mistook every `Apply`-driven write for its own echo and
+dropped it before it ever reached the wire — any deployment calling
+`Server.Apply` on a server with a relay attached has never actually
+replicated those writes to other nodes — and separately, a concurrent
+relay-injected update could bleed into the delta `Apply` returns to its own
+caller. Fixed by giving each sentinel its own named, non-zero-size type.
 
 The rest of the release is the performance/isolation half of the same
 change set (#187): relay delivery — inbound in `cluster/redis`, outbound in
 `provider/websocket` — used one shared queue for the whole node in each
-direction, so one slow room stalled delivery for every other room. Each room
-now gets its own bounded lane and worker, and a saturated lane coalesces its
-backlog (`crdt.MergeUpdatesV1`) instead of dropping it. That is not free —
-under a sustained wedge the commit path pays a bounded, amortized merge cost
-(never a block) — and it does not change what Redis pub/sub itself guarantees:
+direction, so one slow room's `Inject`/`Publish` call stalled delivery for
+every other room. Each room now gets its own bounded lane and worker, so
+that specific stall is gone in both directions. A saturated lane coalesces
+its `KindSync` backlog (`crdt.MergeUpdatesV1`) instead of dropping it — a
+saturated awareness slot instead replaces the queued blob with the newest one
+(`AwarenessSuperseded`, not a drop, since awareness is idempotent heartbeat
+state). That coalescing is not free, and not fully isolated either: on both
+sides, once a room's backlog exceeds its cap, the merge runs synchronously,
+on the goroutine that's doing the enqueueing — the Transact commit-path
+goroutine outbound, `cluster/redis`'s single subscriber goroutine inbound.
+Outbound this is a private cost to that one room's commit path (never a
+block, just an occasional bounded merge). Inbound, because the subscriber
+goroutine is shared across every room on the node, a wedged room's merge
+attempt *can* still delay reading (and therefore delivering) other rooms'
+messages for as long as the merge takes — bounded and amortized while merges
+keep succeeding, unbounded while they keep failing (see #184 for the merge
+cost itself). None of this changes what Redis pub/sub itself guarantees:
 still at-most-once by Redis's own definition, with persistence healing a drop
 only on the room's next reload, which a hot room never gets. What actually
-changed is that a full lane can no longer arise from ordinary volume, so a
-hard drop now signals a failing merge specifically, not exhausted capacity —
-watch `Relay.Stats()` / `RelayStats()` (`Coalesced`, `HardDrops`) as the
-health signal.
+changed is that a full lane can no longer arise from ordinary volume alone,
+so a hard drop now signals a failing merge specifically, not exhausted
+capacity — watch `Relay.Stats()` / `RelayStats()` as the health signal:
+`Coalesced`/`AwarenessSuperseded`/inbound-only `RouterDrops` are routine,
+alert on their rate; `HardDrops`/outbound-only `Dropped` should always be
+zero, alert on presence.
 
 ### Fixed
 
@@ -43,35 +63,50 @@ health signal.
   runtime satisfy both from the same `runtime.zerobase` address, so the two
   pointers compared equal even though they were meant to be distinct
   identities. The relay's echo guard misidentified every `Apply`-driven
-  commit as a self-echo and dropped it before publish. Fixed by giving each
-  sentinel its own named, non-zero-size, unexported type.
+  commit as a self-echo and dropped it before publish; separately, a
+  concurrent relay-injected update could bleed into the delta `Apply` returns
+  to its own caller. Fixed by giving each sentinel its own named, non-zero-
+  size, unexported type.
 - **Head-of-line blocking in relay delivery, both directions**
   ([#187](https://github.com/reearth/ygo/issues/187)). `cluster/redis`'s
   subscriber called `Sink.Inject` synchronously in its receive loop, so one
-  slow room stalled inbound delivery for every room on the node;
-  `provider/websocket` had the same defect outbound, via one shared queue and
-  worker for all rooms. Each room now gets its own bounded lane and worker in
-  both directions.
+  slow room's `Inject` call stalled inbound delivery for every room on the
+  node; `provider/websocket` had the same defect outbound, via one shared
+  queue and worker for all rooms. Each room now gets its own bounded lane and
+  worker in both directions, so a slow `Inject`/`Publish` call for one room no
+  longer blocks any other room's delivery. `MemRelay` is not part of this fix
+  — it still delivers every room from a single per-node goroutine.
 - **Relay updates are coalesced instead of dropped under saturation.** A full
   lane merges its queued `KindSync` backlog via `crdt.MergeUpdatesV1` rather
-  than dropping it. The previous outbound drop was justified in-comment by
-  "peers reconcile via sync step 1/2", which does not hold for a hot room —
-  reconciliation needs a room reload, and a room with a connected client never
-  reloads. The commit path still never blocks, but it is not merge-free: past
-  a room's queue cap, `Lane.Push` merges synchronously on the caller's
-  goroutine (bounded, amortized cost — see #184 for the merge itself). A hard
-  drop remains possible only when the merge keeps failing.
+  than dropping it (a full awareness slot instead replaces the queued blob,
+  counted as `AwarenessSuperseded`, not a drop). The previous outbound drop
+  was justified in-comment by "peers reconcile via sync step 1/2", which does
+  not hold for a hot room — reconciliation needs a room reload, and a room
+  with a connected client never reloads. Neither direction is merge-free:
+  outbound, the commit path never blocks but does occasionally merge, on the
+  caller's own goroutine; inbound, that same merge runs on `cluster/redis`'s
+  single subscriber goroutine, shared across every room, so a wedged room's
+  merge attempts can delay other rooms too (bounded/amortized while merges
+  succeed, unbounded while they keep failing — see #184 for the merge cost
+  itself). A hard drop remains possible on either side only when the merge
+  keeps failing.
 
 ### Changed
 
 - **`cluster.Sink.Inject` may now be called concurrently for distinct rooms.**
   Calls for the same room remain serialised and in publish order.
   `*websocket.Server` is already safe; third-party `Sink` implementations must
-  confirm they are before relying on this.
+  confirm they are before relying on this. `cluster/redis` exercises the new
+  permission; `MemRelay` does not yet.
 - `cluster/redis`'s package documentation states the at-most-once delivery
   reality explicitly, including that persistence heals a dropped update only
   on room reload and that idle residency (#183) lengthens that window rather
-  than shortening it.
+  than shortening it. It also corrects two overclaims the doc previously
+  made: `Coalesced` non-zero is routine on any busy room (alert on its rate,
+  not its presence — this was already stated correctly in `Stats`' own doc,
+  just not in the package doc), and "one slow room never stalls delivery for
+  another" is now scoped to the delivery work itself rather than the shared
+  enqueue-time merge cost described above.
 - `cluster.Relay`'s `RoomActivated`/`RoomDeactivated` contract now documents
   that implementers must tolerate a successor room activating a name before
   the predecessor's deactivate call for that name lands (both shipped relays
@@ -79,11 +114,17 @@ health signal.
 
 ### Added
 
-- `cluster/redis.Config.RoomQueueSize`, `cluster/redis.Relay.Stats()`, and
-  `websocket.Server.RelayStats()` — coalesce/awareness-superseded/hard-drop
-  counters for each direction. Monotonic for the life of the relay/server, but
-  not guaranteed exact under a couple of documented, benign race windows
-  (never an overcount, never a decrease).
+- `cluster/redis.Config.RoomQueueSize`, `cluster/redis.Relay.Stats()` (with
+  `Coalesced`/`AwarenessSuperseded`/`HardDrops`/`RouterDrops`), and
+  `websocket.Server.RelayStats()` (with `Coalesced`/`AwarenessSuperseded`/
+  `HardDrops`/`Dropped`). `relayDropped` (now `RelayStats.Dropped`) was
+  previously incremented and read nowhere, making outbound relay loss
+  invisible; `RouterDrops` is new inbound instrumentation with no prior
+  equivalent. Alert on `Coalesced`/`AwarenessSuperseded`/`RouterDrops` by
+  rate (routine); alert on `HardDrops`/`Dropped` by presence (should always
+  be zero). Monotonic for the life of the relay/server, but not guaranteed
+  exact under a couple of documented, benign race windows (never an
+  overcount, never a decrease).
 
 ## Install
 

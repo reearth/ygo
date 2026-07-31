@@ -379,7 +379,7 @@ type room struct {
 	// inflight counts callers that have obtained this room via getOrCreateRoom
 	// but have not yet either registered a peer (ServeHTTP join path) or
 	// finished their synchronous use of the room (relay Inject / admin Apply).
-	// Guarded by mu. Incremented under s.rmu in getOrCreateRoomLocked — atomic
+	// Guarded by mu. Incremented under s.rmu in createRoomPlaceholder — atomic
 	// with the room lookup/publish, so an eviction that holds s.rmu cannot
 	// interleave between a caller's lookup and its increment (#193 review).
 	// evictIdleRoom refuses to evict while inflight > 0: this closes the race
