@@ -68,10 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `websocket.Server.RelayStats()` (with `Coalesced`/`AwarenessSuperseded`/
   `HardDrops`/`Dropped`). `relayDropped` (now `RelayStats.Dropped`) was
   previously incremented and read nowhere, making outbound relay loss
-  invisible; `RouterDrops` (a message for a room this node no longer hosts,
-  discarded by the inbound router) is new instrumentation with no prior
-  equivalent. Alerting posture: `Coalesced`/`AwarenessSuperseded` are routine
-  on a busy room — alert on their rate trending up, not their mere presence;
+  invisible; `RouterDrops` (a message for a room this node no longer hosts, or
+  one whose `Kind` this node does not recognise, discarded by the inbound
+  router) is new instrumentation with no prior equivalent. Alerting posture:
+  `Coalesced`/`AwarenessSuperseded` are routine on a busy room — alert on
+  their rate trending up, not their mere presence;
   `RouterDrops` is likewise routine under ordinary room churn — alert on
   rate; `HardDrops`/`Dropped` should always be zero — alert on presence, they
   mean data was lost and nodes may be diverged. Both `Stats()` methods are

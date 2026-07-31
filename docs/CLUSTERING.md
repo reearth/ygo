@@ -414,7 +414,8 @@ Alerting posture is the same on both sides:
   up, not on their mere presence.
 - `RouterDrops` (inbound only) is likewise **routine** under ordinary room
   churn — a message for a room this node no longer hosts arriving just
-  after `RoomDeactivated`. Alert on its rate, not its presence.
+  after `RoomDeactivated`, or one whose `Kind` this node does not recognise.
+  Alert on its rate, not its presence.
 
 `Coalesced`, `AwarenessSuperseded`, and `HardDrops` are **monotonic but not
 exact**: they are guaranteed to never decrease across the life of the
