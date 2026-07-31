@@ -343,6 +343,23 @@ type room struct {
 	// by the room's mu via registerRelayObservers / unregisterRelayObservers.
 	relayUnsub []func()
 
+	// relayLane is the specific *relayRoomLane THIS room instance created via
+	// ensureRelayLane (nil when no relay is attached). Room eviction is a
+	// two-step process (see peer.go's handleDisconnect / idle_sweep.go's
+	// evictIdleRoom): the room is removed from s.rooms first, and
+	// teardownRelayRoom — which retires this lane — only runs later, after a
+	// possibly-slow persistence flush. A client can reconnect and create a
+	// BRAND NEW room instance for the same name in that window, and that new
+	// instance's own registerRelayObservers/ensureRelayLane call would see
+	// this (predecessor) instance's lane still sitting in Server.relayLanes
+	// keyed by the same room name. Remembering exactly which lane THIS
+	// instance owns lets stopRelayLane retire the correct one by identity
+	// (s.relayLanes[name] == this pointer) rather than by name alone — by
+	// name alone it could either wrongly reuse a predecessor's already-stale
+	// lane, or wrongly delete/close a successor's live one. Guarded by the
+	// room's mu, set once by registerRelayObservers alongside relayUnsub.
+	relayLane *relayRoomLane
+
 	// idleSince records when this room last went empty while
 	// Server.RoomIdleTimeout > 0 (#183). Zero value means "not idle" — either
 	// the room has peers, or RoomIdleTimeout is 0 (eager-evict mode, in which

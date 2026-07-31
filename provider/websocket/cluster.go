@@ -97,38 +97,77 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 	return nil
 }
 
-// ensureRelayLane creates and starts the outbound lane for room if it does not
-// exist. Called from registerRelayObservers (room creation), NEVER from the
-// observer hot path: creating a lane takes the write lock and starts a
-// goroutine, and the observer runs on the Transact commit path.
-func (s *Server) ensureRelayLane(room string) {
+// ensureRelayLane creates and starts a FRESH outbound lane for room, for the
+// exclusive use of the room instance calling it, and returns it. Called
+// exactly once per room instance from registerRelayObservers (room
+// creation), NEVER from the observer hot path: creating a lane takes the
+// write lock and starts a goroutine, and the observer runs on the Transact
+// commit path. Returns nil when no relay is attached.
+//
+// This does NOT reuse whatever is already in Server.relayLanes[room] — see
+// room.relayLane's doc for why. If an entry is already there, it can only be
+// a predecessor room instance's lane that has not yet been retired (room
+// eviction removes the room from Server.rooms before it retires the lane —
+// see peer.go's handleDisconnect / idle_sweep.go's evictIdleRoom — so a
+// reconnect can create a brand new instance for the same name in that
+// window). This function always installs its OWN fresh lane in that slot and
+// retires the stale predecessor by closing its done channel — never by
+// draining it directly, which would let two goroutines call relay.Publish
+// for the same room concurrently (see relayLaneWorker's doc). The
+// predecessor's own worker goroutine observes its done close and performs
+// its own final drain before exiting, exactly as it would from its own
+// stopRelayLane call.
+//
+// stopRelayLane and this function race safely on which one actually retires
+// a given lane: both resolve it via a single relayLanesMu-guarded identity
+// check against Server.relayLanes[room], so whichever one's critical section
+// runs first "wins" the delete/replace and is the one that closes that
+// lane's done; the other observes the map entry no longer matches and skips
+// closing (avoiding a double-close panic).
+func (s *Server) ensureRelayLane(room string) *relayRoomLane {
 	s.relayLanesMu.Lock()
-	defer s.relayLanesMu.Unlock()
 	if s.relayLanes == nil {
-		return // no relay attached
+		s.relayLanesMu.Unlock()
+		return nil // no relay attached
 	}
-	if _, ok := s.relayLanes[room]; ok {
-		return
-	}
+	prev, hadPrev := s.relayLanes[room]
 	l := &relayRoomLane{lane: relaylane.New(0), done: make(chan struct{})}
 	s.relayLanes[room] = l
+	s.relayLanesMu.Unlock()
+
+	if hadPrev {
+		close(prev.done)
+	}
 	go s.relayLaneWorker(s.relayCtx, room, l)
+	return l
 }
 
-// relayLaneFor looks up a room's outbound lane. Read-only, so the commit path
-// never contends with lane creation or teardown. Returns nil when no relay is
-// attached or the room has no lane yet.
+// relayLaneFor looks up a room's outbound lane BY NAME. Read-only, so the
+// commit path never contends with lane creation or teardown. Returns nil
+// when no relay is attached or the room has no lane yet.
 //
-// A caller can hold onto the returned *relayRoomLane after stopRelayLane has
-// already removed it from the map — an observer callback in flight on another
-// goroutine looked this up just before teardown. Pushing onto that stale
-// reference is harmless in the common case (the worker's final drain, see
-// relayLaneWorker's l.done case, still picks it up) but there is one narrow,
-// accepted window: a Push landing after that final drain has already
-// executed and the worker has returned is lost with no counter incremented.
-// This mirrors the one accepted race documented on cluster/redis's Relay
-// (see its `retired` field doc) and is not solvable without either blocking
-// this lookup against teardown or keeping retired lanes around forever.
+// By name, not by room instance: the map entry for a given name always
+// reflects whichever room instance most recently called ensureRelayLane, so
+// this is correct across the room-eviction-then-reconnect transition
+// (ensureRelayLane's identity-checked handoff guarantees the map is never
+// stuck on a stale predecessor — see its doc). An observer callback for an
+// evicted predecessor instance that is still (rarely) in flight during that
+// transition will therefore route its Push onto the SUCCESSOR's lane rather
+// than finding nil — which is correct, since both instances represent the
+// same logical room and the relay only cares about {Room, Kind, Data}, not
+// which room-instance produced it.
+//
+// The one race this can NOT close: a caller can obtain a non-nil
+// *relayRoomLane here and then be descheduled before calling Push, for long
+// enough that BOTH (a) that exact lane gets retired (ensureRelayLane's or
+// stopRelayLane's identity-checked handoff — see their docs) AND (b) that
+// lane's worker performs its final drain (relayLaneWorker's l.done case) and
+// returns — all before the delayed Push executes. That Push then lands on an
+// abandoned lane nobody will ever drain again, and is lost with no counter
+// incremented. This mirrors the one accepted race documented on
+// cluster/redis's Relay (see its `retired` field doc) and is not solvable
+// without either blocking this lookup against teardown or keeping every
+// retired lane around forever.
 func (s *Server) relayLaneFor(room string) *relayRoomLane {
 	s.relayLanesMu.RLock()
 	defer s.relayLanesMu.RUnlock()
@@ -184,30 +223,45 @@ func (s *Server) publishRelay(ctx context.Context, room string, kind cluster.Kin
 	}
 }
 
-// stopRelayLane retires a room's outbound lane. It does NOT drain the lane
-// itself — relayLaneWorker is this lane's sole consumer for its entire life,
-// and draining from this goroutine too would let two goroutines call
-// relay.Publish for the same room concurrently. Instead this only removes the
-// lane from the map (so no new Push can find it) and signals the worker to
-// stop; the worker's own l.done case performs the final drain before it
+// stopRelayLane retires l, the specific outbound lane the caller's room
+// instance created via ensureRelayLane (room.relayLane; nil is a valid no-op
+// input for "no relay was attached"). It does NOT drain the lane itself —
+// relayLaneWorker is this lane's sole consumer for its entire life, and
+// draining from this goroutine too would let two goroutines call
+// relay.Publish for the same room concurrently. Instead this only removes
+// the lane from the map (so no new Push can find it) and signals the worker
+// to stop; the worker's own l.done case performs the final drain before it
 // returns, so whatever is queued still reaches Publish rather than being
 // silently discarded.
 //
 // Deliberate deviation from a naive "check Empty() and drain here" teardown:
 // the inbound side (cluster/redis's stopWorker / runRoomWorker) already
 // learned this the hard way — its stopWorker doc explains the same
-// worker-does-the-final-drain shape for the identical reason. See
-// relayLaneFor's doc for the residual race this still leaves (a Push that
-// lands on a stale lane reference after this goroutine's final drain has
-// already run).
-func (s *Server) stopRelayLane(room string) {
+// worker-does-the-final-drain shape for the identical reason.
+//
+// l is retired ONLY if Server.relayLanes[room] still equals it: room
+// eviction removes the room from Server.rooms before this function ever
+// runs (see peer.go / idle_sweep.go), so a successor room instance can
+// already have been created and called ensureRelayLane for the same name in
+// the interim — and ensureRelayLane's own identity-checked handoff would
+// then already have retired l on this call's behalf (see its doc). Deleting
+// or closing done unconditionally here, by name alone, would either silently
+// resurrect an already-retired predecessor's map entry or — worse — rip out
+// a live successor's lane and kill its worker. See relayLaneFor's doc for the
+// one narrower race this identity check does not (and cannot) close.
+func (s *Server) stopRelayLane(room string, l *relayRoomLane) {
+	if l == nil {
+		return // no relay was attached for this room instance
+	}
 	s.relayLanesMu.Lock()
-	l, ok := s.relayLanes[room]
-	if ok {
+	cur, ok := s.relayLanes[room]
+	stillCurrent := ok && cur == l
+	if stillCurrent {
 		delete(s.relayLanes, room)
 	}
 	s.relayLanesMu.Unlock() // write side: teardown, not the commit path
-	if !ok {
+	if !stillCurrent {
+		// A successor's ensureRelayLane already displaced and retired l.
 		return
 	}
 	close(l.done)
@@ -226,8 +280,10 @@ func (s *Server) stopRelayLane(room string) {
 func (s *Server) registerRelayObservers(r *room, name string) {
 	sentinel := s.relaySentinel
 	// Create the outbound lane before the observers that feed it. This runs
-	// during room creation, NOT on the commit path.
-	s.ensureRelayLane(name)
+	// during room creation, NOT on the commit path. Remember exactly which
+	// lane THIS room instance owns (r.relayLane's doc) so teardownRelayRoom
+	// can retire it by identity rather than by name alone.
+	relayLane := s.ensureRelayLane(name)
 
 	unsubDoc := r.doc.OnUpdate(func(update []byte, origin any) {
 		if origin == sentinel {
@@ -259,28 +315,45 @@ func (s *Server) registerRelayObservers(r *room, name string) {
 
 	r.mu.Lock()
 	r.relayUnsub = append(r.relayUnsub, unsubDoc, unsubAw)
+	r.relayLane = relayLane
 	r.mu.Unlock()
 }
 
-// enqueueRelayOutbound is the observer-side, NON-BLOCKING hand-off to the
-// room's outbound worker. The observer runs on the CRDT commit path (the
-// Transact caller's goroutine), so this must never block and must never merge
-// here — merging happens on the lane's worker instead.
+// enqueueRelayOutbound is the observer-side hand-off to the room's outbound
+// worker. The observer runs on the CRDT commit path (the Transact caller's
+// goroutine).
 //
-// On a saturated lane the queued KindSync backlog is coalesced (merged), not
-// dropped: an update lost here is NOT recoverable in general. The old comment
-// claimed "peers reconcile via sync step 1/2", but reconciliation only happens
-// when a room is reloaded, and a hot room (always at least one client) is
-// never reloaded — so a dropped update parks every later edit from that client
-// on the peer node. Coalescing avoids that. A hard drop remains possible only
-// if the merge itself fails; it is counted and surfaced via RelayStats.
+// The commit path never BLOCKS here: Lane.Push always returns without
+// waiting on anything. It is NOT merge-free, though — an earlier version of
+// this comment claimed merging "happens on the lane's worker instead", which
+// is wrong: once the queued KindSync backlog exceeds relaylane.DefaultCap
+// (64) entries, Push collapses the whole backlog into one blob via
+// crdt.MergeUpdatesV1 synchronously, on THIS goroutine, before returning
+// (see relaylane.Lane.Push / collapseLocked). So under a sustained wedge —
+// this room's worker parked in a slow Publish — the commit path pays a
+// bounded, amortized cost: roughly one merge per DefaultCap pushes, not one
+// per push. That cost is real but small and infrequent, not a stall; #184
+// tracks MergeUpdatesV1 itself as a hot path worth optimizing, which would
+// directly shrink it further. The alternative — capping only on the Take*
+// (consumer) side and never on Push — would trade this bounded latency for
+// UNBOUNDED memory growth on a wedged room, which is worse.
 //
-// relayLaneFor can legitimately return nil here: registerRelayObservers
-// creates the lane before wiring these observers, but stopRelayLane can retire
-// a room's lane while an observer callback for that same room is already
-// in-flight on another goroutine (a straggler). That is counted as a drop
-// too, for the same reason — it is not recoverable in general — rather than
-// silently discarded or treated as a bug.
+// On a saturated lane the backlog is coalesced (merged), never silently
+// dropped: an update lost here is NOT recoverable in general. The old
+// comment (from before per-room lanes existed) claimed "peers reconcile via
+// sync step 1/2", but reconciliation only happens when a room is reloaded,
+// and a hot room (always at least one client) is never reloaded — so a
+// dropped update would park every later edit from that client on the peer
+// node. Coalescing avoids that. A hard drop remains possible only if the
+// merge itself repeatedly fails; it is counted (relaylane.Stats.HardDrops)
+// and surfaced via RelayStats (Task 6).
+//
+// relayLaneFor can legitimately return nil here: no relay is attached, or —
+// see relayLaneFor's and ensureRelayLane's docs for the full detail — this
+// observer callback is a genuine straggler that lost its race against this
+// exact lane's retirement and drain. That is counted as a drop too, for the
+// same reason — it is not recoverable in general — rather than silently
+// discarded or treated as a bug.
 func (s *Server) enqueueRelayOutbound(name string, out cluster.Outbound) {
 	l := s.relayLaneFor(name)
 	if l == nil {
@@ -310,11 +383,16 @@ func (s *Server) teardownRelayRoom(r *room, name string) {
 	r.mu.Lock()
 	unsubs := r.relayUnsub
 	r.relayUnsub = nil
+	relayLane := r.relayLane
+	r.relayLane = nil
 	r.mu.Unlock()
 	for _, u := range unsubs {
 		u()
 	}
-	s.stopRelayLane(name)
+	// Pass THIS instance's own remembered lane, not name alone: r.relayLane's
+	// doc explains why a name-only lookup here would be unsafe across the
+	// evict-then-reconnect window.
+	s.stopRelayLane(name, relayLane)
 	s.relay.RoomDeactivated(name)
 }
 

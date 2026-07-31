@@ -103,13 +103,22 @@ func applyLocal(t *testing.T, ts *httptest.Server, srv *ygws.Server, room, text 
 // THE OUTBOUND #187 GATE: a room whose Publish is wedged must not stop any
 // other room from publishing. Fails before the fix, where one worker drains a
 // single shared queue.
+//
+// Strengthened per review: it is not enough to show "fast" eventually
+// publishes — that alone would also pass by coincidence if the wedge simply
+// wasn't real. So this also asserts "slow" has NOT published while wedged,
+// and that releasing the wedge lets its backlog flush through afterwards.
 func TestRelayOutbound_CrossRoomIsolation(t *testing.T) {
 	relay := newStallingRelay("slow")
 	srv := ygws.NewServer()
 	require.NoError(t, srv.AttachRelay(relay))
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
-		close(relay.release)
+		// Do NOT close(relay.release) here: the test body closes it itself
+		// once it's done asserting the wedge. If a require.* above fails
+		// first, Shutdown's relayCtx cancellation (not this cleanup) is what
+		// unwedges the "slow" worker — see stallingRelay.Publish's ctx.Done
+		// branch — so a second close here would double-close and panic.
 		_ = srv.Shutdown(context.Background())
 		ts.Close()
 	})
@@ -127,4 +136,130 @@ func TestRelayOutbound_CrossRoomIsolation(t *testing.T) {
 		return false
 	}, 2*time.Second, 10*time.Millisecond,
 		`room "fast" must publish while room "slow" is wedged`)
+
+	// The wedge must be real, not a timing fluke that would have let this
+	// test pass even without the fix: "slow" must still be parked inside
+	// Publish, not have already gone through.
+	require.NotContains(t, relay.roomsPublished(), "slow",
+		`room "slow" must NOT have published yet — it should still be wedged inside Publish`)
+
+	// Releasing the wedge must let the backlog flush: "slow" publishes too.
+	close(relay.release)
+	require.Eventually(t, func() bool {
+		for _, room := range relay.roomsPublished() {
+			if room == "slow" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond,
+		`room "slow" must publish once its wedge is released`)
+}
+
+// blockingCompactAdapter is a PersistenceAdapter + CompactableAdapter whose
+// Compact blocks until released. Compact runs synchronously in the
+// persistence worker's exit path on room unload (CompactableAdapter's doc:
+// "a slow or hanging Compact delays that room's teardown"), so blocking it
+// deterministically holds a room's teardown open at exactly the point this
+// test needs: peer.go's handleDisconnect removes the room from Server.rooms
+// and closes persistStop BEFORE waiting on persistDone, and persistDone only
+// closes after the worker's exit-path Compact call returns. Blocking Compact
+// therefore reproduces the window, between "room removed from Server.rooms"
+// and "teardownRelayRoom runs", during which a reconnect can create a
+// brand-new room instance for the same name — the Critical 1 regression this
+// file's TestRelayOutbound_SurvivesEvictionRace covers.
+type blockingCompactAdapter struct {
+	release chan struct{}
+	blocked chan struct{}
+	once    sync.Once
+}
+
+func newBlockingCompactAdapter() *blockingCompactAdapter {
+	return &blockingCompactAdapter{release: make(chan struct{}), blocked: make(chan struct{})}
+}
+
+func (a *blockingCompactAdapter) LoadDoc(string) ([]byte, error)   { return nil, nil }
+func (a *blockingCompactAdapter) StoreUpdate(string, []byte) error { return nil }
+func (a *blockingCompactAdapter) Compact(_ context.Context, _ string) error {
+	a.once.Do(func() { close(a.blocked) })
+	<-a.release
+	return nil
+}
+
+var (
+	_ ygws.PersistenceAdapter = (*blockingCompactAdapter)(nil)
+	_ ygws.CompactableAdapter = (*blockingCompactAdapter)(nil)
+)
+
+// THE CRITICAL-1 REGRESSION GATE: a room instance recreated while its
+// predecessor's teardown is still in flight must keep publishing to the
+// relay AFTER that predecessor's teardown completes.
+//
+// Sequence: peer A joins room "r" (instance A). A disconnects, triggering
+// eager eviction: "r" is removed from Server.rooms and persistStop closes,
+// but persistDone (and therefore teardownRelayRoom, which retires instance
+// A's outbound lane) is held open by the blocked Compact call. While stuck
+// there, peer B reconnects for the SAME room name — since Server.rooms has
+// no entry, this creates a genuinely new room instance B, with its own
+// fresh outbound lane (ensureRelayLane's identity-checked handoff). B
+// publishes successfully. Then instance A's teardown is allowed to
+// complete: with the pre-fix, name-only stopRelayLane, this would delete
+// (and kill the worker for) instance B's live lane, because both instances
+// shared the same map key "r". B must still be able to publish after that.
+func TestRelayOutbound_SurvivesEvictionRace(t *testing.T) {
+	adapter := newBlockingCompactAdapter()
+	relay := newStallingRelay("") // "" never matches a real room name: pure capture, no stalling
+	srv := ygws.NewServerWithPersistence(adapter)
+	require.NoError(t, srv.AttachRelay(relay))
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		_ = srv.Shutdown(context.Background())
+		ts.Close()
+	})
+
+	// A joins "r" (instance A), then leaves immediately — no edits needed;
+	// eager eviction (the default) fires purely from the peer count
+	// dropping to zero.
+	connA := dial(t, ts, "r")
+	drainHandshake(t, connA, crdt.New())
+	require.NoError(t, connA.Close())
+
+	// Wait until instance A's teardown has reached the blocked Compact call:
+	// at this point "r" has already been removed from Server.rooms (that
+	// happens strictly before the persistDone wait — see peer.go), but
+	// teardownRelayRoom(instance A) has not run yet.
+	select {
+	case <-adapter.blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for instance A's teardown to reach the blocked Compact call")
+	}
+
+	// B reconnects for the same room name while A's teardown is stuck.
+	// Server.rooms has no entry for "r" (A already removed it), so this
+	// creates a brand-new room instance.
+	connB := dial(t, ts, "r")
+	drainHandshake(t, connB, crdt.New())
+	require.NoError(t, crdt.ApplyUpdateV1(srv.GetDoc("r"), syncUpdate(t, "b1"), nil))
+
+	require.Eventually(t, func() bool {
+		return len(relay.roomsPublished()) >= 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"instance B's own outbound lane must publish while instance A's teardown is still stuck")
+
+	// Let instance A's teardown proceed to completion: persistDone closes,
+	// then teardownRelayRoom(instance A) retires instance A's lane.
+	close(adapter.release)
+
+	// Instance B must keep publishing AFTER instance A's teardown has fully
+	// run. Re-applying inside Eventually (rather than a fixed sleep before
+	// one check) makes this robust to exactly when A's teardown finishes:
+	// each retry both re-drives B's doc and re-checks the publish count, so
+	// it converges as soon as the teardown-then-recreate handoff is safe —
+	// and never converges (times out) if instance B's lane was wrongly
+	// killed by instance A's teardown.
+	require.Eventually(t, func() bool {
+		_ = crdt.ApplyUpdateV1(srv.GetDoc("r"), syncUpdate(t, "b2"), nil)
+		return len(relay.roomsPublished()) >= 2
+	}, 2*time.Second, 20*time.Millisecond,
+		"instance B's outbound lane must survive instance A's teardown completing (#187 identity-guard regression)")
 }
