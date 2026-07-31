@@ -121,7 +121,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference-count activations per name (or otherwise tolerate the overlap)
   rather than treat `RoomDeactivated` as an unconditional unsubscribe. Both
   shipped relays (`cluster/redis`, `MemRelay`) already do; this was previously
-  undocumented on the interface.
+  undocumented on the interface. `RoomDeactivated` also now documents the
+  companion case on the *publish* side: a trailing `Publish` for that room can
+  still arrive after `RoomDeactivated` returns, since teardown stops the
+  room's outbound lane asynchronously and its final drain runs on the lane
+  worker's own goroutine; a `Relay` that releases per-room publish-side state
+  from `RoomDeactivated` would drop that update. Both shipped relays are
+  unaffected (`cluster/redis`'s `RoomDeactivated` is inbound-only; `MemRelay`
+  no-ops both calls).
 
 ## [1.41.0] — 2026-07-30
 

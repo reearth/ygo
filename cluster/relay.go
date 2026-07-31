@@ -157,6 +157,17 @@ type Relay interface {
 	// RoomDeactivated tells the relay a room is no longer resident on this
 	// node. Idempotent. See RoomActivated's doc for the activation-overlap
 	// requirement this call is one half of.
+	//
+	// Implementations MUST tolerate a Publish for this room arriving AFTER
+	// RoomDeactivated has returned: the provider's teardown stops the room's
+	// outbound lane asynchronously and calls RoomDeactivated right away,
+	// without waiting for the lane worker's own final drain — which runs on
+	// its own goroutine and can still call Publish — to finish. A Relay that
+	// releases per-room PUBLISH-side state (a producer handle, a partition
+	// assignment, a stream key) here would drop that trailing update. Both
+	// shipped relays are unaffected: cluster/redis's RoomDeactivated only
+	// UNSUBSCRIBEs, which is inbound-only and never consulted by Publish;
+	// MemRelay no-ops both calls.
 	RoomDeactivated(room string)
 	// Close stops the relay and releases its resources. After Close, Publish
 	// returns ErrRelayClosed and no further inbound changes are delivered.
