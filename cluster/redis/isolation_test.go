@@ -155,9 +155,15 @@ func TestInteg_Subscriber_PreservesPerRoomOrder(t *testing.T) {
 	}
 }
 
-// A message for a room this node has not activated must still reach Inject:
+// A message for a room the Sink has never heard of must still reach Inject:
 // Server.Inject auto-creates the room so a node with no local peers still
-// materialises converged state (provider/websocket/cluster.go:209-211).
+// materialises converged state (provider/websocket/cluster.go:209-211). The
+// relay itself DOES activate the room (RoomActivated below), which
+// pre-creates its worker — this test exercises the Sink-layer auto-create
+// guarantee, not the router's lazy worker-creation branch. That branch is
+// (by design) near-unreachable until Task 3 adds worker reaping, which is
+// the first thing that can leave a subscribed room legitimately without a
+// worker; real coverage for it belongs there.
 func TestInteg_Subscriber_NonResidentRoom_StillInjects(t *testing.T) {
 	sink := newFakeSink() // no rooms registered
 	mr := newMiniRedis(t)
