@@ -34,6 +34,31 @@ type relayRoomLane struct {
 	done chan struct{}
 }
 
+// relayOriginSentinel is the concrete type of the origin value AttachRelay
+// stamps on every relay-injected doc/awareness change (see s.relaySentinel).
+// registerRelayObservers' echo guard compares an update's origin against this
+// value by == to tell "this arrived via the relay, don't re-publish it" apart
+// from "this is a local change, publish it".
+//
+// This type MUST stay a non-zero-size struct (the `_ byte` field is load-
+// bearing — do not remove it, and do not "simplify" this back to `struct{}`).
+// Go's size-and-alignment guarantee lets the runtime satisfy every
+// *zero-size* allocation from the same backing address (runtime.zerobase),
+// so two unrelated `new(struct{})` calls anywhere in the process produce
+// pointers that compare == to each other even though nothing about them is
+// actually the same value. That is exactly what happened here pre-fix: this
+// sentinel and inject.go's applyOriginSentinel (Server.Apply's own per-call
+// origin, also once a bare `new(struct{})`) both collapsed onto zerobase and
+// aliased. Every Server.Apply write was then misidentified by THIS echo guard
+// as a self-echo of a relay-injected change and silently dropped before ever
+// reaching enqueueRelayOutbound — permanent, silent cross-node divergence for
+// any Apply call on a server with a relay attached. Giving each sentinel its
+// own named, non-zero-size type removes the aliasing risk structurally (each
+// instance gets its own heap allocation) AND belt-and-braces it with a
+// distinct dynamic type, since `any` equality compares dynamic type before
+// value.
+type relayOriginSentinel struct{ _ byte }
+
 // ErrRelayAlreadyAttached is returned by AttachRelay if a relay is already set.
 var ErrRelayAlreadyAttached = errors.New("ygo/websocket: relay already attached")
 
@@ -74,7 +99,7 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 		return ErrRelayAlreadyAttached
 	}
 
-	sentinel := new(struct{})
+	sentinel := &relayOriginSentinel{}
 	ctx, cancel := context.WithCancel(context.Background())
 	// Start before committing any state: a Start failure must leave the server
 	// unattached and retryable.

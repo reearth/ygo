@@ -421,7 +421,9 @@ type Server struct {
 	// nodes and applies inbound changes. Set once via AttachRelay. relayCtx /
 	// relayCancel govern the relay's delivery lifetime; cancelled on Shutdown.
 	// relaySentinel is the origin stamped on relay-injected changes so the
-	// per-room observers can drop echoes (pointer-identity guard).
+	// per-room observers can drop echoes (identity guard: a *relayOriginSentinel,
+	// see that type's doc comment in cluster.go for why it must never be a
+	// zero-size type).
 	//
 	// relayMu guards the attach handshake: AttachRelay only commits s.relay
 	// after relay.Start succeeds, so a Start failure leaves the server

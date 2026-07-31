@@ -783,3 +783,45 @@ func TestUnit_CloseRoom_WithPersistence_DrainsBeforeReturn(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 }
+
+// TestUnit_Apply_RelaysToOtherNodes is the regression test for the
+// zerobase-collision bug: Server.Apply's own origin sentinel
+// (`origin := new(struct{})` in Apply) and AttachRelay's echo-guard sentinel
+// (`sentinel := new(struct{})` in AttachRelay) are both zero-size allocations,
+// which Go's runtime satisfies from the same `runtime.zerobase` address —
+// so the two pointers compare equal even though they are meant to be
+// distinct identities.
+//
+// registerRelayObservers' doc.OnUpdate observer treats any update whose
+// origin == the relay's sentinel as a relay echo and drops it without
+// publishing (that's the whole point of the echo guard: don't re-publish
+// what just arrived FROM the relay). Because Apply's origin pointer aliases
+// the relay's sentinel pointer, every Apply-driven write is misidentified as
+// an echo of itself and is silently swallowed — it never reaches
+// enqueueRelayOutbound, so other cluster nodes never see it. That is
+// permanent cross-node divergence for every server-side write made via
+// Apply, on any server with a relay attached.
+//
+// Before the fix this test fails: recordingRelay's syncPubs stays 0 forever
+// because the observer's echo guard fires (wrongly) on Apply's own origin.
+// After the fix (distinct non-zero-size sentinel types for the two origins)
+// the pointers can never alias, the echo guard no longer misfires, and the
+// update is published.
+func TestUnit_Apply_RelaysToOtherNodes(t *testing.T) {
+	relay := newRecordingRelay()
+	srv := ygws.NewServer()
+	require.NoError(t, srv.AttachRelay(relay))
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	err := srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		syncPubs, _ := relay.counts()
+		return syncPubs >= 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"Server.Apply's write must be published to the relay, not swallowed by the echo guard")
+}

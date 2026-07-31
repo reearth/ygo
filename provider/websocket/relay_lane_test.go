@@ -82,17 +82,16 @@ func syncUpdate(t *testing.T, s string) []byte {
 // fires doc.OnUpdate and cannot reach registerRelayObservers' relay
 // subscription at all, no matter how the outbound path is implemented.
 //
-// It is also deliberately NOT srv.Apply: Apply tags its own transaction with
-// a private `origin := new(struct{})` sentinel, and Go's zero-size-value
-// guarantee (https://go.dev/ref/spec#Size_and_alignment_guarantees) means
-// EVERY `new(struct{})` in the process may share one address — in practice
-// Apply's origin pointer compares equal (==) to AttachRelay's own
-// `relaySentinel := new(struct{})`. That makes registerRelayObservers' echo
-// guard (`if origin == sentinel`) always fire for an Apply-driven change,
-// silently swallowing it before it ever reaches enqueueRelayOutbound. This
-// is a pre-existing latent bug in Server.Apply + relay interaction, entirely
-// outside Task 5's file scope (inject.go, not cluster.go/server.go) — flagged
-// separately rather than fixed here.
+// It is also deliberately NOT srv.Apply: this helper predates the fix for
+// the zerobase sentinel-collision bug (Apply's origin and AttachRelay's echo
+// sentinel used to both be bare `new(struct{})` values, which Go's
+// zero-size-allocation guarantee let alias onto the same address —
+// see inject.go's applyOriginSentinel and cluster.go's relayOriginSentinel
+// doc comments for the full mechanism and TestUnit_Apply_RelaysToOtherNodes
+// in inject_test.go for the regression coverage). Kept as a direct
+// crdt.ApplyUpdateV1 call rather than switched to srv.Apply now, simply to
+// keep this file's helper scoped to what Task 5's outbound-lane tests
+// actually need to exercise.
 func applyLocal(t *testing.T, ts *httptest.Server, srv *ygws.Server, room, text string) {
 	t.Helper()
 	conn := dial(t, ts, room)
