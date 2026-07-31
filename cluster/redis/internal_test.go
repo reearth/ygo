@@ -13,15 +13,48 @@ package redis
 import (
 	"bytes"
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/cluster"
+	"github.com/reearth/ygo/crdt"
 )
+
+// countingSink is a minimal cluster.Sink test double for internal-package
+// tests. It is deliberately not the redis_test package's fakeSink: that type
+// lives in package redis_test and is not visible from these package-redis
+// test files, which is exactly why this test needs its own.
+type countingSink struct {
+	mu       sync.Mutex
+	injected int
+}
+
+func (s *countingSink) Inject(_ context.Context, _ cluster.Inbound) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.injected++
+	return nil
+}
+
+func (s *countingSink) Rooms() []string { return nil }
+
+func (s *countingSink) GetAwareness(string) (*awareness.Awareness, bool) { return nil, false }
+
+func (s *countingSink) GetDoc(string) *crdt.Doc { return nil }
+
+func (s *countingSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.injected
+}
 
 // TestUnit_WireFormat_RoundTrip exercises encode → decode for the v1.21.0
 // wire format. A regression here typically means the four fields drifted
@@ -271,6 +304,69 @@ func newTestRelayNoStart() *Relay {
 		startCtx:    context.Background(),
 		activeRooms: make(map[string]int),
 	}
+}
+
+// TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom verifies the
+// lazy-worker-creation branch in workerFor. RoomDeactivated's own stopWorker
+// call always pairs with an UNSUBSCRIBE, so a room can never legitimately be
+// "subscribed but workerless" through the exported API alone — that is why
+// this test lives here (package redis, where stopWorker is reachable) rather
+// than in redis_test: it calls stopWorker directly to reap the worker while
+// deliberately leaving the Redis subscription untouched, then publishes and
+// checks that delivery still arrives via a lazily recreated worker.
+func TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom(t *testing.T) {
+	mr := miniredis.RunT(t)
+
+	pubClient := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = pubClient.Close() })
+	subClient := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = subClient.Close() })
+
+	pub, err := New(pubClient, Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pub.Close() })
+	require.NoError(t, pub.Start(context.Background(), &countingSink{}))
+
+	sink := &countingSink{}
+	sub, err := New(subClient, Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Close() })
+	require.NoError(t, sub.Start(context.Background(), sink))
+
+	pub.RoomActivated("room")
+	sub.RoomActivated("room")
+	require.Eventually(t, func() bool {
+		counts := mr.PubSubNumSub(DefaultChannelPrefix + "room")
+		return counts[DefaultChannelPrefix+"room"] >= 2
+	}, 2*time.Second, 5*time.Millisecond)
+
+	sub.workersMu.Lock()
+	_, hadWorker := sub.workers["room"]
+	sub.workersMu.Unlock()
+	require.True(t, hadWorker, "precondition: RoomActivated must pre-create the worker")
+
+	sub.stopWorker("room")
+
+	sub.workersMu.Lock()
+	_, stillThere := sub.workers["room"]
+	sub.workersMu.Unlock()
+	require.False(t, stillThere, "stopWorker must remove the room's worker from the map")
+
+	// The Redis subscription itself is untouched by stopWorker: publishing
+	// again must still arrive and lazily recreate the worker.
+	require.NoError(t, pub.Publish(context.Background(), cluster.Outbound{
+		Room: "room", Kind: cluster.KindSync, Data: []byte{0x09},
+	}))
+
+	require.Eventually(t, func() bool {
+		return sink.count() == 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"publish to a still-subscribed room after stopWorker must lazily recreate the worker and deliver")
+
+	sub.workersMu.Lock()
+	_, recreated := sub.workers["room"]
+	sub.workersMu.Unlock()
+	require.True(t, recreated, "workerFor must have lazily recreated the room's worker")
 }
 
 // Sanity: ensure the closed.Store path doesn't trip race detector under

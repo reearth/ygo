@@ -459,48 +459,71 @@ func (r *Relay) RoomActivated(room string) {
 	}
 }
 
-// RoomDeactivated unsubscribes from the room's pub/sub channel. See the
-// RoomActivated godoc for idempotency / reference-counting / locking
-// semantics. The UNSUBSCRIBE RPC is cancelable via the relay's bound start
-// context for the same reason: a stalled Redis must not pin the websocket
-// provider's room-teardown path.
+// RoomDeactivated unsubscribes from the room's pub/sub channel and retires
+// the room's delivery worker. See the RoomActivated godoc for idempotency /
+// reference-counting / locking semantics. The UNSUBSCRIBE RPC is cancelable
+// via the relay's bound start context for the same reason: a stalled Redis
+// must not pin the websocket provider's room-teardown path.
+//
+// The worker teardown (stopWorker) drains whatever is still queued for the
+// room before stopping it, so a deactivation does not silently discard
+// delivered-but-not-yet-injected updates. That drain calls Sink.Inject and so
+// can — in the worst case of a Sink that ignores context cancellation — block
+// for a while; deliberately, that call happens AFTER releasing r.mu (see the
+// closure below), so a wedged Sink stalls only this call's own goroutine, not
+// every other lifecycle op on the relay. Only the reference-count bookkeeping
+// and the UNSUBSCRIBE RPC run under r.mu.
 func (r *Relay) RoomDeactivated(room string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	shouldStop := func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
 
-	if !r.started.Load() || r.closed.Load() {
-		return
-	}
-	select {
-	case <-r.startCtx.Done():
-		return
-	default:
-	}
-	if r.activeRooms[room] <= 0 {
-		return
-	}
+		if !r.started.Load() || r.closed.Load() {
+			return false
+		}
+		select {
+		case <-r.startCtx.Done():
+			return false
+		default:
+		}
+		if r.activeRooms[room] <= 0 {
+			return false
+		}
 
-	r.activeRooms[room]--
-	count := r.activeRooms[room]
-	if count == 0 {
-		delete(r.activeRooms, room)
+		r.activeRooms[room]--
+		count := r.activeRooms[room]
+		if count == 0 {
+			delete(r.activeRooms, room)
+		}
+		if count > 0 {
+			return false // still active elsewhere on this node
+		}
+		if err := r.pubSub.Unsubscribe(r.startCtx, r.channelFor(room)); err != nil {
+			r.log.Warn("cluster/redis: UNSUBSCRIBE failed", "room", room, "err", err)
+		}
+		return true
+	}()
+	if !shouldStop {
+		return
 	}
-	if count > 0 {
-		return // still active elsewhere on this node
-	}
-	if err := r.pubSub.Unsubscribe(r.startCtx, r.channelFor(room)); err != nil {
-		r.log.Warn("cluster/redis: UNSUBSCRIBE failed", "room", room, "err", err)
-	}
+	// Drain and retire the room's delivery worker, outside r.mu (see the
+	// doc comment above). Ordering still matters even though the lock is
+	// released: we unsubscribed above, under r.mu, before ever getting here,
+	// so no new payload can be routed to a worker we are about to stop.
+	r.stopWorker(room)
 }
 
 // Close stops the relay. Idempotent. Does NOT close the underlying
 // *redis.Client — clients are commonly shared across the application and
 // owned by the caller.
 //
-// Close blocks until any in-flight Start has committed (it acquires r.mu)
-// and all background goroutines have exited (wg.Wait). This is what makes
-// the relay safe under racy callers: there is no window in which the
-// publisher/subscriber can fire after Close returns.
+// Close blocks until any in-flight Start has committed (it acquires r.mu) and
+// all background goroutines have exited (wg.Wait) — the publisher, the
+// subscriber router, and every per-room delivery worker, all of which select
+// on r.done and are registered on r.wg. Combined with the closed-flag
+// re-check in drainLane, this is what makes the relay safe under racy
+// callers: there is no window in which anything can fire after Close
+// returns.
 func (r *Relay) Close() error {
 	r.closeOnce.Do(func() {
 		// Lock-protected handshake: if Start is mid-flight, we wait for it

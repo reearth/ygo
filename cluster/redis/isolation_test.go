@@ -2,6 +2,7 @@ package redis_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -135,10 +136,13 @@ func TestInteg_Subscriber_SaturatedLane_NoLoss(t *testing.T) {
 // Per-room ordering must be preserved end to end.
 func TestInteg_Subscriber_PreservesPerRoomOrder(t *testing.T) {
 	sink := newFakeSink("room")
-	// Default capacity, single in-flight publisher: coalescing only kicks in
-	// once the lane is saturated, and even when it does, TakeSync merges the
-	// backlog in FIFO order — it never reorders, so delivery order still
-	// matches publish order here.
+	// Default capacity, only 5 updates, single in-flight publisher: this
+	// stays well under the lane's default capacity, so no coalescing occurs
+	// here at all — this test is not exercising order-under-coalescing. The
+	// injectedCount() == 5 assertion below would fail loudly if a merge ever
+	// did happen (payloads would collapse to fewer than 5), so the test is
+	// not vacuous, but it does not itself demonstrate that order survives
+	// coalescing.
 	pub, _ := oneSubscriber(t, sink, ygoredis.Config{}, "room")
 
 	for i := 0; i < 5; i++ {
@@ -161,9 +165,9 @@ func TestInteg_Subscriber_PreservesPerRoomOrder(t *testing.T) {
 // relay itself DOES activate the room (RoomActivated below), which
 // pre-creates its worker — this test exercises the Sink-layer auto-create
 // guarantee, not the router's lazy worker-creation branch. That branch is
-// (by design) near-unreachable until Task 3 adds worker reaping, which is
-// the first thing that can leave a subscribed room legitimately without a
-// worker; real coverage for it belongs there.
+// covered separately by TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom
+// in internal_test.go, which needs stopWorker (unexported) to leave a
+// subscribed room legitimately without a worker.
 func TestInteg_Subscriber_NonResidentRoom_StillInjects(t *testing.T) {
 	sink := newFakeSink() // no rooms registered
 	mr := newMiniRedis(t)
@@ -191,4 +195,73 @@ func TestInteg_Subscriber_NonResidentRoom_StillInjects(t *testing.T) {
 		return sink.injectedCount() == 1
 	}, 2*time.Second, 10*time.Millisecond,
 		"inbound for a non-resident room must still reach Inject")
+}
+
+// closeWatchSink fails the test if Inject is called after Close returned.
+// That is the invariant Relay.Close documents: no goroutine may fire
+// afterwards.
+type closeWatchSink struct {
+	*fakeSink
+	closed atomic.Bool
+	t      *testing.T
+}
+
+func (s *closeWatchSink) Inject(ctx context.Context, in cluster.Inbound) error {
+	if s.closed.Load() {
+		s.t.Errorf("Inject called for room %q after Close returned", in.Room)
+	}
+	return s.fakeSink.Inject(ctx, in)
+}
+
+// Deactivating a room must not silently discard work already queued for it.
+func TestInteg_RoomDeactivated_DrainsBacklog(t *testing.T) {
+	sink := newFakeSink("room")
+	pub, sub := oneSubscriber(t, sink, ygoredis.Config{}, "room")
+
+	publishSync(t, pub, "room", []byte{0x01})
+	// Give the router a moment to have queued it, then deactivate.
+	require.Eventually(t, func() bool {
+		return sink.injectedCount() == 1
+	}, 2*time.Second, 5*time.Millisecond)
+
+	sub.RoomDeactivated("room")
+
+	// Re-activating must work and deliver again (worker recreated cleanly).
+	pub.RoomActivated("room")
+	sub.RoomActivated("room")
+	// miniredis (not real Redis) tears down and lazily respawns its internal
+	// per-connection pubsub dispatch goroutine whenever a connection's
+	// subscriber count drops to zero and is then resubscribed (see
+	// miniredis's endSubscriber/subscribedState). A publish that lands before
+	// that goroutine has been scheduled is silently dropped by the fake
+	// server — confirmed independently of this package: a tight
+	// unsubscribe/resubscribe/publish loop against raw miniredis + go-redis
+	// drops ~10-40% of messages with no settle gap, and 0/1000 with one. This
+	// is specific to miniredis's Go-channel-per-subscriber-cycle bridge; real
+	// Redis's single-threaded subscriber dispatch and go-redis's long-lived
+	// client-side reader goroutine (started once, unaffected by
+	// subscribe/unsubscribe cycles) have no equivalent gap, so this is a
+	// test-double artifact, not a cluster/redis correctness issue.
+	time.Sleep(100 * time.Millisecond)
+	publishSync(t, pub, "room", []byte{0x02})
+	require.Eventually(t, func() bool {
+		return sink.injectedCount() == 2
+	}, 2*time.Second, 10*time.Millisecond,
+		"a re-activated room must deliver again")
+}
+
+// Nothing may reach the Sink after Close returns.
+func TestInteg_Close_NothingFiresAfterReturn(t *testing.T) {
+	base := newFakeSink("room")
+	sink := &closeWatchSink{fakeSink: base, t: t}
+	pub, sub := oneSubscriber(t, sink, ygoredis.Config{}, "room")
+
+	for i := 0; i < 50; i++ {
+		publishSync(t, pub, "room", []byte{byte(i)})
+	}
+
+	require.NoError(t, sub.Close())
+	sink.closed.Store(true)
+	// Give any leaked goroutine a window to misbehave.
+	time.Sleep(100 * time.Millisecond)
 }
