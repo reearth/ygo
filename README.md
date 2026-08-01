@@ -7,15 +7,29 @@
 [![CI](https://github.com/reearth/ygo/actions/workflows/ci.yml/badge.svg)](https://github.com/reearth/ygo/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/reearth/ygo.svg)](https://pkg.go.dev/github.com/reearth/ygo)
 [![Go Report Card](https://goreportcard.com/badge/github.com/reearth/ygo)](https://goreportcard.com/report/github.com/reearth/ygo)
+[![codecov](https://codecov.io/gh/reearth/ygo/branch/main/graph/badge.svg)](https://codecov.io/gh/reearth/ygo)
+[![Go version](https://img.shields.io/github/go-mod/go-version/reearth/ygo)](go.mod)
+[![Yjs wire format](https://img.shields.io/badge/yjs%20wire-V1%20%2B%20V2-blue)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**ygo** is a pure-Go implementation of the [Yjs](https://github.com/yjs/yjs) CRDT (Conflict-free Replicated Data Type) library, enabling real-time collaborative applications in Go backends without CGO or embedded runtimes.
+**ygo** is a pure-Go implementation of [Yjs](https://github.com/yjs/yjs), the CRDT (Conflict-free Replicated Data Type) framework for real-time collaborative editing. It is a Go CRDT library for building collaborative applications — shared text, rich text, maps, arrays, and XML trees that merge concurrent edits without conflicts, without a central authority, and without operational transformation.
 
-It is **binary-compatible** with the JavaScript Yjs reference implementation — updates produced by ygo can be applied by Yjs clients, and vice versa.
+ygo is **binary-compatible** with the JavaScript Yjs reference implementation: it speaks both the V1 and V2 update wire formats byte-for-byte, along with the [y-protocols](https://github.com/yjs/y-protocols) sync handshake and awareness layer. Updates produced by ygo apply cleanly in Yjs (JavaScript) and yrs (Rust), and vice versa. That claim is enforced, not asserted — a byte-level cross-language conformance suite generated from `yjs@13.6.30` and a differential convergence fuzzer both run in CI.
 
-## API stability
+Where ygo goes further than a port is on the server. It ships a [Hocuspocus](https://tiptap.dev/docs/hocuspocus)-compatible WebSocket server that scales horizontally across instances through a Redis-backed cluster relay, with versioned persistence (including a CGo-free SQLite store), snapshots, and a turnkey `ygo-server` binary. The same library also embeds natively on iOS and Android through `gomobile` — no JavaScript runtime, no CGO, anywhere.
 
-ygo follows [semantic versioning](https://semver.org/). The v1.x public API is stable: new functionality lands as minor releases; bug fixes as patch releases; breaking changes are deferred to v2.
+**[Quick start](#quick-start) · [How ygo compares](#how-ygo-compares) · [WebSocket server](#websocket-server) · [Benchmarks](#performance) · [Documentation](#documentation)**
+
+## Contents
+
+- [Capabilities](#capabilities) · [Features](#features)
+- [Installation](#installation) · [Quick Start](#quick-start) · [Examples](#examples)
+- [How ygo compares](#how-ygo-compares) · [Goals and non-goals](#goals-and-non-goals)
+- [WebSocket Server](#websocket-server) · [Server-side document injection](#server-side-document-injection)
+- [Attribution](#attribution) · [Persistence](#persistence) · [Subdocuments](#subdocuments) · [Mobile (iOS / Android)](#mobile-ios--android)
+- [Running in production](#running-in-production) · [Performance](#performance) · [Architecture](#architecture)
+- [Compatibility](#compatibility) · [Versioning and API stability](#versioning-and-api-stability) · [Gotchas](#gotchas)
+- [Documentation](#documentation) · [Contributing](#contributing) · [Security](#security) · [License](#license)
 
 ## Capabilities
 
@@ -28,7 +42,7 @@ ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (
 - Native iOS/Android embedding via `gomobile` (the `mobile/` subpackage) — no JS runtime, no CGO
 - Snapshots, garbage collection, undo manager, persistence adapters
 
-The current release is **v1.39.0**. See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
+See [the latest release](https://github.com/reearth/ygo/releases/latest) for the current version, [CHANGELOG.md](CHANGELOG.md) for per-release detail, and [docs/HISTORY.md](docs/HISTORY.md) for the longer arc.
 
 ## Features
 
@@ -144,6 +158,36 @@ go run ./examples/collab-editor/server   # then open http://localhost:8080
 ```
 
 **New users**: start with `peer-sync` for the smallest end-to-end demonstration of two docs converging in-process. Jump to `collab-editor` when you want to wire the WebSocket server to a real browser client.
+
+## How ygo compares
+
+The Yjs ecosystem is mostly JavaScript, with a Rust core. If you are searching for a Go equivalent of one of these, here is where ygo sits:
+
+| Project | Runtime | What it provides | Relationship to ygo |
+|---|---|---|---|
+| [Yjs](https://github.com/yjs/yjs) | JavaScript | The reference CRDT implementation and wire format | ygo is a pure-Go implementation of it, byte-compatible on the wire in both directions |
+| [y-websocket](https://github.com/yjs/y-websocket) | Node.js | Minimal WebSocket sync server for Yjs clients | ygo's [WebSocket server](#websocket-server) is the Go-native equivalent, plus auth hooks, rate limiting, resource caps, and persistence |
+| [Hocuspocus](https://tiptap.dev/docs/hocuspocus) | Node.js | Production Yjs backend — hooks, webhooks, persistence, read-only peers | ygo speaks the Hocuspocus message types and mirrors its hook and webhook model, so a Go backend can replace it without touching the client |
+| [yrs](https://github.com/y-crdt/y-crdt) | Rust (+ FFI) | The Rust CRDT core used for non-JS bindings | The alternative when your host language is Go: no CGO, no FFI boundary, no cross-language build. See [docs/comparison/ygo-vs-yrs.md](docs/comparison/ygo-vs-yrs.md) |
+| [y-leveldb](https://github.com/yjs/y-leveldb) / [y-redis](https://github.com/yjs/y-redis) | Node.js | Document persistence and multi-node fan-out for Yjs servers | ygo's [persistence adapters](#persistence) and [cluster relay](cluster/) cover the same ground in-process, including a CGo-free SQLite store |
+
+Choose ygo when the collaborative backend is Go and you would rather not run a Node.js sidecar, an FFI boundary, or an embedded JavaScript runtime to get there. Choose Yjs or Hocuspocus directly when your backend is already Node.js — ygo interoperates with both, so the choice is per-service rather than all-or-nothing.
+
+## Goals and non-goals
+
+**Goals**
+
+- **Wire compatibility with Yjs**, verified byte-for-byte against fixtures generated from the JavaScript reference implementation, in both directions and for both V1 and V2.
+- **Convergence correctness**, verified by a differential fuzzer that compares ygo's merge results against Yjs across randomized concurrent-edit histories.
+- **An idiomatic Go API** — explicit transactions, `error` returns, `context` support, `*slog.Logger`, no reflection-driven magic.
+- **Production-ready server operation** — horizontal scale, versioned persistence, bounded resources, structured logs, graceful shutdown.
+- **Pure Go**, no CGO, on every supported target including iOS and Android.
+
+**Non-goals**
+
+- **Being a browser client.** ygo runs in Go processes and on mobile. Browser clients stay on Yjs itself, which ygo syncs with.
+- **A new or "improved" wire format.** Compatibility with Yjs is the point; divergence would defeat it.
+- **Authentication and authorization.** ygo provides the hooks (`Authorize`, `AuthFunc`, `OnInject`) and expects your application to own the policy. See [Security](#security).
 
 ## WebSocket Server
 
@@ -631,9 +675,15 @@ ygo targets compatibility with:
 - [y-protocols](https://github.com/yjs/y-protocols) sync and awareness protocol
 - [lib0](https://github.com/dmonad/lib0) binary encoding format
 
-Compatibility is verified by golden-file tests that compare binary output byte-for-byte with Yjs-generated fixtures.
+Compatibility is verified by golden-file tests that compare binary output byte-for-byte with Yjs-generated fixtures, in both directions, plus a differential convergence fuzzer that checks ygo's merge results against Yjs over randomized concurrent-edit histories. Both run in CI.
 
 For a Go-vs-Rust port comparison, see [docs/comparison/ygo-vs-yrs.md](docs/comparison/ygo-vs-yrs.md).
+
+## Versioning and API stability
+
+ygo follows [semantic versioning](https://semver.org/). The v1.x public API is stable: new functionality lands as minor releases; bug fixes as patch releases; breaking changes are deferred to v2.
+
+Note that the bump size follows the change's **API surface**, not its intent — a bug-fix release that adds a new exported symbol is still a minor.
 
 ## Gotchas
 
@@ -671,7 +721,25 @@ document has started accepting operations will corrupt the item store.
 
 ## What's changed since v1.0
 
-Eighteen minor and patch releases between v1.1.0 and v1.14.0. The early arc (v1.1.x–v1.7.x) focused on production hardening: panic safety, out-of-order convergence, WebSocket hooks, observability, error-returning variants, context-aware persistence. The recent arc (v1.8.x–v1.14.x) delivered a systematic cross-reference audit against Yjs JS and yrs, closing correctness gaps in YATA boundary handling, awareness protocol, delete-path cascade, lib0 wire-format parity, YText format markers, and JSON serialisation of nested shared types — tracked under the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps). See [CHANGELOG.md](CHANGELOG.md) for the per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the design narrative.
+Forty-plus minor and patch releases, summarised under [Post-v1.0 hardening](#features) above. Broadly: the early arc (v1.1.x–v1.7.x) focused on production hardening — panic safety, out-of-order convergence, WebSocket hooks, observability, error-returning variants, context-aware persistence. The middle arc (v1.8.x–v1.14.x) delivered a systematic cross-reference audit against Yjs JS and yrs, closing correctness gaps in YATA boundary handling, the awareness protocol, delete-path cascade, lib0 wire-format parity, YText format markers, and JSON serialisation of nested shared types — tracked under the [`gaps` label](https://github.com/reearth/ygo/issues?label=gaps). Since then the work has been mostly server-side: Hocuspocus compatibility, horizontal scale, versioned and coalesced persistence, mobile bindings, and positional-access performance.
+
+See [CHANGELOG.md](CHANGELOG.md) for per-release detail and [docs/HISTORY.md](docs/HISTORY.md) for the design narrative.
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The CRDT algorithm (YATA), data model, and package layout |
+| [docs/INTERNALS.md](docs/INTERNALS.md) | Implementation detail below the public API — item store, integration, encoding |
+| [docs/CLUSTERING.md](docs/CLUSTERING.md) | Running multiple server instances behind a load balancer via the cluster relay |
+| [docs/PERSISTENCE.md](docs/PERSISTENCE.md) | Persistence adapters, versioning, compaction, and durability guarantees |
+| [docs/comparison/ygo-vs-yrs.md](docs/comparison/ygo-vs-yrs.md) | Go-vs-Rust port comparison against yrs |
+| [docs/HISTORY.md](docs/HISTORY.md) | The design narrative across releases |
+| [CHANGELOG.md](CHANGELOG.md) | Per-release changes |
+| [SECURITY.md](SECURITY.md) | Threat model and vulnerability reporting |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow, benchmarking discipline, PR checklist |
+
+API reference: [pkg.go.dev/github.com/reearth/ygo](https://pkg.go.dev/github.com/reearth/ygo).
 
 ## Contributing
 
