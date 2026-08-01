@@ -24,20 +24,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one per call. `YText` is unchanged: Yjs stages `Y.Text` as deferred operations
   (`_pending`), which the existing model already matches.
 - **Detached reads answer from the staged content.** `Len`, `Get`, `Keys`,
-  `Has`, `ToSlice`, `Entries` and `ToJSON` report what a detached `YMap` or
-  `YArray` holds, recursively unwrapping staged nested types, following the
-  convention `yxml.go` set for `prelimAttrs`/`prelimChildren`.
-- **Shared types are rejected as plain values**: `YMap.Set` panics on an
-  attached shared type, and `YArray.Insert`/`Push` panic on a shared type
-  among `vals` (use `PushType`). Previously these stored the type inside a
-  `ContentAny`, which read back as an empty blob and panicked the encoder at
-  commit time — inside `Doc.Transact` when an `OnUpdate` hook is registered.
+  `Has`, `ToSlice`, `Entries`, `ForEach` and `ToJSON` report what a detached
+  `YMap` or `YArray` holds, recursively unwrapping staged nested types. This is
+  for the core types what [#170](https://github.com/reearth/ygo/pull/170) did
+  for detached XML nodes, rather than reversing that convention in a sibling
+  API.
 - **Cross-language conformance fixtures for prelim construction**
   (`testutil/gen_fixtures_prelim.js`, `crdt/prelim_yjs_conformance_test.go`):
   authored-sequence fixtures with a pinned clientID, in the same shape
   `gen_fixtures_yxml.js` uses. Go replays each build and must produce
   byte-identical V1 bytes to `yjs@13.6.30`, and must decode Yjs's own output to
   the same canonical JSON. Plus a fuzz target over nested prelim shapes.
+
+### Changed
+
+- **Shared types are rejected as plain values**: `YMap.Set` panics on an
+  attached shared type, and `YArray.Insert`/`Push` panic on a shared type
+  among `vals` (use `PushType`). Previously these stored the type inside a
+  `ContentAny`, which read back as an empty blob and panicked the encoder at
+  commit time — inside `Doc.Transact` when an `OnUpdate` hook is registered, so
+  the failure moves from a process-killing panic in the transaction machinery to
+  a rejection at the call site.
 
 ### Fixed
 
