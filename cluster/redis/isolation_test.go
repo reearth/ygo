@@ -444,6 +444,13 @@ func TestInteg_Stats_MonotonicUnderConcurrentChurn(t *testing.T) {
 	// Poll Stats() concurrently with the churn above, recording every sample
 	// so the monotonicity check below runs after all goroutines have
 	// finished (keeping the assertions off the hot loop).
+	//
+	// The pollInterval pause matters: Stats() takes workersMu for its whole
+	// computation, so an unpaced loop would both spin a core and contend the
+	// very lock the churning goroutines need — starving the concurrency this
+	// test exists to exercise, and growing samples without bound under -race.
+	// A short interval still yields thousands of samples across the churn.
+	const pollInterval = 100 * time.Microsecond
 	pollDone := make(chan struct{})
 	var samples []ygoredis.Stats
 	var pollWG sync.WaitGroup
@@ -456,7 +463,7 @@ func TestInteg_Stats_MonotonicUnderConcurrentChurn(t *testing.T) {
 			case <-pollDone:
 				samples = append(samples, sub.Stats()) // one last sample post-churn
 				return
-			default:
+			case <-time.After(pollInterval):
 			}
 		}
 	}()
