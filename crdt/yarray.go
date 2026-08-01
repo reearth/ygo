@@ -243,16 +243,10 @@ func (a *YArray) Len() int {
 	return a.length
 }
 
-// spliceInto inserts vals at index, clamping index into range. The three-index
-// slice on the head keeps the append from writing into the tail's backing
-// array.
+// spliceInto inserts vals at index into a fresh slice. Callers guarantee
+// 0 <= index <= len(dst): Insert and Move normalise their indices to the
+// attached boundary semantics first.
 func spliceInto(dst []any, index int, vals []any) []any {
-	if index < 0 {
-		index = 0
-	}
-	if index > len(dst) {
-		index = len(dst)
-	}
 	out := make([]any, 0, len(dst)+len(vals))
 	out = append(out, dst[:index]...)
 	out = append(out, vals...)
@@ -276,6 +270,12 @@ func rejectSharedVals(vals []any) {
 func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
 	rejectSharedVals(vals)
 	if a.detached() {
+		// Any unresolvable index anchors at the tail, exactly as
+		// leftNeighbourAt does for an attached array: Insert(-1) and
+		// Insert(len+k) both append.
+		if index < 0 || index > len(a.prelim) {
+			index = len(a.prelim)
+		}
 		a.prelim = spliceInto(a.prelim, index, vals)
 		return
 	}
@@ -412,8 +412,13 @@ func (a *YArray) Get(index int) any {
 func (a *YArray) Delete(txn *Transaction, index, length int) {
 	if a.detached() {
 		// Staged content is removed outright, so nothing is emitted for it and
-		// no tombstone reaches the wire — matching a detached Yjs delete.
-		if index < 0 || length <= 0 || index >= len(a.prelim) {
+		// no tombstone reaches the wire. Boundary rules match deleteRange on
+		// an attached array: a negative start resolves to the first element,
+		// deleting past the end truncates, a start beyond the end is a no-op.
+		if index < 0 {
+			index = 0
+		}
+		if length <= 0 || index >= len(a.prelim) {
 			return
 		}
 		if index+length > len(a.prelim) {
@@ -691,13 +696,19 @@ func (a *YArray) Move(txn *Transaction, fromIndex, toIndex int) {
 	if a.detached() {
 		// Reorder the staged slice, so a detached move emits ordinary content
 		// rather than a ContentMove other implementations cannot decode.
-		if fromIndex < 0 || fromIndex >= len(a.prelim) || toIndex < 0 || toIndex > len(a.prelim) || fromIndex == toIndex {
+		// Boundary rules match an attached Move: the element lands AT toIndex,
+		// a negative fromIndex resolves to the first element, a fromIndex past
+		// the end is a no-op, and an unresolvable toIndex anchors at the tail.
+		if fromIndex < 0 {
+			fromIndex = 0
+		}
+		if fromIndex >= len(a.prelim) || fromIndex == toIndex {
 			return
 		}
 		v := a.prelim[fromIndex]
 		rest := append(a.prelim[:fromIndex:fromIndex], a.prelim[fromIndex+1:]...)
-		if toIndex > fromIndex {
-			toIndex--
+		if toIndex < 0 || toIndex > len(rest) {
+			toIndex = len(rest)
 		}
 		a.prelim = spliceInto(rest, toIndex, []any{v})
 		return

@@ -97,6 +97,80 @@ func TestForEachAgreesAcrossTheAttachBoundary(t *testing.T) {
 	}
 }
 
+func TestDetachedBoundariesMatchAttached(t *testing.T) {
+	// Every mutation must behave identically on a staged array and an attached
+	// one — the staged path may not invent its own boundary rules. Attached
+	// semantics, verified empirically: Move lands the element AT toIndex; any
+	// unresolvable index (negative or past the end) anchors at the tail for
+	// Insert and Move's target; a negative fromIndex or Delete start resolves
+	// to the first element; a fromIndex or Delete start past the end no-ops.
+	ops := []struct {
+		name string
+		run  func(txn *Transaction, a *YArray)
+	}{
+		{"move interior forward", func(txn *Transaction, a *YArray) { a.Move(txn, 0, 1) }},
+		{"move interior backward", func(txn *Transaction, a *YArray) { a.Move(txn, 2, 1) }},
+		{"move to end", func(txn *Transaction, a *YArray) { a.Move(txn, 0, 3) }},
+		{"move to negative", func(txn *Transaction, a *YArray) { a.Move(txn, 0, -1) }},
+		{"move to past end", func(txn *Transaction, a *YArray) { a.Move(txn, 0, 99) }},
+		{"move from negative", func(txn *Transaction, a *YArray) { a.Move(txn, -1, 1) }},
+		{"move from past end", func(txn *Transaction, a *YArray) { a.Move(txn, 50, 0) }},
+		{"move same index", func(txn *Transaction, a *YArray) { a.Move(txn, 1, 1) }},
+		{"insert beyond end", func(txn *Transaction, a *YArray) { a.Insert(txn, 10, []any{"x"}) }},
+		{"insert negative", func(txn *Transaction, a *YArray) { a.Insert(txn, -1, []any{"x"}) }},
+		{"delete negative start", func(txn *Transaction, a *YArray) { a.Delete(txn, -1, 2) }},
+		{"delete past end", func(txn *Transaction, a *YArray) { a.Delete(txn, 50, 1) }},
+		{"delete over-length", func(txn *Transaction, a *YArray) { a.Delete(txn, 2, 99) }},
+	}
+	for _, op := range ops {
+		attachedDoc := New()
+		attached := attachedDoc.GetArray("a")
+		attachedDoc.Transact(func(txn *Transaction) {
+			attached.Push(txn, []any{"a", "b", "c"})
+			op.run(txn, attached)
+		})
+
+		stagedDoc := New()
+		root := stagedDoc.GetArray("root")
+		staged := NewArrayPrelim()
+		stagedDoc.Transact(func(txn *Transaction) {
+			staged.Push(txn, []any{"a", "b", "c"})
+			op.run(txn, staged)
+			root.PushType(txn, staged)
+		})
+
+		want, got := fmt.Sprint(attached.ToSlice()), fmt.Sprint(staged.ToSlice())
+		if got != want {
+			t.Errorf("%s: attached %s, staged %s — boundary semantics must agree", op.name, want, got)
+		}
+	}
+
+	// Reads at the same boundaries, plus a missing-key delete.
+	doc := New()
+	arr := NewArrayPrelim()
+	m := NewMapPrelim()
+	doc.Transact(func(txn *Transaction) {
+		arr.Push(txn, []any{"a"})
+		m.Set(txn, "k", "v")
+		m.Delete(txn, "missing") // no-op, like an attached map
+	})
+	if got := arr.Get(99); got != nil {
+		t.Errorf("detached Get(99) = %v, want nil", got)
+	}
+	if got := arr.Get(-1); got != nil {
+		t.Errorf("detached Get(-1) = %v, want nil", got)
+	}
+	if v, ok := m.Get("missing"); ok || v != nil {
+		t.Errorf(`detached Get("missing") = %v, %v; want nil, false`, v, ok)
+	}
+	if m.Has("missing") {
+		t.Error(`detached Has("missing") = true, want false`)
+	}
+	if got := m.Keys(); len(got) != 1 || got[0] != "k" {
+		t.Errorf("Delete of a missing key disturbed the staged entries: %v", got)
+	}
+}
+
 func TestDetachedMoveEmitsNoContentMove(t *testing.T) {
 	// Reordering staged content must not put ContentMove (a ygo wire
 	// extension, see #207) on the wire: other implementations mis-parse it,
