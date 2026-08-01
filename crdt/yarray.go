@@ -262,7 +262,7 @@ func spliceInto(dst []any, index int, vals []any) []any {
 // rejectSharedVals guards the plain-value entry points. A shared type batched
 // into a ContentAny only fails at encode time — inside Doc.Transact when an
 // OnUpdate hook triggers commit-time encoding — so fail at the call site
-// instead. Runs before the detached gate so a buffered call cannot defer the
+// instead. Runs before the detached gate so a staged value cannot defer the
 // panic to attach time.
 func rejectSharedVals(vals []any) {
 	for _, v := range vals {

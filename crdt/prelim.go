@@ -3,12 +3,12 @@ package crdt
 // Every internal piece for locally-created nested types already existed:
 // ContentType, abstractType.detached(), the prelimFlusher contract, and the
 // generic ContentType branch in item.integrate that links the child and
-// replays its buffered ops. What it lacked was a way for code OUTSIDE the
+// flushes its staged content. What it lacked was a way for code OUTSIDE the
 // package to build a detached type (abstractType is unexported) and a way to
 // insert one into a YArray as its own item (Insert batches plain values into
 // a single ContentAny).
 //
-// Together with the ContentType branch in YMap.Get and the detached buffering
+// Together with the ContentType branch in YMap.Get and the detached staging
 // in YMap.Set, this is what a nested document shape needs: for example a
 // Jupyter notebook cell, which is a Y.Map holding a Y.Text.
 
@@ -28,12 +28,16 @@ package crdt
 // Accessors that read shared state (Keys, Has, ToJSON) are likewise not safe
 // from inside a Transact callback.
 
-// Buffered mutations replay call-by-call at attach: each buffered op emits its
-// own item, where Yjs coalesces detached content (_prelimContent) and emits
-// the net result. A multi-call build — two Pushes, a key set twice, a
-// set-then-delete — therefore converges with Yjs but is not byte-identical to
-// it. The conformance fixtures pin the shapes that are. Reads on a detached
-// type (Len, Get, Keys) see none of the buffered state until attach.
+// YMap and YArray STAGE their content while detached, as Yjs does with
+// _prelimContent: mutations edit the staged content and the net result
+// materialises once, at attach. So a key set twice emits once, a key set then
+// deleted emits nothing, and consecutive pushes coalesce into a single item —
+// a multi-call build emits what Yjs emits, and reads (Len, Get, Keys, ToJSON)
+// report the staged content before attach.
+//
+// YText is the exception, and deliberately so: Yjs stages Y.Text as deferred
+// operations (_pending) rather than as content, so YText buffers calls and
+// replays them at attach. Its detached reads are empty until then.
 
 // NewTextPrelim returns a DETACHED YText. Mutations are buffered until it is
 // attached (via YMap.Set or YArray.PushType) and replayed then, so its items
@@ -45,7 +49,7 @@ func NewTextPrelim() *YText {
 	return t
 }
 
-// NewMapPrelim returns a DETACHED YMap. Sets are buffered until attached.
+// NewMapPrelim returns a DETACHED YMap. Entries are staged until attached.
 func NewMapPrelim() *YMap {
 	m := &YMap{}
 	m.owner = m
@@ -53,7 +57,7 @@ func NewMapPrelim() *YMap {
 	return m
 }
 
-// NewArrayPrelim returns a DETACHED YArray.
+// NewArrayPrelim returns a DETACHED YArray. Content is staged until attached.
 func NewArrayPrelim() *YArray {
 	a := &YArray{}
 	a.owner = a
@@ -101,6 +105,6 @@ func (a *YArray) PushType(txn *Transaction, st sharedType) {
 		Content: NewContentType(bt),
 	}
 	// item.integrate sets bt.item, assigns bt.doc, and calls flushPrelim on
-	// the owner — so buffered children materialise top-down from here.
+	// the owner — so staged children materialise top-down from here.
 	item.integrate(txn, 0)
 }
