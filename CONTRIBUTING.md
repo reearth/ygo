@@ -182,6 +182,8 @@ Two files need an entry, both in your own branch. `main` is PR-protected, so any
 
 Both files are newest-first: your new section goes at the top, above the previous release.
 
+**Exemption.** A PR that changes no library behaviour — documentation, tests, CI, tooling, benchmarks — needs neither entry, and does not get a release of its own. Those changes ride along with whatever release comes next. If you are unsure whether your PR qualifies, assume it does not and add the entries; an unnecessary entry is trivial to drop in review, a missing one blocks a tag.
+
 ## Pull Request Checklist
 
 Before opening a PR ensure:
