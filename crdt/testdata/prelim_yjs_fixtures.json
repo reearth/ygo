@@ -71,6 +71,20 @@
       "expectedJSON": "{\"root\":[[\"a\",\"b\",{\"k\":\"v\"},\"c\"]]}"
     },
     {
+      "name": "inserttype_between_cells",
+      "description": "A coach note inserted BETWEEN two existing cells — the anchoring case insert_coach_note needs, which PushType cannot express at all.",
+      "clientID": 3735928559,
+      "updateV1": "0109effdb6f50d0007010563656c6c73012700effdb6f50d0006736f75726365020400effdb6f50d010a66697273742063656c6c87effdb6f50d00012700effdb6f50d0c06736f75726365020400effdb6f50d0d0a74686972642063656c6cc7effdb6f50d00effdb6f50d0c012700effdb6f50d1806736f75726365020400effdb6f50d190a636f616368206e6f746500",
+      "expectedJSON": "{\"cells\":[{\"source\":\"first cell\"},{\"source\":\"coach note\"},{\"source\":\"third cell\"}]}"
+    },
+    {
+      "name": "inserttype_detached_interior",
+      "description": "A nested type inserted at an interior index of a DETACHED array — the staged run of plain values must split around it at attach.",
+      "clientID": 3735928559,
+      "updateV1": "0105effdb6f50d00070104726f6f74000800effdb6f50d000177016187effdb6f50d01012800effdb6f50d02016b0177017688effdb6f50d020277016277016300",
+      "expectedJSON": "{\"root\":[[\"a\",{\"k\":\"v\"},\"b\",\"c\"]]}"
+    },
+    {
       "name": "array_nested_in_map",
       "description": "Y.Map holding a Y.Array of scalars, built detached.",
       "clientID": 3735928559,

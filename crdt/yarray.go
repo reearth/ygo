@@ -262,7 +262,7 @@ func spliceInto(dst []any, index int, vals []any) []any {
 func rejectSharedVals(vals []any) {
 	for _, v := range vals {
 		if _, ok := v.(sharedType); ok {
-			panic("crdt: a shared type cannot be inserted as a plain value; use PushType")
+			panic("crdt: a shared type cannot be inserted as a plain value; use InsertType or PushType")
 		}
 	}
 }

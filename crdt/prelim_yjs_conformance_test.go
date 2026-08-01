@@ -146,6 +146,39 @@ var prelimBuilders = map[string]func(*Doc){
 			root.PushType(txn, inner)
 		})
 	},
+	// The shape insert_coach_note actually needs: a note placed BETWEEN two
+	// existing cells. PushType cannot express it, and the PushType+Move
+	// workaround emits ContentMove (an ygo extension) which other
+	// implementations mis-parse (#207) — so byte-identity here is the proof
+	// that InsertType uses the standard wire shape.
+	"inserttype_between_cells": func(doc *Doc) {
+		cells := doc.GetArray("cells")
+		doc.Transact(func(txn *Transaction) {
+			for _, text := range []string{"first cell", "third cell"} {
+				cell := NewMapPrelim()
+				src := NewTextPrelim()
+				src.Insert(txn, 0, text, nil)
+				cell.Set(txn, "source", src)
+				cells.PushType(txn, cell)
+			}
+			note := NewMapPrelim()
+			nsrc := NewTextPrelim()
+			nsrc.Insert(txn, 0, "coach note", nil)
+			note.Set(txn, "source", nsrc)
+			cells.InsertType(txn, 1, note)
+		})
+	},
+	"inserttype_detached_interior": func(doc *Doc) {
+		root := doc.GetArray("root")
+		doc.Transact(func(txn *Transaction) {
+			inner := NewArrayPrelim()
+			inner.Push(txn, []any{"a", "b", "c"})
+			m := NewMapPrelim()
+			m.Set(txn, "k", "v")
+			inner.InsertType(txn, 1, m)
+			root.PushType(txn, inner)
+		})
+	},
 	"array_nested_in_map": func(doc *Doc) {
 		root := doc.GetArray("root")
 		doc.Transact(func(txn *Transaction) {

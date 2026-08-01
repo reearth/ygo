@@ -108,3 +108,44 @@ func (a *YArray) PushType(txn *Transaction, st sharedType) {
 	// the owner — so staged children materialise top-down from here.
 	item.integrate(txn, 0)
 }
+
+// InsertType inserts a DETACHED shared type at logical position index
+// (0 = prepend, Len() = append), as its own nested item.
+//
+// It is to Insert what PushType is to Push: Insert batches plain values into a
+// single ContentAny item, which a nested type cannot share. Without this, the
+// only way to place a nested type anywhere but the end is PushType followed by
+// Move — and Move emits ContentMove, a ygo extension other implementations
+// mis-parse, usually silently (#207).
+//
+// Placement mirrors Insert: leftNeighbourAt uses LIVE-index semantics (it
+// skips tombstones), splitting the neighbour when the index falls inside it,
+// and an unresolvable index anchors at the tail. That is the deliberate
+// difference from PushType, which anchors after the last PHYSICAL item so a
+// concurrent Yjs push converges the same way.
+func (a *YArray) InsertType(txn *Transaction, index int, st sharedType) {
+	bt := st.baseType()
+	if !bt.detached() {
+		panic("crdt: InsertType requires a detached type (use NewMapPrelim/NewTextPrelim)")
+	}
+	if a.detached() {
+		// Splice into the staged content; flushPrelim splits plain-value runs
+		// around it at attach. Unresolvable indices anchor at the tail, the
+		// attached rule.
+		if index < 0 || index > len(a.prelim) {
+			index = len(a.prelim)
+		}
+		a.prelim = spliceInto(a.prelim, index, []any{st})
+		return
+	}
+	t := &a.abstractType
+	left, offset := t.leftNeighbourAt(index)
+	if offset > 0 {
+		splitItem(txn, left, offset)
+		// left now holds the [0,offset) part; its Right is the new right half.
+	}
+	// Same anchor as Insert, differing only in the Content carried. integrate
+	// sets bt.item, assigns bt.doc and calls flushPrelim on the owner, so
+	// staged children materialise top-down from here.
+	a.insertContentAfterItem(txn, left, NewContentType(bt), index)
+}
