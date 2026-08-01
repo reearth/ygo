@@ -22,7 +22,7 @@ func buildCell(doc *Doc, arrName, text string) {
 	})
 }
 
-func TestPrelimMapBuffersSetsUntilAttached(t *testing.T) {
+func TestPrelimMapStagesSetsUntilAttached(t *testing.T) {
 	doc := New()
 	root := doc.GetArray("root") // hoisted: GetArray locks the doc, Transact holds that lock
 	m := NewMapPrelim()
@@ -370,10 +370,10 @@ func TestPushTypeAppendsAfterExistingItems(t *testing.T) {
 	}
 }
 
-func TestPrelimArrayBuffersMutationsUntilAttached(t *testing.T) {
-	// Insert, Delete and Move on a detached array must buffer and replay on
-	// attach, like Push — otherwise their items would carry clocks below the
-	// container's. Verified end to end: the update must decode elsewhere.
+func TestPrelimArrayStagesMutationsUntilAttached(t *testing.T) {
+	// Insert, Delete and Move on a detached array must edit the staged content
+	// rather than materialise, like Push — otherwise their items would carry
+	// clocks below the container's. Verified end to end through a decode.
 	doc := New()
 	root := doc.GetArray("root")
 	arr := NewArrayPrelim()
@@ -423,8 +423,8 @@ func TestPrelimArrayBuffersMutationsUntilAttached(t *testing.T) {
 	assertSlice("decoded array", inner)
 }
 
-func TestPushTypeBuffersWhenArrayDetached(t *testing.T) {
-	// A nested type pushed into a DETACHED array must buffer like every other
+func TestPushTypeStagesWhenArrayDetached(t *testing.T) {
+	// A nested type pushed into a DETACHED array must stage like every other
 	// mutation, or the child materialises with a clock below the container's —
 	// an update ygo silently decodes to an empty root and real Yjs rejects.
 	doc := New()
@@ -492,8 +492,8 @@ func TestInsertRejectsASharedType(t *testing.T) {
 	doc.Transact(func(txn *Transaction) { root.Insert(txn, 0, []any{NewTextPrelim()}) })
 }
 
-func TestPrelimMapDeleteBuffersUntilAttached(t *testing.T) {
-	// Delete on a detached map must buffer like Set, or the buffered Set
+func TestPrelimMapDeleteStagesUntilAttached(t *testing.T) {
+	// Delete on a detached map must drop the staged entry, or the staged Set
 	// replays at attach and resurrects the deleted key. Yjs yields {} here.
 	doc := New()
 	root := doc.GetArray("root")
