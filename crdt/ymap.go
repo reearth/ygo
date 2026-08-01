@@ -40,20 +40,24 @@ type YMap struct {
 	abstractType
 	subIDGen  uint64
 	observers []mapSub
-	// pending buffers Sets issued while this map is detached, replayed when the
-	// container item integrates (prelimFlusher parity with YText.pending). The
-	// buffering is what keeps child clocks ABOVE the container item's clock —
-	// the ordering genuine Yjs produces and can decode.
-	pending []func(txn *Transaction)
+	// prelim stages this map's ENTRIES while it is detached, mirroring Yjs's
+	// _prelimContent (a JS Map): Set overwrites in place and Delete removes,
+	// so only surviving entries materialise when the container item
+	// integrates. Materialising eagerly would give children clocks BELOW the
+	// future container item's — an ordering genuine Yjs never produces.
+	// prelimKeys preserves insertion order, which is the order Yjs replays in.
+	prelim     map[string]any
+	prelimKeys []string
 }
 
-// flushPrelim replays Sets buffered while this map was detached.
-// Called by item.integrate when the container item integrates.
+// flushPrelim materialises the staged entries in insertion order when the
+// container item integrates. A key set twice emits once, and a key deleted
+// before attach emits not at all — matching what Yjs puts on the wire.
 func (m *YMap) flushPrelim(txn *Transaction) {
-	ops := m.pending
-	m.pending = nil
-	for _, op := range ops {
-		op(txn)
+	keys, staged := m.prelimKeys, m.prelim
+	m.prelimKeys, m.prelim = nil, nil
+	for _, k := range keys {
+		m.Set(txn, k, staged[k])
 	}
 }
 
@@ -169,9 +173,16 @@ func extractMapValue(item *Item) any {
 func (m *YMap) Set(txn *Transaction, key string, value any) {
 	t := &m.abstractType
 
-	// Detached: buffer for replay at attach time (see pending).
+	// Detached: stage the entry (see prelim). Re-setting a key overwrites in
+	// place and keeps its original position, as a JS Map does.
 	if t.detached() {
-		m.pending = append(m.pending, func(txn *Transaction) { m.Set(txn, key, value) })
+		if _, exists := m.prelim[key]; !exists {
+			m.prelimKeys = append(m.prelimKeys, key)
+		}
+		if m.prelim == nil {
+			m.prelim = make(map[string]any)
+		}
+		m.prelim[key] = value
 		return
 	}
 
@@ -199,10 +210,20 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 // Delete removes the entry for key if it exists.
 func (m *YMap) Delete(txn *Transaction, key string) {
 	t := &m.abstractType
-	// Detached: buffer like Set, or the buffered Set for this key would replay
-	// at attach and resurrect it.
+	// Detached: drop the staged entry outright, so nothing is emitted for the
+	// key and no tombstone reaches the wire. A later Set re-appends it at the
+	// end, as a JS Map does.
 	if t.detached() {
-		m.pending = append(m.pending, func(txn *Transaction) { m.Delete(txn, key) })
+		if _, exists := m.prelim[key]; !exists {
+			return
+		}
+		delete(m.prelim, key)
+		for i, k := range m.prelimKeys {
+			if k == key {
+				m.prelimKeys = append(m.prelimKeys[:i:i], m.prelimKeys[i+1:]...)
+				break
+			}
+		}
 		return
 	}
 	if item, ok := t.itemMap[key]; ok && !item.Deleted {
@@ -216,6 +237,13 @@ func (m *YMap) Get(key string) (any, bool) {
 	if doc := m.doc; doc != nil {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
+	}
+	if m.detached() {
+		v, ok := m.prelim[key]
+		if !ok {
+			return nil, false
+		}
+		return prelimValueAt(v), true
 	}
 	t := &m.abstractType
 	item, ok := t.itemMap[key]
@@ -245,6 +273,10 @@ func (m *YMap) Has(key string) bool {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
 	}
+	if m.detached() {
+		_, ok := m.prelim[key]
+		return ok
+	}
 	t := &m.abstractType
 	item, ok := t.itemMap[key]
 	return ok && !item.Deleted
@@ -256,6 +288,10 @@ func (m *YMap) Keys() []string {
 	if doc := m.doc; doc != nil {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
+	}
+	if m.detached() {
+		// Insertion order, which is the order these will materialise in.
+		return append(make([]string, 0, len(m.prelimKeys)), m.prelimKeys...)
 	}
 	t := &m.abstractType
 	keys := make([]string, 0)
@@ -285,6 +321,13 @@ func (m *YMap) Entries() map[string]any {
 // hold the doc lock. Used by Entries (top-level) and toJSONValue (during
 // recursive unwrap of nested types).
 func (m *YMap) entriesLocked() map[string]any {
+	if m.detached() {
+		out := make(map[string]any, len(m.prelim))
+		for k, v := range m.prelim {
+			out[k] = prelimJSONValue(v)
+		}
+		return out
+	}
 	t := &m.abstractType
 	out := make(map[string]any, len(t.itemMap))
 	for k, item := range t.itemMap {

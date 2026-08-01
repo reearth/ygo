@@ -36,6 +36,41 @@
       "expectedJSON": "{\"root\":[{\"k\":\"v\"}]}"
     },
     {
+      "name": "map_key_set_twice",
+      "description": "A detached key set twice — only the surviving value reaches the wire.",
+      "clientID": 3735928559,
+      "updateV1": "0102effdb6f50d00070104726f6f74012800effdb6f50d00016b017702763200",
+      "expectedJSON": "{\"root\":[{\"k\":\"v2\"}]}"
+    },
+    {
+      "name": "map_set_then_delete",
+      "description": "A detached key set then deleted before attach — nothing reaches the wire for it.",
+      "clientID": 3735928559,
+      "updateV1": "0102effdb6f50d00070104726f6f74012800effdb6f50d00046b6565700177013200",
+      "expectedJSON": "{\"root\":[{\"keep\":\"2\"}]}"
+    },
+    {
+      "name": "array_two_pushes_coalesce",
+      "description": "Two pushes onto a detached array — Yjs emits one item carrying both values.",
+      "clientID": 3735928559,
+      "updateV1": "0102effdb6f50d00070104726f6f74000800effdb6f50d000277036f6e65770374776f00",
+      "expectedJSON": "{\"root\":[[\"one\",\"two\"]]}"
+    },
+    {
+      "name": "array_detached_delete",
+      "description": "Push then delete on a detached array — the deleted value never materialises, so no tombstone.",
+      "clientID": 3735928559,
+      "updateV1": "0102effdb6f50d00070104726f6f74000800effdb6f50d000277016177016300",
+      "expectedJSON": "{\"root\":[[\"a\",\"c\"]]}"
+    },
+    {
+      "name": "array_values_interleaved_with_type",
+      "description": "Plain values either side of a nested type — the runs coalesce around it.",
+      "clientID": 3735928559,
+      "updateV1": "0105effdb6f50d00070104726f6f74000800effdb6f50d000277016177016287effdb6f50d02012800effdb6f50d03016b0177017688effdb6f50d030177016300",
+      "expectedJSON": "{\"root\":[[\"a\",\"b\",{\"k\":\"v\"},\"c\"]]}"
+    },
+    {
       "name": "array_nested_in_map",
       "description": "Y.Map holding a Y.Array of scalars, built detached.",
       "clientID": 3735928559,

@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"unicode/utf8"
 )
@@ -30,14 +31,120 @@ func TestPrelimMapBuffersSetsUntilAttached(t *testing.T) {
 		m.Set(txn, "a", "1")
 		m.Set(txn, "b", "2")
 	})
-	// Still detached, so nothing has materialised.
-	if got := len(m.Keys()); got != 0 {
-		t.Fatalf("detached map has %d keys, want 0 (Sets must buffer)", got)
+	// Staged, so the map reads back its own content — but nothing has
+	// materialised into the document yet.
+	if got := m.Keys(); len(got) != 2 {
+		t.Fatalf("detached map has keys %v, want 2 (staged Sets must be readable)", got)
+	}
+	if v, ok := m.Get("a"); !ok || v != "1" {
+		t.Fatalf(`detached Get("a") = %v, %v; want "1", true`, v, ok)
+	}
+	if !m.Has("b") {
+		t.Fatal(`detached Has("b") = false, want true`)
+	}
+	if got := root.Len(); got != 0 {
+		t.Fatalf("root has %d items before attach, want 0 (staging must not materialise)", got)
 	}
 
 	doc.Transact(func(txn *Transaction) { root.PushType(txn, m) })
 	if got := len(m.Keys()); got != 2 {
-		t.Fatalf("attached map has %d keys, want 2 (buffered Sets must replay)", got)
+		t.Fatalf("attached map has %d keys, want 2 (staged Sets must materialise)", got)
+	}
+}
+
+func TestDetachedReadsUnwrapStagedNestedTypes(t *testing.T) {
+	// A staged nested type reads back as its live handle, and renders through
+	// ToJSON, exactly as it would once attached.
+	doc := New()
+	outer := NewMapPrelim()
+	inner := NewMapPrelim()
+	list := NewArrayPrelim()
+	el := NewYXmlElement("div")
+	xtext := NewYXmlText()
+	arr := NewArrayPrelim()
+	doc.Transact(func(txn *Transaction) {
+		inner.Set(txn, "deep", "value")
+		list.Push(txn, []any{1.0, 2.0})
+		outer.Set(txn, "inner", inner)
+		outer.Set(txn, "list", list)
+		outer.Set(txn, "el", el)
+		outer.Set(txn, "xtext", xtext)
+		arr.PushType(txn, inner)
+	})
+
+	if got, ok := outer.Get("inner"); !ok || got != any(inner) {
+		t.Fatalf(`detached Get("inner") = %v, %v; want the staged *YMap handle`, got, ok)
+	}
+	if got := arr.Get(0); got != any(inner) {
+		t.Fatalf("detached array Get(0) = %v, want the staged *YMap handle", got)
+	}
+
+	b, err := outer.ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("detached ToJSON %s: %v", b, err)
+	}
+	nested, isMap := got["inner"].(map[string]any)
+	if !isMap || nested["deep"] != "value" {
+		t.Fatalf("inner rendered as %v, want {deep: value}", got["inner"])
+	}
+	if items, isArr := got["list"].([]any); !isArr || len(items) != 2 {
+		t.Fatalf("list rendered as %v, want two items", got["list"])
+	}
+	if s, isStr := got["el"].(string); !isStr || s == "" {
+		t.Fatalf("el rendered as %v, want XML markup", got["el"])
+	}
+	if _, isStr := got["xtext"].(string); !isStr {
+		t.Fatalf("xtext rendered as %v, want a string", got["xtext"])
+	}
+}
+
+func TestPrelimReadsSurviveTheAttachBoundary(t *testing.T) {
+	// The same reads must answer identically either side of attach — the point
+	// of staging state rather than buffering calls.
+	doc := New()
+	root := doc.GetArray("root")
+	cell := NewMapPrelim()
+	body := NewTextPrelim()
+	inner := NewArrayPrelim()
+	doc.Transact(func(txn *Transaction) {
+		body.Insert(txn, 0, "note", nil)
+		inner.Push(txn, []any{"x", "y"})
+		cell.Set(txn, "source", body)
+		cell.Set(txn, "outputs", inner)
+		cell.Set(txn, "cell_type", "markdown")
+	})
+
+	before, err := cell.ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Transact(func(txn *Transaction) { root.PushType(txn, cell) })
+	after, err := cell.ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var b, a map[string]any
+	if err := json.Unmarshal(before, &b); err != nil {
+		t.Fatalf("detached ToJSON %s: %v", before, err)
+	}
+	if err := json.Unmarshal(after, &a); err != nil {
+		t.Fatal(err)
+	}
+	// YText stages deferred ops (matching Yjs's Y.Text._pending), so its
+	// detached content is not readable; the map and array staging is.
+	if b["cell_type"] != "markdown" {
+		t.Fatalf("detached cell_type = %v, want markdown", b["cell_type"])
+	}
+	if got, want := fmt.Sprint(b["outputs"]), fmt.Sprint(a["outputs"]); got != want {
+		t.Fatalf("outputs read %s detached and %s attached; want identical", got, want)
+	}
+	if a["source"] != "note" {
+		t.Fatalf("attached source = %v, want note", a["source"])
 	}
 }
 
@@ -199,8 +306,16 @@ func TestPrelimArrayBuffersMutationsUntilAttached(t *testing.T) {
 		arr.Delete(txn, 3, 1)          // a b c
 		arr.Move(txn, 0, 3)            // b c a
 	})
-	if got := arr.Len(); got != 0 {
-		t.Fatalf("detached array has len %d, want 0 (mutations must buffer)", got)
+	// Staged, so the array reads back its own content; nothing has
+	// materialised into the document yet.
+	if got := arr.Len(); got != 3 {
+		t.Fatalf("detached array has len %d, want 3 (staged mutations must be readable)", got)
+	}
+	if got := arr.Get(0); got != "b" {
+		t.Fatalf("detached Get(0) = %v, want b", got)
+	}
+	if got := root.Len(); got != 0 {
+		t.Fatalf("root has %d items before attach, want 0 (staging must not materialise)", got)
 	}
 
 	doc.Transact(func(txn *Transaction) { root.PushType(txn, arr) })

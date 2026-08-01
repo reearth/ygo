@@ -16,20 +16,70 @@ type YArray struct {
 	abstractType
 	subIDGen  uint64
 	observers []arraySub
-	// pending buffers mutations issued while this array is detached, replayed
-	// when the container item integrates (prelimFlusher parity with YText and
-	// YMap). Materialising immediately would give children clocks BELOW the
-	// future container item's — an ordering genuine Yjs never produces.
-	pending []func(txn *Transaction)
+	// prelim stages the CONTENT of this array while it is detached, mirroring
+	// Yjs's _prelimContent: mutations edit the staged slice directly and the
+	// net result materialises once, when the container item integrates.
+	// Materialising eagerly would give children clocks BELOW the future
+	// container item's — an ordering genuine Yjs never produces. Entries are
+	// plain values or detached shared types.
+	prelim []any
 }
 
-// flushPrelim replays mutations buffered while this array was detached.
-// Called by item.integrate when the container item integrates.
+// flushPrelim materialises the staged content when the container item
+// integrates. Runs of consecutive plain values become a single item and each
+// nested type gets its own, which is what Yjs's typeListInsertGenerics does
+// with _prelimContent — so a detached build emits the same structs Yjs emits
+// rather than one per call.
 func (a *YArray) flushPrelim(txn *Transaction) {
-	ops := a.pending
-	a.pending = nil
-	for _, op := range ops {
-		op(txn)
+	staged := a.prelim
+	a.prelim = nil
+
+	var run []any
+	flushRun := func() {
+		if len(run) > 0 {
+			a.Push(txn, run)
+			run = nil
+		}
+	}
+	for _, v := range staged {
+		if st, ok := v.(sharedType); ok {
+			flushRun()
+			a.PushType(txn, st)
+			continue
+		}
+		run = append(run, v)
+	}
+	flushRun()
+}
+
+// prelimValueAt unwraps a staged entry for reading: a staged shared type is
+// surfaced as its owner, the same handle an attached read would return.
+func prelimValueAt(v any) any {
+	if st, ok := v.(sharedType); ok {
+		return st.baseType().owner
+	}
+	return v
+}
+
+// prelimJSONValue renders a staged entry the way toJSONValue renders an
+// attached one, so a detached ToJSON/ToSlice/Entries unwraps nested staged
+// types recursively rather than emitting an opaque handle.
+func prelimJSONValue(v any) any {
+	switch owner := v.(type) {
+	case *YArray:
+		return owner.toSliceLocked()
+	case *YMap:
+		return owner.entriesLocked()
+	case *YText:
+		return owner.toStringLocked()
+	case *YXmlElement:
+		return owner.toXMLLocked()
+	case *YXmlText:
+		return owner.toXMLLocked()
+	// No YXmlFragment case: a fragment is only ever a named root or a decode
+	// product, so a detached one cannot be obtained to stage in the first place.
+	default:
+		return v
 	}
 }
 
@@ -186,7 +236,28 @@ func arrayValuesFromItem(item *Item) []any {
 }
 
 // Len returns the number of non-deleted elements.
-func (a *YArray) Len() int { return a.length }
+func (a *YArray) Len() int {
+	if a.detached() {
+		return len(a.prelim)
+	}
+	return a.length
+}
+
+// spliceInto inserts vals at index, clamping index into range. The three-index
+// slice on the head keeps the append from writing into the tail's backing
+// array.
+func spliceInto(dst []any, index int, vals []any) []any {
+	if index < 0 {
+		index = 0
+	}
+	if index > len(dst) {
+		index = len(dst)
+	}
+	out := make([]any, 0, len(dst)+len(vals))
+	out = append(out, dst[:index]...)
+	out = append(out, vals...)
+	return append(out, dst[index:]...)
+}
 
 // rejectSharedVals guards the plain-value entry points. A shared type batched
 // into a ContentAny only fails at encode time — inside Doc.Transact when an
@@ -205,7 +276,7 @@ func rejectSharedVals(vals []any) {
 func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
 	rejectSharedVals(vals)
 	if a.detached() {
-		a.pending = append(a.pending, func(txn *Transaction) { a.Insert(txn, index, vals) })
+		a.prelim = spliceInto(a.prelim, index, vals)
 		return
 	}
 	t := &a.abstractType
@@ -266,7 +337,7 @@ func (a *YArray) insertAfterItem(txn *Transaction, left *Item, vals []any, hintI
 func (a *YArray) Push(txn *Transaction, vals []any) {
 	rejectSharedVals(vals)
 	if a.detached() {
-		a.pending = append(a.pending, func(txn *Transaction) { a.Push(txn, vals) })
+		a.prelim = append(a.prelim, vals...)
 		return
 	}
 	t := &a.abstractType
@@ -290,6 +361,12 @@ func (a *YArray) Get(index int) any {
 	if doc := a.doc; doc != nil {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
+	}
+	if a.detached() {
+		if index < 0 || index >= len(a.prelim) {
+			return nil
+		}
+		return prelimValueAt(a.prelim[index])
 	}
 	t := &a.abstractType
 	if index < 0 {
@@ -334,7 +411,15 @@ func (a *YArray) Get(index int) any {
 // Delete removes length elements starting at logical position index.
 func (a *YArray) Delete(txn *Transaction, index, length int) {
 	if a.detached() {
-		a.pending = append(a.pending, func(txn *Transaction) { a.Delete(txn, index, length) })
+		// Staged content is removed outright, so nothing is emitted for it and
+		// no tombstone reaches the wire — matching a detached Yjs delete.
+		if index < 0 || length <= 0 || index >= len(a.prelim) {
+			return
+		}
+		if index+length > len(a.prelim) {
+			length = len(a.prelim) - index
+		}
+		a.prelim = append(a.prelim[:index], a.prelim[index+length:]...)
 		return
 	}
 	deleteRange(&a.abstractType, txn, index, length)
@@ -358,6 +443,13 @@ func (a *YArray) ToSlice() []any {
 // hold the doc lock. Used by ToSlice (top-level) and toJSONValue (during
 // recursive unwrap of nested types under #75).
 func (a *YArray) toSliceLocked() []any {
+	if a.detached() {
+		out := make([]any, 0, len(a.prelim))
+		for _, v := range a.prelim {
+			out = append(out, prelimJSONValue(v))
+		}
+		return out
+	}
 	t := &a.abstractType
 	result := make([]any, 0, t.length)
 	for item := t.start; item != nil; item = item.Right {
@@ -584,7 +676,17 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 // by the enclosing Transact callback.
 func (a *YArray) Move(txn *Transaction, fromIndex, toIndex int) {
 	if a.detached() {
-		a.pending = append(a.pending, func(txn *Transaction) { a.Move(txn, fromIndex, toIndex) })
+		// Reorder the staged slice, so a detached move emits ordinary content
+		// rather than a ContentMove other implementations cannot decode.
+		if fromIndex < 0 || fromIndex >= len(a.prelim) || toIndex < 0 || toIndex > len(a.prelim) || fromIndex == toIndex {
+			return
+		}
+		v := a.prelim[fromIndex]
+		rest := append(a.prelim[:fromIndex:fromIndex], a.prelim[fromIndex+1:]...)
+		if toIndex > fromIndex {
+			toIndex--
+		}
+		a.prelim = spliceInto(rest, toIndex, []any{v})
 		return
 	}
 	if fromIndex == toIndex {

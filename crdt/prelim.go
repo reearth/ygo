@@ -74,7 +74,7 @@ func (a *YArray) PushType(txn *Transaction, st sharedType) {
 		panic("crdt: PushType requires a detached type (use NewMapPrelim/NewTextPrelim)")
 	}
 	if a.detached() {
-		a.pending = append(a.pending, func(txn *Transaction) { a.PushType(txn, st) })
+		a.prelim = append(a.prelim, st)
 		return
 	}
 	t := &a.abstractType

@@ -97,6 +97,55 @@ var prelimBuilders = map[string]func(*Doc){
 			root.PushType(txn, m)
 		})
 	},
+	"map_key_set_twice": func(doc *Doc) {
+		root := doc.GetArray("root")
+		doc.Transact(func(txn *Transaction) {
+			m := NewMapPrelim()
+			m.Set(txn, "k", "v1")
+			m.Set(txn, "k", "v2")
+			root.PushType(txn, m)
+		})
+	},
+	"map_set_then_delete": func(doc *Doc) {
+		root := doc.GetArray("root")
+		doc.Transact(func(txn *Transaction) {
+			m := NewMapPrelim()
+			m.Set(txn, "a", "1")
+			m.Set(txn, "keep", "2")
+			m.Delete(txn, "a")
+			root.PushType(txn, m)
+		})
+	},
+	"array_two_pushes_coalesce": func(doc *Doc) {
+		root := doc.GetArray("root")
+		doc.Transact(func(txn *Transaction) {
+			inner := NewArrayPrelim()
+			inner.Push(txn, []any{"one"})
+			inner.Push(txn, []any{"two"})
+			root.PushType(txn, inner)
+		})
+	},
+	"array_detached_delete": func(doc *Doc) {
+		root := doc.GetArray("root")
+		doc.Transact(func(txn *Transaction) {
+			inner := NewArrayPrelim()
+			inner.Push(txn, []any{"a", "b", "c"})
+			inner.Delete(txn, 1, 1)
+			root.PushType(txn, inner)
+		})
+	},
+	"array_values_interleaved_with_type": func(doc *Doc) {
+		root := doc.GetArray("root")
+		doc.Transact(func(txn *Transaction) {
+			inner := NewArrayPrelim()
+			inner.Push(txn, []any{"a", "b"})
+			child := NewMapPrelim()
+			child.Set(txn, "k", "v")
+			inner.PushType(txn, child)
+			inner.Push(txn, []any{"c"})
+			root.PushType(txn, inner)
+		})
+	},
 	"array_nested_in_map": func(doc *Doc) {
 		root := doc.GetArray("root")
 		doc.Transact(func(txn *Transaction) {

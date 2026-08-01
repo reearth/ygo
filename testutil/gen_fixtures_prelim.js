@@ -118,6 +118,79 @@ const fixtures = [
       })
     }
   ),
+  // The shapes below distinguish STAGED prelim content from replayed calls.
+  // Yjs stages detached content (_prelimContent) and materialises the net
+  // result once at integrate, so repeated calls collapse rather than each
+  // emitting their own item.
+  authored(
+    'map_key_set_twice',
+    'A detached key set twice — only the surviving value reaches the wire.',
+    (doc) => {
+      const root = doc.getArray('root')
+      doc.transact(() => {
+        const m = new Y.Map()
+        m.set('k', 'v1')
+        m.set('k', 'v2')
+        root.push([m])
+      })
+    }
+  ),
+  authored(
+    'map_set_then_delete',
+    'A detached key set then deleted before attach — nothing reaches the wire for it.',
+    (doc) => {
+      const root = doc.getArray('root')
+      doc.transact(() => {
+        const m = new Y.Map()
+        m.set('a', '1')
+        m.set('keep', '2')
+        m.delete('a')
+        root.push([m])
+      })
+    }
+  ),
+  authored(
+    'array_two_pushes_coalesce',
+    'Two pushes onto a detached array — Yjs emits one item carrying both values.',
+    (doc) => {
+      const root = doc.getArray('root')
+      doc.transact(() => {
+        const inner = new Y.Array()
+        inner.push(['one'])
+        inner.push(['two'])
+        root.push([inner])
+      })
+    }
+  ),
+  authored(
+    'array_detached_delete',
+    'Push then delete on a detached array — the deleted value never materialises, so no tombstone.',
+    (doc) => {
+      const root = doc.getArray('root')
+      doc.transact(() => {
+        const inner = new Y.Array()
+        inner.push(['a', 'b', 'c'])
+        inner.delete(1, 1)
+        root.push([inner])
+      })
+    }
+  ),
+  authored(
+    'array_values_interleaved_with_type',
+    'Plain values either side of a nested type — the runs coalesce around it.',
+    (doc) => {
+      const root = doc.getArray('root')
+      doc.transact(() => {
+        const inner = new Y.Array()
+        inner.push(['a', 'b'])
+        const child = new Y.Map()
+        child.set('k', 'v')
+        inner.push([child])
+        inner.push(['c'])
+        root.push([inner])
+      })
+    }
+  ),
   authored(
     'array_nested_in_map',
     'Y.Map holding a Y.Array of scalars, built detached.',
