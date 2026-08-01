@@ -1,3 +1,67 @@
+## v1.43.0
+
+ygo could decode and materialise nested Y types but offered no way to construct
+one: `abstractType` is unexported, `YArray.Insert` batches plain values into a
+single `ContentAny` item, and `YMap.Get` returned `(nil, false)` for a key
+holding a nested type despite it being visible through `ToJSON`. This release
+adds the public surface — so a shape like a Jupyter notebook cell, a `Y.Map`
+holding a `Y.Text`, can be built from outside the package — and makes detached
+types behave the way the reference implementation does. No breaking API changes.
+
+### Added
+
+- **Public prelim constructors: `NewMapPrelim`, `NewTextPrelim`,
+  `NewArrayPrelim`, and `YArray.PushType`.** Each returns a detached type that
+  is inert until attached, at which point its content materialises with
+  parent-first clocks — the ordering genuine Yjs produces and can decode.
+  `PushType` gives a nested type its own item rather than batching it into a
+  `ContentAny`, the same reason `YXmlFragment` exposes
+  `InsertElement`/`InsertText`. This generalises to the core types what #147 and
+  #170 established for `YXml`.
+
+- **`YMap` and `YArray` stage their content while detached**, mirroring Yjs's
+  `_prelimContent`. Mutations edit the staged content directly and the net
+  result materialises once, when the container item integrates: a key set twice
+  emits once, a key set then deleted emits not at all, and consecutive pushes
+  coalesce into a single item. A detached build therefore emits the same structs
+  Yjs emits rather than one per call. `YText` is unchanged — Yjs stages
+  `Y.Text` as deferred operations (`_pending`), which the existing model already
+  matches.
+
+- **Detached reads answer from the staged content.** `Len`, `Get`, `Keys`,
+  `Has`, `ToSlice`, `Entries` and `ToJSON` now report what a detached `YMap` or
+  `YArray` holds, recursively unwrapping staged nested types. This follows the
+  convention `yxml.go` already set by surfacing `prelimAttrs` and
+  `prelimChildren`, rather than reversing it in a sibling API.
+
+- **Conformance fixtures for prelim construction**
+  (`testutil/gen_fixtures_prelim.js`). Yjs runs a scripted build with a pinned
+  clientID and Go must replay the identical sequence and emit byte-identical V1
+  bytes, in both directions, across eleven shapes — including the multi-call
+  builds that distinguish staged content from replayed calls. Plus a fuzz target
+  over nested prelim shapes.
+
+### Fixed
+
+- **`YMap.Get` returns nested types.** A key holding a `Y.Text`, `Y.Map` or
+  `Y.Array` read back as `(nil, false)` because `Get` handled only `ContentDoc`
+  and `ContentAny`, even though the type was fully materialised and reachable
+  through `ToJSON`. It now mirrors `YArray.Get`.
+
+- **Shared types are rejected as plain values.** `YMap.Set` panics on an
+  attached shared type, and `YArray.Insert`/`Push` panic on a shared type among
+  `vals`, pointing at `PushType` instead. Previously these stored the
+  type inside a `ContentAny`, which read back as an empty blob and then panicked
+  the encoder at commit time — inside `Doc.Transact` when an `OnUpdate` hook is
+  registered, which is every websocket deployment.
+
+- **`YArray.Move` on a detached array no longer emits `ContentMove`.** It
+  reorders the staged content instead, so the attached result carries ordinary
+  content that other implementations decode. Emitting the wire extension here
+  was reachable through the prelim API and diverged silently: verified against
+  pycrdt 0.13.1, the peer accepted the update without error and read the
+  pre-move order while ygo read the moved one (#207).
+
 ## v1.42.0
 
 Two contract changes for anyone with custom clustering code — nothing to do

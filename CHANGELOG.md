@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.43.0] — 2026-08-01
 
 ### Added
 
@@ -15,10 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalises to the core types what [#147](https://github.com/reearth/ygo/pull/147)
   and [#170](https://github.com/reearth/ygo/pull/170) established for `YXml`, and
   closes the API asymmetry recorded in `crdt/nested_map_yjs_interop_test.go`.
-- **`YMap` and `YArray` mutations buffer while detached** (`Set`, `Delete`,
-  `Insert`, `Push`, `PushType`, `Move`), replaying on attach (parity with
-  `YText.pending`), so nested children materialise top-down with parent-first
-  clocks — the ordering genuine Yjs produces and can decode.
+- **`YMap` and `YArray` stage their content while detached**, mirroring Yjs's
+  `_prelimContent`: mutations (`Set`, `Delete`, `Insert`, `Push`, `PushType`,
+  `Move`) edit the staged content directly and the net result materialises once,
+  when the container item integrates. Nested children therefore materialise
+  top-down with parent-first clocks — the ordering genuine Yjs produces and can
+  decode — and a multi-call build emits the same structs Yjs emits rather than
+  one per call. `YText` is unchanged: Yjs stages `Y.Text` as deferred operations
+  (`_pending`), which the existing model already matches.
+- **Detached reads answer from the staged content.** `Len`, `Get`, `Keys`,
+  `Has`, `ToSlice`, `Entries` and `ToJSON` report what a detached `YMap` or
+  `YArray` holds, recursively unwrapping staged nested types, following the
+  convention `yxml.go` set for `prelimAttrs`/`prelimChildren`.
 - **Shared types are rejected as plain values**: `YMap.Set` panics on an
   attached shared type, and `YArray.Insert`/`Push` panic on a shared type
   among `vals` (use `PushType`). Previously these stored the type inside a
@@ -37,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Y.Array` previously read back as `(nil, false)` despite being fully
   materialised and visible through `ToJSON`, because `Get` handled only
   `ContentDoc` and `ContentAny`. It now mirrors `YArray.Get`.
+- **`YArray.Move` on a detached array no longer emits `ContentMove`.** It now
+  reorders the staged content, so the attached result carries ordinary content
+  that other implementations decode. Emitting the wire extension here was
+  reachable through the prelim API and diverged silently: verified against
+  pycrdt 0.13.1, the peer accepted the update without error and read the
+  pre-move order while ygo read the moved one
+  ([#207](https://github.com/reearth/ygo/issues/207)).
 
 ## [1.42.0] — 2026-08-01
 
