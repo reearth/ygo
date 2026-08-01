@@ -12,7 +12,7 @@
 [![Yjs wire format](https://img.shields.io/badge/yjs%20wire-V1%20%2B%20V2-blue)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**ygo** is a pure-Go implementation of [Yjs](https://github.com/yjs/yjs), the CRDT (Conflict-free Replicated Data Type) framework for real-time collaborative editing. It is a Go CRDT library for building collaborative applications — shared text, rich text, maps, arrays, and XML trees that merge concurrent edits without conflicts, without a central authority, and without operational transformation.
+**ygo** is a pure-Go implementation of [Yjs](https://github.com/yjs/yjs), the CRDT (Conflict-free Replicated Data Type) framework for real-time collaborative editing. Use it to build collaborative applications in Go — shared text, rich text, maps, arrays, and XML trees that merge concurrent edits without conflicts, without a central authority, and without operational transformation.
 
 ygo is **binary-compatible** with the JavaScript Yjs reference implementation: it speaks both the V1 and V2 update wire formats byte-for-byte, along with the [y-protocols](https://github.com/yjs/y-protocols) sync handshake and awareness layer. Updates produced by ygo apply cleanly in Yjs (JavaScript) and yrs (Rust), and vice versa. That claim is enforced, not asserted — a byte-level cross-language conformance suite generated from `yjs@13.6.30` and a differential convergence fuzzer both run in CI.
 
