@@ -298,6 +298,14 @@ func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
 // and Push; the two differ only in how left is chosen (Insert uses the
 // live-index neighbour, Push uses the physical tail).
 func (a *YArray) insertAfterItem(txn *Transaction, left *Item, vals []any, hintIndex int) {
+	a.insertContentAfterItem(txn, left, NewContentAny(vals...), hintIndex)
+}
+
+// insertContentAfterItem anchors a new item carrying content immediately after
+// left, deriving origin/originRight from its neighbours. The plain-value path
+// and InsertType differ only in the Content they carry, so the anchor logic
+// lives here once.
+func (a *YArray) insertContentAfterItem(txn *Transaction, left *Item, content Content, hintIndex int) {
 	t := &a.abstractType
 
 	var origin *ID
@@ -320,7 +328,7 @@ func (a *YArray) insertAfterItem(txn *Transaction, left *Item, vals []any, hintI
 		OriginRight: originRight,
 		Left:        left,
 		Parent:      t,
-		Content:     NewContentAny(vals...),
+		Content:     content,
 	}
 	// Signal to integrate the logical index for partial cache invalidation.
 	if hintIndex > 0 {
