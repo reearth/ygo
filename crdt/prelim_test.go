@@ -52,6 +52,39 @@ func TestPrelimMapBuffersSetsUntilAttached(t *testing.T) {
 	}
 }
 
+func TestDetachedMoveEmitsNoContentMove(t *testing.T) {
+	// Reordering staged content must not put ContentMove (a ygo wire
+	// extension, see #207) on the wire: other implementations mis-parse it,
+	// usually silently. Under the previous replay model this move materialised
+	// as a real Move at attach, and pycrdt read the pre-move order while ygo
+	// read the moved one.
+	doc := New()
+	root := doc.GetArray("root")
+	inner := NewArrayPrelim()
+	doc.Transact(func(txn *Transaction) {
+		inner.Push(txn, []any{"a", "b", "c"})
+		inner.Move(txn, 0, 3)
+		root.PushType(txn, inner)
+	})
+
+	dst := New()
+	if err := dst.ApplyUpdate(doc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("ApplyUpdate: %v", err)
+	}
+	decoded, ok := dst.GetArray("root").Get(0).(*YArray)
+	if !ok {
+		t.Fatalf("root[0] is %T, want *YArray", dst.GetArray("root").Get(0))
+	}
+	for item := decoded.start; item != nil; item = item.Right {
+		if _, isMove := item.Content.(*ContentMove); isMove {
+			t.Fatal("a detached Move emitted ContentMove; staged content must reorder instead")
+		}
+	}
+	if got := fmt.Sprint(decoded.ToSlice()); got != "[b c a]" {
+		t.Fatalf("decoded order = %s, want [b c a]", got)
+	}
+}
+
 func TestDetachedReadsUnwrapStagedNestedTypes(t *testing.T) {
 	// A staged nested type reads back as its live handle, and renders through
 	// ToJSON, exactly as it would once attached.
