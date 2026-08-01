@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.46.0] — 2026-08-05
+
+### Added
+
+- **`YArray.InsertType` places a detached shared type at an index**, as its own
+  nested item. It is to `Insert` what `PushType` is to `Push`: `Insert` batches
+  plain values into a single `ContentAny` item, which a nested type cannot
+  share, so before this the only way to place a nested type anywhere but the
+  end was `PushType` followed by `Move` — and `Move` emits `ContentMove`, a ygo
+  extension other implementations mis-parse, usually silently
+  ([#207](https://github.com/reearth/ygo/issues/207)). Attached placement
+  mirrors `Insert` (live-index semantics, splitting a plain-value run when the
+  index falls inside it, unresolvable indices anchoring at the tail); on a
+  detached array the type splices into the staged content and plain-value runs
+  split around it at attach. Conformance fixtures pin both shapes byte-identical
+  to `yjs@13.6.30`, and the plain-value rejection now names `InsertType` first.
+
 ## [1.45.0] — 2026-08-05
 
 ### Fixed
@@ -53,7 +70,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passed it, the current one fails it. **Third-party `SnapshotStore`
   implementations may newly fail conformance; that is the intent.** The in-tree
   memory, file, and sqlite backends pass unchanged (#211).
-
 ## [1.44.0] — 2026-08-04
 
 ### Changed
@@ -91,7 +107,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Encoder.WriteVarStringE` returns `ErrInvalidUTF8` instead of panicking, for
   callers encoding untrusted input (#209).
-
 ## [1.43.0] — 2026-08-02
 
 ### Added
