@@ -14,4 +14,5 @@ Closes #
 - [ ] `make test` passes (with `-race`)
 - [ ] `make lint` passes
 - [ ] Tests added for new behaviour
-- [ ] `CHANGELOG.md` updated under the next version's heading (e.g. `## [1.7.1]`)
+- [ ] `CHANGELOG.md` updated under the next version's heading (e.g. `## [1.7.1]`) — we don't use `[Unreleased]`
+- [ ] `RELEASE_NOTES.md` has a section for that same version (it becomes the GitHub release body)

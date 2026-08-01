@@ -172,9 +172,17 @@ benchstat before.txt after.txt
 
 Three samples are not enough to distinguish real change from noise — we found this out the hard way (see closed issue #22). The PR description should include the `benchstat` output for any row that changed.
 
-### CHANGELOG entry
+### CHANGELOG and release notes
 
-Add your change under the next version's heading in `CHANGELOG.md`. We don't use an `[Unreleased]` section — entries go directly into the version they ship in.
+Two files need an entry, both in your own branch. `main` is PR-protected, so anything left for "later" costs a second, docs-only PR before the release can be tagged.
+
+1. **`CHANGELOG.md`** — add your change under the next version's heading (e.g. `## [1.43.0] — 2026-08-14`). We do **not** use an `[Unreleased]` section: entries go directly into the version they ship in. If you don't know which version that is, ask in the PR and a maintainer will tell you — it follows from your change's API surface, not its intent (a new exported symbol is a MINOR even in a bug-fix PR).
+
+2. **`RELEASE_NOTES.md`** — add a section for the same version. The release workflow publishes this file verbatim as the GitHub release body (`body_path: RELEASE_NOTES.md` in `.github/workflows/release.yml`), so a version missing from it ships with empty release notes.
+
+Both files are newest-first: your new section goes at the top, above the previous release.
+
+**Exemption.** A PR that changes no library behaviour — documentation, tests, CI, tooling, benchmarks — needs neither entry, and does not get a release of its own. Those changes ride along with whatever release comes next. If you are unsure whether your PR qualifies, assume it does not and add the entries; an unnecessary entry is trivial to drop in review, a missing one blocks a tag.
 
 ## Pull Request Checklist
 
@@ -184,7 +192,8 @@ Before opening a PR ensure:
 - [ ] `make lint` passes with no new warnings
 - [ ] `make vet` passes (no vulnerabilities)
 - [ ] New tests are added for changed behaviour
-- [ ] `CHANGELOG.md` is updated under `[Unreleased]`
+- [ ] `CHANGELOG.md` is updated under the next version's heading (e.g. `## [1.43.0]`) — not `[Unreleased]`
+- [ ] `RELEASE_NOTES.md` has a section for that same version
 - [ ] Wire-format changes regenerate fixtures (`make fixtures`) and update `TestCompat_` tests
 - [ ] Doc comments updated for any changed public API
 - [ ] PR description links the related issue (`Closes #NNN`)
