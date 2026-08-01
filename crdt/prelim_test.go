@@ -52,6 +52,51 @@ func TestPrelimMapBuffersSetsUntilAttached(t *testing.T) {
 	}
 }
 
+func TestForEachAgreesAcrossTheAttachBoundary(t *testing.T) {
+	// ForEach must report the same thing either side of attach, like the other
+	// reads. Note both walks yield plain values only — a nested type is skipped
+	// attached, so it is skipped detached too rather than inventing a
+	// difference here.
+	doc := New()
+	root := doc.GetArray("root")
+	arr := NewArrayPrelim()
+	m := NewMapPrelim()
+	doc.Transact(func(txn *Transaction) {
+		arr.Push(txn, []any{"a", "b"})
+		arr.PushType(txn, NewMapPrelim())
+		arr.Push(txn, []any{"c"})
+		m.Set(txn, "k1", "v1")
+		m.Set(txn, "nested", NewArrayPrelim())
+		m.Set(txn, "k2", "v2")
+	})
+
+	collectArr := func() string {
+		var got []string
+		arr.ForEach(func(i int, v any) { got = append(got, fmt.Sprintf("%d=%v", i, v)) })
+		return fmt.Sprint(got)
+	}
+	collectMap := func() string {
+		got := map[string]any{}
+		m.ForEach(func(k string, v any) { got[k] = v })
+		return fmt.Sprint(len(got), got["k1"], got["k2"], got["nested"])
+	}
+
+	arrBefore, mapBefore := collectArr(), collectMap()
+	doc.Transact(func(txn *Transaction) {
+		root.PushType(txn, arr)
+		root.PushType(txn, m)
+	})
+	if after := collectArr(); after != arrBefore {
+		t.Fatalf("array ForEach: %s detached, %s attached; want identical", arrBefore, after)
+	}
+	if after := collectMap(); after != mapBefore {
+		t.Fatalf("map ForEach: %s detached, %s attached; want identical", mapBefore, after)
+	}
+	if arrBefore != "[0=a 1=b 2=c]" {
+		t.Fatalf("array ForEach = %s, want [0=a 1=b 2=c]", arrBefore)
+	}
+}
+
 func TestDetachedMoveEmitsNoContentMove(t *testing.T) {
 	// Reordering staged content must not put ContentMove (a ygo wire
 	// extension, see #207) on the wire: other implementations mis-parse it,

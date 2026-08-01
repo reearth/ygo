@@ -362,6 +362,18 @@ func (m *YMap) ForEach(fn func(key string, value any)) {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
 	}
+	if m.detached() {
+		// Nested types are skipped, which is what the attached walk below does
+		// — it yields ContentAny values only.
+		for _, k := range m.prelimKeys {
+			v := m.prelim[k]
+			if _, isType := v.(sharedType); isType {
+				continue
+			}
+			fn(k, v)
+		}
+		return
+	}
 	t := &m.abstractType
 	for k, item := range t.itemMap {
 		if item.Deleted {

@@ -629,6 +629,19 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
 	}
+	if a.detached() {
+		// Nested types are skipped and do not advance the index, which is what
+		// the attached walk below does — it yields ContentAny values only.
+		index := 0
+		for _, v := range a.prelim {
+			if _, isType := v.(sharedType); isType {
+				continue
+			}
+			fn(index, v)
+			index++
+		}
+		return
+	}
 	t := &a.abstractType
 	index := 0
 	// Same shared position definition as Get/Slice: renderedStep decides
