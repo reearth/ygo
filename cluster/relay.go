@@ -76,6 +76,20 @@ type Sink interface {
 	// is applied to the room's crdt.Doc with the relay sentinel origin and
 	// rebroadcast to local peers; for KindAwareness it is merged into the
 	// room's awareness.Awareness with the relay sentinel origin.
+	//
+	// Inject MAY BE CALLED CONCURRENTLY for distinct rooms — a relay is not
+	// required to deliver every room from a single goroutine, and every Sink
+	// implementation must be safe for that regardless of which relay ends up
+	// attached. *websocket.Server is (it is the same path concurrent
+	// connections already take). Calls for the SAME room must still be
+	// serialised and delivered in publish order.
+	//
+	// This is a permission on the interface, not a guarantee every relay
+	// exercises: cluster/redis's Relay takes advantage of it — it delivers
+	// each room on its own goroutine so one slow room cannot stall inbound
+	// delivery for the others (#187) — but MemRelay does not (yet): it still
+	// delivers every room from one goroutine per node, so a Sink attached
+	// only to a MemRelay does not get that isolation from MemRelay itself.
 	Inject(ctx context.Context, in Inbound) error
 	// Rooms returns the names of rooms currently resident on this node.
 	Rooms() []string
@@ -92,6 +106,32 @@ type Relay interface {
 	// Publish broadcasts a locally-originated change to all other nodes. It is
 	// the caller's responsibility (the provider wiring) to drop changes whose
 	// Origin is the relay sentinel before calling Publish.
+	//
+	// Publish MAY BE CALLED CONCURRENTLY for distinct rooms — the provider
+	// (provider/websocket) drives it from one worker goroutine per room, not
+	// one per server, so calls for different rooms are expected to overlap.
+	// Every Relay implementation must be safe for that.
+	//
+	// The contract imposes NO per-room ordering: implementations must not
+	// rely on receiving a room's publishes in any particular order relative
+	// to each other, and must tolerate TWO CONCURRENT Publish calls for the
+	// SAME room. That same-room overlap is narrow and short-lived — it can
+	// only happen across a room's eviction/reload handoff, where a
+	// predecessor lane's final drain briefly overlaps with the successor
+	// lane's worker publishing for the same room name — but it is a real
+	// possibility a third-party Relay must not assume away (e.g. by keeping
+	// an unlocked per-room sequence counter, or appending to an
+	// unsynchronised buffer). This was reviewed and accepted as benign at the
+	// provider level because the Relay contract imposes no per-room ordering,
+	// KindSync payloads are commutative/idempotent V1 update blobs regardless
+	// of arrival order, and a stale KindAwareness payload is dropped by the
+	// receiving Awareness's own per-client clock gate — but a Relay
+	// implementation still needs to be safe for the concurrent calls
+	// themselves, independent of that payload-level reasoning. Both shipped
+	// relays already are: MemRelay.Publish snapshots the node list under its
+	// own mutex, releases it, then sends on per-node channels; cluster/redis's
+	// Publish deliberately takes no lock at all and uses atomics plus
+	// channels.
 	Publish(ctx context.Context, out Outbound) error
 	// Start binds a Sink for one node and begins delivering inbound changes to
 	// it. Each node (each Server) calls Start once; a relay shared across
@@ -101,9 +141,33 @@ type Relay interface {
 	Start(ctx context.Context, sink Sink) error
 	// RoomActivated tells the relay a room became resident on this node, so it
 	// may begin subscribing to / delivering that room's traffic. Idempotent.
+	//
+	// Implementations MUST tolerate a successor room instance activating the
+	// same name before a predecessor's RoomDeactivated for that name has been
+	// called. During a room's eviction/reload window, the websocket provider's
+	// teardown and lookup paths are decoupled enough that a fresh room
+	// instance can call RoomActivated(name) while the outgoing instance's
+	// teardown — which calls RoomDeactivated(name) — is still in flight, in
+	// either order. A Relay that reference-counts activations per name (both
+	// shipped relays do: cluster/redis via its activeRooms counter, MemRelay
+	// trivially since both calls are no-ops) rides this out correctly; one
+	// that treats RoomDeactivated as an unconditional unsubscribe would drop
+	// a live successor room's subscription.
 	RoomActivated(room string)
 	// RoomDeactivated tells the relay a room is no longer resident on this
-	// node. Idempotent.
+	// node. Idempotent. See RoomActivated's doc for the activation-overlap
+	// requirement this call is one half of.
+	//
+	// Implementations MUST tolerate a Publish for this room arriving AFTER
+	// RoomDeactivated has returned: the provider's teardown stops the room's
+	// outbound lane asynchronously and calls RoomDeactivated right away,
+	// without waiting for the lane worker's own final drain — which runs on
+	// its own goroutine and can still call Publish — to finish. A Relay that
+	// releases per-room PUBLISH-side state (a producer handle, a partition
+	// assignment, a stream key) here would drop that trailing update. Both
+	// shipped relays are unaffected: cluster/redis's RoomDeactivated only
+	// UNSUBSCRIBEs, which is inbound-only and never consulted by Publish;
+	// MemRelay no-ops both calls.
 	RoomDeactivated(room string)
 	// Close stops the relay and releases its resources. After Close, Publish
 	// returns ErrRelayClosed and no further inbound changes are delivered.

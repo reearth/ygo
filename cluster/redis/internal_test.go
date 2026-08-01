@@ -13,15 +13,48 @@ package redis
 import (
 	"bytes"
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/cluster"
+	"github.com/reearth/ygo/crdt"
 )
+
+// countingSink is a minimal cluster.Sink test double for internal-package
+// tests. It is deliberately not the redis_test package's fakeSink: that type
+// lives in package redis_test and is not visible from these package-redis
+// test files, which is exactly why this test needs its own.
+type countingSink struct {
+	mu       sync.Mutex
+	injected int
+}
+
+func (s *countingSink) Inject(_ context.Context, _ cluster.Inbound) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.injected++
+	return nil
+}
+
+func (s *countingSink) Rooms() []string { return nil }
+
+func (s *countingSink) GetAwareness(string) (*awareness.Awareness, bool) { return nil, false }
+
+func (s *countingSink) GetDoc(string) *crdt.Doc { return nil }
+
+func (s *countingSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.injected
+}
 
 // TestUnit_WireFormat_RoundTrip exercises encode → decode for the v1.21.0
 // wire format. A regression here typically means the four fields drifted
@@ -270,7 +303,235 @@ func newTestRelayNoStart() *Relay {
 		done:        make(chan struct{}),
 		startCtx:    context.Background(),
 		activeRooms: make(map[string]int),
+		workers:     make(map[string]*roomWorker),
 	}
+}
+
+// TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray is the #187-leak
+// regression test: a router-triggered miss for a room this relay is not (or
+// no longer) active for must NOT create a worker. Before this fix, the
+// router created a worker unconditionally on any miss, so a straggler
+// message arriving after RoomDeactivated already unsubscribed would
+// re-create a worker that nothing could ever reap (a later RoomDeactivated
+// for the same room just no-ops, since activeRooms is already back at
+// zero) — the exact unbounded per-room growth this task exists to stop.
+func TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray(t *testing.T) {
+	r := newTestRelayNoStart()
+	t.Cleanup(func() { close(r.done) })
+
+	w, ok := r.workerForInbound("never-activated")
+	assert.False(t, ok, "a miss for an inactive room must be reported as not-ok")
+	assert.Nil(t, w)
+
+	r.workersMu.Lock()
+	_, present := r.workers["never-activated"]
+	r.workersMu.Unlock()
+	assert.False(t, present, "a miss for an inactive room must not create a worker")
+}
+
+// TestUnit_WorkerForInbound_MissOnActiveRoom_Drops is the mirror image of
+// TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray, confirming the
+// router no longer distinguishes the two cases at all: a room this relay
+// counts as active (activeRooms>0) but that has no entry in r.workers still
+// drops on a miss, same as an inactive room. Before the router was simplified
+// to remove lazy worker recreation, this case used to call isRoomActive +
+// workerFor to recreate the worker — that was what made lazy recreation after an
+// explicit reap work (see the now-renamed
+// TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated below). Removing
+// that call means workerForInbound is a plain hit-or-drop lookup against
+// r.workers only; "active on the relay" and "resident in r.workers" are no
+// longer treated differently by the router.
+func TestUnit_WorkerForInbound_MissOnActiveRoom_Drops(t *testing.T) {
+	r := newTestRelayNoStart()
+	t.Cleanup(func() { close(r.done) })
+	r.mu.Lock()
+	r.activeRooms["room"] = 1
+	r.mu.Unlock()
+
+	w, ok := r.workerForInbound("room")
+	assert.False(t, ok, "a miss must be reported as not-ok even for an active room")
+	assert.Nil(t, w)
+
+	r.workersMu.Lock()
+	_, present := r.workers["room"]
+	r.workersMu.Unlock()
+	assert.False(t, present, "a miss must never create a worker, active room or not")
+}
+
+// TestInteg_RunSubscriber_UnrecognisedKind_DroppedNotInjected exercises the
+// real router hot path (runSubscriber -> decodeInbound -> workerForInbound ->
+// Push), not a helper in isolation, because that is exactly where the bug
+// lived: before this fix, an out-of-range cluster.Kind decoded off the wire
+// was pushed onto the room's lane unchecked, where Lane.Push's `else` branch
+// treats anything that isn't KindAwareness as a KindSync blob, and the
+// worker's drainLane then injects it with a hardcoded cluster.KindSync (see
+// worker.go's drainLane) — silently relabelling an unknown kind as a document
+// update instead of ignoring it. A garbage blob fed to
+// crdt.ApplyUpdateV1/MergeUpdatesV1 this way is not just mislabelled: per
+// TestLane_MergeFailure_DoesNotLose (internal/relaylane), a blob that fails to
+// merge makes every subsequent collapseLocked attempt on that room's lane
+// fail too, i.e. one malformed payload can jam legitimate updates for that
+// room behind it.
+//
+// This test publishes a payload with an out-of-range Kind through the real
+// Publish -> Redis pub/sub -> runSubscriber path and asserts the actual
+// observable contract: nothing reaches the Sink, and the drop is counted in
+// Stats().RouterDrops (mirroring the router's existing miss-drop, per the
+// fix's design) rather than silently disappearing.
+func TestInteg_RunSubscriber_UnrecognisedKind_DroppedNotInjected(t *testing.T) {
+	mr := miniredis.RunT(t)
+
+	pubClient := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = pubClient.Close() })
+	subClient := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = subClient.Close() })
+
+	pub, err := New(pubClient, Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pub.Close() })
+	require.NoError(t, pub.Start(context.Background(), &countingSink{}))
+
+	sink := &countingSink{}
+	sub, err := New(subClient, Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Close() })
+	require.NoError(t, sub.Start(context.Background(), sink))
+
+	pub.RoomActivated("room")
+	sub.RoomActivated("room")
+	require.Eventually(t, func() bool {
+		counts := mr.PubSubNumSub(DefaultChannelPrefix + "room")
+		return counts[DefaultChannelPrefix+"room"] >= 2
+	}, 2*time.Second, 5*time.Millisecond)
+
+	// cluster.Kind is a plain int with no wire-level enum enforcement, so a
+	// value outside {KindSync, KindAwareness} — e.g. a newer node's
+	// not-yet-understood third Kind, or corruption — can and does appear on
+	// the wire in a rolling deploy. Publish one directly.
+	require.NoError(t, pub.Publish(context.Background(), cluster.Outbound{
+		Room: "room", Kind: cluster.Kind(99), Data: []byte("not a real update"),
+	}))
+
+	require.Eventually(t, func() bool {
+		return sub.Stats().RouterDrops >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"an unrecognised kind must be dropped and counted in Stats().RouterDrops")
+
+	// Give any wrongful delivery every chance to land, then confirm it did
+	// not: this is the assertion that actually matters. Before the fix, this
+	// payload was pushed to the lane and injected as a mislabelled KindSync,
+	// so sink.count() would be 1 here.
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, 0, sink.count(),
+		"a payload with an unrecognised kind must never reach Sink.Inject")
+}
+
+// TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated replaces the former
+// TestInteg_StopWorker_LazyRecreateOnStillSubscribedRoom, whose name and
+// assertions described behaviour the router simplification above removed.
+// workerForInbound no longer creates a worker on a miss (see worker.go), so
+// an explicitly reaped room — stopWorker called
+// directly, leaving the Redis subscription and the activeRooms refcount
+// both untouched — now DROPS inbound messages instead of lazily recreating
+// its worker.
+//
+// RoomDeactivated's own stopWorker call always pairs with an UNSUBSCRIBE and
+// a refcount drop to zero, so "subscribed and active, but workerless" can
+// never legitimately arise through the exported API alone — that is why this
+// test lives here (package redis, where stopWorker is reachable) rather than
+// in redis_test: it calls stopWorker directly to simulate that state, then
+// verifies (1) a publish while reaped is dropped, not delivered, and (2)
+// only a full RoomDeactivated→RoomActivated cycle — the legitimate exported
+// path, which recreates the worker before resubscribing — restores delivery.
+func TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated(t *testing.T) {
+	mr := miniredis.RunT(t)
+
+	pubClient := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = pubClient.Close() })
+	subClient := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = subClient.Close() })
+
+	pub, err := New(pubClient, Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pub.Close() })
+	require.NoError(t, pub.Start(context.Background(), &countingSink{}))
+
+	sink := &countingSink{}
+	sub, err := New(subClient, Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Close() })
+	require.NoError(t, sub.Start(context.Background(), sink))
+
+	pub.RoomActivated("room")
+	sub.RoomActivated("room")
+	require.Eventually(t, func() bool {
+		counts := mr.PubSubNumSub(DefaultChannelPrefix + "room")
+		return counts[DefaultChannelPrefix+"room"] >= 2
+	}, 2*time.Second, 5*time.Millisecond)
+
+	sub.workersMu.Lock()
+	_, hadWorker := sub.workers["room"]
+	sub.workersMu.Unlock()
+	require.True(t, hadWorker, "precondition: RoomActivated must pre-create the worker")
+
+	sub.stopWorker("room")
+
+	sub.workersMu.Lock()
+	_, stillThere := sub.workers["room"]
+	sub.workersMu.Unlock()
+	require.False(t, stillThere, "stopWorker must remove the room's worker from the map")
+
+	// The Redis subscription and activeRooms refcount are both untouched by
+	// stopWorker: publishing now must be DROPPED, not lazily recreate the
+	// worker (that behaviour was removed by this task's carried-forward
+	// router simplification).
+	require.NoError(t, pub.Publish(context.Background(), cluster.Outbound{
+		Room: "room", Kind: cluster.KindSync, Data: []byte{0x09},
+	}))
+
+	// Give the message every chance to arrive if the old lazy-recreate
+	// behaviour still applied, then assert it did not: no delivery, no
+	// worker resurrected by the router.
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, 0, sink.count(),
+		"a message for a reaped-but-still-subscribed room must be dropped, not delivered")
+	sub.workersMu.Lock()
+	_, recreatedByMiss := sub.workers["room"]
+	sub.workersMu.Unlock()
+	require.False(t, recreatedByMiss, "a router miss must never recreate a worker")
+	// The real runSubscriber goroutine decoded this message and hit the
+	// workerForInbound miss above via the router's actual hot path (not a
+	// simulated call) — so this is a faithful check that the drop is
+	// counted, not just silent.
+	require.Equal(t, uint64(1), sub.Stats().RouterDrops,
+		"a router-dropped message must be counted in Stats().RouterDrops")
+
+	// Recovery requires the real exported lifecycle: a full deactivate
+	// (unsubscribes; stopWorker no-ops since the worker is already gone)
+	// followed by a reactivate (creates a fresh worker, then resubscribes).
+	pub.RoomDeactivated("room")
+	sub.RoomDeactivated("room")
+	pub.RoomActivated("room")
+	sub.RoomActivated("room")
+
+	sub.workersMu.Lock()
+	_, recreated := sub.workers["room"]
+	sub.workersMu.Unlock()
+	require.True(t, recreated, "RoomActivated after a full deactivate/reactivate cycle must recreate the worker")
+
+	// miniredis (not real Redis) needs a settle gap after a rapid
+	// unsubscribe/resubscribe cycle before it reliably delivers again — see
+	// the identical note in isolation_test.go's
+	// TestInteg_RoomDeactivated_DrainsBacklog; this is a test-double
+	// artifact, not a cluster/redis correctness issue.
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, pub.Publish(context.Background(), cluster.Outbound{
+		Room: "room", Kind: cluster.KindSync, Data: []byte{0x0A},
+	}))
+	require.Eventually(t, func() bool {
+		return sink.count() == 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"publish after a real deactivate/reactivate cycle must deliver")
 }
 
 // Sanity: ensure the closed.Store path doesn't trip race detector under

@@ -92,6 +92,27 @@ type StatelessInfo struct {
 // subsequent message processing for that peer.
 type StatelessHook func(info StatelessInfo)
 
+// applyOriginSentinel is the concrete type of the private per-call origin
+// Server.Apply stamps on its own transaction. Apply's doc.OnUpdate observer
+// compares an update's origin against ITS OWN instance of this type by == to
+// capture only the update(s) its own transact() calls produced — not a
+// concurrent relay injection or peer write landing on the same room.
+//
+// This type MUST stay a non-zero-size struct (the `_ byte` field is load-
+// bearing — do not remove it, and do not "simplify" this back to `struct{}`).
+// See cluster.go's relayOriginSentinel doc comment for the full mechanism:
+// in short, Go satisfies every *zero-size* allocation from the same
+// `runtime.zerobase` address, so a bare `new(struct{})` here once compared ==
+// to AttachRelay's own relay-echo sentinel (also a bare `new(struct{})`).
+// That had two consequences, both silent: (1) every Apply-driven write was
+// misidentified by the relay's echo guard as a self-echo and never
+// published to the cluster — permanent cross-node divergence; (2) a
+// concurrent relay-injected update (carrying the relay's sentinel as origin)
+// could be captured into the delta Apply returns to its caller, since `o !=
+// origin` below failed to exclude it. Distinct non-zero-size named types
+// for the two sentinels close both gaps structurally.
+type applyOriginSentinel struct{ _ byte }
+
 // Error sentinels returned by BroadcastUpdate, Apply, and CloseRoom.
 // Callers should compare with errors.Is rather than ==.
 var (
@@ -306,7 +327,7 @@ func (s *Server) Apply(
 	defer s.releaseInflight(rm)
 	rm.clearIdle() // #183: Apply mutates the doc immediately; no registration delay.
 
-	origin := new(struct{})
+	origin := &applyOriginSentinel{}
 	var (
 		captured   [][]byte
 		capturedMu sync.Mutex

@@ -1,3 +1,172 @@
+## v1.42.0
+
+Two contract changes for anyone with custom clustering code — nothing to do
+here if you only use shipped components. **`cluster.Sink.Inject` may now be
+called concurrently for distinct rooms** (same-room calls still stay
+serialised and in publish order) — this is what a custom `Sink` must handle.
+**`cluster.Relay.Publish` may now be called concurrently for distinct rooms,
+and briefly twice for the SAME room** during a room's eviction/reload
+handoff, with no per-room ordering guaranteed at all — this is what a custom
+`Relay` must handle. `*websocket.Server` (the shipped `Sink`), `MemRelay`, and
+`cluster/redis` (the shipped `Relay`s) are already safe for both; a
+third-party `Sink` or `Relay` written against the old single-caller
+assumption must confirm it is safe for concurrent use before upgrading.
+Neither permission is a guarantee every relay exercises: `cluster/redis`
+takes advantage of both, with a dedicated goroutine per room on each side,
+so one slow room's `Inject`/`Publish` call can no longer stall delivery for
+others (#187); `MemRelay`, the in-process reference relay, still delivers
+every room from one goroutine per node and does not (yet) get that isolation
+on either side.
+
+Also fixed, and arguably the more consequential bug: a pre-existing defect,
+shipped since v1.20.0 (the cluster relay's introduction), where `Server.Apply`
+and the relay's echo-guard sentinel could both be satisfied from the same
+address by Go's zero-size-allocation guarantee (`new(struct{})` twice), so the
+two "distinct" origin markers compared equal. Two silent consequences: the
+relay's echo guard mistook every `Apply`-driven write for its own echo and
+dropped it before it ever reached the wire — any deployment calling
+`Server.Apply` on a server with a relay attached has never actually
+replicated those writes to other nodes — and separately, a concurrent
+relay-injected update could bleed into the delta `Apply` returns to its own
+caller. Fixed by giving each sentinel its own named, non-zero-size type.
+
+The rest of the release is the performance/isolation half of the same
+change set (#187): relay delivery — inbound in `cluster/redis`, outbound in
+`provider/websocket` — used one shared queue for the whole node in each
+direction, so one slow room's `Inject`/`Publish` call stalled delivery for
+every other room. Each room now gets its own bounded lane and worker, so
+that specific stall is gone in both directions. A saturated lane coalesces
+its `KindSync` backlog (`crdt.MergeUpdatesV1`) instead of dropping it — a
+saturated awareness slot instead replaces the queued blob with the newest one
+(`AwarenessSuperseded`, not a drop, since awareness is idempotent heartbeat
+state). That coalescing is not free, and not fully isolated either: on both
+sides, once a room's backlog exceeds its cap, the merge runs synchronously,
+on the goroutine that's doing the enqueueing — the Transact commit-path
+goroutine outbound, `cluster/redis`'s single subscriber goroutine inbound.
+Outbound this is a private cost to that one room's commit path (never a
+block, just an occasional bounded merge). Inbound, because the subscriber
+goroutine is shared across every room on the node, a wedged room's merge
+attempt *can* still delay reading (and therefore delivering) other rooms'
+messages for as long as the merge takes — bounded and amortized while merges
+keep succeeding, unbounded while they keep failing (see #184 for the merge
+cost itself). None of this changes what Redis pub/sub itself guarantees:
+still at-most-once by Redis's own definition, with persistence healing a drop
+only on the room's next reload, which a hot room never gets. What actually
+changed is that a full lane can no longer arise from ordinary volume alone,
+so a hard drop now signals a failing merge specifically, not exhausted
+capacity — watch `Relay.Stats()` / `RelayStats()` as the health signal:
+`Coalesced`/`AwarenessSuperseded`/inbound-only `RouterDrops` are routine,
+alert on their rate; `HardDrops`/outbound-only `Dropped` should always be
+zero, alert on presence.
+
+One exception to that "should always be zero" rule: `Shutdown` cancels the
+relay context before closing peer connections and before the persistence
+drain, so peers can keep committing for the rest of shutdown — potentially
+seconds — after outbound relay delivery has already stopped. Whatever is
+still queued in a room's outbound lane at that point, or arrives afterward,
+is discarded on `Shutdown` without incrementing `Dropped` or `HardDrops`, so
+those counters reading zero does not mean nothing was lost across a
+`Shutdown`. This is pre-existing behaviour, not new in this release — the
+single shared outbound worker it replaces discarded the same way — but it is
+newly *mis*-documented if left unstated, since this release is what
+establishes `Dropped`/`HardDrops` as the "always zero, alert on presence"
+signal. A fix (draining the outbound lanes, or reordering `relayCancel`
+relative to connection-close/persistence-drain) is out of scope here — it
+needs its own change, since reordering also delays inbound shutdown.
+
+### Fixed
+
+- **`Server.Apply` writes were silently never relayed to other nodes, since
+  v1.20.0.** `Server.Apply` and `AttachRelay` each minted their origin
+  sentinel with `new(struct{})`; Go's zero-size-allocation guarantee let the
+  runtime satisfy both from the same `runtime.zerobase` address, so the two
+  pointers compared equal even though they were meant to be distinct
+  identities. The relay's echo guard misidentified every `Apply`-driven
+  commit as a self-echo and dropped it before publish; separately, a
+  concurrent relay-injected update could bleed into the delta `Apply` returns
+  to its own caller. Fixed by giving each sentinel its own named, non-zero-
+  size, unexported type.
+- **Head-of-line blocking in relay delivery, both directions**
+  ([#187](https://github.com/reearth/ygo/issues/187)). `cluster/redis`'s
+  subscriber called `Sink.Inject` synchronously in its receive loop, so one
+  slow room's `Inject` call stalled inbound delivery for every room on the
+  node; `provider/websocket` had the same defect outbound, via one shared
+  queue and worker for all rooms. Each room now gets its own bounded lane and
+  worker in both directions, so a slow `Inject`/`Publish` call for one room no
+  longer blocks any other room's delivery. `MemRelay` is not part of this fix
+  — it still delivers every room from a single per-node goroutine.
+- **Relay updates are coalesced instead of dropped under saturation.** A full
+  lane merges its queued `KindSync` backlog via `crdt.MergeUpdatesV1` rather
+  than dropping it (a full awareness slot instead replaces the queued blob,
+  counted as `AwarenessSuperseded`, not a drop). The previous outbound drop
+  was justified in-comment by "peers reconcile via sync step 1/2", which does
+  not hold for a hot room — reconciliation needs a room reload, and a room
+  with a connected client never reloads. Neither direction is merge-free:
+  outbound, the commit path never blocks but does occasionally merge, on the
+  caller's own goroutine; inbound, that same merge runs on `cluster/redis`'s
+  single subscriber goroutine, shared across every room, so a wedged room's
+  merge attempts can delay other rooms too (bounded/amortized while merges
+  succeed, unbounded while they keep failing — see #184 for the merge cost
+  itself). A hard drop remains possible on either side only when the merge
+  keeps failing.
+
+### Changed
+
+- **`cluster.Sink.Inject` may now be called concurrently for distinct rooms.**
+  Calls for the same room remain serialised and in publish order.
+  `*websocket.Server` is already safe; third-party `Sink` implementations must
+  confirm they are before relying on this. `cluster/redis` exercises the new
+  permission; `MemRelay` does not yet.
+- **`cluster.Relay.Publish` may now be called concurrently for distinct
+  rooms, and two concurrent calls for the SAME room are possible.**
+  `provider/websocket` drives `Publish` from one worker goroutine per room
+  (not one per server), so distinct rooms overlap by design; across a room's
+  eviction/reload handoff a predecessor lane's final drain can also briefly
+  overlap with the successor lane's worker publishing for the same room
+  name. Reviewed and accepted as benign — the `Relay` contract imposes no
+  per-room ordering, `KindSync` blobs are commutative/idempotent, and stale
+  awareness is dropped by the awareness clock gate — but a third-party
+  `Relay` built on the old single-caller assumption must confirm it is safe
+  for concurrent use, exactly as a custom `Sink` must. Both shipped relays
+  already are: `MemRelay.Publish` snapshots its node list under its own
+  mutex before sending; `cluster/redis`'s `Publish` takes no lock at all and
+  uses atomics plus channels.
+- `cluster/redis`'s package documentation states the at-most-once delivery
+  reality explicitly, including that persistence heals a dropped update only
+  on room reload and that idle residency (#183) lengthens that window rather
+  than shortening it. It also corrects two overclaims the doc previously
+  made: `Coalesced` non-zero is routine on any busy room (alert on its rate,
+  not its presence — this was already stated correctly in `Stats`' own doc,
+  just not in the package doc), and "one slow room never stalls delivery for
+  another" is now scoped to the delivery work itself rather than the shared
+  enqueue-time merge cost described above.
+- `cluster.Relay`'s `RoomActivated`/`RoomDeactivated` contract now documents
+  that implementers must tolerate a successor room activating a name before
+  the predecessor's deactivate call for that name lands (both shipped relays
+  already do, via reference-counting or no-op).
+
+### Added
+
+- `cluster/redis.Config.RoomQueueSize`, `cluster/redis.Relay.Stats()` (with
+  `Coalesced`/`AwarenessSuperseded`/`HardDrops`/`RouterDrops`), and
+  `websocket.Server.RelayStats()` (with `Coalesced`/`AwarenessSuperseded`/
+  `HardDrops`/`Dropped`). `relayDropped` (now `RelayStats.Dropped`) was
+  previously incremented and read nowhere, making outbound relay loss
+  invisible; `RouterDrops` is new inbound instrumentation with no prior
+  equivalent. Alert on `Coalesced`/`AwarenessSuperseded`/`RouterDrops` by
+  rate (routine); alert on `HardDrops`/`Dropped` by presence (should always
+  be zero). Monotonic for the life of the relay/server, but not guaranteed
+  exact under a couple of documented, benign race windows (never an
+  overcount, never a decrease).
+
+## Install
+
+```
+go get github.com/reearth/ygo@v1.42.0
+```
+
+See [CHANGELOG.md](https://github.com/reearth/ygo/blob/main/CHANGELOG.md) for full details.
+
 ## v1.41.0
 
 Three additions that together let an application build a real, bounded,

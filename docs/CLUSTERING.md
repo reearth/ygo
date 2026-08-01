@@ -177,6 +177,13 @@ Characteristics:
 
 - **Asynchronous delivery**: `Publish` enqueues to a per-node buffered channel
   drained by a goroutine; each node processes its deliveries in order.
+- **One goroutine per node, no per-room isolation**: `memNode.run` calls
+  `sink.Inject` inline, for every room, from that single per-node goroutine —
+  so a slow `Inject` for one room stalls delivery for **every other room**
+  on that node. This is exactly the head-of-line-blocking defect #187 fixed
+  for `cluster/redis` (each room gets its own worker there); `MemRelay` does
+  not (yet) get that isolation — it is the in-process reference
+  implementation, not a production transport.
 - **No per-room subscription**: `RoomActivated`/`RoomDeactivated` are no-ops;
   every node receives every room's traffic and applies only the rooms it hosts.
   (A production relay keyed by a real broker should subscribe per room.)
@@ -184,7 +191,9 @@ Characteristics:
   `Publish`/`Start` (`ErrRelayClosed`); `Publish` before any `Start` returns
   `ErrRelayNotStarted`.
 
-`MemRelay` is ideal for tests and single-process multi-server simulations. For a
+`MemRelay` is ideal for tests and single-process multi-server simulations —
+keep the one-goroutine-per-node head-of-line limitation above in mind if a
+simulation involves a deliberately slow `Sink.Inject` for one room. For a
 real cluster, implement `Relay` over your message bus (NATS, Redis Streams,
 Kafka, Google Pub/Sub, …): `Publish` serialises `Outbound{Room,Kind,Data}` to a
 subject/topic; the subscriber reconstructs an `Inbound` and calls
@@ -227,11 +236,58 @@ Notes:
   already drops sentinel-origin changes before `Publish`. If your broker echoes
   a publisher's own messages back, the sentinel makes that harmless — but you
   may exclude the publisher to save bandwidth.
-- `Publish` should be non-blocking or bounded; a slow broker must not stall the
-  CRDT transaction that triggered it.
+- `Publish` should still be non-blocking or bounded — a slow broker is bad
+  practice regardless — but since #187 it no longer stalls the CRDT
+  transaction that triggered it directly: the provider buffers per room and
+  drives `Publish` from that room's own worker goroutine, off the Transact
+  commit path. What a slow, unbounded `Publish` *does* stall is delivery for
+  that one room specifically (and, once its lane saturates, the room's own
+  commit path pays an occasional bounded merge cost — see "Observability:
+  `Stats()`" below for the vocabulary this shows up under).
+- `Publish` may be called **concurrently for distinct rooms**, and — briefly,
+  across a room's eviction/reload handoff — **twice concurrently for the same
+  room**. See "Contract: concurrent calls" below; your `Relay` must be safe
+  for both.
 - Combine the relay with a `PersistenceAdapter` /
   [`VersionedPersistence`](PERSISTENCE.md) for durability — the relay handles
   live fan-out (including awareness), persistence handles restart recovery.
+
+### Contract: concurrent calls
+
+Both halves of `cluster.Relay`/`cluster.Sink` now permit concurrency that a
+relay written against the pre-#187 provider could safely assume away.
+Anyone implementing a custom `Relay` (or a custom `Sink`, though the shipped
+`*websocket.Server` already handles this) needs both of these:
+
+- **`Sink.Inject` may be called concurrently for distinct rooms.** Calls for
+  the *same* room must still be serialised and delivered in publish order.
+  `*websocket.Server` is already safe for this (it is the same path
+  concurrent peer connections already take). This is a permission the
+  interface grants, not a guarantee every relay exercises: `cluster/redis`
+  takes advantage of it (one worker per room, so one slow room's `Inject`
+  can't stall another's); `MemRelay` does not (see its Characteristics
+  above).
+- **`Relay.Publish` may be called concurrently for distinct rooms, and two
+  concurrent calls for the SAME room are possible.** `provider/websocket`
+  drives `Publish` from one worker goroutine per room, so distinct rooms are
+  expected to overlap; additionally, across a room's eviction/reload
+  handoff, a predecessor lane's final drain can briefly overlap with the
+  successor lane's worker publishing for the same room name. Unlike
+  `Inject`, this means `Publish` implementations must tolerate that
+  same-room overlap too — the contract imposes no per-room ordering on
+  `Publish` at all. This was reviewed and accepted as benign because
+  `KindSync` payloads are commutative/idempotent V1 update blobs regardless
+  of arrival order, and a stale `KindAwareness` payload is dropped by the
+  receiving `Awareness`'s own per-client clock gate — but a `Relay`
+  implementation still has to be safe for the concurrent calls themselves.
+  Both shipped relays already are: `MemRelay.Publish` snapshots its node
+  list under its own mutex, releases it, then sends on per-node channels;
+  `cluster/redis`'s `Publish` deliberately takes no lock at all and uses
+  atomics plus channels.
+
+A relay that appends to an unsynchronised buffer, or keeps an unlocked
+per-room sequence counter, on either the inbound or outbound side, is not
+safe under this contract and must add its own synchronisation.
 
 ---
 
@@ -285,9 +341,16 @@ the queue is full, `Publish` blocks until a slot frees, the caller's
 ctx cancels, the relay closes, or the bound start context (the one
 passed to `AttachRelay`/`Start`) is cancelled — surfacing as a clean
 `ErrRelayClosed` rather than hanging. The inbound side has its own
-buffer too (`Config.ChannelSize`, default 1024); size it for the
-busiest expected room since go-redis silently drops messages when this
-fills.
+buffer too (`Config.ChannelSize`, default 1024): go-redis feeds every
+subscribed message onto it and only drops a message if a send to it
+blocks for the client's `ChanSendTimeout` (go-redis defaults this to
+60 seconds — not immediately on a full buffer). Since #187 the
+subscriber is a thin router that decodes and hands each message
+straight to its room's lane (`Lane.Push`, which never blocks) without
+ever calling `Sink.Inject` itself, so the channel should no longer
+back up from a slow `Inject` in the first place; raise `ChannelSize`
+only if you expect bursts large enough to outrun that per-room
+hand-off.
 
 **Reference-counted activation.** `RoomActivated` / `RoomDeactivated`
 are reference-counted at the relay layer, so duplicate calls collapse
@@ -316,6 +379,55 @@ how Hocuspocus's `extension-redis` is conventionally deployed.
 If a deployment needs at-least-once delivery (no catch-up dependency on
 persistence), a Redis Streams-based adapter (`XADD` + last-read-id
 tracking) would replace this one. Tracked separately; not in v1.21.0.
+
+**`Shutdown` discards queued outbound updates, uncounted.** `Server.Shutdown`
+cancels the relay context before closing peer connections and before the
+persistence drain, so peers can keep committing for the rest of shutdown —
+potentially seconds — after outbound relay delivery has already stopped.
+Anything still queued in a room's outbound lane at that point, or enqueued
+afterward, is discarded with neither `Dropped` nor `HardDrops` incrementing:
+those counters reading zero after a `Shutdown` does not mean nothing was
+lost. This is pre-existing behaviour (the single shared outbound worker it
+replaced discarded the same way), not a regression from #187 — but it is
+worth calling out explicitly here, since the `Stats()`/`RelayStats()`
+section above establishes those same counters as the "always zero, alert on
+presence" signal for every other code path.
+
+### Observability: `Stats()`
+
+Since #187, both sides of the relay expose health counters — watch these,
+not just error logs, since a saturated lane degrades silently otherwise:
+
+- **Inbound** — `cluster/redis.Relay.Stats()` returns `Coalesced`,
+  `AwarenessSuperseded`, `HardDrops`, and `RouterDrops`.
+- **Outbound** — `websocket.Server.RelayStats()` returns `Coalesced`,
+  `AwarenessSuperseded`, `HardDrops`, and `Dropped`.
+
+Alerting posture is the same on both sides:
+
+- `HardDrops` (inbound and outbound) and `Dropped` (outbound) **should
+  always be zero** — alert on presence. They mean an update was actually
+  lost and nodes may have diverged.
+- `Coalesced` and `AwarenessSuperseded` are **routine** on a busy room —
+  they increment on ordinary backlog merges / superseded heartbeats, well
+  before a lane is anywhere near saturated. Alert on their *rate* trending
+  up, not on their mere presence.
+- `RouterDrops` (inbound only) is likewise **routine** under ordinary room
+  churn — a message for a room this node no longer hosts arriving just
+  after `RoomDeactivated`, or one whose `Kind` this node does not recognise.
+  Alert on its rate, not its presence.
+
+`Coalesced`, `AwarenessSuperseded`, and `HardDrops` are **monotonic but not
+exact**: they are guaranteed to never decrease across the life of the
+relay/server, but a small number of documented, benign race windows around
+room retirement can *undercount* a value (never overcount, never decrease
+relative to a total already returned). See `Relay.Stats()`'s and
+`RelayStats()`'s own doc comments for the exact windows if you need the
+detail.
+
+`RouterDrops` (inbound) and `Dropped` (outbound) are different: each is a
+single atomic counter on a direct increment path with no fold-on-retirement
+step, so both are **exact**, not just monotonic.
 
 ### What's *not* in this adapter
 

@@ -21,6 +21,7 @@ import (
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/reearth/ygo/internal/relaylane"
 	"github.com/reearth/ygo/internal/roomname"
 	ygsync "github.com/reearth/ygo/sync"
 )
@@ -343,6 +344,23 @@ type room struct {
 	// by the room's mu via registerRelayObservers / unregisterRelayObservers.
 	relayUnsub []func()
 
+	// relayLane is the specific *relayRoomLane THIS room instance created via
+	// ensureRelayLane (nil when no relay is attached). Room eviction is a
+	// two-step process (see peer.go's handleDisconnect / idle_sweep.go's
+	// evictIdleRoom): the room is removed from s.rooms first, and
+	// teardownRelayRoom — which retires this lane — only runs later, after a
+	// possibly-slow persistence flush. A client can reconnect and create a
+	// BRAND NEW room instance for the same name in that window, and that new
+	// instance's own registerRelayObservers/ensureRelayLane call would see
+	// this (predecessor) instance's lane still sitting in Server.relayLanes
+	// keyed by the same room name. Remembering exactly which lane THIS
+	// instance owns lets stopRelayLane retire the correct one by identity
+	// (s.relayLanes[name] == this pointer) rather than by name alone — by
+	// name alone it could either wrongly reuse a predecessor's already-stale
+	// lane, or wrongly delete/close a successor's live one. Guarded by the
+	// room's mu, set once by registerRelayObservers alongside relayUnsub.
+	relayLane *relayRoomLane
+
 	// idleSince records when this room last went empty while
 	// Server.RoomIdleTimeout > 0 (#183). Zero value means "not idle" — either
 	// the room has peers, or RoomIdleTimeout is 0 (eager-evict mode, in which
@@ -361,7 +379,7 @@ type room struct {
 	// inflight counts callers that have obtained this room via getOrCreateRoom
 	// but have not yet either registered a peer (ServeHTTP join path) or
 	// finished their synchronous use of the room (relay Inject / admin Apply).
-	// Guarded by mu. Incremented under s.rmu in getOrCreateRoomLocked — atomic
+	// Guarded by mu. Incremented under s.rmu in createRoomPlaceholder — atomic
 	// with the room lookup/publish, so an eviction that holds s.rmu cannot
 	// interleave between a caller's lookup and its increment (#193 review).
 	// evictIdleRoom refuses to evict while inflight > 0: this closes the race
@@ -404,21 +422,41 @@ type Server struct {
 	// nodes and applies inbound changes. Set once via AttachRelay. relayCtx /
 	// relayCancel govern the relay's delivery lifetime; cancelled on Shutdown.
 	// relaySentinel is the origin stamped on relay-injected changes so the
-	// per-room observers can drop echoes (pointer-identity guard).
+	// per-room observers can drop echoes (identity guard: a *relayOriginSentinel,
+	// see that type's doc comment in cluster.go for why it must never be a
+	// zero-size type).
 	//
 	// relayMu guards the attach handshake: AttachRelay only commits s.relay
 	// after relay.Start succeeds, so a Start failure leaves the server
 	// unattached and the call is retryable (no sync.Once latching a partial
-	// attach). relayOut is the bounded outbound queue the CRDT observers
-	// enqueue onto; a dedicated worker drains it and drives relay.Publish so
-	// the commit path never blocks on a slow relay. See cluster.go.
+	// attach). Outbound delivery (#187) is one lane + worker PER ROOM rather
+	// than one shared queue, so a relay that is slow for one room cannot
+	// stall Publish for any other room. relayLanesMu guards relayLanes;
+	// enqueueRelayOutbound (the CRDT commit path) only ever takes its read
+	// side — lane creation (ensureRelayLane, room-creation time) and teardown
+	// (stopRelayLane, room-eviction time) take the write side. See cluster.go.
 	relayMu       sync.Mutex
 	relay         clusterRelay
 	relaySentinel any
 	relayCtx      context.Context
 	relayCancel   context.CancelFunc
-	relayOut      chan relayOutbound
+	relayLanesMu  sync.RWMutex
+	relayLanes    map[string]*relayRoomLane
 	relayDropped  atomic.Uint64
+
+	// relayRetired accumulates the Coalesced/AwarenessSuperseded/HardDrops of
+	// every outbound lane this server has ever retired, folded in (under
+	// relayLanesMu, already held for the delete/replace) at retirement time —
+	// mirrors cluster/redis's Relay.retired field for the identical reason:
+	// without this, a room's counters would simply vanish from RelayStats()
+	// the moment its lane is retired, letting the running totals go
+	// backwards. There are TWO retirement sites, both folding into this same
+	// field: stopRelayLane (ordinary teardown — idle eviction, last peer
+	// disconnects) and ensureRelayLane's predecessor-displacement handoff
+	// (the reconnect-during-teardown race — see ensureRelayLane's doc). See
+	// RelayStats' doc in cluster.go for the monotonic-not-exact guarantee
+	// this buys.
+	relayRetired relaylane.Stats
 
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{} // closed by Shutdown
