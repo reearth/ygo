@@ -44,19 +44,25 @@ relay identifier.
 
 **Performance:** encoding is slower, because `Encoder.WriteVarString` now runs
 a `utf8.ValidString` pass over every string on every encode. The committed,
-CI-gating benchmark, `BenchmarkEncodeStateAsUpdateV1`, measured **+8.63%**
-(n=10). That benchmark is a worst case rather than a typical one:
-`buildTextDoc(1000)` performs 1000 one-character inserts, each in its own
-transaction, so the encoded document is 1000 items each holding a one-byte
-string — maximum validation call count, with no string length at all to
-amortize each call's fixed overhead over. `BenchmarkEncodeStateAsUpdateV1_Bulk`,
-also committed, encodes the same total byte count built as a single bulk
-insert instead of 1000 tiny ones — the shape most real documents actually
-have — and measured **+2.86%** (n=10). Allocations are unchanged in both
-cases. `ApplyUpdateV1` (decode), the heavier path at roughly 115µs, moves
-only about +1.2%, since the decode side already validated UTF-8 before this
-release. This is not rounded down to "negligible": it is a real, measured
-cost, worst on documents built from many tiny string items.
+CI-gating benchmark, `BenchmarkEncodeStateAsUpdateV1`, measured **+7.45%**
+(n=10, quiet machine). This benchmark's result is noticeably sensitive to
+what else is running on the machine at the time — repeated n=10 runs have
+landed anywhere from roughly flat to the high single digits depending on
+background load — so +7.45% should be read as a representative order of
+magnitude rather than a precise constant; treat it as "mid-single-digit to
+high-single-digit percent," not a number good to two decimal places. That
+benchmark is also a worst case rather than a typical one: `buildTextDoc(1000)`
+performs 1000 one-character inserts, each in its own transaction, so the
+encoded document is 1000 items each holding a one-byte string — maximum
+validation call count, with no string length at all to amortize each call's
+fixed overhead over. `BenchmarkEncodeStateAsUpdateV1_Bulk`, also committed,
+encodes the same total byte count built as a single bulk insert instead of
+1000 tiny ones — the shape most real documents actually have — and measured
+**+2.86%** (n=10). Allocations are unchanged in both cases. `ApplyUpdateV1`
+(decode), the heavier path at roughly 115µs, moves only about +1.2%, since
+the decode side already validated UTF-8 before this release. This is not
+rounded down to "negligible": it is a real, measured cost, worst on documents
+built from many tiny string items.
 
 **Why we're paying it:** most of this cost buys defence-in-depth rather than
 closing a real gap. Every string in a document tree already passes either a
