@@ -357,6 +357,48 @@ func TestUnit_YXmlElement_SetAttribute_Detached_RejectsInvalidUTF8(t *testing.T)
 	})
 }
 
+// TestUnit_YXmlElement_SetAttribute_PanicNamesCallSite guards the seam
+// extracted between SetAttribute and SetAttributeValue: both now delegate to
+// an unexported setAttributeValue(op, ...), and the panic must always name
+// whichever exported method the caller actually invoked, not the shared
+// helper. Previously SetAttribute validated its string value itself and then
+// handed off to SetAttributeValue, which validated it a second time.
+func TestUnit_YXmlElement_SetAttribute_PanicNamesCallSite(t *testing.T) {
+	bad := string([]byte{0xff})
+	newAttachedElement := func() (*Doc, *YXmlElement) {
+		doc := New()
+		frag := doc.GetXmlFragment("f")
+		el := NewYXmlElement("div")
+		doc.Transact(func(txn *Transaction) { frag.InsertElement(txn, 0, el) })
+		return doc, el
+	}
+
+	t.Run("SetAttribute bad key", func(t *testing.T) {
+		doc, el := newAttachedElement()
+		requirePanicsWithMessage(t, "crdt: YXmlElement.SetAttribute: key: invalid UTF-8", func() {
+			doc.Transact(func(txn *Transaction) { el.SetAttribute(txn, bad, "v") })
+		})
+	})
+	t.Run("SetAttribute bad value", func(t *testing.T) {
+		doc, el := newAttachedElement()
+		requirePanicsWithMessage(t, "crdt: YXmlElement.SetAttribute: value: invalid UTF-8", func() {
+			doc.Transact(func(txn *Transaction) { el.SetAttribute(txn, "k", bad) })
+		})
+	})
+	t.Run("SetAttributeValue bad key", func(t *testing.T) {
+		doc, el := newAttachedElement()
+		requirePanicsWithMessage(t, "crdt: YXmlElement.SetAttributeValue: key: invalid UTF-8", func() {
+			doc.Transact(func(txn *Transaction) { el.SetAttributeValue(txn, bad, "v") })
+		})
+	})
+	t.Run("SetAttributeValue bad value", func(t *testing.T) {
+		doc, el := newAttachedElement()
+		requirePanicsWithMessage(t, "crdt: YXmlElement.SetAttributeValue: value: invalid UTF-8", func() {
+			doc.Transact(func(txn *Transaction) { el.SetAttributeValue(txn, "k", bad) })
+		})
+	})
+}
+
 // TestUnit_YXml_ValidUnicodeStillWorks is the positive companion: emoji,
 // non-Latin scripts and combining marks must still work as node names and
 // attribute keys/values, both attached and detached.
