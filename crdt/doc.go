@@ -87,7 +87,12 @@ func WithAutoLoad(v bool) DocOption { return func(d *Doc) { d.autoLoad = v } }
 func WithShouldLoad(v bool) DocOption { return func(d *Doc) { d.shouldLoad = v } }
 
 // WithCollectionID sets an optional subdocument collection identifier.
-func WithCollectionID(id string) DocOption { return func(d *Doc) { d.collectionID = id } }
+func WithCollectionID(id string) DocOption {
+	return func(d *Doc) {
+		checkUTF8("WithCollectionID", "id", id)
+		d.collectionID = id
+	}
+}
 
 // defaultMaxPendingItems is the default cap on items parked in the per-doc
 // pending queue waiting for out-of-order dependencies. Matches the per-update

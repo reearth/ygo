@@ -163,6 +163,30 @@ func TestUnit_YText_RejectsInvalidUTF8(t *testing.T) {
 	})
 }
 
+// TestUnit_YText_ApplyDelta_ValidatesWholeSliceBeforeApplying guards the
+// documented all-or-nothing contract on YText.ApplyDelta (see its doc
+// comment): the ENTIRE delta slice must be validated before ANY op is
+// applied, because Transact releases the doc lock on panic but does not roll
+// back mutations already made. A delta whose first op is valid and whose
+// second op is invalid must panic AND leave the document completely
+// untouched — if validation happened op-by-op inside the apply loop instead,
+// the first (valid) Insert would already have committed, with observers
+// having already fired, before the panic on the second op.
+func TestUnit_YText_ApplyDelta_ValidatesWholeSliceBeforeApplying(t *testing.T) {
+	bad := string([]byte{0xff})
+	d := New()
+	txt := d.GetText("t")
+	requirePanicsWithInvalidUTF8(t, func() {
+		d.Transact(func(txn *Transaction) {
+			txt.ApplyDelta(txn, []Delta{
+				{Op: DeltaOpInsert, Insert: "hello"},
+				{Op: DeltaOpInsert, Insert: bad},
+			})
+		})
+	})
+	require.Empty(t, txt.ToString(), "the valid leading op must not be committed")
+}
+
 // TestUnit_YMap_Set_Detached_ValidUTF8MaterialisesOnAttach is the companion
 // positive case: a detached map built with valid (including decomposed
 // combining-mark) content must still stage correctly and materialise
@@ -204,8 +228,14 @@ func TestUnit_Doc_RootNamesRejectInvalidUTF8(t *testing.T) {
 	t.Run("WithGUID", func(t *testing.T) {
 		requirePanicsWithInvalidUTF8(t, func() { New(WithGUID(bad)) })
 	})
+	t.Run("WithCollectionID", func(t *testing.T) {
+		requirePanicsWithInvalidUTF8(t, func() { New(WithCollectionID(bad)) })
+	})
 	t.Run("valid unicode name still works", func(t *testing.T) {
 		require.NotPanics(t, func() { New().GetText("документ 📄") })
+	})
+	t.Run("valid unicode collection id still works", func(t *testing.T) {
+		require.NotPanics(t, func() { New(WithCollectionID("документ 📄")) })
 	})
 }
 
