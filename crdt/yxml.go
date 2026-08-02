@@ -321,6 +321,8 @@ func (e *YXmlElement) InsertText(txn *Transaction, index int, txt *YXmlText) {
 // SetAttributeValue; Yjs stores attribute values typed, and y-prosemirror
 // round-trips them typed.
 func (e *YXmlElement) SetAttribute(txn *Transaction, key, value string) {
+	checkUTF8("YXmlElement.SetAttribute", "key", key)
+	checkUTF8("YXmlElement.SetAttribute", "value", value)
 	e.SetAttributeValue(txn, key, value)
 }
 
@@ -328,6 +330,8 @@ func (e *YXmlElement) SetAttribute(txn *Transaction, key, value string) {
 // (string, number, bool, …), preserving the value type on the wire exactly as
 // Yjs's YXmlElement.setAttribute does.
 func (e *YXmlElement) SetAttributeValue(txn *Transaction, key string, value any) {
+	checkUTF8("YXmlElement.SetAttributeValue", "key", key)
+	checkAnyUTF8("YXmlElement.SetAttributeValue", "value", value)
 	t := &e.abstractType
 	if t.detached() {
 		// Store the wire-normalised value (int -> int64, the same transform
@@ -562,6 +566,7 @@ func (t *YXmlText) toXMLLocked() string {
 // NewYXmlElement creates a standalone YXmlElement ready to be inserted into a
 // YXmlFragment or another YXmlElement.
 func NewYXmlElement(nodeName string) *YXmlElement {
+	checkUTF8("NewYXmlElement", "nodeName", nodeName)
 	e := &YXmlElement{NodeName: nodeName}
 	e.itemMap = make(map[string]*Item)
 	e.owner = e

@@ -241,3 +241,107 @@ func TestUnit_Transaction_RootNamesRejectInvalidUTF8(t *testing.T) {
 		})
 	})
 }
+
+// TestUnit_YXml_RejectsInvalidUTF8 guards the three XML entry points that
+// write a caller-supplied string to the wire: the node name passed to
+// NewYXmlElement, and the attribute key/value pairs passed to SetAttribute
+// and SetAttributeValue. NodeName is also an exported field a caller can
+// assign directly, bypassing NewYXmlElement entirely — that path is NOT
+// guarded here; Encoder.WriteVarString (Task 1) is the deliberate backstop
+// for it, since adding a setter or reflection here would be chasing an
+// unreachable corner for a struct field Yjs itself exposes as public.
+func TestUnit_YXml_RejectsInvalidUTF8(t *testing.T) {
+	bad := string([]byte{0xff})
+	t.Run("NewYXmlElement node name", func(t *testing.T) {
+		requirePanicsWithInvalidUTF8(t, func() { NewYXmlElement(bad) })
+	})
+	t.Run("SetAttribute key and value", func(t *testing.T) {
+		doc := New()
+		frag := doc.GetXmlFragment("f")
+		el := NewYXmlElement("div")
+		doc.Transact(func(txn *Transaction) { frag.InsertElement(txn, 0, el) })
+
+		requirePanicsWithInvalidUTF8(t, func() {
+			doc.Transact(func(txn *Transaction) { el.SetAttribute(txn, bad, "v") })
+		})
+		requirePanicsWithInvalidUTF8(t, func() {
+			doc.Transact(func(txn *Transaction) { el.SetAttribute(txn, "k", bad) })
+		})
+		_, ok := el.GetAttribute("k")
+		require.False(t, ok, "no attribute may be committed by a rejected call")
+	})
+	t.Run("SetAttributeValue nested", func(t *testing.T) {
+		doc := New()
+		frag := doc.GetXmlFragment("f2")
+		el := NewYXmlElement("div")
+		doc.Transact(func(txn *Transaction) { frag.InsertElement(txn, 0, el) })
+		requirePanicsWithInvalidUTF8(t, func() {
+			doc.Transact(func(txn *Transaction) {
+				el.SetAttributeValue(txn, "k", []any{bad})
+			})
+		})
+	})
+}
+
+// TestUnit_YXmlElement_SetAttribute_Detached_RejectsInvalidUTF8 closes the
+// same coverage gap Task 3 hit for YMap.Set: SetAttributeValue has an early
+// `if t.detached()` branch that buffers into prelimAttrs, and Task 3's own
+// history shows validation placed AFTER such a branch lets bad input sail
+// through the buffer and materialise unvalidated at attach. Exercise the
+// detached path directly (an element that was never inserted into a
+// fragment) for both SetAttribute and SetAttributeValue, on both key and
+// value.
+func TestUnit_YXmlElement_SetAttribute_Detached_RejectsInvalidUTF8(t *testing.T) {
+	bad := string([]byte{0xff})
+	doc := New()
+
+	t.Run("SetAttribute key", func(t *testing.T) {
+		el := NewYXmlElement("div")
+		require.True(t, el.detached())
+		requirePanicsWithInvalidUTF8(t, func() {
+			doc.Transact(func(txn *Transaction) { el.SetAttribute(txn, bad, "v") })
+		})
+		_, ok := el.GetAttribute(bad)
+		require.False(t, ok, "detached element must be untouched after a rejected call")
+	})
+	t.Run("SetAttribute value", func(t *testing.T) {
+		el := NewYXmlElement("div")
+		requirePanicsWithInvalidUTF8(t, func() {
+			doc.Transact(func(txn *Transaction) { el.SetAttribute(txn, "k", bad) })
+		})
+		_, ok := el.GetAttribute("k")
+		require.False(t, ok)
+	})
+	t.Run("SetAttributeValue nested value", func(t *testing.T) {
+		el := NewYXmlElement("div")
+		requirePanicsWithInvalidUTF8(t, func() {
+			doc.Transact(func(txn *Transaction) {
+				el.SetAttributeValue(txn, "k", []any{bad})
+			})
+		})
+		_, ok := el.GetAttribute("k")
+		require.False(t, ok)
+	})
+}
+
+// TestUnit_YXml_ValidUnicodeStillWorks is the positive companion: emoji,
+// non-Latin scripts and combining marks must still work as node names and
+// attribute keys/values, both attached and detached.
+func TestUnit_YXml_ValidUnicodeStillWorks(t *testing.T) {
+	combining := "e" + "́"
+	require.NotPanics(t, func() { NewYXmlElement("документ📄") })
+
+	doc := New()
+	frag := doc.GetXmlFragment("f")
+	el := NewYXmlElement("タイトル")
+	require.NotPanics(t, func() {
+		doc.Transact(func(txn *Transaction) {
+			frag.InsertElement(txn, 0, el)
+			el.SetAttribute(txn, "🔑", "wörld")
+			el.SetAttributeValue(txn, "n", combining)
+		})
+	})
+	v, ok := el.GetAttribute("🔑")
+	require.True(t, ok)
+	require.Equal(t, "wörld", v)
+}
