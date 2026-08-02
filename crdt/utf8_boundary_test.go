@@ -100,6 +100,66 @@ func TestUnit_YMap_Set_Detached_RejectsInvalidUTF8(t *testing.T) {
 	})
 }
 
+func TestUnit_YText_RejectsInvalidUTF8(t *testing.T) {
+	bad := string([]byte{0xff})
+	newDoc := func() (*Doc, *YText) {
+		d := New()
+		return d, d.GetText("t")
+	}
+
+	t.Run("Insert content", func(t *testing.T) {
+		d, txt := newDoc()
+		requirePanicsWithInvalidUTF8(t, func() {
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 0, bad, nil) })
+		})
+		require.Empty(t, txt.ToString())
+	})
+	t.Run("Insert attrs value", func(t *testing.T) {
+		d, txt := newDoc()
+		requirePanicsWithInvalidUTF8(t, func() {
+			d.Transact(func(txn *Transaction) {
+				txt.Insert(txn, 0, "ok", Attributes{"bold": bad})
+			})
+		})
+		require.Empty(t, txt.ToString())
+	})
+	t.Run("Format attribute key", func(t *testing.T) {
+		d, txt := newDoc()
+		d.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "hello", nil) })
+		requirePanicsWithInvalidUTF8(t, func() {
+			d.Transact(func(txn *Transaction) { txt.Format(txn, 0, 5, Attributes{bad: "x"}) })
+		})
+	})
+	t.Run("InsertEmbed value", func(t *testing.T) {
+		d, txt := newDoc()
+		requirePanicsWithInvalidUTF8(t, func() {
+			d.Transact(func(txn *Transaction) {
+				txt.InsertEmbed(txn, 0, map[string]any{"src": bad}, nil)
+			})
+		})
+	})
+	t.Run("ApplyDelta insert", func(t *testing.T) {
+		d, txt := newDoc()
+		requirePanicsWithInvalidUTF8(t, func() {
+			d.Transact(func(txn *Transaction) {
+				txt.ApplyDelta(txn, []Delta{{Op: DeltaOpInsert, Insert: bad}})
+			})
+		})
+		require.Empty(t, txt.ToString())
+	})
+	t.Run("ApplyDelta attributes", func(t *testing.T) {
+		d, txt := newDoc()
+		requirePanicsWithInvalidUTF8(t, func() {
+			d.Transact(func(txn *Transaction) {
+				txt.ApplyDelta(txn, []Delta{{
+					Op: DeltaOpInsert, Insert: "ok", Attributes: Attributes{"b": bad},
+				}})
+			})
+		})
+		require.Empty(t, txt.ToString())
+	})
+}
+
 // TestUnit_YMap_Set_Detached_ValidUTF8MaterialisesOnAttach is the companion
 // positive case: a detached map built with valid (including decomposed
 // combining-mark) content must still stage correctly and materialise
