@@ -1,0 +1,81 @@
+{
+  "fixtures": [
+    {
+      "name": "map_with_text_child",
+      "description": "Y.Map holding a Y.Text, built detached and attached last (a notebook cell).",
+      "clientID": 3735928559,
+      "updateV1": "0105effdb6f50d0007010563656c6c73012800effdb6f50d000963656c6c5f747970650177086d61726b646f776e2700effdb6f50d0006736f75726365020400effdb6f50d020a636f616368206e6f74652700effdb6f50d00086d657461646174610100",
+      "expectedJSON": "{\"cells\":[{\"cell_type\":\"markdown\",\"source\":\"coach note\",\"metadata\":{}}]}"
+    },
+    {
+      "name": "text_child_only",
+      "description": "A bare Y.Text pushed into an array, built detached.",
+      "clientID": 3735928559,
+      "updateV1": "0102effdb6f50d00070104726f6f74020400effdb6f50d000568656c6c6f00",
+      "expectedJSON": "{\"root\":[\"hello\"]}"
+    },
+    {
+      "name": "two_cells_pushed_in_sequence",
+      "description": "Two notebook cells pushed into the same array — the second push must anchor after the first cell, not at the list head.",
+      "clientID": 3735928559,
+      "updateV1": "0106effdb6f50d0007010563656c6c73012700effdb6f50d0006736f75726365020400effdb6f50d010a66697273742063656c6c87effdb6f50d00012700effdb6f50d0c06736f75726365020400effdb6f50d0d0b7365636f6e642063656c6c00",
+      "expectedJSON": "{\"cells\":[{\"source\":\"first cell\"},{\"source\":\"second cell\"}]}"
+    },
+    {
+      "name": "pushtype_after_plain_values",
+      "description": "A nested map pushed after plain values — PushType anchors after the ContentAny item.",
+      "clientID": 3735928559,
+      "updateV1": "0103effdb6f50d00080104726f6f740177016187effdb6f50d00012800effdb6f50d01016b0177017600",
+      "expectedJSON": "{\"root\":[\"a\",{\"k\":\"v\"}]}"
+    },
+    {
+      "name": "pushtype_after_tombstone",
+      "description": "A nested map pushed after a deleted trailing element — PushType anchors past the tombstone, the trailing-tombstone rule from #70.",
+      "clientID": 3735928559,
+      "updateV1": "0103effdb6f50d00010104726f6f740187effdb6f50d00012800effdb6f50d01016b0177017601effdb6f50d010001",
+      "expectedJSON": "{\"root\":[{\"k\":\"v\"}]}"
+    },
+    {
+      "name": "map_key_set_twice",
+      "description": "A detached key set twice — only the surviving value reaches the wire.",
+      "clientID": 3735928559,
+      "updateV1": "0102effdb6f50d00070104726f6f74012800effdb6f50d00016b017702763200",
+      "expectedJSON": "{\"root\":[{\"k\":\"v2\"}]}"
+    },
+    {
+      "name": "map_set_then_delete",
+      "description": "A detached key set then deleted before attach — nothing reaches the wire for it.",
+      "clientID": 3735928559,
+      "updateV1": "0102effdb6f50d00070104726f6f74012800effdb6f50d00046b6565700177013200",
+      "expectedJSON": "{\"root\":[{\"keep\":\"2\"}]}"
+    },
+    {
+      "name": "array_two_pushes_coalesce",
+      "description": "Two pushes onto a detached array — Yjs emits one item carrying both values.",
+      "clientID": 3735928559,
+      "updateV1": "0102effdb6f50d00070104726f6f74000800effdb6f50d000277036f6e65770374776f00",
+      "expectedJSON": "{\"root\":[[\"one\",\"two\"]]}"
+    },
+    {
+      "name": "array_detached_delete",
+      "description": "Push then delete on a detached array — the deleted value never materialises, so no tombstone.",
+      "clientID": 3735928559,
+      "updateV1": "0102effdb6f50d00070104726f6f74000800effdb6f50d000277016177016300",
+      "expectedJSON": "{\"root\":[[\"a\",\"c\"]]}"
+    },
+    {
+      "name": "array_values_interleaved_with_type",
+      "description": "Plain values either side of a nested type — the runs coalesce around it.",
+      "clientID": 3735928559,
+      "updateV1": "0105effdb6f50d00070104726f6f74000800effdb6f50d000277016177016287effdb6f50d02012800effdb6f50d03016b0177017688effdb6f50d030177016300",
+      "expectedJSON": "{\"root\":[[\"a\",\"b\",{\"k\":\"v\"},\"c\"]]}"
+    },
+    {
+      "name": "array_nested_in_map",
+      "description": "Y.Map holding a Y.Array of scalars, built detached.",
+      "clientID": 3735928559,
+      "updateV1": "0103effdb6f50d00070104726f6f74012700effdb6f50d00076f757470757473000800effdb6f50d010277036f6e65770374776f00",
+      "expectedJSON": "{\"root\":[{\"outputs\":[\"one\",\"two\"]}]}"
+    }
+  ]
+}

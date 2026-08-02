@@ -862,8 +862,11 @@ func TestInteg_NestedTypes_YArrayOfYMap_ConvergesTwoPeers(t *testing.T) {
 func TestInteg_NestedTypes_YMapOfYText(t *testing.T) {
 	doc := newTestDoc(1)
 	m := doc.GetMap("doc")
-	txt := doc.GetText("content")
 
+	// A nested text is built detached and attached by Set. Setting an ATTACHED
+	// type (the previous form of this test: a root type from GetText) now
+	// panics rather than storing a ContentAny blob that fails at encode time.
+	txt := NewTextPrelim()
 	doc.Transact(func(txn *Transaction) {
 		txt.Insert(txn, 0, "hello", nil)
 		m.Set(txn, "body", txt)

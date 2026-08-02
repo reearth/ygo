@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.43.0] — 2026-08-02
+
+### Added
+
+- **Public prelim constructors for `Y.Map`, `Y.Text` and `Y.Array`**: `NewMapPrelim`,
+  `NewTextPrelim`, `NewArrayPrelim` and `YArray.PushType` let code outside the
+  package construct a detached nested type and attach it to a document. This
+  generalises to the core types what [#147](https://github.com/reearth/ygo/pull/147)
+  and [#170](https://github.com/reearth/ygo/pull/170) established for `YXml`, and
+  closes the API asymmetry recorded in `crdt/nested_map_yjs_interop_test.go`.
+- **`YMap` and `YArray` stage their content while detached**, mirroring Yjs's
+  `_prelimContent`: mutations (`Set`, `Delete`, `Insert`, `Push`, `PushType`,
+  `Move`) edit the staged content directly and the net result materialises once,
+  when the container item integrates. Nested children therefore materialise
+  top-down with parent-first clocks — the ordering genuine Yjs produces and can
+  decode — and a multi-call build emits the same structs Yjs emits rather than
+  one per call. `YText` is unchanged: Yjs stages `Y.Text` as deferred operations
+  (`_pending`), which the existing model already matches.
+- **Detached reads answer from the staged content.** `Len`, `Get`, `Keys`,
+  `Has`, `ToSlice`, `Entries`, `ForEach` and `ToJSON` report what a detached
+  `YMap` or `YArray` holds, recursively unwrapping staged nested types. This is
+  for the core types what [#170](https://github.com/reearth/ygo/pull/170) did
+  for detached XML nodes, rather than reversing that convention in a sibling
+  API.
+- **Cross-language conformance fixtures for prelim construction**
+  (`testutil/gen_fixtures_prelim.js`, `crdt/prelim_yjs_conformance_test.go`):
+  authored-sequence fixtures with a pinned clientID, in the same shape
+  `gen_fixtures_yxml.js` uses. Go replays each build and must produce
+  byte-identical V1 bytes to `yjs@13.6.30`, and must decode Yjs's own output to
+  the same canonical JSON. Plus a fuzz target over nested prelim shapes.
+
+### Changed
+
+- **Shared types are rejected as plain values**: `YMap.Set` panics on an
+  attached shared type, and `YArray.Insert`/`Push` panic on a shared type
+  among `vals` (use `PushType`). Previously these stored the type inside a
+  `ContentAny`, which read back as an empty blob and panicked the encoder at
+  commit time — inside `Doc.Transact` when an `OnUpdate` hook is registered, so
+  the failure moves from a process-killing panic in the transaction machinery to
+  a rejection at the call site.
+
+### Fixed
+
+- **`YMap.Get` returns nested types**: a key holding a `Y.Text`, `Y.Map` or
+  `Y.Array` previously read back as `(nil, false)` despite being fully
+  materialised and visible through `ToJSON`, because `Get` handled only
+  `ContentDoc` and `ContentAny`. It now mirrors `YArray.Get`.
+- **`YArray.Move` on a detached array no longer emits `ContentMove`.** It now
+  reorders the staged content, so the attached result carries ordinary content
+  that other implementations decode. Emitting the wire extension here was
+  reachable through the prelim API and diverged silently: verified against
+  pycrdt 0.13.1, the peer accepted the update without error and read the
+  pre-move order while ygo read the moved one
+  ([#207](https://github.com/reearth/ygo/issues/207)).
 
 ## [1.42.0] — 2026-08-01
 
