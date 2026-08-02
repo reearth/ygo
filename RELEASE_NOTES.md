@@ -49,14 +49,14 @@ CI-gating benchmark, `BenchmarkEncodeStateAsUpdateV1`, measured **+8.63%**
 `buildTextDoc(1000)` performs 1000 one-character inserts, each in its own
 transaction, so the encoded document is 1000 items each holding a one-byte
 string — maximum validation call count, with no string length at all to
-amortize each call's fixed overhead over. A separate, ad hoc comparison (not
-committed to the repo, not reproducible from source as-is) encoding the same
-total byte count as a single bulk insert instead of 1000 tiny ones measured
-roughly +3.5%. Allocations are unchanged in both cases. `ApplyUpdateV1`
-(decode), the heavier path at roughly 115µs, moves only about +1.2%, since
-the decode side already validated UTF-8 before this release. This is not
-rounded down to "negligible": it is a real, measured cost, worst on documents
-built from many tiny string items.
+amortize each call's fixed overhead over. `BenchmarkEncodeStateAsUpdateV1_Bulk`,
+also committed, encodes the same total byte count built as a single bulk
+insert instead of 1000 tiny ones — the shape most real documents actually
+have — and measured **+2.86%** (n=10). Allocations are unchanged in both
+cases. `ApplyUpdateV1` (decode), the heavier path at roughly 115µs, moves
+only about +1.2%, since the decode side already validated UTF-8 before this
+release. This is not rounded down to "negligible": it is a real, measured
+cost, worst on documents built from many tiny string items.
 
 **Why we're paying it:** most of this cost buys defence-in-depth rather than
 closing a real gap. Every string in a document tree already passes either a

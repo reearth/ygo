@@ -22,6 +22,20 @@ func buildTextDoc(n int) (*Doc, *YText) { //nolint:unparam
 	return doc, txt
 }
 
+// buildTextDocBulk creates a doc whose "text" YText holds the same total
+// byte count as buildTextDoc(n), but inserted as a single n-byte string in
+// one transaction instead of n one-character inserts in n separate
+// transactions. It is the realistic-shape counterpart used by
+// BenchmarkEncodeStateAsUpdateV1_Bulk below.
+func buildTextDocBulk(n int) (*Doc, *YText) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("text")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, strings.Repeat("a", n), nil)
+	})
+	return doc, txt
+}
+
 // BenchmarkYText_Insert measures the cost of appending a single character to a
 // YText that already contains b.N-1 characters — i.e. each iteration extends a
 // growing document by one keystroke.
@@ -88,6 +102,27 @@ func BenchmarkEncodeStateAsUpdateV1(b *testing.B) {
 	b.ReportAllocs()
 
 	doc, _ := buildTextDoc(1000)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = EncodeStateAsUpdateV1(doc, nil)
+	}
+}
+
+// BenchmarkEncodeStateAsUpdateV1_Bulk is the realistic-shape counterpart to
+// BenchmarkEncodeStateAsUpdateV1 above: it encodes a document holding the
+// same total byte count (1000 bytes of YText content), but built as a
+// single bulk insert in one transaction rather than 1000 one-character
+// inserts in 1000 separate transactions. BenchmarkEncodeStateAsUpdateV1's
+// thousand-tiny-items shape is a deliberate worst case for per-string
+// validation work — maximum validation call count, with no string length at
+// all to amortise each call's fixed overhead over — not representative of
+// real documents, which tend to hold far fewer, much longer strings. This
+// benchmark measures that more typical shape instead.
+func BenchmarkEncodeStateAsUpdateV1_Bulk(b *testing.B) {
+	b.ReportAllocs()
+
+	doc, _ := buildTextDocBulk(1000)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
