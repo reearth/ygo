@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Room names must be valid UTF-8.** `internal/roomname.Valid` previously
   accepted them, because ranging over a string yields `RuneError` for invalid
   bytes. Affects the HTTP and WebSocket providers alike (#209).
+- **A client whose awareness state can't be encoded as valid UTF-8 now
+  broadcasts as `null` for that client, instead of panicking the broadcast.**
+  `Awareness.EncodeUpdate` marshals state through `json.Marshal`, which
+  normally coerces invalid UTF-8 to U+FFFD — except for a `json.RawMessage`
+  value, which passes its bytes through once they pass JSON syntax
+  validation, so invalid UTF-8 inside one could still reach
+  `WriteVarString` and panic. Awareness state is ephemeral presence data,
+  not CRDT document content, so this path degrades rather than panics: one
+  peer's cursor drops instead of crashing every peer's broadcast (#209).
 
 ### Added
 
