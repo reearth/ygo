@@ -11,6 +11,15 @@ import (
 // buildTextDoc creates a doc whose "text" YText contains n single-character
 // inserts (one transaction per character, simulating keystroke-by-keystroke
 // typing). The returned YText handle is safe to use outside Transact.
+//
+// This n-items-of-one-byte shape is a deliberate WORST CASE for any cost that
+// scales with item count or per-string overhead (encoding, decoding,
+// validation): maximum item/call count, with no string length to amortise a
+// call's fixed overhead over. It is not representative of real documents,
+// which tend to hold far fewer, much longer strings. Read a percentage off a
+// benchmark built on this helper with that in mind, and prefer
+// buildTextDocBulk below — which builds the same total byte count as a
+// single bulk insert — wherever a realistic-shape comparison is needed.
 func buildTextDoc(n int) (*Doc, *YText) { //nolint:unparam
 	doc := newTestDoc(1)
 	txt := doc.GetText("text")
@@ -147,6 +156,31 @@ func BenchmarkApplyUpdateV1(b *testing.B) {
 	}
 }
 
+// BenchmarkApplyUpdateV1_Bulk is the realistic-shape counterpart to
+// BenchmarkApplyUpdateV1 above: it applies an update built from the same
+// total byte count (1000 bytes of YText content), but built as a single bulk
+// insert in one transaction rather than 1000 one-character inserts in 1000
+// separate transactions. BenchmarkApplyUpdateV1's thousand-tiny-items shape
+// is a deliberate worst case for per-string validation work — maximum
+// validation call count, with no string length at all to amortise each
+// call's fixed overhead over — not representative of real documents, which
+// tend to hold far fewer, much longer strings. This benchmark measures that
+// more typical shape instead.
+func BenchmarkApplyUpdateV1_Bulk(b *testing.B) {
+	b.ReportAllocs()
+
+	src, _ := buildTextDocBulk(1000)
+	update := EncodeStateAsUpdateV1(src, nil)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dst := newTestDoc(2)
+		if err := ApplyUpdateV1(dst, update, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkEncodeStateAsUpdateV2 encodes a ~1000-character document in the V2
 // column-oriented format.
 func BenchmarkEncodeStateAsUpdateV2(b *testing.B) {
@@ -160,12 +194,58 @@ func BenchmarkEncodeStateAsUpdateV2(b *testing.B) {
 	}
 }
 
+// BenchmarkEncodeStateAsUpdateV2_Bulk is the realistic-shape counterpart to
+// BenchmarkEncodeStateAsUpdateV2 above: it encodes a document holding the
+// same total byte count (1000 bytes of YText content), but built as a
+// single bulk insert in one transaction rather than 1000 one-character
+// inserts in 1000 separate transactions. BenchmarkEncodeStateAsUpdateV2's
+// thousand-tiny-items shape is a deliberate worst case for per-string
+// validation work — maximum validation call count, with no string length at
+// all to amortise each call's fixed overhead over — not representative of
+// real documents, which tend to hold far fewer, much longer strings. This
+// benchmark measures that more typical shape instead.
+func BenchmarkEncodeStateAsUpdateV2_Bulk(b *testing.B) {
+	b.ReportAllocs()
+
+	doc, _ := buildTextDocBulk(1000)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = EncodeStateAsUpdateV2(doc, nil)
+	}
+}
+
 // BenchmarkApplyUpdateV2 applies a pre-encoded V2 update (~1000 characters)
 // to a fresh document on every iteration.
 func BenchmarkApplyUpdateV2(b *testing.B) {
 	b.ReportAllocs()
 
 	src, _ := buildTextDoc(1000)
+	update := EncodeStateAsUpdateV2(src, nil)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dst := newTestDoc(2)
+		if err := ApplyUpdateV2(dst, update, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkApplyUpdateV2_Bulk is the realistic-shape counterpart to
+// BenchmarkApplyUpdateV2 above: it applies an update built from the same
+// total byte count (1000 bytes of YText content), but built as a single bulk
+// insert in one transaction rather than 1000 one-character inserts in 1000
+// separate transactions. BenchmarkApplyUpdateV2's thousand-tiny-items shape
+// is a deliberate worst case for per-string validation work — maximum
+// validation call count, with no string length at all to amortise each
+// call's fixed overhead over — not representative of real documents, which
+// tend to hold far fewer, much longer strings. This benchmark measures that
+// more typical shape instead.
+func BenchmarkApplyUpdateV2_Bulk(b *testing.B) {
+	b.ReportAllocs()
+
+	src, _ := buildTextDocBulk(1000)
 	update := EncodeStateAsUpdateV2(src, nil)
 
 	b.ResetTimer()
