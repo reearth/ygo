@@ -55,6 +55,13 @@ func TestInteg_ValidUnicode_RoundTripsUnchanged(t *testing.T) {
 			got := New()
 			require.NoError(t, tc.apply(got, tc.enc()))
 			require.Equal(t, txt.ToString(), got.GetText("t").ToString())
+
+			wantJSON, err := m.ToJSON()
+			require.NoError(t, err)
+			gotJSON, err := got.GetMap("m").ToJSON()
+			require.NoError(t, err)
+			require.JSONEq(t, string(wantJSON), string(gotJSON),
+				"YMap must round-trip its multi-byte key and nested unicode value unchanged")
 		})
 	}
 }
