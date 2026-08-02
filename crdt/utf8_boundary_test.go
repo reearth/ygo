@@ -182,3 +182,26 @@ func TestUnit_YMap_Set_Detached_ValidUTF8MaterialisesOnAttach(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, combining, v)
 }
+
+// TestUnit_Doc_RootNamesRejectInvalidUTF8 guards the worst case in the whole
+// UTF-8 plan: a bad ROOT TYPE NAME poisons the entire document (it's encoded
+// on every update touching that root), not just one value. Covers all four
+// root accessors plus the subdocument GUID (WithGUID).
+func TestUnit_Doc_RootNamesRejectInvalidUTF8(t *testing.T) {
+	bad := string([]byte{0xff})
+	doc := New()
+	for name, fn := range map[string]func(){
+		"GetArray":       func() { doc.GetArray(bad) },
+		"GetMap":         func() { doc.GetMap(bad) },
+		"GetText":        func() { doc.GetText(bad) },
+		"GetXmlFragment": func() { doc.GetXmlFragment(bad) },
+	} {
+		t.Run(name, func(t *testing.T) { requirePanicsWithInvalidUTF8(t, fn) })
+	}
+	t.Run("WithGUID", func(t *testing.T) {
+		requirePanicsWithInvalidUTF8(t, func() { New(WithGUID(bad)) })
+	})
+	t.Run("valid unicode name still works", func(t *testing.T) {
+		require.NotPanics(t, func() { New().GetText("документ 📄") })
+	})
+}
