@@ -15,14 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   complaint into an update that neither ygo nor Yjs could decode — a room that
   silently stopped converging, and a stored update that could never be reloaded.
   `YMap.Set`, `YArray.Insert`/`Push`, `YText.Insert`/`ApplyDelta`/`InsertEmbed`/
-  `Format`, the root-type accessors, the XML node-name and attribute setters and
-  `WithGUID` now panic on invalid UTF-8, naming the offending input. Values are
-  walked recursively, because V2 writes attribute and embed values through
-  `WriteAny` unsanitised where V1 routes them through `json.Marshal`.
-  `Encoder.WriteVarString` panics as a backstop for the two paths with no such
-  boundary (`RelativePosition.Tname` and `YXmlElement.NodeName` are exported
-  fields). Valid UTF-8 — including emoji, combining marks and non-Latin scripts —
-  encodes byte-identically to before (#209).
+  `Format`, the root-type accessors, the XML node-name and attribute setters,
+  `EncodeRelativePosition` and `WithGUID` now panic on invalid UTF-8, naming
+  the offending input. Values are walked recursively, because V2 writes
+  attribute and embed values through `WriteAny` unsanitised where V1 routes
+  them through `json.Marshal`. `Encoder.WriteVarString` panics as a backstop
+  for the paths with no such targeted check — `YXmlElement.NodeName` and
+  `ContentAttribute.Name` are exported fields a caller can assign directly,
+  bypassing `NewYXmlElement`/`NewContentAttribute`. Valid UTF-8 — including
+  emoji, combining marks and non-Latin scripts — encodes byte-identically to
+  before (#209).
 - **Room names must be valid UTF-8.** `internal/roomname.Valid` previously
   accepted them, because ranging over a string yields `RuneError` for invalid
   bytes. Affects the HTTP and WebSocket providers alike (#209).

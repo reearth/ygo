@@ -42,30 +42,37 @@ else in this change coerces; this is the sole, deliberate exception, guarding
 a live goroutine against an application's own string rather than a wire or
 relay identifier.
 
-**Performance:** encoding is roughly 3-5% slower depending on document shape,
-because `Encoder.WriteVarString` now runs a `utf8.ValidString` pass over every
-string on every encode. The worst case is a document built from very many
-tiny string items (our CI benchmark, which does 1000 one-character inserts in
-1000 separate transactions, showed +5.48%, with one sample run as high as
-+8.63% at the top of its run-to-run variance) because per-string call
-overhead dominates and there's no length to amortize the scan over. A more
-realistic shape — fewer, larger strings — showed +3.55%. Allocations are
-unchanged in both shapes. `ApplyUpdateV1` (decode), the heavier path at
-roughly 115µs, moves only about +1.2%, since the decode side already
-validated UTF-8 before this release. This is not rounded down to
-"negligible": it is a real, measured cost.
+**Performance:** encoding is slower, because `Encoder.WriteVarString` now runs
+a `utf8.ValidString` pass over every string on every encode. The committed,
+CI-gating benchmark, `BenchmarkEncodeStateAsUpdateV1`, measured **+8.63%**
+(n=10). That benchmark is a worst case rather than a typical one:
+`buildTextDoc(1000)` performs 1000 one-character inserts, each in its own
+transaction, so the encoded document is 1000 items each holding a one-byte
+string — maximum validation call count, with no string length at all to
+amortize each call's fixed overhead over. A separate, ad hoc comparison (not
+committed to the repo, not reproducible from source as-is) encoding the same
+total byte count as a single bulk insert instead of 1000 tiny ones measured
+roughly +3.5%. Allocations are unchanged in both cases. `ApplyUpdateV1`
+(decode), the heavier path at roughly 115µs, moves only about +1.2%, since
+the decode side already validated UTF-8 before this release. This is not
+rounded down to "negligible": it is a real, measured cost, worst on documents
+built from many tiny string items.
 
 **Why we're paying it:** most of this cost buys defence-in-depth rather than
 closing a real gap. Every string in a document tree already passes either a
 mutator boundary check (the new validation added in this release) or the
 validating decoder (`ReadVarString` has always rejected invalid UTF-8 on the
-read side). The encode-time check added here uniquely covers only strings
-assigned directly to exported struct fields that bypass the mutator API —
-and of those, `RelativePosition.Tname` already had its own targeted check
-before this release. We are knowingly paying the ~3-5% so that
-`YXmlElement.NodeName` and `ContentAttribute.Name` — both reachable by direct
-field assignment, not just through a constructor — cannot silently produce an
-update no decoder will accept.
+read side). The encode-time check added here uniquely covers strings
+assigned directly to exported struct fields that bypass the mutator API. For
+`RelativePosition.Tname` this release adds a targeted check at
+`EncodeRelativePosition`, so a caller building `RelativePosition{Tname: bad}`
+by hand — there is no constructor to intercept it — gets a panic naming the
+field rather than the encoder's generic one. `YXmlElement.NodeName` and
+`ContentAttribute.Name` are the fields left relying on the generic
+`Encoder.WriteVarString` backstop alone: both are exported and directly
+assignable, bypassing `NewYXmlElement`/`NewContentAttribute`. We are
+knowingly paying the encode-time cost so that none of these three paths can
+silently produce an update no decoder will accept.
 
 **This change deliberately reverses a documented decision.** Commit
 `c3ba5ff` (2026-05-19, issue #77) added
