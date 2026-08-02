@@ -205,3 +205,39 @@ func TestUnit_Doc_RootNamesRejectInvalidUTF8(t *testing.T) {
 		require.NotPanics(t, func() { New().GetText("документ 📄") })
 	})
 }
+
+// TestUnit_Transaction_RootNamesRejectInvalidUTF8 covers the OTHER root-name
+// entry point: Transaction.GetText/GetMap/GetArray/GetXmlFragment. These are
+// the documented, recommended way to resolve a root type from INSIDE a
+// Transact callback (Doc.GetText et al. would self-deadlock there — see
+// GetText's doc comment and issue #138) — so this path sees more use inside
+// transactions than Doc.GetX, not less. Each must panic independently of
+// Doc.GetX's checks, since Transaction.GetX calls the lock-free
+// t.doc.get*Locked helper directly rather than going through Doc.GetX.
+//
+// These necessarily run inside a Transact callback (that's the only place a
+// *Transaction exists), which doubles as proof the panic propagates cleanly
+// out of Transact without deadlocking (Transact has been panic-safe since
+// v1.1.1).
+func TestUnit_Transaction_RootNamesRejectInvalidUTF8(t *testing.T) {
+	bad := string([]byte{0xff})
+	for name, fn := range map[string]func(*Transaction){
+		"GetText":        func(txn *Transaction) { txn.GetText(bad) },
+		"GetMap":         func(txn *Transaction) { txn.GetMap(bad) },
+		"GetArray":       func(txn *Transaction) { txn.GetArray(bad) },
+		"GetXmlFragment": func(txn *Transaction) { txn.GetXmlFragment(bad) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc := New()
+			requirePanicsWithInvalidUTF8(t, func() {
+				doc.Transact(func(txn *Transaction) { fn(txn) })
+			})
+		})
+	}
+	t.Run("valid unicode name still works", func(t *testing.T) {
+		doc := New()
+		require.NotPanics(t, func() {
+			doc.Transact(func(txn *Transaction) { txn.GetText("документ 📄") })
+		})
+	})
+}
