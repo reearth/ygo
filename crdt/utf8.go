@@ -3,7 +3,16 @@ package crdt
 import (
 	"fmt"
 	"unicode/utf8"
+
+	"github.com/reearth/ygo/encoding"
 )
+
+// ErrInvalidUTF8 is crdt's re-export of encoding.ErrInvalidUTF8, for entry
+// points (like NewContentAttribute) whose signature already returns an error
+// rather than panicking. It is the SAME sentinel value as encoding's, not an
+// independent one, so errors.Is matches regardless of which package's name
+// callers compare against.
+var ErrInvalidUTF8 = encoding.ErrInvalidUTF8
 
 // checkUTF8 panics if s is not valid UTF-8. op names the calling method and
 // what names the offending input, so the failure points at a call site rather

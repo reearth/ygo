@@ -1,9 +1,12 @@
 package crdt
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/encoding"
 )
 
 func TestUnit_YMap_Set_RejectsInvalidUTF8(t *testing.T) {
@@ -344,4 +347,49 @@ func TestUnit_YXml_ValidUnicodeStillWorks(t *testing.T) {
 	v, ok := el.GetAttribute("🔑")
 	require.True(t, ok)
 	require.Equal(t, "wörld", v)
+}
+
+// TestUnit_Attribution_RejectsInvalidUTF8 covers NewContentAttribute, the last
+// entry point with no panic — its signature already returns an error, so the
+// governing rule for this plan (use an error wherever one already exists;
+// panic only where adding one would expand the API) applies here instead of
+// checkUTF8's panic.
+func TestUnit_Attribution_RejectsInvalidUTF8(t *testing.T) {
+	bad := string([]byte{0xff})
+
+	// The signature already carries an error, so use it — no panic here.
+	got, err := NewContentAttribute(bad, "v")
+	require.ErrorIs(t, err, encoding.ErrInvalidUTF8)
+	require.Nil(t, got)
+
+	// Must variant panics, as it does for every other error.
+	requirePanicsWithInvalidUTF8Any(t, func() { MustContentAttribute(bad, "v") })
+
+	ok, err := NewContentAttribute("valid", "v")
+	require.NoError(t, err)
+	require.NotNil(t, ok)
+}
+
+// TestUnit_EncodeRelativePosition_RejectsInvalidTname guards the other path
+// with no input boundary to guard: Tname is an exported field on an exported
+// struct, so a caller can build RelativePosition{Tname: bad} as a literal —
+// there is no constructor to intercept it. Validation lives at the encode
+// entry point instead.
+func TestUnit_EncodeRelativePosition_RejectsInvalidTname(t *testing.T) {
+	rp := RelativePosition{Tname: string([]byte{0xff})}
+	requirePanicsWithInvalidUTF8(t, func() { EncodeRelativePosition(rp) })
+}
+
+// requirePanicsWithInvalidUTF8Any is requirePanicsWithInvalidUTF8's sibling
+// for panics that carry an error value rather than a string.
+// MustContentAttribute does `panic(err)` with the raw error value, not a
+// string, so the string-typed helper above does not apply here.
+func requirePanicsWithInvalidUTF8Any(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "expected a panic")
+		require.Contains(t, fmt.Sprint(r), "invalid UTF-8")
+	}()
+	fn()
 }
