@@ -1,3 +1,103 @@
+## v1.44.0
+
+**Who is affected:** only callers who put non-UTF-8 bytes into a document —
+a Go `string` holding an invalid UTF-8 byte sequence, passed to `YMap.Set`,
+`YArray.Insert`/`Push`, `YText.Insert`/`ApplyDelta`/`InsertEmbed`/`Format`, a
+root-type accessor, an XML node-name/attribute setter, or `WithGUID`. Most
+callers are not doing this — Go string literals and anything read from JSON,
+HTTP bodies, or ordinary text sources are valid UTF-8 already. If you build
+strings from raw byte slices, non-UTF-8-safe truncation, or another encoding
+without converting, you may be affected.
+
+**What changes:** those calls now **panic**, naming the offending input, where
+previously they succeeded and produced an update that encoded without
+complaint but that neither ygo nor Yjs could decode — a room that silently
+stopped converging and a stored update that could never be reloaded. A panic
+on write is a large behavior change but it replaces silent, hard-to-diagnose
+corruption with an immediate, attributable failure at the point the bad
+string was introduced, instead of downstream at decode time (or never, if the
+divergence went unnoticed).
+
+**How to prepare:**
+- **Pre-check** with `utf8.ValidString` (standard library `unicode/utf8`)
+  before passing a string into any of the calls above, if you can't already
+  guarantee the string is valid UTF-8.
+- **Recover**, if you'd rather catch the panic at a call boundary than
+  pre-check every string (e.g., wrapping a batch-import path that processes
+  many documents and should skip/report a bad one rather than crash the
+  whole batch).
+- **Use `Encoder.WriteVarStringE`** if you're working at the encoding layer
+  directly (not through the CRDT mutator API): it returns `ErrInvalidUTF8`
+  instead of panicking, for callers encoding untrusted input themselves.
+
+**The one place ygo repairs instead of rejecting:** the WebSocket provider's
+auth reply path (`encodeAuthMessage` in `provider/websocket/peer.go`) coerces
+an app-supplied diagnostic string — an `OnTokenAuth` hook's error text, or the
+`"read-write"`/`"readonly"` scope label — with `strings.ToValidUTF8` rather
+than panicking. That string runs on a live connection goroutine at a point
+where crashing the goroutine over a malformed error message from the
+application layer would be worse than the alternative: replacing invalid runs
+with U+FFFD and keeping the connection and the diagnostic readable. Nowhere
+else in this change coerces; this is the sole, deliberate exception, guarding
+a live goroutine against an application's own string rather than a wire or
+relay identifier.
+
+**Performance:** encoding is roughly 3-5% slower depending on document shape,
+because `Encoder.WriteVarString` now runs a `utf8.ValidString` pass over every
+string on every encode. The worst case is a document built from very many
+tiny string items (our CI benchmark, which does 1000 one-character inserts in
+1000 separate transactions, showed +5.48%, with one sample run as high as
++8.63% at the top of its run-to-run variance) because per-string call
+overhead dominates and there's no length to amortize the scan over. A more
+realistic shape — fewer, larger strings — showed +3.55%. Allocations are
+unchanged in both shapes. `ApplyUpdateV1` (decode), the heavier path at
+roughly 115µs, moves only about +1.2%, since the decode side already
+validated UTF-8 before this release. This is not rounded down to
+"negligible": it is a real, measured cost.
+
+**Why we're paying it:** most of this cost buys defence-in-depth rather than
+closing a real gap. Every string in a document tree already passes either a
+mutator boundary check (the new validation added in this release) or the
+validating decoder (`ReadVarString` has always rejected invalid UTF-8 on the
+read side). The encode-time check added here uniquely covers only strings
+assigned directly to exported struct fields that bypass the mutator API —
+and of those, `RelativePosition.Tname` already had its own targeted check
+before this release. We are knowingly paying the ~3-5% so that
+`YXmlElement.NodeName` and `ContentAttribute.Name` — both reachable by direct
+field assignment, not just through a constructor — cannot silently produce an
+update no decoder will accept.
+
+**This change deliberately reverses a documented decision.** Commit
+`c3ba5ff` (2026-05-19, issue #77) added
+`TestUnit_VarString_AsymmetricUTF8Contract`, codifying "write trusts, read
+validates" — deliberately asymmetric, on the reasoning that adding write-side
+validation would break callers passing pre-encoded data through the varstring
+path. That asymmetry is now reversed: `WriteVarString` validates. The
+reasoning that changed is this — a caller with genuinely pre-encoded binary
+data was never using the varstring wire format correctly in the first place;
+`WriteVarBytes` is the correct call for that, because a varstring is UTF-8 by
+wire definition, not an arbitrary-bytes container. What such a caller
+produces today, by routing binary through `WriteVarString`, is an update that
+no decoder — ygo's own `ReadVarString`, or Yjs's — will accept. Validating on
+write closes a contract that was already broken in practice; it does not
+newly break a working pattern.
+
+### Changed
+
+- **Invalid UTF-8 is now rejected where it enters the document**, across
+  `YMap`, `YArray`, `YText`, the XML types, `RelativePosition`, and
+  `Doc.WithGUID`. See the upgrade impact above. (#209)
+- **Room names must be valid UTF-8.** `internal/roomname.Valid` previously
+  accepted invalid UTF-8, because ranging over a Go string yields
+  `utf8.RuneError` for bad bytes rather than failing outright. Affects both
+  the HTTP and WebSocket providers. (#209)
+
+### Added
+
+- `Encoder.WriteVarStringE` — the non-panicking, error-returning variant of
+  `WriteVarString`, for callers who want to handle invalid UTF-8 rather than
+  have it panic. (#209)
+
 ## v1.43.0
 
 ygo could decode and materialise nested Y types but offered no way to construct
