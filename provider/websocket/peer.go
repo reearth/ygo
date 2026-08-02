@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -265,7 +266,21 @@ func (p *peer) safeTokenAuth(hook func(string, string) (ConnectionConfig, error)
 
 // encodeAuthMessage builds a tag-2 auth reply: VarUint(msgAuth) VarUint(sub)
 // VarString(s). docName framing (if enabled) is applied later in writeToConn.
+//
+// s is app-supplied (an OnTokenAuth hook's error text via authErr.Error(), or
+// the "read-write"/"readonly" scope label) and this runs on a live connection
+// goroutine. WriteVarString now panics on invalid UTF-8 (#209/Task 1), but an
+// application returning a malformed error string is not this library's fault
+// to crash a goroutine over, nor severe enough to warrant dropping the peer's
+// connection the way a genuine protocol violation would. So this is the one
+// place in the UTF-8 validation work that COERCES instead of rejecting:
+// strings.ToValidUTF8 repairs the string in place (U+FFFD for bad runs),
+// keeping the diagnostic readable and the connection alive. Do not "fix" this
+// inconsistency with roomname.Valid's reject-outright rule — that guards a
+// wire/relay identifier, this guards a live goroutine against an
+// application's own string.
 func encodeAuthMessage(subType uint64, s string) []byte {
+	s = strings.ToValidUTF8(s, "�")
 	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
 		enc.WriteVarUint(msgAuth)
 		enc.WriteVarUint(subType)
