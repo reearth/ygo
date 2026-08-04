@@ -178,7 +178,7 @@ Two files need an entry, both in your own branch. `main` is PR-protected, so any
 
 1. **`CHANGELOG.md`** — add your change under the next version's heading (e.g. `## [1.43.0] — 2026-08-14`). We do **not** use an `[Unreleased]` section: entries go directly into the version they ship in. If you don't know which version that is, ask in the PR and a maintainer will tell you — it follows from your change's API surface, not its intent (a new exported symbol is a MINOR even in a bug-fix PR).
 
-2. **`RELEASE_NOTES.md`** — add a section for the same version. The release workflow publishes this file verbatim as the GitHub release body (`body_path: RELEASE_NOTES.md` in `.github/workflows/release.yml`), so a version missing from it ships with empty release notes.
+2. **`RELEASE_NOTES.md`** — add a section for the same version, headed `## v<version>` to match the tag. `.github/workflows/release.yml` extracts the file's **top section only** and publishes it as the GitHub release body. The heading must equal the tag being pushed: if it doesn't, the release job fails rather than attaching the previous version's notes to your tag.
 
 Both files are newest-first: your new section goes at the top, above the previous release.
 

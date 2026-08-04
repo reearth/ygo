@@ -27,6 +27,25 @@ jobs:
       - run: npm ci
         working-directory: testutil
       - run: go test -race ./...
+      # RELEASE_NOTES.md is cumulative and newest-first, so publishing the file
+      # whole made every release page repeat every earlier release's notes —
+      # v1.43.0's body carried all 10 sections. Publish only the top one.
+      #
+      # The version check is the point of the extra step: if the tag is pushed
+      # before RELEASE_NOTES.md has a section for it, the top section is the
+      # PREVIOUS release's, and publishing that silently attaches the wrong
+      # notes to the tag. Failing here is recoverable; a wrong published body
+      # on an immutable tag is not.
+      - name: Extract this version's release notes
+        run: |
+          notes="$RUNNER_TEMP/release-notes.md"
+          awk '/^## v/{n++} n==1' RELEASE_NOTES.md > "$notes"
+          heading=$(head -n 1 "$notes")
+          if [ "$heading" != "## $GITHUB_REF_NAME" ]; then
+            echo "::error file=RELEASE_NOTES.md::Top section is \"$heading\" but the tag is $GITHUB_REF_NAME. Add a \"## $GITHUB_REF_NAME\" section at the top of RELEASE_NOTES.md, then re-push the tag."
+            exit 1
+          fi
+          echo "Publishing $(wc -l < "$notes") lines of notes for $GITHUB_REF_NAME."
       - uses: softprops/action-gh-release@v2
         with:
-          body_path: RELEASE_NOTES.md
+          body_path: ${{ runner.temp }}/release-notes.md
