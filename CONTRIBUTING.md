@@ -178,6 +178,8 @@ Two files need an entry, both in your own branch. `main` is PR-protected, so any
 
 1. **`CHANGELOG.md`** — add your change under the next version's heading (e.g. `## [1.43.0] — 2026-08-14`). We do **not** use an `[Unreleased]` section: entries go directly into the version they ship in. If you don't know which version that is, ask in the PR and a maintainer will tell you — it follows from your change's API surface, not its intent (a new exported symbol is a MINOR even in a bug-fix PR).
 
+   The date is the **release** date, not the day you wrote the entry, and the release job enforces both halves: it fails if the file's newest version heading isn't the tag being pushed, or if that heading's date isn't the release date. If your PR sits for a few days, bump the date just before merging.
+
 2. **`RELEASE_NOTES.md`** — add a section for the same version, headed `## v<version>` to match the tag. `.github/workflows/release.yml` extracts the file's **top section only** and publishes it as the GitHub release body. The heading must equal the tag being pushed: if it doesn't, the release job fails rather than attaching the previous version's notes to your tag.
 
 Both files are newest-first: your new section goes at the top, above the previous release.
@@ -192,8 +194,8 @@ Before opening a PR ensure:
 - [ ] `make lint` passes with no new warnings
 - [ ] `make vet` passes (no vulnerabilities)
 - [ ] New tests are added for changed behaviour
-- [ ] `CHANGELOG.md` is updated under the next version's heading (e.g. `## [1.43.0]`) — not `[Unreleased]`
-- [ ] `RELEASE_NOTES.md` has a section for that same version
+- [ ] `CHANGELOG.md` is updated under the next version's heading (e.g. `## [1.43.0]`) — not `[Unreleased]` — carrying the release date
+- [ ] `RELEASE_NOTES.md` has a `## v<version>` section for that same version, at the top of the file
 - [ ] Wire-format changes regenerate fixtures (`make fixtures`) and update `TestCompat_` tests
 - [ ] Doc comments updated for any changed public API
 - [ ] PR description links the related issue (`Closes #NNN`)

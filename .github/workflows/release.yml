@@ -46,6 +46,34 @@ jobs:
             exit 1
           fi
           echo "Publishing $(wc -l < "$notes") lines of notes for $GITHUB_REF_NAME."
+      # Nothing used to check CHANGELOG.md at tag time, so a release could ship
+      # with no entry at all, or with a heading date left over from whenever the
+      # PR was written — v1.44.0 was authored 08-02 and tagged 08-04, and the
+      # stale date was caught by hand. A tag is immutable, so the date it
+      # records is wrong forever; failing the job is the recoverable option.
+      #
+      # The date must be the job's UTC date or the day before. The one-day
+      # window absorbs timezone skew: a maintainer tagging in the evening west
+      # of UTC writes their local date, which is already "yesterday" in UTC.
+      - name: Verify the CHANGELOG entry for this tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          top=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | tr -d '#[] ')
+          if [ "$top" != "$version" ]; then
+            echo "::error file=CHANGELOG.md::Newest version heading is [$top] but the tag is $GITHUB_REF_NAME. CHANGELOG.md is newest-first, so add a \"## [$version]\" section at the top before tagging."
+            exit 1
+          fi
+          heading=$(grep -m1 -F "## [$version]" CHANGELOG.md)
+          today=$(date -u +%F)
+          yesterday=$(date -u -d '1 day ago' +%F)
+          case "$heading" in
+            *"$today"* | *"$yesterday"*) ;;
+            *)
+              echo "::error file=CHANGELOG.md::Heading \"$heading\" does not carry the release date. Expected $today (or $yesterday for timezone skew). Update the date, then re-push the tag."
+              exit 1
+              ;;
+          esac
+          echo "CHANGELOG heading OK: $heading"
       - uses: softprops/action-gh-release@v2
         with:
           body_path: ${{ runner.temp }}/release-notes.md
