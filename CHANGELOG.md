@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.44.0] — 2026-08-04
+
+### Changed
+
+- **Invalid UTF-8 is now rejected where it enters the document.** Go strings are
+  arbitrary byte sequences, but the wire format is UTF-8 and the decoder rejects
+  anything else, so a string containing invalid UTF-8 previously encoded without
+  complaint into an update that neither ygo nor Yjs could decode — a room that
+  silently stopped converging, and a stored update that could never be reloaded.
+  `YMap.Set`, `YArray.Insert`/`Push`, `YText.Insert`/`ApplyDelta`/`InsertEmbed`/
+  `Format`, the root-type accessors, the XML node-name and attribute setters,
+  `EncodeRelativePosition` and `WithGUID` now panic on invalid UTF-8, naming
+  the offending input. Values are walked recursively, because V2 writes
+  attribute and embed values through `WriteAny` unsanitised where V1 routes
+  them through `json.Marshal`. `Encoder.WriteVarString` panics as a backstop
+  for the paths with no such targeted check — `YXmlElement.NodeName` and
+  `ContentAttribute.Name` are exported fields a caller can assign directly,
+  bypassing `NewYXmlElement`/`NewContentAttribute`. Valid UTF-8 — including
+  emoji, combining marks and non-Latin scripts — encodes byte-identically to
+  before (#209).
+- **Room names must be valid UTF-8.** `internal/roomname.Valid` previously
+  accepted them, because ranging over a string yields `RuneError` for invalid
+  bytes. Affects the HTTP and WebSocket providers alike (#209).
+- **A client whose awareness state can't be encoded as valid UTF-8 now
+  broadcasts as `null` for that client, instead of panicking the broadcast.**
+  `Awareness.EncodeUpdate` marshals state through `json.Marshal`, which
+  normally coerces invalid UTF-8 to U+FFFD — except for a `json.RawMessage`
+  value, which passes its bytes through once they pass JSON syntax
+  validation, so invalid UTF-8 inside one could still reach
+  `WriteVarString` and panic. Awareness state is ephemeral presence data,
+  not CRDT document content, so this path degrades rather than panics: one
+  peer's cursor drops instead of crashing every peer's broadcast (#209).
+
+### Added
+
+- `Encoder.WriteVarStringE` returns `ErrInvalidUTF8` instead of panicking, for
+  callers encoding untrusted input (#209).
+
 ## [1.43.0] — 2026-08-02
 
 ### Added

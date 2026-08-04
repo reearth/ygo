@@ -3,6 +3,7 @@ package crdt
 import (
 	"fmt"
 	"sort"
+	"unicode/utf8"
 
 	"github.com/reearth/ygo/encoding"
 )
@@ -47,8 +48,15 @@ func validateAnyValue(v any) error {
 }
 
 // NewContentAttribute validates value against the encodable lib0 domain and
-// returns the attribute. Containers are validated recursively.
+// returns the attribute. Containers are validated recursively. name must be
+// valid UTF-8 (it is written to the wire via WriteVarString in
+// writeIDMap/attrKey); ErrInvalidUTF8 is crdt's re-export of
+// encoding.ErrInvalidUTF8, so errors.Is matches whichever sentinel a caller
+// compares against.
 func NewContentAttribute(name string, value any) (*ContentAttribute, error) {
+	if !utf8.ValidString(name) {
+		return nil, ErrInvalidUTF8
+	}
 	if err := validateAnyValue(value); err != nil {
 		return nil, err
 	}

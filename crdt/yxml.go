@@ -321,13 +321,26 @@ func (e *YXmlElement) InsertText(txn *Transaction, index int, txt *YXmlText) {
 // SetAttributeValue; Yjs stores attribute values typed, and y-prosemirror
 // round-trips them typed.
 func (e *YXmlElement) SetAttribute(txn *Transaction, key, value string) {
-	e.SetAttributeValue(txn, key, value)
+	e.setAttributeValue("YXmlElement.SetAttribute", txn, key, value)
 }
 
 // SetAttributeValue sets the XML attribute key to an arbitrary scalar value
 // (string, number, bool, …), preserving the value type on the wire exactly as
 // Yjs's YXmlElement.setAttribute does.
 func (e *YXmlElement) SetAttributeValue(txn *Transaction, key string, value any) {
+	e.setAttributeValue("YXmlElement.SetAttributeValue", txn, key, value)
+}
+
+// setAttributeValue is the shared implementation behind SetAttribute and
+// SetAttributeValue. op names whichever exported method the caller actually
+// invoked, so validation runs exactly once (SetAttribute previously validated
+// its string value, then handed off to SetAttributeValue which validated it
+// again) while the panic still points at the call site the caller used. For a
+// plain string value, checkAnyUTF8 immediately delegates to checkUTF8 — same
+// message, same behaviour as calling checkUTF8 directly.
+func (e *YXmlElement) setAttributeValue(op string, txn *Transaction, key string, value any) {
+	checkUTF8(op, "key", key)
+	checkAnyUTF8(op, "value", value)
 	t := &e.abstractType
 	if t.detached() {
 		// Store the wire-normalised value (int -> int64, the same transform
@@ -562,6 +575,7 @@ func (t *YXmlText) toXMLLocked() string {
 // NewYXmlElement creates a standalone YXmlElement ready to be inserted into a
 // YXmlFragment or another YXmlElement.
 func NewYXmlElement(nodeName string) *YXmlElement {
+	checkUTF8("NewYXmlElement", "nodeName", nodeName)
 	e := &YXmlElement{NodeName: nodeName}
 	e.itemMap = make(map[string]*Item)
 	e.owner = e

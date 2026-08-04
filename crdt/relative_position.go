@@ -191,6 +191,13 @@ func ToAbsolutePosition(doc *Doc, rp RelativePosition) (AbsolutePosition, bool) 
 //
 // followed by VarInt(assoc).
 func EncodeRelativePosition(rp RelativePosition) []byte {
+	// Tname is an exported field on an exported struct, so a caller can build
+	// RelativePosition{Tname: bad} directly — there is no constructor to
+	// guard it at the point of the mistake. Encoder.WriteVarString would
+	// still catch it below, but that generic panic doesn't name the field;
+	// this check exists purely for a clearer message (#209).
+	checkUTF8("EncodeRelativePosition", "Tname", rp.Tname)
+
 	enc := encoding.NewEncoder()
 	switch {
 	case rp.Item != nil:

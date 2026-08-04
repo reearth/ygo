@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/reearth/ygo/encoding"
 )
@@ -483,9 +484,30 @@ func (a *Awareness) EncodeUpdate(clientIDs []uint64) []byte {
 			enc.WriteVarString("null")
 		} else {
 			b, err := json.Marshal(cs.State)
-			if err != nil {
+			switch {
+			case err != nil:
 				enc.WriteVarString("null")
-			} else {
+			case !utf8.Valid(b):
+				// json.Marshal coerces invalid UTF-8 in an ordinary Go string
+				// to U+FFFD, but it passes a json.RawMessage value through
+				// once its bytes pass JSON *syntax* validation — a
+				// syntactically valid JSON string token can still contain
+				// invalid UTF-8 in its content, and that content sails
+				// through untouched. Left alone, that reaches
+				// WriteVarString, which panics.
+				//
+				// This deliberately differs from the panic-at-the-mutator
+				// policy used for document content (CRDT struct/YText/YMap
+				// data): awareness state is ephemeral presence information,
+				// not persisted CRDT content, and EncodeUpdate runs on a
+				// broadcast goroutine serving every connected peer at once.
+				// Dropping one client's cursor as "null" is a peer losing a
+				// presence indicator for a moment; panicking here would take
+				// down the broadcast for every peer over one client's bad
+				// input. Do not "fix" this to panic — that would trade a
+				// minor, contained degradation for a shared-goroutine crash.
+				enc.WriteVarString("null")
+			default:
 				enc.WriteVarString(string(b))
 			}
 		}

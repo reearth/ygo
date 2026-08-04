@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"unicode/utf8"
 )
 
 // ErrVarIntOutOfRange is returned by WriteVarIntE when the magnitude of v
@@ -95,10 +96,37 @@ func (e *Encoder) WriteVarInt(v int64) {
 	}
 }
 
-// WriteVarString encodes s as VarUint(byteLength) followed by raw UTF-8 bytes.
-func (e *Encoder) WriteVarString(s string) {
+// WriteVarStringE is the error-returning variant of WriteVarString. Returns
+// ErrInvalidUTF8 if s is not valid UTF-8, writing nothing in that case.
+//
+// Go strings are arbitrary byte sequences, but the wire format is UTF-8 and
+// ReadVarString (like lib0's TextDecoder with fatal:true) rejects anything
+// else. Without this check an encoder can produce an update that no decoder,
+// ygo's or Yjs's, will accept (#209).
+//
+// Successful encoding is byte-identical to the previous unvalidated behaviour.
+func (e *Encoder) WriteVarStringE(s string) error {
+	if !utf8.ValidString(s) {
+		return ErrInvalidUTF8
+	}
 	e.WriteVarUint(uint64(len(s)))
 	e.buf = append(e.buf, s...)
+	return nil
+}
+
+// WriteVarString encodes s as VarUint(byteLength) followed by raw UTF-8 bytes.
+//
+// Panics if s is not valid UTF-8. Callers who need to surface that as a value
+// should use WriteVarStringE. Most invalid input is rejected earlier, at the
+// crdt mutator that accepted it; this is the net for paths with no such
+// boundary (exported struct fields a caller can assign directly).
+func (e *Encoder) WriteVarString(s string) {
+	if err := e.WriteVarStringE(s); err != nil {
+		// Self-contained message, matching WriteVarInt's style. Do not
+		// interpolate err: ErrInvalidUTF8's text already begins with
+		// "encoding:", which would double the package prefix.
+		panic("encoding: WriteVarString: input is not valid UTF-8")
+	}
 }
 
 // WriteVarBytes encodes b as VarUint(len) followed by raw bytes.

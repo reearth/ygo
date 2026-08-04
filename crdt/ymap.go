@@ -171,6 +171,9 @@ func extractMapValue(item *Item) any {
 // Set writes value under key. If a live entry already exists for key, it is
 // deleted and the new item becomes the winner.
 func (m *YMap) Set(txn *Transaction, key string, value any) {
+	checkUTF8("YMap.Set", "key", key)
+	checkAnyUTF8("YMap.Set", "value", value)
+
 	t := &m.abstractType
 
 	// Detached: stage the entry (see prelim). Re-setting a key overwrites in

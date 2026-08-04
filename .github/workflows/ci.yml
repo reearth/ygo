@@ -81,6 +81,67 @@ jobs:
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...
 
+  release-docs:
+    name: Release docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # The release job publishes RELEASE_NOTES.md's top section under the tag
+      # it is given and reads the version from CHANGELOG.md's top heading. If
+      # the two files disagree about what the newest version is, one of those
+      # two reads is wrong and the mistake only surfaces at tag time.
+      - name: CHANGELOG and RELEASE_NOTES agree on the newest version
+        run: |
+          chg=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | tr -d '#[] ')
+          rel=$(grep -m1 -oE '^## v[0-9]+\.[0-9]+\.[0-9]+' RELEASE_NOTES.md | sed 's/^## v//')
+          if [ "$chg" != "$rel" ]; then
+            echo "::error::CHANGELOG.md leads with [$chg] but RELEASE_NOTES.md leads with v$rel. Both files are newest-first and the release job reads both, so they must name the same version."
+            exit 1
+          fi
+          echo "Both files lead with $chg."
+      # Catches the omission at review time instead of at tag time, where the
+      # only remedy is a docs-only PR to a PR-protected main before anything
+      # can ship. CONTRIBUTING's exemption is encoded as the path filter below.
+      - name: Behaviour changes carry entries
+        if: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'no-release-notes') }}
+        run: |
+          set -euo pipefail
+          # Fail closed. An unresolvable base or an empty diff means this step
+          # is not looking at the PR's changes, and the path filter below would
+          # then find no source files and pass — reporting green while checking
+          # nothing. That is worse than not having the check at all.
+          base="origin/$GITHUB_BASE_REF"
+          if ! git rev-parse --verify --quiet "$base" >/dev/null; then
+            echo "::error::Cannot resolve $base. The checkout needs fetch-depth: 0 for the merge-base diff below."
+            exit 1
+          fi
+          changed=$(git diff --name-only "$base...HEAD")
+          if [ -z "$changed" ]; then
+            echo "::error::Empty diff against $base. Refusing to report success without having examined any files."
+            exit 1
+          fi
+          # Library source = a non-test .go file outside examples/ and
+          # benchmarks/. Tests, testdata, markdown, CI, tooling and examples
+          # ride along with the next release and need no entry of their own.
+          # testutil/ is deliberately NOT exempt: it exports symbols, and
+          # v1.40.0 was a MINOR precisely because testutil/fuzz gained some.
+          src=$(printf '%s\n' "$changed" | grep -E '\.go$' | grep -vE '_test\.go$' | grep -vE '^(examples|benchmarks)/' || true)
+          if [ -z "$src" ]; then
+            echo "No library source changed — entries not required."
+            exit 0
+          fi
+          echo "Library source changed:"; printf '%s\n' "$src" | sed 's/^/  /'
+          missing=
+          printf '%s\n' "$changed" | grep -qx 'CHANGELOG.md' || missing="$missing CHANGELOG.md"
+          printf '%s\n' "$changed" | grep -qx 'RELEASE_NOTES.md' || missing="$missing RELEASE_NOTES.md"
+          if [ -n "$missing" ]; then
+            echo "::error::This PR changes library source but does not touch:$missing. Add an entry to each — see CONTRIBUTING.md, \"CHANGELOG and release notes\". If the change ships no behaviour at all, apply the 'no-release-notes' label to skip this check."
+            exit 1
+          fi
+          echo "Entries present in both files."
+
   conformance-fixtures:
     name: Conformance fixture drift
     runs-on: ubuntu-latest

@@ -767,23 +767,33 @@ func TestUnit_Any_FloatSpecials(t *testing.T) {
 	})
 }
 
-// Asymmetric UTF-8 contract: WriteVarString trusts the caller (Go strings
-// can legally contain invalid UTF-8 byte sequences). ReadVarString is the
-// validation gate. Document this so future contributors don't add
-// validation to WriteVarString and break callers passing pre-encoded data.
-func TestUnit_VarString_AsymmetricUTF8Contract(t *testing.T) {
+// #209 — WriteVarString used to trust the caller (Go strings can legally
+// contain invalid UTF-8 byte sequences) while ReadVarString rejected
+// malformed input on the way back in. That asymmetry let a caller produce
+// an update that no decoder, ygo's or Yjs's, could read. WriteVarString now
+// validates and panics symmetrically with ReadVarString's rejection;
+// WriteVarStringE is the non-panicking variant for callers that need to
+// surface the failure as a value. See encoder_test.go for the dedicated
+// WriteVarStringE/WriteVarString coverage.
+func TestUnit_VarString_SymmetricUTF8Contract(t *testing.T) {
 	invalid := string([]byte{0xff, 0xfe, 0xfd}) // not valid UTF-8
 
-	// Write trusts the caller — no validation, no panic.
+	// Write now validates and panics, matching Read's rejection.
 	enc := encoding.NewEncoder()
-	assert.NotPanics(t, func() { enc.WriteVarString(invalid) })
+	assert.PanicsWithValue(t,
+		"encoding: WriteVarString: input is not valid UTF-8",
+		func() { enc.WriteVarString(invalid) })
 
-	// Read validates and rejects.
-	dec := encoding.NewDecoder(enc.Bytes())
+	// A pre-encoded payload containing invalid UTF-8 (e.g. from another,
+	// non-validating implementation) is still rejected on read.
+	raw := encoding.NewEncoder()
+	raw.WriteVarUint(uint64(len(invalid)))
+	raw.WriteRaw([]byte(invalid))
+	dec := encoding.NewDecoder(raw.Bytes())
 	_, err := dec.ReadVarString()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, encoding.ErrInvalidUTF8,
-		"asymmetric contract: write trusts, read validates")
+		"read must still reject invalid UTF-8 regardless of its source")
 }
 
 // G4: WriteAny must accept Go unsigned integer types (uint, uint8-32, uint64

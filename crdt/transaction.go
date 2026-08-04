@@ -95,6 +95,7 @@ func (t *Transaction) assertLive(method string) {
 // GetText returns the named root YText, creating it if it does not exist.
 // Safe to call inside the Transact callback; see the section comment above.
 func (t *Transaction) GetText(name string) *YText {
+	checkUTF8("Transaction.GetText", "name", name)
 	t.assertLive("GetText")
 	return t.doc.getTextLocked(name)
 }
@@ -102,6 +103,7 @@ func (t *Transaction) GetText(name string) *YText {
 // GetMap returns the named root YMap, creating it if it does not exist.
 // Safe to call inside the Transact callback; see the section comment above.
 func (t *Transaction) GetMap(name string) *YMap {
+	checkUTF8("Transaction.GetMap", "name", name)
 	t.assertLive("GetMap")
 	return t.doc.getMapLocked(name)
 }
@@ -109,6 +111,7 @@ func (t *Transaction) GetMap(name string) *YMap {
 // GetArray returns the named root YArray, creating it if it does not exist.
 // Safe to call inside the Transact callback; see the section comment above.
 func (t *Transaction) GetArray(name string) *YArray {
+	checkUTF8("Transaction.GetArray", "name", name)
 	t.assertLive("GetArray")
 	return t.doc.getArrayLocked(name)
 }
@@ -117,6 +120,7 @@ func (t *Transaction) GetArray(name string) *YArray {
 // not exist. Safe to call inside the Transact callback; see the section
 // comment above.
 func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
+	checkUTF8("Transaction.GetXmlFragment", "name", name)
 	t.assertLive("GetXmlFragment")
 	return t.doc.getXmlFragmentLocked(name)
 }

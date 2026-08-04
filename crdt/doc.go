@@ -73,7 +73,10 @@ func WithGC(gc bool) DocOption {
 // WithGUID sets the document's subdocument identifier. When a Doc is embedded
 // inside another Doc via ContentDoc, the GUID identifies it across peers.
 func WithGUID(guid string) DocOption {
-	return func(d *Doc) { d.guid = guid }
+	return func(d *Doc) {
+		checkUTF8("WithGUID", "guid", guid)
+		d.guid = guid
+	}
 }
 
 // WithAutoLoad marks a subdocument to be auto-loaded by remote peers. Default false.
@@ -84,7 +87,12 @@ func WithAutoLoad(v bool) DocOption { return func(d *Doc) { d.autoLoad = v } }
 func WithShouldLoad(v bool) DocOption { return func(d *Doc) { d.shouldLoad = v } }
 
 // WithCollectionID sets an optional subdocument collection identifier.
-func WithCollectionID(id string) DocOption { return func(d *Doc) { d.collectionID = id } }
+func WithCollectionID(id string) DocOption {
+	return func(d *Doc) {
+		checkUTF8("WithCollectionID", "id", id)
+		d.collectionID = id
+	}
+}
 
 // defaultMaxPendingItems is the default cap on items parked in the per-doc
 // pending queue waiting for out-of-order dependencies. Matches the per-update
@@ -357,6 +365,7 @@ func (d *Doc) getArrayLocked(name string) *YArray {
 // It takes the document lock — inside a Transact callback use txn.GetArray
 // instead (see Transact and GetText for the locking contract; issue #138).
 func (d *Doc) GetArray(name string) *YArray {
+	checkUTF8("Doc.GetArray", "name", name)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.getArrayLocked(name)
@@ -388,6 +397,7 @@ func (d *Doc) getMapLocked(name string) *YMap {
 // It takes the document lock — inside a Transact callback use txn.GetMap
 // instead (see Transact and GetText for the locking contract; issue #138).
 func (d *Doc) GetMap(name string) *YMap {
+	checkUTF8("Doc.GetMap", "name", name)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.getMapLocked(name)
@@ -425,6 +435,7 @@ func (d *Doc) getTextLocked(name string) *YText {
 //	txt := doc.GetText("t")
 //	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "hi", nil) })
 func (d *Doc) GetText(name string) *YText {
+	checkUTF8("Doc.GetText", "name", name)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.getTextLocked(name)
@@ -841,6 +852,7 @@ func (d *Doc) getXmlFragmentLocked(name string) *YXmlFragment {
 // txn.GetXmlFragment instead (see Transact and GetText for the locking
 // contract; issue #138).
 func (d *Doc) GetXmlFragment(name string) *YXmlFragment {
+	checkUTF8("Doc.GetXmlFragment", "name", name)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.getXmlFragmentLocked(name)

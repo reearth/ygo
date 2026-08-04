@@ -30,3 +30,18 @@ func TestValid(t *testing.T) {
 		}
 	}
 }
+
+// TestUnit_Valid_RejectsInvalidUTF8 guards issue #209: ranging over a string
+// yields utf8.RuneError (U+FFFD) for invalid bytes, which is above the
+// control-character floor, so the old rule accepted these. Room names reach
+// the wire (WriteVarString, which now rejects invalid UTF-8) and the Redis
+// relay, so Valid must reject them outright rather than let them panic a
+// connection goroutine later.
+func TestUnit_Valid_RejectsInvalidUTF8(t *testing.T) {
+	if Valid(string([]byte{0xff, 0xfe})) {
+		t.Fatal("invalid UTF-8 room name must be rejected")
+	}
+	if !Valid("документ 📄") {
+		t.Fatal("valid Unicode room names must still be accepted")
+	}
+}

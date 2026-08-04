@@ -2,6 +2,7 @@ package awareness_test
 
 import (
 	"context"
+	"encoding/json"
 	"runtime"
 	"testing"
 	"time"
@@ -1043,4 +1044,63 @@ func TestUnit_RemoveExpired_FiresOnUpdate(t *testing.T) {
 	a.OnUpdate(func(awareness.UpdateEvent) { upd++ })
 	a.RemoveExpired(0) // everything older than 0 => expire client 99
 	require.Equal(t, 1, upd)
+}
+
+// ---------------------------------------------------------------------------
+// #209 addendum — json.RawMessage bypasses json.Marshal's UTF-8 coercion
+// ---------------------------------------------------------------------------
+
+// TestUnit_EncodeUpdate_InvalidUTF8RawMessage_EncodesAsNull proves that a
+// client state holding a json.RawMessage with invalid UTF-8 bytes does not
+// panic EncodeUpdate. json.Marshal ordinarily replaces invalid UTF-8 with
+// U+FFFD, but that coercion happens while encoding a Go string; a
+// json.RawMessage is emitted as-is once it passes JSON *syntax* validation,
+// so a syntactically valid JSON string token (quotes and all) whose byte
+// content isn't valid UTF-8 sails through json.Marshal untouched and reaches
+// WriteVarString still broken. That client's entry must degrade to the wire
+// string "null" instead, exactly like the json.Marshal-error path three
+// lines above it. A normal state encoded alongside it in the same call must
+// be completely unaffected.
+func TestUnit_EncodeUpdate_InvalidUTF8RawMessage_EncodesAsNull(t *testing.T) {
+	// A syntactically valid JSON string ("...") whose content is the single
+	// invalid UTF-8 byte 0xFF. json.Compact accepts this (it only checks JSON
+	// structure), so json.Marshal passes it through rather than erroring or
+	// substituting U+FFFD.
+	invalidJSONString := json.RawMessage("\"\xff\"")
+
+	bad := awareness.New(1)
+	bad.SetLocalState(map[string]any{"cursor": invalidJSONString})
+
+	good := awareness.New(2)
+	good.SetLocalState(map[string]any{"name": "bob"})
+
+	// Fold client 2's state into client 1's awareness so a single
+	// EncodeUpdate call covers both the invalid-UTF-8 RawMessage state and
+	// an ordinary state, proving one does not affect the other.
+	require.NoError(t, bad.ApplyUpdate(good.EncodeUpdate(nil), nil))
+
+	var enc []byte
+	require.NotPanics(t, func() {
+		enc = bad.EncodeUpdate([]uint64{1, 2})
+	}, "invalid UTF-8 inside a json.RawMessage state must not panic the encoder")
+	require.NotEmpty(t, enc)
+
+	dec := encoding.NewDecoder(enc)
+	n, err := dec.ReadVarUint()
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), n)
+
+	seen := map[uint64]string{}
+	for i := uint64(0); i < n; i++ {
+		id, err := dec.ReadVarUint()
+		require.NoError(t, err)
+		_, err = dec.ReadVarUint() // clock
+		require.NoError(t, err)
+		s, err := dec.ReadVarString()
+		require.NoError(t, err)
+		seen[id] = s
+	}
+
+	assert.Equal(t, "null", seen[1], "state with invalid-UTF-8 RawMessage must encode as null")
+	assert.JSONEq(t, `{"name":"bob"}`, seen[2], "a normal state alongside it must be unaffected")
 }

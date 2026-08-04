@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -315,6 +316,8 @@ func (txt *YText) Len() int { return txt.length }
 // Keys whose requested value already matches the current state produce no
 // markers (empty diff = no work).
 func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attributes) {
+	checkUTF8("YText.Insert", "text", text)
+	checkAttrsUTF8("YText.Insert", attrs)
 	if text == "" {
 		return
 	}
@@ -536,6 +539,8 @@ func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 //
 // Added in v1.12.0 (#76).
 func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attributes) {
+	checkAnyUTF8("YText.InsertEmbed", "embed", embed)
+	checkAttrsUTF8("YText.InsertEmbed", attrs)
 	if txt.detached() {
 		attrs := cloneAttributes(attrs)
 		txt.buffer(func(txn *Transaction) { txt.InsertEmbed(txn, index, embed, attrs) })
@@ -782,6 +787,7 @@ func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *
 // removal marker before the source marker when both share the same origin.
 // Full concurrent attribute removal is tracked as a follow-up improvement.
 func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) {
+	checkAttrsUTF8("YText.Format", attrs)
 	if len(attrs) == 0 || length <= 0 {
 		return
 	}
@@ -1280,6 +1286,15 @@ func (txt *YText) Observe(fn func(YTextEvent)) func() {
 // The cursor starts at position 0. ApplyDelta must be called from inside a
 // Transact callback.
 func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
+	// Validate the ENTIRE slice before applying ANY of it. Transact is
+	// panic-safe (releases the lock) but does not roll back, so validating
+	// op-by-op inside the loop below would let delta[0], delta[1], ... commit
+	// before a panic on delta[2] — a partial write with observers already
+	// fired (#209).
+	for i, d := range delta {
+		checkAnyUTF8("YText.ApplyDelta", fmt.Sprintf("delta[%d].Insert", i), d.Insert)
+		checkAttrsUTF8("YText.ApplyDelta", d.Attributes)
+	}
 	if txt.detached() {
 		delta := cloneDelta(delta)
 		txt.buffer(func(txn *Transaction) { txt.ApplyDelta(txn, delta) })

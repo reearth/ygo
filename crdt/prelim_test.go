@@ -631,10 +631,8 @@ func FuzzPrelimNestedRoundTrip(f *testing.F) {
 		if n < 0 || n > 32 {
 			t.Skip()
 		}
-		// Constrain to valid UTF-8. Go strings may hold arbitrary bytes, but
-		// ygo's varstring encoding rejects non-UTF-8 on decode — a pre-existing
-		// property unrelated to prelim construction, and letting it through
-		// would make this target test string encoding instead of wire ordering.
+		// Skip non-UTF-8 inputs: ygo rejects them at the mutator boundary by design
+		// (#209), so feeding them here would assert the guard, not the round trip.
 		if !utf8.ValidString(text) || !utf8.ValidString(kind) {
 			t.Skip()
 		}
