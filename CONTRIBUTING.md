@@ -186,6 +186,8 @@ Both files are newest-first: your new section goes at the top, above the previou
 
 **Exemption.** A PR that changes no library behaviour — documentation, tests, CI, tooling, benchmarks — needs neither entry, and does not get a release of its own. Those changes ride along with whatever release comes next. If you are unsure whether your PR qualifies, assume it does not and add the entries; an unnecessary entry is trivial to drop in review, a missing one blocks a tag.
 
+The **Release docs** CI job enforces both files, and decides the exemption by path: a changed non-test `.go` file outside `examples/` and `benchmarks/` requires entries, and everything else does not. `testutil/` is deliberately *not* exempt — it exports symbols, and v1.40.0 was a MINOR because `testutil/fuzz` gained some. The path rule can only approximate "changes behaviour", so if you touch such a file and genuinely ship none — a comment, a purely internal rename — apply the **`no-release-notes`** label to skip the check. The job also fails if `CHANGELOG.md` and `RELEASE_NOTES.md` name different newest versions, since the release job reads both.
+
 ## Pull Request Checklist
 
 Before opening a PR ensure:
