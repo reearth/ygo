@@ -308,50 +308,85 @@ func RunSnapshotStoreConformance(t *testing.T, factory func() SnapshotStore) {
 		}
 	})
 
+	// Parameterised over pairs of DISTINCT rooms whose names collide under a
+	// naive encoding. This is the case that catches the sharp edge in #211:
+	// snapshot IDs are often recovered by parsing them back out of an object
+	// name, so two rooms collapsing to one key silently maps one room's IDs
+	// onto the other's instead of failing, and a wrong ID decides which state a
+	// user restores.
 	t.Run("RoomsAreIsolated", func(t *testing.T) {
-		s := factory()
-		idA, err := s.SaveSnapshot(ctx, "roomA", "a", []byte("aaa"))
-		if err != nil {
-			t.Fatalf("SaveSnapshot(roomA): %v", err)
+		pairs := []struct {
+			name string
+			a, b string
+		}{
+			// Both separators mapped to the same replacement character.
+			{"separator", "a/b", "a:b"},
+			// Percent-encoding applied to one name but not the other.
+			{"percent", "a/b", "a%2Fb"},
+			// Space encoded as "+".
+			{"space-plus", "a b", "a+b"},
+			// NFC vs NFD: distinct bytes that collide if the backend lets a
+			// normalizing filesystem name the object. Escaped deliberately —
+			// see conformance_names.go.
+			{"unicode-normalization", "\u00fc\u00f1\u00ef", "u\u0308n\u0303i\u0308"},
 		}
-		idB, err := s.SaveSnapshot(ctx, "roomB", "b", []byte("bbb"))
-		if err != nil {
-			t.Fatalf("SaveSnapshot(roomB): %v", err)
-		}
-		// Listings must not bleed across rooms.
-		a, err := s.ListSnapshots(ctx, "roomA")
-		if err != nil {
-			t.Fatalf("ListSnapshots(roomA): %v", err)
-		}
-		if len(a) != 1 || a[0].Label != "a" {
-			t.Fatalf("roomA = %+v, want single label a", a)
-		}
-		b, err := s.ListSnapshots(ctx, "roomB")
-		if err != nil {
-			t.Fatalf("ListSnapshots(roomB): %v", err)
-		}
-		if len(b) != 1 || b[0].Label != "b" {
-			t.Fatalf("roomB = %+v, want single label b", b)
-		}
-		// State is keyed by (room, id): each room reads its own blob. IDs are only
-		// unique within a room, so ids may legitimately collide across rooms.
-		sa, err := s.GetSnapshotState(ctx, "roomA", idA)
-		if err != nil {
-			t.Fatalf("GetSnapshotState(roomA): %v", err)
-		}
-		sb, err := s.GetSnapshotState(ctx, "roomB", idB)
-		if err != nil {
-			t.Fatalf("GetSnapshotState(roomB): %v", err)
-		}
-		if !bytes.Equal(sa, []byte("aaa")) || !bytes.Equal(sb, []byte("bbb")) {
-			t.Fatalf("states = %q / %q, want aaa / bbb", sa, sb)
-		}
-		// Deleting in one room must not affect the other.
-		if err := s.DeleteSnapshot(ctx, "roomB", idB); err != nil {
-			t.Fatalf("DeleteSnapshot(roomB): %v", err)
-		}
-		if _, err := s.GetSnapshotState(ctx, "roomA", idA); err != nil {
-			t.Fatalf("roomA snapshot must survive roomB delete: %v", err)
+		for _, p := range pairs {
+			t.Run(p.name, func(t *testing.T) {
+				// The pair must be two DIFFERENT rooms or this case asserts
+				// nothing. Cheap insurance: the normalization pair in
+				// particular is two visually identical literals, and an editor
+				// or tool that normalizes the file would collapse them into one
+				// string, leaving a test that passes while checking nothing.
+				if p.a == p.b {
+					t.Fatalf("pair %q is the same room twice (%q) — the names were normalized away", p.name, p.a)
+				}
+				s := factory()
+				idA, err := s.SaveSnapshot(ctx, p.a, "a", []byte("aaa"))
+				if err != nil {
+					t.Fatalf("SaveSnapshot(%q): %v", p.a, err)
+				}
+				idB, err := s.SaveSnapshot(ctx, p.b, "b", []byte("bbb"))
+				if err != nil {
+					t.Fatalf("SaveSnapshot(%q): %v", p.b, err)
+				}
+				// Listings must not bleed across rooms.
+				a, err := s.ListSnapshots(ctx, p.a)
+				if err != nil {
+					t.Fatalf("ListSnapshots(%q): %v", p.a, err)
+				}
+				if len(a) != 1 || a[0].Label != "a" {
+					t.Fatalf("room %q = %+v, want single label a", p.a, a)
+				}
+				b, err := s.ListSnapshots(ctx, p.b)
+				if err != nil {
+					t.Fatalf("ListSnapshots(%q): %v", p.b, err)
+				}
+				if len(b) != 1 || b[0].Label != "b" {
+					t.Fatalf("room %q = %+v, want single label b", p.b, b)
+				}
+				// State is keyed by (room, id): each room reads its own blob. IDs
+				// are only unique within a room, so ids may legitimately collide
+				// across rooms — do NOT assert the other room's id is missing,
+				// that would fail on a correct backend.
+				sa, err := s.GetSnapshotState(ctx, p.a, idA)
+				if err != nil {
+					t.Fatalf("GetSnapshotState(%q): %v", p.a, err)
+				}
+				sb, err := s.GetSnapshotState(ctx, p.b, idB)
+				if err != nil {
+					t.Fatalf("GetSnapshotState(%q): %v", p.b, err)
+				}
+				if !bytes.Equal(sa, []byte("aaa")) || !bytes.Equal(sb, []byte("bbb")) {
+					t.Fatalf("states = %q / %q, want aaa / bbb", sa, sb)
+				}
+				// Deleting in one room must not affect the other.
+				if err := s.DeleteSnapshot(ctx, p.b, idB); err != nil {
+					t.Fatalf("DeleteSnapshot(%q): %v", p.b, err)
+				}
+				if _, err := s.GetSnapshotState(ctx, p.a, idA); err != nil {
+					t.Fatalf("room %q snapshot must survive %q delete: %v", p.a, p.b, err)
+				}
+			})
 		}
 	})
 }
