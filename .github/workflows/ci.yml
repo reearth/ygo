@@ -97,8 +97,9 @@ jobs:
       # Same trap as benchmark.yml's benchstat install, pre-empted: govulncheck
       # is a tool tracking @latest, so the day x/vuln requires a Go newer than
       # the version pinned above, this step fails unless Go may fetch a
-      # toolchain. actions/setup-go@v7 sets GOTOOLCHAIN=local, which forbids
-      # that. Not currently broken — 1.26 is new enough today — but this is the
+      # toolchain. actions/setup-go set GOTOOLCHAIN=auto through v5 and flipped
+      # the default to local in v7, so that permission is no longer inherited.
+      # Not currently broken — 1.26 is new enough today — but this is the
       # security scan, and it should not start failing on someone else's release
       # schedule.
       - env:

@@ -63,16 +63,18 @@ jobs:
         # golang.org/x/perf now requires Go >= 1.25 — so Go has to be allowed to
         # fetch a newer toolchain just to build it.
         #
-        # It worked by accident until actions/setup-go@v7, which sets
-        # GOTOOLCHAIN=local and thereby forbids that switch:
+        # This worked only because actions/setup-go set GOTOOLCHAIN=auto for us.
+        # v7 flipped that default to local, which forbids the switch:
         #
-        #   setup-go@v5: "requires go >= 1.25.0; switching to go1.25.12"  -> ok
-        #   setup-go@v7: "requires go >= 1.25.0 (GOTOOLCHAIN=local)"      -> fail
+        #   setup-go@v5 (GOTOOLCHAIN=auto):  "switching to go1.25.12"   -> ok
+        #   setup-go@v7 (GOTOOLCHAIN=local): "requires go >= 1.25.0"    -> fail
         #
-        # Setting it explicitly makes the requirement visible instead of relying
-        # on an action's default. Pinning x/perf instead is not an option worth
-        # taking: it publishes no tags, so a pin means freezing an opaque
-        # pseudo-version, and for a tool we want the current release anyway.
+        # So set it here rather than inheriting whatever the action decides: the
+        # requirement belongs to this step, not to an action's default.
+        #
+        # Pinning x/perf instead is not an option worth taking: it publishes no
+        # tags, so a pin means freezing an opaque pseudo-version, and for a tool
+        # we want the current release anyway.
         env:
           GOTOOLCHAIN: auto
         run: go install golang.org/x/perf/cmd/benchstat@latest
