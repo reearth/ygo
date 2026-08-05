@@ -3,6 +3,7 @@ package persistence_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -156,7 +157,7 @@ func TestLegacyAdapterSaveVersion_AutoDoesNotEvictNamed(t *testing.T) {
 	snaps, err := store.ListSnapshots(ctx, "room")
 	require.NoError(t, err)
 
-	var labels []string
+	labels := make([]string, 0, len(snaps))
 	found := false
 	autos := 0
 	for _, sn := range snaps {
@@ -274,12 +275,16 @@ func TestLegacyAdapterTrimSnapshots_UnsupportedStore(t *testing.T) {
 	ctx := context.Background()
 	inner := persistence.NewMemoryPersistence()
 
+	// Subtests rather than a bare loop: keep=0 is the case that regresses if the
+	// guards are reordered, and it must still be reported even when keep=1 fails.
 	for _, keep := range []int{0, 1} {
-		a := persistence.NewLegacyAdapter(bareStore{VersionedPersistence: inner})
-		a.KeepSnapshots = keep
-		n, err := a.TrimSnapshots(ctx, "room", "auto")
-		assert.ErrorIs(t, err, persistence.ErrSnapshotsUnsupported,
-			"KeepSnapshots=%d must still report the misconfiguration", keep)
-		assert.Zero(t, n)
+		t.Run(fmt.Sprintf("keep=%d", keep), func(t *testing.T) {
+			a := persistence.NewLegacyAdapter(bareStore{VersionedPersistence: inner})
+			a.KeepSnapshots = keep
+			n, err := a.TrimSnapshots(ctx, "room", "auto")
+			require.ErrorIs(t, err, persistence.ErrSnapshotsUnsupported,
+				"KeepSnapshots=%d must still report the misconfiguration", keep)
+			assert.Zero(t, n)
+		})
 	}
 }
