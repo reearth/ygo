@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // LegacyAdapter adapts a VersionedPersistence to the provider/websocket
@@ -134,23 +135,70 @@ func (a *LegacyAdapter) SaveVersion(ctx context.Context, room, label string) (in
 	if err != nil {
 		return 0, err
 	}
-	a.trimSnapshots(ctx, ss, room)
+	// Best-effort, and scoped to the label just written so an auto version
+	// cannot evict one a user named — see the doc above for why a retention
+	// failure is not propagated.
+	_, _ = a.TrimSnapshots(ctx, room, label)
 	return id, nil
 }
 
-// trimSnapshots deletes the oldest snapshots beyond KeepSnapshots. Best-effort:
-// see the SaveVersion doc for why errors are swallowed.
-func (a *LegacyAdapter) trimSnapshots(ctx context.Context, ss SnapshotStore, room string) {
+// TrimSnapshots deletes the oldest snapshots of room labelled label beyond
+// KeepSnapshots, and reports how many it deleted.
+//
+// Retention is scoped to the LABEL CLASS: a call with the server's auto-version
+// label never deletes a snapshot a user named, and a named save never disturbs
+// the auto history. The label is a parameter rather than something the adapter
+// infers because this package deliberately does not import provider/websocket,
+// so it cannot know which label means "automatic" — and scoping to the label
+// the caller just wrote needs no such knowledge.
+//
+// KeepSnapshots <= 0 keeps everything and returns (0, nil). Note this is the
+// opposite of some other Yjs ports, where a keep of 0 deletes every version.
+//
+// Because the bound is per class, a room's TOTAL snapshot count is
+// (distinct labels x KeepSnapshots) and is NOT itself bounded. A caller needing
+// a hard per-room cap must enumerate the labels from ListSnapshots and trim
+// each one; bounding the total is what evicts named snapshots, which is the
+// behaviour this scoping exists to prevent.
+//
+// Every surplus snapshot is attempted even if an earlier delete fails: the
+// count is how many were actually deleted, and the error joins each failure.
+// DeleteSnapshot is contractually idempotent (deleting an unknown snapshot
+// returns nil), so a concurrent trim of the same class cannot make this report
+// a spurious failure.
+func (a *LegacyAdapter) TrimSnapshots(ctx context.Context, room, label string) (int, error) {
+	ss, ok := a.store.(SnapshotStore)
+	if !ok {
+		return 0, ErrSnapshotsUnsupported
+	}
 	if a.KeepSnapshots <= 0 {
-		return
+		return 0, nil
 	}
 	snaps, err := ss.ListSnapshots(ctx, room)
-	if err != nil || len(snaps) <= a.KeepSnapshots {
-		return
+	if err != nil {
+		return 0, err
 	}
-	// ListSnapshots is newest-first, so everything at or past KeepSnapshots is
-	// surplus.
-	for _, sn := range snaps[a.KeepSnapshots:] {
-		_ = ss.DeleteSnapshot(ctx, room, sn.ID)
+	// ListSnapshots is newest-first by contract, so filtering preserves that
+	// order and everything at or past KeepSnapshots within the class is surplus.
+	var class []SnapshotInfo
+	for _, sn := range snaps {
+		if sn.Label == label {
+			class = append(class, sn)
+		}
 	}
+	if len(class) <= a.KeepSnapshots {
+		return 0, nil
+	}
+	var (
+		deleted int
+		errs    []error
+	)
+	for _, sn := range class[a.KeepSnapshots:] {
+		if derr := ss.DeleteSnapshot(ctx, room, sn.ID); derr != nil {
+			errs = append(errs, fmt.Errorf("delete snapshot %d: %w", sn.ID, derr))
+			continue
+		}
+		deleted++
+	}
+	return deleted, errors.Join(errs...)
 }

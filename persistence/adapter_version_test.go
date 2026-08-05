@@ -131,3 +131,70 @@ func TestLegacyAdapterSaveVersion_UnsupportedStoreErrors(t *testing.T) {
 	assert.ErrorIs(t, err, persistence.ErrSnapshotsUnsupported,
 		"a store without SnapshotStore must report the misconfiguration")
 }
+
+// An auto-captured version must never evict a snapshot a user deliberately
+// named: the two classes have opposite retention needs, and the named one is
+// exactly what a user would be most upset to lose (issue #212).
+func TestLegacyAdapterSaveVersion_AutoDoesNotEvictNamed(t *testing.T) {
+	ctx := context.Background()
+	store := persistence.NewMemoryPersistence()
+	a := persistence.NewLegacyAdapter(store)
+	a.KeepSnapshots = 2
+
+	seedRoom(t, store, "room", 1)
+
+	named, err := a.SaveVersion(ctx, "room", "before-migration")
+	require.NoError(t, err)
+
+	// Enough auto versions to bury the named one under the old newest-N rule.
+	for i := 0; i < 5; i++ {
+		_, err := a.SaveVersion(ctx, "room", "auto")
+		require.NoError(t, err)
+	}
+
+	snaps, err := store.ListSnapshots(ctx, "room")
+	require.NoError(t, err)
+
+	var labels []string
+	found := false
+	autos := 0
+	for _, sn := range snaps {
+		labels = append(labels, sn.Label)
+		if sn.ID == named {
+			found = true
+		}
+		if sn.Label == "auto" {
+			autos++
+		}
+	}
+	assert.True(t, found, "named snapshot must survive auto-version retention; labels = %v", labels)
+	assert.Equal(t, 2, autos, "the auto class must still be bounded by KeepSnapshots")
+}
+
+// KeepSnapshots bounds each label class independently.
+func TestLegacyAdapterTrimSnapshots_PerLabelBound(t *testing.T) {
+	ctx := context.Background()
+	store := persistence.NewMemoryPersistence()
+	a := persistence.NewLegacyAdapter(store)
+	a.KeepSnapshots = 2
+
+	seedRoom(t, store, "room", 1)
+	for i := 0; i < 4; i++ {
+		_, err := a.SaveVersion(ctx, "room", "auto")
+		require.NoError(t, err)
+	}
+	for i := 0; i < 4; i++ {
+		_, err := a.SaveVersion(ctx, "room", "manual")
+		require.NoError(t, err)
+	}
+
+	snaps, err := store.ListSnapshots(ctx, "room")
+	require.NoError(t, err)
+	counts := map[string]int{}
+	for _, sn := range snaps {
+		counts[sn.Label]++
+	}
+	assert.Equal(t, 2, counts["auto"], "auto class bounded")
+	assert.Equal(t, 2, counts["manual"], "manual class bounded independently")
+	assert.Len(t, snaps, 4, "room total is the sum of the bounded classes")
+}
