@@ -2,6 +2,7 @@ package persistence_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -197,4 +198,88 @@ func TestLegacyAdapterTrimSnapshots_PerLabelBound(t *testing.T) {
 	assert.Equal(t, 2, counts["auto"], "auto class bounded")
 	assert.Equal(t, 2, counts["manual"], "manual class bounded independently")
 	assert.Len(t, snaps, 4, "room total is the sum of the bounded classes")
+}
+
+// failingDeleteStore wraps a real store and fails exactly one DeleteSnapshot, to
+// prove a single failure neither aborts the remaining deletes nor is silently
+// dropped by the error-returning entry point.
+type failingDeleteStore struct {
+	persistence.SnapshotVersionedPersistence
+	failID int64
+}
+
+func (f *failingDeleteStore) DeleteSnapshot(ctx context.Context, room string, id int64) error {
+	if id == f.failID {
+		return errors.New("boom")
+	}
+	return f.SnapshotVersionedPersistence.DeleteSnapshot(ctx, room, id)
+}
+
+// TrimSnapshots reports what it did: the count is the number actually deleted,
+// and a failure is joined rather than swallowed the way SaveVersion's internal
+// best-effort call does.
+func TestLegacyAdapterTrimSnapshots_ReportsCountAndJoinsErrors(t *testing.T) {
+	ctx := context.Background()
+	inner := persistence.NewMemoryPersistence()
+	seedRoom(t, inner, "room", 1)
+
+	// Four snapshots, KeepSnapshots=1 leaves three surplus; one delete fails.
+	base := persistence.NewLegacyAdapter(inner)
+	var ids []int64
+	for i := 0; i < 4; i++ {
+		id, err := base.SaveVersion(ctx, "room", "auto")
+		require.NoError(t, err)
+		ids = append(ids, id)
+	}
+
+	store := &failingDeleteStore{SnapshotVersionedPersistence: inner, failID: ids[1]}
+	a := persistence.NewLegacyAdapter(store)
+	a.KeepSnapshots = 1
+
+	n, err := a.TrimSnapshots(ctx, "room", "auto")
+	require.Error(t, err, "the failed delete must be reported, not swallowed")
+	assert.Contains(t, err.Error(), "boom")
+	assert.Equal(t, 2, n, "the other two surplus snapshots must still be deleted")
+
+	snaps, err := inner.ListSnapshots(ctx, "room")
+	require.NoError(t, err)
+	assert.Len(t, snaps, 2, "the newest kept, plus the one whose delete failed")
+}
+
+// KeepSnapshots <= 0 keeps everything — deliberately the opposite of some other
+// Yjs ports, where a keep of 0 deletes every version.
+func TestLegacyAdapterTrimSnapshots_ZeroKeepsEverything(t *testing.T) {
+	ctx := context.Background()
+	store := persistence.NewMemoryPersistence()
+	a := persistence.NewLegacyAdapter(store)
+	// KeepSnapshots left at its 0 default.
+	seedRoom(t, store, "room", 1)
+	for i := 0; i < 3; i++ {
+		_, err := a.SaveVersion(ctx, "room", "auto")
+		require.NoError(t, err)
+	}
+
+	n, err := a.TrimSnapshots(ctx, "room", "auto")
+	require.NoError(t, err)
+	assert.Zero(t, n, "KeepSnapshots=0 must delete nothing")
+	snaps, err := store.ListSnapshots(ctx, "room")
+	require.NoError(t, err)
+	assert.Len(t, snaps, 3)
+}
+
+// The unsupported-store check must precede the KeepSnapshots short-circuit, so a
+// direct caller learns the store is misconfigured instead of getting a nil error
+// that looks like "nothing to trim".
+func TestLegacyAdapterTrimSnapshots_UnsupportedStore(t *testing.T) {
+	ctx := context.Background()
+	inner := persistence.NewMemoryPersistence()
+
+	for _, keep := range []int{0, 1} {
+		a := persistence.NewLegacyAdapter(bareStore{VersionedPersistence: inner})
+		a.KeepSnapshots = keep
+		n, err := a.TrimSnapshots(ctx, "room", "auto")
+		assert.ErrorIs(t, err, persistence.ErrSnapshotsUnsupported,
+			"KeepSnapshots=%d must still report the misconfiguration", keep)
+		assert.Zero(t, n)
+	}
 }
