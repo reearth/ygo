@@ -66,7 +66,32 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           set -o pipefail
-          go test -tags benchheavy -bench=. -benchmem -count=6 ./... | tee /tmp/heavy.txt
+          # -benchtime=10x is REQUIRED, not a tuning knob, and its absence made
+          # every nightly run since 2026-07-31 fail. The heavy benchmarks are
+          # built for a fixed small iteration count (BENCHMARKS.md documents this
+          # invocation); letting Go auto-scale b.N instead broke two ways:
+          #
+          #   - crdt and persistence ran past the default per-package test
+          #     timeout and were killed at 11m ("ran too long"), so the artifact
+          #     upload below never happened once.
+          #   - BroadcastFanout enqueued frames faster than its peers could drain
+          #     them, filling every writeCh; the default SlowPeerDisconnect policy
+          #     then closed the peers, the emptied room was evicted, and the next
+          #     BroadcastUpdate failed with "room not found".
+          #
+          # -timeout is set explicitly too: the default is a silent 10m, and this
+          # tier needs far longer.
+          #
+          # -count=3, not 6. Measured: crdt alone is ~6.5min per sample at
+          # -benchtime=10x on a fast 4-core machine, so count=6 is ~39min there
+          # and more on a runner. Almost none of that is the measured operations
+          # — it is per-sample setup that ns/op never shows (Conflict_B3 is
+          # 0.42s/op, and the SearchMarker_*_100k_Cold family rebuilds 100k-element
+          # structures). The PR gate keeps -count=5, which is where benchstat
+          # actually gates a decision; this tier uploads drift artifacts, and
+          # spotting drift across nights needs a run that finishes every night
+          # more than it needs six samples in one.
+          go test -tags benchheavy -bench=. -benchtime=10x -benchmem -count=3 -timeout 90m ./... | tee /tmp/heavy.txt
       - name: Scaling probe (nightly + manual)
         if: github.event_name != 'pull_request'
         run: |

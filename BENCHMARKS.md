@@ -29,12 +29,16 @@ go version go1.26.5 darwin/arm64
   treat them as a baseline for `benchstat` regression comparison on *this*
   machine, and re-run locally before trusting an absolute number for
   capacity planning.
-- CI (`.github/workflows/benchmark.yml`) uses `-count=5` (PR gate) / `-count=6`
-  (nightly heavy tier) so `benchstat` has enough samples to report a
-  meaningful confidence interval. This document's numbers use `-count=3`
-  (light tier) and `-count=1` (`-benchtime=10x`, heavy tier) — enough to
-  sanity-check the shape of the numbers, not a substitute for `benchstat
-  old.txt new.txt` when evaluating a real performance change.
+- CI (`.github/workflows/benchmark.yml`) uses `-count=5` on the PR gate, where
+  `benchstat` needs enough samples to report a meaningful confidence interval
+  and actually gates a decision. The nightly heavy tier uses `-count=3`: `crdt`
+  alone costs ~6.5min per sample, so six samples did not fit in the run, and a
+  drift artifact produced every night is worth more than six samples in a run
+  that never finishes.
+- This document's numbers use `-count=3` (light tier) and `-count=1`
+  (`-benchtime=10x`, heavy tier) — enough to sanity-check the shape of the
+  numbers, not a substitute for `benchstat old.txt new.txt` when evaluating a
+  real performance change.
 - **Determinism:** every randomized scenario in this suite seeds its PRNG
   from a fixed constant (`rand.New(rand.NewSource(<const>))`) — never
   unseeded `math/rand` or a wall-clock seed. Re-running any benchmark here
@@ -62,8 +66,18 @@ the PR gate; runs nightly on a cron schedule and on demand
 (`workflow_dispatch`).
 
 ```
-go test -tags benchheavy -bench=. -benchmem -count=6 ./...
+go test -tags benchheavy -bench=. -benchtime=10x -benchmem -count=3 -timeout 90m ./...
 ```
+
+`-benchtime=10x` is required, not optional. These benchmarks are built for a
+fixed small iteration count; letting Go auto-scale `b.N` pushes `crdt` and
+`persistence` past the default 10m per-package test timeout, and drives
+`BenchmarkBroadcastFanout` into back-pressure — its peers cannot drain what an
+unthrottled producer enqueues, so the slow-peer policy closes them, the emptied
+room is evicted, and the broadcast fails with "room not found". This recipe
+omitted the flag until 2026-08-05, and every nightly run from 2026-07-31 onward
+failed as a result. `-timeout` is explicit for the same reason: the default is a
+silent 10m.
 
 ### Scaling probe (nightly + manual)
 
