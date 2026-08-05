@@ -37,6 +37,10 @@ jobs:
     env:
       YGO_REQUIRE_NODE: "1"
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
@@ -69,6 +73,10 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
@@ -82,6 +90,10 @@ jobs:
     name: Vulnerability scan
     runs-on: ubuntu-latest
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
@@ -111,6 +123,10 @@ jobs:
     name: Release docs
     runs-on: ubuntu-latest
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
@@ -172,6 +188,10 @@ jobs:
     name: Conformance fixture drift
     runs-on: ubuntu-latest
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
