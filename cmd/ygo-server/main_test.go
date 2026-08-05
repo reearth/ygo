@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -236,5 +238,94 @@ func TestRun_InMemoryStore_StartsAndShutsDown(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not shut down")
+	}
+}
+
+// Auto-versioning is off unless asked for: both flags default to zero, which is
+// what keeps a default run from writing periodic versions nobody requested.
+func TestUnit_ParseFlags_AutoVersioningDefaultsOff(t *testing.T) {
+	cfg, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if cfg.VersionInterval != 0 {
+		t.Errorf("VersionInterval = %v, want 0 (disabled)", cfg.VersionInterval)
+	}
+	if cfg.KeepSnapshots != 0 {
+		t.Errorf("KeepSnapshots = %d, want 0 (keep all)", cfg.KeepSnapshots)
+	}
+}
+
+func TestUnit_ParseFlags_AutoVersioningFlags(t *testing.T) {
+	cfg, err := parseFlags([]string{"-version-interval", "15m", "-keep-snapshots", "50"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.VersionInterval != 15*time.Minute {
+		t.Errorf("VersionInterval = %v, want 15m", cfg.VersionInterval)
+	}
+	if cfg.KeepSnapshots != 50 {
+		t.Errorf("KeepSnapshots = %d, want 50", cfg.KeepSnapshots)
+	}
+}
+
+// -keep-snapshots without -version-interval is inert, because retention runs
+// only when a version is captured. The operator must be told, or they will
+// believe a bound is being enforced that is not.
+func TestUnit_KeepSnapshotsWithoutInterval_Warns(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		wantWarned bool
+	}{
+		{"retention without capture", []string{"-keep-snapshots", "50"}, true},
+		{"both set", []string{"-keep-snapshots", "50", "-version-interval", "15m"}, false},
+		{"neither set", nil, false},
+		{"capture without retention", []string{"-version-interval", "15m"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := parseFlags(tc.args)
+			if err != nil {
+				t.Fatalf("parseFlags: %v", err)
+			}
+			var buf bytes.Buffer
+			// Exercises the production function run() calls, not a restatement
+			// of its condition.
+			warnIfInertRetention(newLoggerTo(&buf, "text"), cfg)
+			warned := strings.Contains(buf.String(), "-keep-snapshots has no effect")
+			if warned != tc.wantWarned {
+				t.Fatalf("warned = %v, want %v (log: %q)", warned, tc.wantWarned, buf.String())
+			}
+		})
+	}
+}
+
+// Every flag must appear in the package doc's "# Usage" block. This is not
+// ceremony: -awareness-expiry and -max-awareness-clients had both shipped
+// without ever being added there, and nothing noticed until someone read the
+// two lists side by side.
+func TestUnit_PackageDocUsage_ListsEveryFlag(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	// The Usage block runs from "# Usage" to the end of the doc comment.
+	doc := string(src)
+	start := strings.Index(doc, "// # Usage")
+	end := strings.Index(doc, "\npackage main")
+	if start < 0 || end < 0 || end < start {
+		t.Fatalf("could not locate the package doc Usage block (start=%d end=%d)", start, end)
+	}
+	usage := doc[start:end]
+
+	var missing []string
+	newFlagSet(&Config{}).VisitAll(func(f *flag.Flag) {
+		if !strings.Contains(usage, "-"+f.Name) {
+			missing = append(missing, f.Name)
+		}
+	})
+	if len(missing) > 0 {
+		t.Fatalf("flags declared but absent from the package doc Usage block: %v", missing)
 	}
 }
