@@ -1,0 +1,56 @@
+version: 2
+
+updates:
+  # Security updates only, deliberately.
+  #
+  # Four direct dependencies' latest releases require a newer Go than go.mod's
+  # floor of 1.23 — modernc.org/sqlite, golang.org/x/sync and golang.org/x/time
+  # need 1.25, and github.com/redis/go-redis/v9 needs 1.24 — so version updates
+  # would open pull requests that cannot pass the Go 1.23 matrix job. A limit of
+  # 0 disables version updates; security updates are unaffected and do not count
+  # toward it.
+  #
+  # NOT solved with `ignore` rules: those would encode the Go floor a second
+  # time, where nothing verifies it, and would silently suppress valid updates
+  # once the real floor moves. When the floor rises, raise this number and delete
+  # this comment.
+  #
+  # Requires "Dependabot alerts" and "Dependabot security updates" to be enabled
+  # in repository settings; this file alone does not turn them on.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 0
+
+  # Every action is pinned to a major tag (actions/checkout@v5 and friends), so
+  # updates are rare and always mergeable. Grouped so a week's worth of bumps
+  # arrives as a single pull request instead of one each.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+
+  # npm is deliberately absent.
+  #
+  # testutil/package.json pins yjs exactly because it is the conformance oracle,
+  # not a dependency: CHANGELOG.md cites yjs@13.6.30 as the version our
+  # byte-for-byte wire compatibility is verified against, and the committed
+  # fixtures under crdt/testdata are generated from it, so the "Conformance
+  # fixture drift" job fails the moment the pin and the fixtures disagree.
+  #
+  # Bumping yjs is a deliberate act — regenerate fixtures, re-verify conformance,
+  # write a release note — not weekly triage. Please do not add an npm entry here
+  # thinking it was forgotten.

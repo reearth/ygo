@@ -5,6 +5,22 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly canary. govulncheck on push/PR only catches an advisory when
+  # something is pushed; this covers one landing against an unchanged dependency
+  # in a quiet week. Every job in this workflow runs on the schedule,
+  # deliberately: guarding the others with `if: github.event_name != 'schedule'`
+  # would silently fail to apply to any job added later, and a weekly check that
+  # main still builds green is worth having on its own.
+  #
+  # Note GitHub disables scheduled workflows in public repositories after 60 days
+  # with no repository activity, so this is bounded coverage, not a standing
+  # guarantee — Dependabot security alerts are the durable channel.
+  #
+  # 04:17 Monday UTC: off-hour and off-minute, because GitHub delays schedules at
+  # the top of every hour, and benchmark.yml already holds 06:00 daily.
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
