@@ -134,9 +134,8 @@ func TestLegacyAdapterSaveVersion_UnsupportedStoreErrors(t *testing.T) {
 		"a store without SnapshotStore must report the misconfiguration")
 }
 
-// An auto-captured version must never evict a snapshot a user deliberately
-// named: the two classes have opposite retention needs, and the named one is
-// exactly what a user would be most upset to lose (issue #212).
+// An auto-captured version must never evict a snapshot a user named: the two
+// classes have opposite retention needs (issue #212).
 func TestLegacyAdapterSaveVersion_AutoDoesNotEvictNamed(t *testing.T) {
 	ctx := context.Background()
 	store := persistence.NewMemoryPersistence()
@@ -148,7 +147,7 @@ func TestLegacyAdapterSaveVersion_AutoDoesNotEvictNamed(t *testing.T) {
 	named, err := a.SaveVersion(ctx, "room", "before-migration")
 	require.NoError(t, err)
 
-	// Enough auto versions to bury the named one under the old newest-N rule.
+	// Enough to bury the named one under the old newest-N rule.
 	for i := 0; i < 5; i++ {
 		_, err := a.SaveVersion(ctx, "room", "auto")
 		require.NoError(t, err)
@@ -201,9 +200,8 @@ func TestLegacyAdapterTrimSnapshots_PerLabelBound(t *testing.T) {
 	assert.Len(t, snaps, 4, "room total is the sum of the bounded classes")
 }
 
-// failingDeleteStore wraps a real store and fails exactly one DeleteSnapshot, to
-// prove a single failure neither aborts the remaining deletes nor is silently
-// dropped by the error-returning entry point.
+// failingDeleteStore fails exactly one DeleteSnapshot, so a single failure can be
+// shown to neither abort the remaining deletes nor be dropped.
 type failingDeleteStore struct {
 	persistence.SnapshotVersionedPersistence
 	failID int64
@@ -216,15 +214,14 @@ func (f *failingDeleteStore) DeleteSnapshot(ctx context.Context, room string, id
 	return f.SnapshotVersionedPersistence.DeleteSnapshot(ctx, room, id)
 }
 
-// TrimSnapshots reports what it did: the count is the number actually deleted,
-// and a failure is joined rather than swallowed the way SaveVersion's internal
-// best-effort call does.
+// The count is what was actually deleted, and a failure is joined rather than
+// swallowed the way SaveVersion's internal call does.
 func TestLegacyAdapterTrimSnapshots_ReportsCountAndJoinsErrors(t *testing.T) {
 	ctx := context.Background()
 	inner := persistence.NewMemoryPersistence()
 	seedRoom(t, inner, "room", 1)
 
-	// Four snapshots, KeepSnapshots=1 leaves three surplus; one delete fails.
+	// Four snapshots, keep 1 leaves three surplus; the middle delete fails.
 	base := persistence.NewLegacyAdapter(inner)
 	var ids []int64
 	for i := 0; i < 4; i++ {
@@ -247,8 +244,7 @@ func TestLegacyAdapterTrimSnapshots_ReportsCountAndJoinsErrors(t *testing.T) {
 	assert.Len(t, snaps, 2, "the newest kept, plus the one whose delete failed")
 }
 
-// KeepSnapshots <= 0 keeps everything — deliberately the opposite of some other
-// Yjs ports, where a keep of 0 deletes every version.
+// KeepSnapshots <= 0 keeps everything, the opposite of some Yjs ports.
 func TestLegacyAdapterTrimSnapshots_ZeroKeepsEverything(t *testing.T) {
 	ctx := context.Background()
 	store := persistence.NewMemoryPersistence()
@@ -268,15 +264,14 @@ func TestLegacyAdapterTrimSnapshots_ZeroKeepsEverything(t *testing.T) {
 	assert.Len(t, snaps, 3)
 }
 
-// The unsupported-store check must precede the KeepSnapshots short-circuit, so a
-// direct caller learns the store is misconfigured instead of getting a nil error
-// that looks like "nothing to trim".
+// The unsupported-store check must precede the KeepSnapshots short-circuit, or a
+// direct caller gets a nil error that reads as "nothing to trim".
 func TestLegacyAdapterTrimSnapshots_UnsupportedStore(t *testing.T) {
 	ctx := context.Background()
 	inner := persistence.NewMemoryPersistence()
 
-	// Subtests rather than a bare loop: keep=0 is the case that regresses if the
-	// guards are reordered, and it must still be reported even when keep=1 fails.
+	// Subtests, not a bare loop: keep=0 is the case that regresses on reorder and
+	// must report independently of keep=1.
 	for _, keep := range []int{0, 1} {
 		t.Run(fmt.Sprintf("keep=%d", keep), func(t *testing.T) {
 			a := persistence.NewLegacyAdapter(bareStore{VersionedPersistence: inner})

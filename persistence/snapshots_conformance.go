@@ -16,11 +16,10 @@ func RunSnapshotStoreConformance(t *testing.T, factory func() SnapshotStore) {
 	t.Helper()
 	ctx := context.Background()
 
-	// Parameterised over conformanceRoomNames: the room name reaches the
-	// snapshot path's name-derived surface (the per-room counter object embeds
-	// it, and IDs are often recovered by parsing them back out of an object
-	// name), so an awkward name can corrupt ID handling rather than fail
-	// loudly. See conformance_names.go and issue #211.
+	// Parameterised over conformanceRoomNames. The snapshot path derives object
+	// names from the room name and often recovers IDs by parsing them back out,
+	// so an awkward name corrupts ID handling silently rather than failing, and
+	// a wrong ID decides which state a user restores (issue #211).
 	t.Run("SaveThenListNewestFirst", func(t *testing.T) {
 		for _, room := range conformanceRoomNames {
 			t.Run(room, func(t *testing.T) {
@@ -308,35 +307,23 @@ func RunSnapshotStoreConformance(t *testing.T, factory func() SnapshotStore) {
 		}
 	})
 
-	// Parameterised over pairs of DISTINCT rooms whose names collide under a
-	// naive encoding. This is the case that catches the sharp edge in #211:
-	// snapshot IDs are often recovered by parsing them back out of an object
-	// name, so two rooms collapsing to one key silently maps one room's IDs
-	// onto the other's instead of failing, and a wrong ID decides which state a
-	// user restores.
+	// Parameterised over pairs of DISTINCT rooms that collide under a naive
+	// encoding — the case that catches #211, where two rooms collapsing to one
+	// key maps one room's IDs onto the other's.
 	t.Run("RoomsAreIsolated", func(t *testing.T) {
 		pairs := []struct {
 			name string
 			a, b string
 		}{
-			// Both separators mapped to the same replacement character.
-			{"separator", "a/b", "a:b"},
-			// Percent-encoding applied to one name but not the other.
-			{"percent", "a/b", "a%2Fb"},
-			// Space encoded as "+".
-			{"space-plus", "a b", "a+b"},
-			// NFC vs NFD: distinct bytes that collide if the backend lets a
-			// normalizing filesystem name the object. Escaped deliberately —
-			// see conformance_names.go.
+			{"separator", "a/b", "a:b"},  // both separators to one character
+			{"percent", "a/b", "a%2Fb"},  // percent-encoding applied unevenly
+			{"space-plus", "a b", "a+b"}, // space encoded as +
+			// NFC vs NFD; escaped for the reason given in conformance_names.go.
 			{"unicode-normalization", "\u00fc\u00f1\u00ef", "u\u0308n\u0303i\u0308"},
 		}
 		for _, p := range pairs {
 			t.Run(p.name, func(t *testing.T) {
-				// The pair must be two DIFFERENT rooms or this case asserts
-				// nothing. Cheap insurance: the normalization pair in
-				// particular is two visually identical literals, and an editor
-				// or tool that normalizes the file would collapse them into one
-				// string, leaving a test that passes while checking nothing.
+				// Two identical names would make this case assert nothing.
 				if p.a == p.b {
 					t.Fatalf("pair %q is the same room twice (%q) — the names were normalized away", p.name, p.a)
 				}
@@ -364,10 +351,9 @@ func RunSnapshotStoreConformance(t *testing.T, factory func() SnapshotStore) {
 				if len(b) != 1 || b[0].Label != "b" {
 					t.Fatalf("room %q = %+v, want single label b", p.b, b)
 				}
-				// State is keyed by (room, id): each room reads its own blob. IDs
-				// are only unique within a room, so ids may legitimately collide
-				// across rooms — do NOT assert the other room's id is missing,
-				// that would fail on a correct backend.
+				// Keyed by (room, id): each room reads its own blob. IDs are only
+				// unique within a room, so do NOT assert the other room's id is
+				// missing — that would fail on a correct backend.
 				sa, err := s.GetSnapshotState(ctx, p.a, idA)
 				if err != nil {
 					t.Fatalf("GetSnapshotState(%q): %v", p.a, err)

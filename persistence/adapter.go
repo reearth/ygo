@@ -35,28 +35,16 @@ type LegacyAdapter struct {
 	// KeepSnapshots bounds retained labelled snapshots PER LABEL when the
 	// websocket server asks the adapter to save a version (see the provider's
 	// VersionableAdapter / AutoVersionEvery). 0 (default) keeps every version,
-	// matching KeepVersions. Set > 0 to trim each label class to its newest
-	// KeepSnapshots, so an always-connected document cannot grow an unbounded
-	// auto-version history.
+	// matching KeepVersions.
 	//
-	// The scope is spelled out because none of it is guessable:
+	// Two things that are not guessable from the name. It is per label, not per
+	// room, so a room's total is unbounded — see TrimSnapshots, which also
+	// applies it on demand. And it is applied only by those two, so snapshots
+	// written straight to SnapshotStore.SaveSnapshot are never trimmed: with
+	// auto-versioning off and no TrimSnapshots call, this field does nothing.
 	//
-	//   - Per LABEL, not per room. An auto-version save cannot evict a snapshot
-	//     a user named. A room's TOTAL is therefore
-	//     (distinct labels x KeepSnapshots) and is NOT bounded — bounding the
-	//     total is exactly what evicts named snapshots. A caller needing a hard
-	//     per-room cap must enumerate labels from ListSnapshots and call
-	//     TrimSnapshots for each; if an application lets end users name
-	//     snapshots, that growth is user-driven.
-	//   - Applied by SaveVersion after each save, best-effort with errors
-	//     swallowed, and by TrimSnapshots when called directly, which returns
-	//     them.
-	//   - Snapshots written straight to SnapshotStore.SaveSnapshot are NEVER
-	//     trimmed: the adapter does not see those writes. With auto-versioning
-	//     off and no TrimSnapshots call, this field has no effect at all.
-	//
-	// Note this is retention over VERSIONS (SnapshotStore entries), which is a
-	// different axis from KeepVersions' retention over the raw update log.
+	// Retention over VERSIONS (SnapshotStore entries), a different axis from
+	// KeepVersions' retention over the raw update log.
 	KeepSnapshots int
 }
 
@@ -152,37 +140,31 @@ func (a *LegacyAdapter) SaveVersion(ctx context.Context, room, label string) (in
 	if err != nil {
 		return 0, err
 	}
-	// Best-effort, and scoped to the label just written so an auto version
-	// cannot evict one a user named — see the doc above for why a retention
-	// failure is not propagated.
+	// Scoped to the label just written; see above for why failures are swallowed.
 	_, _ = a.TrimSnapshots(ctx, room, label)
 	return id, nil
 }
 
 // TrimSnapshots deletes the oldest snapshots of room labelled label beyond
-// KeepSnapshots, and reports how many it deleted.
+// KeepSnapshots, reporting how many it deleted.
 //
-// Retention is scoped to the LABEL CLASS: a call with the server's auto-version
-// label never deletes a snapshot a user named, and a named save never disturbs
-// the auto history. The label is a parameter rather than something the adapter
-// infers because this package deliberately does not import provider/websocket,
-// so it cannot know which label means "automatic" — and scoping to the label
-// the caller just wrote needs no such knowledge.
+// Retention is per label: an auto-version save never evicts a snapshot a user
+// named. The label is a parameter because this package does not import
+// provider/websocket and so cannot know which label means "automatic".
 //
-// KeepSnapshots <= 0 keeps everything and returns (0, nil). Note this is the
-// opposite of some other Yjs ports, where a keep of 0 deletes every version.
+// Returns ErrSnapshotsUnsupported if the store is not a SnapshotStore. That is
+// checked before KeepSnapshots, so retention being disabled cannot mask a
+// misconfigured store. Otherwise KeepSnapshots <= 0 keeps everything and
+// returns (0, nil) — the opposite of some Yjs ports, where keep 0 deletes
+// every version.
 //
-// Because the bound is per class, a room's TOTAL snapshot count is
-// (distinct labels x KeepSnapshots) and is NOT itself bounded. A caller needing
-// a hard per-room cap must enumerate the labels from ListSnapshots and trim
-// each one; bounding the total is what evicts named snapshots, which is the
-// behaviour this scoping exists to prevent.
+// The per-label bound leaves a room's total unbounded at
+// (distinct labels x KeepSnapshots); bounding the total is what evicts named
+// snapshots. For a hard per-room cap, enumerate labels and trim each.
 //
-// Every surplus snapshot is attempted even if an earlier delete fails: the
-// count is how many were actually deleted, and the error joins each failure.
-// DeleteSnapshot is contractually idempotent (deleting an unknown snapshot
-// returns nil), so a concurrent trim of the same class cannot make this report
-// a spurious failure.
+// Every surplus snapshot is attempted even if one delete fails, and the error
+// joins the failures. DeleteSnapshot is contractually idempotent, so a
+// concurrent trim of the same class cannot report a spurious failure.
 func (a *LegacyAdapter) TrimSnapshots(ctx context.Context, room, label string) (int, error) {
 	ss, ok := a.store.(SnapshotStore)
 	if !ok {
@@ -195,8 +177,8 @@ func (a *LegacyAdapter) TrimSnapshots(ctx context.Context, room, label string) (
 	if err != nil {
 		return 0, err
 	}
-	// ListSnapshots is newest-first by contract, so filtering preserves that
-	// order and everything at or past KeepSnapshots within the class is surplus.
+	// Newest-first by contract, so filtering preserves order: everything at or
+	// past KeepSnapshots in the class is surplus.
 	var class []SnapshotInfo
 	for _, sn := range snaps {
 		if sn.Label == label {
