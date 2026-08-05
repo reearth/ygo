@@ -58,6 +58,23 @@ jobs:
           git checkout ${{ github.base_ref }}
           go test -bench=. -benchmem -count=5 ./... | tee /tmp/old.txt
       - name: Install benchstat
+        # GOTOOLCHAIN=auto is load-bearing. This job pins Go to the module's
+        # floor (1.23), but benchstat is a TOOL, not a dependency, and
+        # golang.org/x/perf now requires Go >= 1.25 — so Go has to be allowed to
+        # fetch a newer toolchain just to build it.
+        #
+        # It worked by accident until actions/setup-go@v7, which sets
+        # GOTOOLCHAIN=local and thereby forbids that switch:
+        #
+        #   setup-go@v5: "requires go >= 1.25.0; switching to go1.25.12"  -> ok
+        #   setup-go@v7: "requires go >= 1.25.0 (GOTOOLCHAIN=local)"      -> fail
+        #
+        # Setting it explicitly makes the requirement visible instead of relying
+        # on an action's default. Pinning x/perf instead is not an option worth
+        # taking: it publishes no tags, so a pin means freezing an opaque
+        # pseudo-version, and for a tool we want the current release anyway.
+        env:
+          GOTOOLCHAIN: auto
         run: go install golang.org/x/perf/cmd/benchstat@latest
       - name: Compare PR vs base
         if: github.event_name == 'pull_request'
