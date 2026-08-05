@@ -73,6 +73,7 @@ suite against a deliberately-colliding store that rewrites awkward characters in
 its storage key: the previous suite passed it clean, the current one fails it on
 three of the four pairs. The in-tree memory, file, and sqlite backends pass
 unchanged.
+
 ## v1.44.0
 
 **Who is affected:** only callers who put non-UTF-8 bytes into a document —
@@ -185,6 +186,7 @@ newly break a working pattern.
 - `Encoder.WriteVarStringE` — the non-panicking, error-returning variant of
   `WriteVarString`, for callers who want to handle invalid UTF-8 rather than
   have it panic. (#209)
+
 ## v1.43.0
 
 ygo could decode and materialise nested Y types but offered no way to construct

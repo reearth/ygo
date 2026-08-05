@@ -2,6 +2,8 @@ package crdt
 
 import (
 	"encoding/json"
+	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -37,16 +39,73 @@ func sourcesOf(t *testing.T, arr *YArray) []string {
 	return out
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+func TestStagingTheSameHandleTwicePanicsAtTheSecondCall(t *testing.T) {
+	// Attached, the second insert of an already-attached handle panics at the
+	// call site. Staged, it used to succeed at both calls and only panic at
+	// attach — inside flushPrelim, naming PushType, a function the caller
+	// never called. The staged paths must reject the duplicate immediately.
+	for _, tc := range []struct {
+		name  string
+		stage func(txn *Transaction, a *YArray, st sharedType)
+	}{
+		{"InsertType", func(txn *Transaction, a *YArray, st sharedType) { a.InsertType(txn, 1, st) }},
+		{"PushType", func(txn *Transaction, a *YArray, st sharedType) { a.PushType(txn, st) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := New()
+			arr := NewArrayPrelim()
+			m := NewMapPrelim()
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("%s staged the same handle twice; want panic at the second call", tc.name)
+				}
+			}()
+			doc.Transact(func(txn *Transaction) {
+				arr.Push(txn, []any{"a", "b"})
+				tc.stage(txn, arr, m)
+				tc.stage(txn, arr, m) // must panic HERE, not at attach
+			})
+		})
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+}
+
+func TestSliceAgreesAcrossTheAttachBoundary(t *testing.T) {
+	// Slice counts a nested type in position space but emits plain values
+	// only (the attached behaviour). The staged read must do the same, so
+	// the parity the rest of the read surface holds extends to Slice.
+	build := func(txn *Transaction, a *YArray) {
+		a.Push(txn, []any{"a"})
+		m := NewMapPrelim()
+		m.Set(txn, "k", "v")
+		a.InsertType(txn, 1, m)
+		a.Push(txn, []any{"b", "c"})
+	}
+
+	attachedDoc := New()
+	attached := attachedDoc.GetArray("a")
+	attachedDoc.Transact(func(txn *Transaction) { build(txn, attached) })
+
+	stagedDoc := New()
+	root := stagedDoc.GetArray("root")
+	staged := NewArrayPrelim()
+	stagedDoc.Transact(func(txn *Transaction) { build(txn, staged) })
+
+	for _, tc := range []struct{ start, end int }{
+		{0, 4}, {0, 2}, {1, 3}, {2, 4}, {-1, 99}, {3, 1},
+	} {
+		want := attached.Slice(tc.start, tc.end)
+		got := staged.Slice(tc.start, tc.end)
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("Slice(%d,%d): attached %v, staged %v — must agree", tc.start, tc.end, want, got)
 		}
 	}
-	return true
+
+	// And attach must not change the answer.
+	before := fmt.Sprint(staged.Slice(0, 4))
+	stagedDoc.Transact(func(txn *Transaction) { root.PushType(txn, staged) })
+	if after := fmt.Sprint(staged.Slice(0, 4)); after != before {
+		t.Fatalf("Slice(0,4) read %s staged and %s attached; want identical", before, after)
+	}
 }
 
 func TestInsertTypePlacesANestedTypeAtAnIndex(t *testing.T) {
@@ -67,7 +126,7 @@ func TestInsertTypePlacesANestedTypeAtAnIndex(t *testing.T) {
 	})
 
 	want := []string{"a", "note", "b", "c"}
-	if got := sourcesOf(t, cells); !equalStrings(got, want) {
+	if got := sourcesOf(t, cells); !slices.Equal(got, want) {
 		t.Fatalf("local order = %v, want %v", got, want)
 	}
 
@@ -76,7 +135,7 @@ func TestInsertTypePlacesANestedTypeAtAnIndex(t *testing.T) {
 	if err := dst.ApplyUpdate(src.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("ApplyUpdate: %v", err)
 	}
-	if got := sourcesOf(t, dst.GetArray("cells")); !equalStrings(got, want) {
+	if got := sourcesOf(t, dst.GetArray("cells")); !slices.Equal(got, want) {
 		t.Fatalf("decoded order = %v, want %v", got, want)
 	}
 }
@@ -107,14 +166,14 @@ func TestInsertTypeAtTheEndsAndIntoAnEmptyArray(t *testing.T) {
 				note.Set(txn, "source", body)
 				arr.InsertType(txn, tc.index, note)
 			})
-			if got := sourcesOf(t, arr); !equalStrings(got, tc.want) {
+			if got := sourcesOf(t, arr); !slices.Equal(got, tc.want) {
 				t.Fatalf("order = %v, want %v", got, tc.want)
 			}
 			dst := New()
 			if err := dst.ApplyUpdate(doc.EncodeStateAsUpdate()); err != nil {
 				t.Fatalf("ApplyUpdate: %v", err)
 			}
-			if got := sourcesOf(t, dst.GetArray("cells")); !equalStrings(got, tc.want) {
+			if got := sourcesOf(t, dst.GetArray("cells")); !slices.Equal(got, tc.want) {
 				t.Fatalf("decoded order = %v, want %v", got, tc.want)
 			}
 		})

@@ -78,6 +78,7 @@ func (a *YArray) PushType(txn *Transaction, st sharedType) {
 		panic("crdt: PushType requires a detached type (use NewMapPrelim/NewTextPrelim)")
 	}
 	if a.detached() {
+		rejectAlreadyStaged(a.prelim, st, "PushType")
 		a.prelim = append(a.prelim, st)
 		return
 	}
@@ -109,6 +110,18 @@ func (a *YArray) PushType(txn *Transaction, st sharedType) {
 	item.integrate(txn, 0)
 }
 
+// rejectAlreadyStaged panics when st is already in the staged content, so
+// staging the same handle twice fails at the second call — not later at
+// attach, inside flushPrelim, with a message naming a function the caller
+// never used.
+func rejectAlreadyStaged(prelim []any, st sharedType, fn string) {
+	for _, v := range prelim {
+		if v == any(st) {
+			panic("crdt: " + fn + ": this type is already staged on the array (a shared type attaches once)")
+		}
+	}
+}
+
 // InsertType inserts a DETACHED shared type at logical position index
 // (0 = prepend, Len() = append), as its own nested item.
 //
@@ -120,9 +133,11 @@ func (a *YArray) PushType(txn *Transaction, st sharedType) {
 //
 // Placement mirrors Insert: leftNeighbourAt uses LIVE-index semantics (it
 // skips tombstones), splitting the neighbour when the index falls inside it,
-// and an unresolvable index anchors at the tail. That is the deliberate
-// difference from PushType, which anchors after the last PHYSICAL item so a
-// concurrent Yjs push converges the same way.
+// and an unresolvable index anchors at the tail. The clamp is ygo's Insert
+// rule, not Yjs's — Yjs itself throws ("Length exceeded!") past the live
+// length and on a negative index, where every ygo array mutator clamps.
+// PushType differs deliberately: it anchors after the last PHYSICAL item,
+// tombstones included, so a concurrent Yjs push converges the same way.
 func (a *YArray) InsertType(txn *Transaction, index int, st sharedType) {
 	bt := st.baseType()
 	if !bt.detached() {
@@ -132,6 +147,7 @@ func (a *YArray) InsertType(txn *Transaction, index int, st sharedType) {
 		// Splice into the staged content; flushPrelim splits plain-value runs
 		// around it at attach. Unresolvable indices anchor at the tail, the
 		// attached rule.
+		rejectAlreadyStaged(a.prelim, st, "InsertType")
 		if index < 0 || index > len(a.prelim) {
 			index = len(a.prelim)
 		}

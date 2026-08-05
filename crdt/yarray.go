@@ -587,6 +587,27 @@ func (a *YArray) Slice(start, end int) []any {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
 	}
+	if a.detached() {
+		// Staged content, with the attached rule: a nested type occupies a
+		// position but emits no value.
+		if end > len(a.prelim) {
+			end = len(a.prelim)
+		}
+		if start < 0 {
+			start = 0
+		}
+		if start > end {
+			return nil
+		}
+		out := make([]any, 0, end-start)
+		for _, v := range a.prelim[start:end] {
+			if _, isType := v.(sharedType); isType {
+				continue
+			}
+			out = append(out, v)
+		}
+		return out
+	}
 	t := &a.abstractType
 	if end > t.length {
 		end = t.length

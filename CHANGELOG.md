@@ -70,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passed it, the current one fails it. **Third-party `SnapshotStore`
   implementations may newly fail conformance; that is the intent.** The in-tree
   memory, file, and sqlite backends pass unchanged (#211).
+
 ## [1.44.0] — 2026-08-04
 
 ### Changed
@@ -107,6 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Encoder.WriteVarStringE` returns `ErrInvalidUTF8` instead of panicking, for
   callers encoding untrusted input (#209).
+
 ## [1.43.0] — 2026-08-02
 
 ### Added
