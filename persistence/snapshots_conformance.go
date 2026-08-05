@@ -16,42 +16,51 @@ func RunSnapshotStoreConformance(t *testing.T, factory func() SnapshotStore) {
 	t.Helper()
 	ctx := context.Background()
 
+	// Parameterised over conformanceRoomNames: the room name reaches the
+	// snapshot path's name-derived surface (the per-room counter object embeds
+	// it, and IDs are often recovered by parsing them back out of an object
+	// name), so an awkward name can corrupt ID handling rather than fail
+	// loudly. See conformance_names.go and issue #211.
 	t.Run("SaveThenListNewestFirst", func(t *testing.T) {
-		s := factory()
-		id1, err := s.SaveSnapshot(ctx, "room", "first", []byte("state-1"))
-		if err != nil {
-			t.Fatalf("SaveSnapshot(first): %v", err)
-		}
-		id2, err := s.SaveSnapshot(ctx, "room", "second", []byte("state-22"))
-		if err != nil {
-			t.Fatalf("SaveSnapshot(second): %v", err)
-		}
-		if id1 == id2 {
-			t.Fatalf("ids must be distinct, both = %d", id1)
-		}
-		if id2 <= id1 {
-			t.Fatalf("ids must increase: id1=%d id2=%d", id1, id2)
-		}
+		for _, room := range conformanceRoomNames {
+			t.Run(room, func(t *testing.T) {
+				s := factory()
+				id1, err := s.SaveSnapshot(ctx, room, "first", []byte("state-1"))
+				if err != nil {
+					t.Fatalf("SaveSnapshot(first): %v", err)
+				}
+				id2, err := s.SaveSnapshot(ctx, room, "second", []byte("state-22"))
+				if err != nil {
+					t.Fatalf("SaveSnapshot(second): %v", err)
+				}
+				if id1 == id2 {
+					t.Fatalf("ids must be distinct, both = %d", id1)
+				}
+				if id2 <= id1 {
+					t.Fatalf("ids must increase: id1=%d id2=%d", id1, id2)
+				}
 
-		got, err := s.ListSnapshots(ctx, "room")
-		if err != nil {
-			t.Fatalf("ListSnapshots: %v", err)
-		}
-		if len(got) != 2 {
-			t.Fatalf("len(ListSnapshots) = %d, want 2", len(got))
-		}
-		// Newest first.
-		if got[0].ID != id2 || got[1].ID != id1 {
-			t.Fatalf("order = [%d %d], want newest-first [%d %d]", got[0].ID, got[1].ID, id2, id1)
-		}
-		if got[0].Label != "second" || got[1].Label != "first" {
-			t.Fatalf("labels = [%q %q], want [second first]", got[0].Label, got[1].Label)
-		}
-		if got[0].Size != int64(len("state-22")) {
-			t.Fatalf("Size = %d, want %d", got[0].Size, len("state-22"))
-		}
-		if got[0].CreatedAt.IsZero() || got[1].CreatedAt.IsZero() {
-			t.Fatalf("CreatedAt must be stamped, got %v and %v", got[0].CreatedAt, got[1].CreatedAt)
+				got, err := s.ListSnapshots(ctx, room)
+				if err != nil {
+					t.Fatalf("ListSnapshots: %v", err)
+				}
+				if len(got) != 2 {
+					t.Fatalf("len(ListSnapshots) = %d, want 2", len(got))
+				}
+				// Newest first.
+				if got[0].ID != id2 || got[1].ID != id1 {
+					t.Fatalf("order = [%d %d], want newest-first [%d %d]", got[0].ID, got[1].ID, id2, id1)
+				}
+				if got[0].Label != "second" || got[1].Label != "first" {
+					t.Fatalf("labels = [%q %q], want [second first]", got[0].Label, got[1].Label)
+				}
+				if got[0].Size != int64(len("state-22")) {
+					t.Fatalf("Size = %d, want %d", got[0].Size, len("state-22"))
+				}
+				if got[0].CreatedAt.IsZero() || got[1].CreatedAt.IsZero() {
+					t.Fatalf("CreatedAt must be stamped, got %v and %v", got[0].CreatedAt, got[1].CreatedAt)
+				}
+			})
 		}
 	})
 
@@ -67,18 +76,22 @@ func RunSnapshotStoreConformance(t *testing.T, factory func() SnapshotStore) {
 	})
 
 	t.Run("GetSnapshotStateRoundTrip", func(t *testing.T) {
-		s := factory()
-		want := []byte("the-state-blob")
-		id, err := s.SaveSnapshot(ctx, "room", "lbl", want)
-		if err != nil {
-			t.Fatalf("SaveSnapshot: %v", err)
-		}
-		got, err := s.GetSnapshotState(ctx, "room", id)
-		if err != nil {
-			t.Fatalf("GetSnapshotState: %v", err)
-		}
-		if !bytes.Equal(got, want) {
-			t.Fatalf("state = %q, want %q", got, want)
+		for _, room := range conformanceRoomNames {
+			t.Run(room, func(t *testing.T) {
+				s := factory()
+				want := []byte("the-state-blob")
+				id, err := s.SaveSnapshot(ctx, room, "lbl", want)
+				if err != nil {
+					t.Fatalf("SaveSnapshot: %v", err)
+				}
+				got, err := s.GetSnapshotState(ctx, room, id)
+				if err != nil {
+					t.Fatalf("GetSnapshotState: %v", err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("state = %q, want %q", got, want)
+				}
+			})
 		}
 	})
 
@@ -199,30 +212,34 @@ func RunSnapshotStoreConformance(t *testing.T, factory func() SnapshotStore) {
 	})
 
 	t.Run("DeleteSnapshotRemovesOnlyThatOne", func(t *testing.T) {
-		s := factory()
-		keep, err := s.SaveSnapshot(ctx, "room", "keep", []byte("k"))
-		if err != nil {
-			t.Fatalf("SaveSnapshot(keep): %v", err)
-		}
-		drop, err := s.SaveSnapshot(ctx, "room", "drop", []byte("d"))
-		if err != nil {
-			t.Fatalf("SaveSnapshot(drop): %v", err)
-		}
-		if err := s.DeleteSnapshot(ctx, "room", drop); err != nil {
-			t.Fatalf("DeleteSnapshot: %v", err)
-		}
-		got, err := s.ListSnapshots(ctx, "room")
-		if err != nil {
-			t.Fatalf("ListSnapshots: %v", err)
-		}
-		if len(got) != 1 || got[0].ID != keep {
-			t.Fatalf("after delete got %+v, want only id=%d", got, keep)
-		}
-		if _, err := s.GetSnapshotState(ctx, "room", drop); !errors.Is(err, ErrSnapshotNotFound) {
-			t.Fatalf("deleted snapshot err = %v, want ErrSnapshotNotFound", err)
-		}
-		if _, err := s.GetSnapshotState(ctx, "room", keep); err != nil {
-			t.Fatalf("kept snapshot must survive: %v", err)
+		for _, room := range conformanceRoomNames {
+			t.Run(room, func(t *testing.T) {
+				s := factory()
+				keep, err := s.SaveSnapshot(ctx, room, "keep", []byte("k"))
+				if err != nil {
+					t.Fatalf("SaveSnapshot(keep): %v", err)
+				}
+				drop, err := s.SaveSnapshot(ctx, room, "drop", []byte("d"))
+				if err != nil {
+					t.Fatalf("SaveSnapshot(drop): %v", err)
+				}
+				if err := s.DeleteSnapshot(ctx, room, drop); err != nil {
+					t.Fatalf("DeleteSnapshot: %v", err)
+				}
+				got, err := s.ListSnapshots(ctx, room)
+				if err != nil {
+					t.Fatalf("ListSnapshots: %v", err)
+				}
+				if len(got) != 1 || got[0].ID != keep {
+					t.Fatalf("after delete got %+v, want only id=%d", got, keep)
+				}
+				if _, err := s.GetSnapshotState(ctx, room, drop); !errors.Is(err, ErrSnapshotNotFound) {
+					t.Fatalf("deleted snapshot err = %v, want ErrSnapshotNotFound", err)
+				}
+				if _, err := s.GetSnapshotState(ctx, room, keep); err != nil {
+					t.Fatalf("kept snapshot must survive: %v", err)
+				}
+			})
 		}
 	})
 
