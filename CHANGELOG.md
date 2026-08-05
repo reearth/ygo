@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.45.0] — 2026-08-05
+
+### Fixed
+
+- **Auto-captured versions no longer evict deliberately-named snapshots.**
+  `LegacyAdapter`'s snapshot retention kept the newest `KeepSnapshots` for a room
+  with no regard for how each was created, so with `Server.AutoVersionEvery`
+  enabled a snapshot named `"before-migration"` was silently deleted once
+  `KeepSnapshots` newer auto versions existed — at a 15-minute interval with
+  keep-50, roughly half a day of continuous editing. The two classes have
+  opposite retention needs: auto versions are numerous and individually
+  disposable, which is the point of bounding them, while a named snapshot is an
+  explicit user act. Retention is now scoped to the label class, so an auto save
+  only trims auto versions and a named save only trims that same name (#212).
+
+### Added
+
+- **`LegacyAdapter.TrimSnapshots(ctx, room, label) (int, error)`** applies the
+  same label-scoped retention on demand, for callers that write snapshots
+  through `SnapshotStore.SaveSnapshot` directly rather than via `SaveVersion`.
+  That path was never trimmed at all — retention only ever ran from
+  `SaveVersion`, so with auto-versioning off `KeepSnapshots` had no effect — and
+  it still is not trimmed unless this is called. It reports how many snapshots
+  it deleted, attempts every surplus snapshot even when one delete fails, and
+  joins the failures rather than stopping at the first (#212).
+
+### Changed
+
+- **`KeepSnapshots` is now a per-label bound rather than a per-room one**, so a
+  deployment using varied labels retains more snapshots after upgrading than
+  before. There is deliberately no per-room total cap: capping the total is what
+  evicts named snapshots in the first place. The doc comment now states the full
+  scope, including that direct `SnapshotStore` writes are never trimmed and that
+  an application letting end users name snapshots has user-driven growth (#212).
+- **The `SnapshotStore` conformance suite now exercises room names that need
+  encoding.** It previously used the literal `"room"` for every call site, so no
+  implementation was ever checked against a name needing escaping on the
+  snapshot path — where the per-room counter object embeds the room name and IDs
+  are often recovered by parsing them back out of an object name, so a collision
+  silently maps one room's IDs onto another's instead of failing, and a wrong ID
+  decides which state a user restores. The core round-trip now runs under a name
+  set shared with the room-lister suite (which gains `"../escape"` and a
+  decomposed counterpart to the existing precomposed Unicode name), and the
+  cross-room isolation case runs over name pairs that collide under naive
+  encoding. Verified against a deliberately-colliding store: the previous suite
+  passed it, the current one fails it. **Third-party `SnapshotStore`
+  implementations may newly fail conformance; that is the intent.** The in-tree
+  memory, file, and sqlite backends pass unchanged (#211).
+
 ## [1.44.0] — 2026-08-04
 
 ### Changed

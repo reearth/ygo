@@ -32,11 +32,28 @@ type LegacyAdapter struct {
 	// retention policy; set before serving.
 	KeepVersions int
 
-	// KeepSnapshots bounds retained labelled snapshots when the websocket server
-	// asks the adapter to save a version (see the provider's VersionableAdapter /
-	// AutoVersionEvery). 0 (default) keeps every version, matching KeepVersions.
-	// Set > 0 to trim to the newest KeepSnapshots after each save, so an
-	// always-connected document cannot grow an unbounded history.
+	// KeepSnapshots bounds retained labelled snapshots PER LABEL when the
+	// websocket server asks the adapter to save a version (see the provider's
+	// VersionableAdapter / AutoVersionEvery). 0 (default) keeps every version,
+	// matching KeepVersions. Set > 0 to trim each label class to its newest
+	// KeepSnapshots, so an always-connected document cannot grow an unbounded
+	// auto-version history.
+	//
+	// The scope is spelled out because none of it is guessable:
+	//
+	//   - Per LABEL, not per room. An auto-version save cannot evict a snapshot
+	//     a user named. A room's TOTAL is therefore
+	//     (distinct labels x KeepSnapshots) and is NOT bounded — bounding the
+	//     total is exactly what evicts named snapshots. A caller needing a hard
+	//     per-room cap must enumerate labels from ListSnapshots and call
+	//     TrimSnapshots for each; if an application lets end users name
+	//     snapshots, that growth is user-driven.
+	//   - Applied by SaveVersion after each save, best-effort with errors
+	//     swallowed, and by TrimSnapshots when called directly, which returns
+	//     them.
+	//   - Snapshots written straight to SnapshotStore.SaveSnapshot are NEVER
+	//     trimmed: the adapter does not see those writes. With auto-versioning
+	//     off and no TrimSnapshots call, this field has no effect at all.
 	//
 	// Note this is retention over VERSIONS (SnapshotStore entries), which is a
 	// different axis from KeepVersions' retention over the raw update log.
