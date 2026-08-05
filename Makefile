@@ -36,8 +36,12 @@ bench:
 # the benchheavy build tag, plus the websocket scaling probe. Too slow for
 # the PR gate; run locally before/after perf-sensitive changes, or let the
 # nightly CI cron job (.github/workflows/benchmark.yml) run it on main.
+#
+# -benchtime=10x is required: these benchmarks are built for a fixed small
+# iteration count, and auto-scaling b.N both blows the default 10m per-package
+# test timeout and drives BroadcastFanout into back-pressure. See BENCHMARKS.md.
 bench-heavy:
-	go test -tags benchheavy -bench=. -benchmem -count=6 $(PACKAGES)
+	go test -tags benchheavy -bench=. -benchtime=10x -benchmem -count=3 -timeout 90m $(PACKAGES)
 	go test -tags benchheavy -run TestScaleProbe -v ./provider/websocket/
 
 # Regenerates the deterministic cross-impl conformance fixtures

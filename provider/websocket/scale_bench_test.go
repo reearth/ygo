@@ -102,6 +102,30 @@ func BenchmarkBroadcastFanout(b *testing.B) {
 	for _, n := range []int{10, 100, 500} {
 		n := n
 		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			// Only meaningful at -benchtime=1x, and it now says so itself rather
+			// than trusting the caller to pass the flag.
+			//
+			// The loop below calls BroadcastUpdate with no flow control while the
+			// peers drain real sockets, so a scaled b.N lets the producer enqueue
+			// far more frames than a reader goroutine can take before it is even
+			// scheduled — this fails at N=10, so it is burstiness, not volume.
+			// Every peer's writeCh (512) fills, the default SlowPeerDisconnect
+			// policy closes the peers, the emptied room is evicted, and the next
+			// BroadcastUpdate returns ErrRoomNotFound. The server is behaving as
+			// designed; the benchmark would just be measuring back-pressure
+			// instead of fan-out cost, which the package comment above forbids.
+			//
+			// The guard must live HERE, not on the parent benchmark: the parent is
+			// only a container and its b.N stays 1, so a guard there never fires.
+			// The threshold sits far above both documented invocations
+			// (-benchtime=1x and the heavy tier's -benchtime=10x) and far below
+			// where Go's auto-scaling lands (10000+), so it only ever fires for a
+			// run that forgot -benchtime — turning a baffling "room not found"
+			// into an explanation.
+			if b.N > 100 {
+				b.Skip("needs -benchtime=1x or 10x; see the comment above")
+			}
+
 			s := NewServer()
 			ts := httptest.NewServer(s)
 			defer ts.Close()
