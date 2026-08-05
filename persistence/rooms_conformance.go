@@ -122,7 +122,7 @@ func RunRoomListerConformance(t *testing.T, factory func() SnapshotVersionedPers
 		// Backends may encode room names on disk (the file backend hex-encodes
 		// them); enumeration must return the ORIGINAL name, not the encoded form.
 		p := factory()
-		names := []string{"plain", "with/slash", "with:colon", "üñïçödé", "with space"}
+		names := conformanceRoomNames
 		updates, _ := genUpdates(t, 1)
 		for _, n := range names {
 			if _, err := p.AppendUpdate(ctx, n, updates[0]); err != nil {

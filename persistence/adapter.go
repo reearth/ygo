@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // LegacyAdapter adapts a VersionedPersistence to the provider/websocket
@@ -31,14 +32,19 @@ type LegacyAdapter struct {
 	// retention policy; set before serving.
 	KeepVersions int
 
-	// KeepSnapshots bounds retained labelled snapshots when the websocket server
-	// asks the adapter to save a version (see the provider's VersionableAdapter /
-	// AutoVersionEvery). 0 (default) keeps every version, matching KeepVersions.
-	// Set > 0 to trim to the newest KeepSnapshots after each save, so an
-	// always-connected document cannot grow an unbounded history.
+	// KeepSnapshots bounds retained labelled snapshots PER LABEL when the
+	// websocket server asks the adapter to save a version (see the provider's
+	// VersionableAdapter / AutoVersionEvery). 0 (default) keeps every version,
+	// matching KeepVersions.
 	//
-	// Note this is retention over VERSIONS (SnapshotStore entries), which is a
-	// different axis from KeepVersions' retention over the raw update log.
+	// Two things that are not guessable from the name. It is per label, not per
+	// room, so a room's total is unbounded — see TrimSnapshots, which also
+	// applies it on demand. And it is applied only by those two, so snapshots
+	// written straight to SnapshotStore.SaveSnapshot are never trimmed: with
+	// auto-versioning off and no TrimSnapshots call, this field does nothing.
+	//
+	// Retention over VERSIONS (SnapshotStore entries), a different axis from
+	// KeepVersions' retention over the raw update log.
 	KeepSnapshots int
 }
 
@@ -134,23 +140,64 @@ func (a *LegacyAdapter) SaveVersion(ctx context.Context, room, label string) (in
 	if err != nil {
 		return 0, err
 	}
-	a.trimSnapshots(ctx, ss, room)
+	// Scoped to the label just written; see above for why failures are swallowed.
+	_, _ = a.TrimSnapshots(ctx, room, label)
 	return id, nil
 }
 
-// trimSnapshots deletes the oldest snapshots beyond KeepSnapshots. Best-effort:
-// see the SaveVersion doc for why errors are swallowed.
-func (a *LegacyAdapter) trimSnapshots(ctx context.Context, ss SnapshotStore, room string) {
+// TrimSnapshots deletes the oldest snapshots of room labelled label beyond
+// KeepSnapshots, reporting how many it deleted.
+//
+// Retention is per label: an auto-version save never evicts a snapshot a user
+// named. The label is a parameter because this package does not import
+// provider/websocket and so cannot know which label means "automatic".
+//
+// Returns ErrSnapshotsUnsupported if the store is not a SnapshotStore. That is
+// checked before KeepSnapshots, so retention being disabled cannot mask a
+// misconfigured store. Otherwise KeepSnapshots <= 0 keeps everything and
+// returns (0, nil) — the opposite of some Yjs ports, where keep 0 deletes
+// every version.
+//
+// The per-label bound leaves a room's total unbounded at
+// (distinct labels x KeepSnapshots); bounding the total is what evicts named
+// snapshots. For a hard per-room cap, enumerate labels and trim each.
+//
+// Every surplus snapshot is attempted even if one delete fails, and the error
+// joins the failures. DeleteSnapshot is contractually idempotent, so a
+// concurrent trim of the same class cannot report a spurious failure.
+func (a *LegacyAdapter) TrimSnapshots(ctx context.Context, room, label string) (int, error) {
+	ss, ok := a.store.(SnapshotStore)
+	if !ok {
+		return 0, ErrSnapshotsUnsupported
+	}
 	if a.KeepSnapshots <= 0 {
-		return
+		return 0, nil
 	}
 	snaps, err := ss.ListSnapshots(ctx, room)
-	if err != nil || len(snaps) <= a.KeepSnapshots {
-		return
+	if err != nil {
+		return 0, err
 	}
-	// ListSnapshots is newest-first, so everything at or past KeepSnapshots is
-	// surplus.
-	for _, sn := range snaps[a.KeepSnapshots:] {
-		_ = ss.DeleteSnapshot(ctx, room, sn.ID)
+	// Newest-first by contract, so filtering preserves order: everything at or
+	// past KeepSnapshots in the class is surplus.
+	var class []SnapshotInfo
+	for _, sn := range snaps {
+		if sn.Label == label {
+			class = append(class, sn)
+		}
 	}
+	if len(class) <= a.KeepSnapshots {
+		return 0, nil
+	}
+	var (
+		deleted int
+		errs    []error
+	)
+	for _, sn := range class[a.KeepSnapshots:] {
+		if derr := ss.DeleteSnapshot(ctx, room, sn.ID); derr != nil {
+			errs = append(errs, fmt.Errorf("delete snapshot %d: %w", sn.ID, derr))
+			continue
+		}
+		deleted++
+	}
+	return deleted, errors.Join(errs...)
 }

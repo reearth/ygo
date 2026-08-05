@@ -1,3 +1,55 @@
+## v1.45.0
+
+**Who is affected:** anyone running `Server.AutoVersionEvery` together with
+`LegacyAdapter.KeepSnapshots > 0` while also letting users name snapshots — and
+anyone maintaining their own `SnapshotStore` implementation.
+
+**The fix.** Snapshot retention kept the newest `KeepSnapshots` per room without
+regard to how each snapshot was created, so auto-captured versions evicted ones
+a user had deliberately named. A snapshot named `"before-migration"` vanished
+once `KeepSnapshots` newer auto versions existed: at a 15-minute interval with
+keep-50, about half a day of continuous editing, silently and with no way to
+protect it. Auto versions are cheap, numerous and individually disposable, which
+is the whole point of bounding them; a named snapshot is an explicit user act and
+the thing they would most object to losing. Retention is now scoped to the label
+class, so the two kinds bound themselves separately.
+
+**What changes for you.** `KeepSnapshots` becomes a per-label bound rather than a
+per-room one, so a room's total is now `distinct labels × KeepSnapshots` and a
+deployment using varied labels will retain more than before. If you relied on it
+as a hard per-room cap you no longer have one — deliberately, because capping the
+total is what evicts named snapshots. If your application lets end users name
+snapshots, that growth is user-driven: enumerate labels from `ListSnapshots` and
+call the new `TrimSnapshots` per label if you need a ceiling.
+
+**New:** `LegacyAdapter.TrimSnapshots(ctx, room, label) (int, error)` runs the
+same retention on demand. Snapshots written straight through
+`SnapshotStore.SaveSnapshot` were never trimmed — retention only ever ran from
+`SaveVersion`, so with auto-versioning off `KeepSnapshots` did nothing at all —
+and they still are not unless you call this. It returns how many it deleted, and
+attempts every surplus snapshot even when one delete fails rather than stopping
+at the first.
+
+**If you implement `SnapshotStore`:** the conformance suite is stricter, and your
+implementation may newly fail it. That is the intent. It used to pass the literal
+`"room"` everywhere, so nothing checked a name needing escaping on the snapshot
+path — and that path has more name-derived surface than the update path: the
+per-room counter object embeds the room name, and IDs are often recovered by
+parsing them back out of an object name. A room name carrying your delimiter
+therefore corrupts ID handling silently rather than failing, and a wrong ID is
+not cosmetic, since IDs address which state a user restores. This is not
+hypothetical — we hit it downstream while implementing `SnapshotStore` on GCS,
+where an id-parsing scheme that looked correct mapped some ids onto others.
+
+The suite now runs its core round-trip under `"with/slash"`, `"with:colon"`,
+`"with space"`, precomposed *and* decomposed Unicode, and `"../escape"`, and
+checks cross-room isolation for name pairs that collide under naive encoding
+(`a/b` vs `a:b`, `a/b` vs `a%2Fb`, `a b` vs `a+b`, NFC vs NFD). We verified the
+suite against a deliberately-colliding store that rewrites awkward characters in
+its storage key: the previous suite passed it clean, the current one fails it on
+three of the four pairs. The in-tree memory, file, and sqlite backends pass
+unchanged.
+
 ## v1.44.0
 
 **Who is affected:** only callers who put non-UTF-8 bytes into a document —
