@@ -25,8 +25,8 @@ jobs:
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.23"
           cache: true
@@ -34,7 +34,7 @@ jobs:
         run: go test -run=^$ -fuzz=${{ matrix.target.func }} -fuzztime=300s ${{ matrix.target.pkg }}
       - name: Upload crash corpus
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crash-${{ matrix.target.func }}
           # Go writes new crash inputs under <package>/testdata/fuzz/<Func>/,
