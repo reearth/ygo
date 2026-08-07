@@ -41,12 +41,12 @@ jobs:
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: ${{ matrix.go }}
           cache: true
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22"
           cache: "npm"
@@ -63,7 +63,7 @@ jobs:
       - run: go test -race -timeout 120s -coverprofile=coverage.txt -covermode=atomic ./...
       - name: CGo-free build (pure Go)
         run: CGO_ENABLED=0 go build ./persistence/sqlite/... ./cmd/ygo-server/... ./mobile/...
-      - uses: codecov/codecov-action@v7
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
         if: matrix.go == '1.23'
         with:
           files: coverage.txt
@@ -77,12 +77,12 @@ jobs:
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.23"
           cache: true
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: v2.12.2
 
@@ -94,8 +94,8 @@ jobs:
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           # Track the latest 1.26 patch so the scan always runs on a toolchain
           # with current standard-library fixes (avoids failing on stdlib CVEs
@@ -127,7 +127,7 @@ jobs:
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       # The release job publishes RELEASE_NOTES.md's top section under the tag
@@ -192,12 +192,12 @@ jobs:
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.26"
           cache: true
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22"
           cache: "npm"
