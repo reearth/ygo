@@ -335,7 +335,7 @@ func (s *session) handleFrame(frame []byte) error {
 // comes back already merged into a single blob, which is why a burst of local
 // edits costs one frame rather than one frame per Transact.
 //
-// # Take-before-write is safe only because the next handshake is a full resync
+// # Take-before-write: safe for KindSync, NOT (yet) proven for awareness
 //
 // Each iteration TAKES a payload off the lane and only THEN writes it to the
 // socket. If that write fails — the ordinary case for the failure this
@@ -344,20 +344,37 @@ func (s *session) handleFrame(frame []byte) error {
 // nothing else in this package retains a copy of it. In isolation that is a
 // dropped update.
 //
-// It is NOT a lost update in practice, and the reason is load-bearing enough
-// to say plainly rather than leave implicit: runReconnectLoop re-runs the
-// full y-protocol handshake on every reconnect (see its doc), and that
-// handshake's SyncStep2 is derived from the Doc's CURRENT state, not from
-// the lane. The update this call just lost from the lane is still sitting in
-// the Doc — Transact already applied it before onDocUpdate ever pushed it
-// onto the lane — so the next successful connection's handshake sends it again,
-// merged into whatever else changed meanwhile, with no special-casing
-// required anywhere. This is precisely #165's central design point (there
-// is no separate offline-op queue) applied to failure recovery as well as to
-// planned disconnection: DO NOT "fix" this by putting the payload back on a
-// failed write, or by adding a retry queue here — that would be solving an
+// For a KindSync payload (the TakeSync branch), this is NOT a lost update in
+// practice, and the reason is load-bearing enough to say plainly rather than
+// leave implicit: runReconnectLoop re-runs the full y-protocol handshake on
+// every reconnect (see its doc), and that handshake's SyncStep2 is derived
+// from the Doc's CURRENT state, not from the lane. The update this call just
+// lost from the lane is still sitting in the Doc — Transact already applied
+// it before onDocUpdate ever pushed it onto the lane — so the next
+// successful connection's handshake sends it again, merged into whatever
+// else changed meanwhile, with no special-casing required anywhere. This is
+// precisely #165's central design point (there is no separate offline-op
+// queue) applied to failure recovery as well as to planned disconnection: DO
+// NOT "fix" the KindSync case by putting the payload back on a failed
+// write, or by adding a retry queue here — that would be solving an
 // already-solved problem, at the cost of a second source of truth for
 // pending writes that could disagree with the Doc.
+//
+// For a TakeAwareness payload, the same argument does NOT hold, and a future
+// implementer must not assume it does just because this comment is right
+// above that branch too: awareness state is not doc state, so it is not
+// part of what SyncStep1/SyncStep2 exchange, and a dropped awareness blob is
+// not "still sitting" anywhere the handshake will ever look. This is latent
+// today — nothing produces an awareness payload yet, so TakeAwareness never
+// actually returns one until a later #165 task wires Awareness.SetLocalState
+// (or similar) to push onto the lane — but latent is not the same as safe to
+// ignore, because THIS comment is exactly what that task's implementer will
+// read first. Whatever makes a dropped awareness write harmless will have to
+// be awareness's own mechanism (its next local-state emit, or a periodic
+// heartbeat, superseding the lost one — awareness is designed to be safely
+// supersedable state, unlike a CRDT update) — confirm that property
+// explicitly against the real implementation when that task lands, rather
+// than inheriting this paragraph's KindSync conclusion by proximity.
 func (s *session) flushLane() error {
 	for {
 		if update, ok := s.c.lane.TakeSync(); ok {
