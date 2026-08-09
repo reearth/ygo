@@ -246,18 +246,21 @@ Notes:
   `Stats()`" below for the vocabulary this shows up under).
 - `Publish` may be called **concurrently for distinct rooms**, and — briefly,
   across a room's eviction/reload handoff — **twice concurrently for the same
-  room**. See "Contract: concurrent calls" below; your `Relay` must be safe
-  for both.
+  room**. It must also **return promptly when its ctx is cancelled** —
+  `Server.Shutdown` depends on that to stay bounded. See "Contract:
+  concurrent calls and cancellation" below; your `Relay` must be safe for all
+  three.
 - Combine the relay with a `PersistenceAdapter` /
   [`VersionedPersistence`](PERSISTENCE.md) for durability — the relay handles
   live fan-out (including awareness), persistence handles restart recovery.
 
-### Contract: concurrent calls
+### Contract: concurrent calls and cancellation
 
 Both halves of `cluster.Relay`/`cluster.Sink` now permit concurrency that a
-relay written against the pre-#187 provider could safely assume away.
-Anyone implementing a custom `Relay` (or a custom `Sink`, though the shipped
-`*websocket.Server` already handles this) needs both of these:
+relay written against the pre-#187 provider could safely assume away, and
+since #202 `Publish` carries a cancellation obligation. Anyone implementing
+a custom `Relay` (or a custom `Sink`, though the shipped `*websocket.Server`
+already handles this) needs all three of these:
 
 - **`Sink.Inject` may be called concurrently for distinct rooms.** Calls for
   the *same* room must still be serialised and delivered in publish order.
@@ -284,6 +287,19 @@ Anyone implementing a custom `Relay` (or a custom `Sink`, though the shipped
   list under its own mutex, releases it, then sends on per-node channels;
   `cluster/redis`'s `Publish` deliberately takes no lock at all and uses
   atomics plus channels.
+- **`Relay.Publish` must return promptly once its ctx is cancelled** (#202,
+  v1.46.0), returning the ctx error for whatever it could not deliver.
+  `Server.Shutdown` relies on this to unwedge a blocked `Publish` after the
+  caller's deadline: it drains each room's outbound lane while the relay
+  context is still live, joins the lane workers bounded by `Shutdown`'s own
+  ctx, then cancels the relay context — and counts every payload an aborted
+  `Publish` abandons in `RelayStats().Dropped`. A `Publish` that ignores
+  cancellation stalls that join and leaves its worker goroutine running past
+  `Shutdown`. Both shipped relays conform: `MemRelay` selects on ctx around
+  its per-node channel sends, and `cluster/redis`'s `Publish` selects on ctx
+  at the hand-off to its publisher goroutine. A custom relay whose broker
+  client offers no cancellable send should wrap the send so the `Publish`
+  call itself can still abandon it and return.
 
 A relay that appends to an unsynchronised buffer, or keeps an unlocked
 per-room sequence counter, on either the inbound or outbound side, is not
@@ -380,18 +396,20 @@ If a deployment needs at-least-once delivery (no catch-up dependency on
 persistence), a Redis Streams-based adapter (`XADD` + last-read-id
 tracking) would replace this one. Tracked separately; not in v1.21.0.
 
-**`Shutdown` discards queued outbound updates, uncounted.** `Server.Shutdown`
-cancels the relay context before closing peer connections and before the
-persistence drain, so peers can keep committing for the rest of shutdown —
-potentially seconds — after outbound relay delivery has already stopped.
-Anything still queued in a room's outbound lane at that point, or enqueued
-afterward, is discarded with neither `Dropped` nor `HardDrops` incrementing:
-those counters reading zero after a `Shutdown` does not mean nothing was
-lost. This is pre-existing behaviour (the single shared outbound worker it
-replaced discarded the same way), not a regression from #187 — but it is
-worth calling out explicitly here, since the `Stats()`/`RelayStats()`
-section above establishes those same counters as the "always zero, alert on
-presence" signal for every other code path.
+**`Shutdown` drains queued outbound updates, and counts what it cannot
+deliver** (#202). `Server.Shutdown` used to cancel the relay context as its
+second act — before closing peer connections and before the persistence
+drain — so everything peers committed for the rest of shutdown was discarded
+with neither `Dropped` nor `HardDrops` incrementing. Since the #202 fix the
+relay context is cancelled at the *end* of `Shutdown`: each room's outbound
+lane is retired and drained while publishing still works, the lane workers
+are joined (bounded by `Shutdown`'s ctx, so no `Publish` call outlives a
+`Shutdown` that completed within its budget), and only then is the context
+cancelled. A backlog that cannot be delivered before the caller's ctx
+expires is counted in `RelayStats().Dropped` instead of vanishing. `Dropped`
+and `HardDrops` both reading zero after a `Shutdown` therefore means what it
+should: nothing was lost. Give `Shutdown` a real deadline — it is also the
+delivery budget for the final outbound tail.
 
 ### Observability: `Stats()`
 

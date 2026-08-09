@@ -262,7 +262,7 @@ func spliceInto(dst []any, index int, vals []any) []any {
 func rejectSharedVals(vals []any) {
 	for _, v := range vals {
 		if _, ok := v.(sharedType); ok {
-			panic("crdt: a shared type cannot be inserted as a plain value; use PushType")
+			panic("crdt: a shared type cannot be inserted as a plain value; use InsertType or PushType")
 		}
 	}
 }
@@ -298,6 +298,14 @@ func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
 // and Push; the two differ only in how left is chosen (Insert uses the
 // live-index neighbour, Push uses the physical tail).
 func (a *YArray) insertAfterItem(txn *Transaction, left *Item, vals []any, hintIndex int) {
+	a.insertContentAfterItem(txn, left, NewContentAny(vals...), hintIndex)
+}
+
+// insertContentAfterItem anchors a new item carrying content immediately after
+// left, deriving origin/originRight from its neighbours. The plain-value path
+// and InsertType differ only in the Content they carry, so the anchor logic
+// lives here once.
+func (a *YArray) insertContentAfterItem(txn *Transaction, left *Item, content Content, hintIndex int) {
 	t := &a.abstractType
 
 	var origin *ID
@@ -320,7 +328,7 @@ func (a *YArray) insertAfterItem(txn *Transaction, left *Item, vals []any, hintI
 		OriginRight: originRight,
 		Left:        left,
 		Parent:      t,
-		Content:     NewContentAny(vals...),
+		Content:     content,
 	}
 	// Signal to integrate the logical index for partial cache invalidation.
 	if hintIndex > 0 {
@@ -578,6 +586,27 @@ func (a *YArray) Slice(start, end int) []any {
 	if doc := a.doc; doc != nil {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
+	}
+	if a.detached() {
+		// Staged content, with the attached rule: a nested type occupies a
+		// position but emits no value.
+		if end > len(a.prelim) {
+			end = len(a.prelim)
+		}
+		if start < 0 {
+			start = 0
+		}
+		if start > end {
+			return nil
+		}
+		out := make([]any, 0, end-start)
+		for _, v := range a.prelim[start:end] {
+			if _, isType := v.(sharedType); isType {
+				continue
+			}
+			out = append(out, v)
+		}
+		return out
 	}
 	t := &a.abstractType
 	if end > t.length {
