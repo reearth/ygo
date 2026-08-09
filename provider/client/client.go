@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/awareness"
+	"github.com/reearth/ygo/cluster"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/internal/relaylane"
 )
 
 // Defaults applied by New for any Options field left at its zero value. See
@@ -52,16 +54,22 @@ type Options struct {
 	// like using a *crdt.Doc directly without this package.
 	Store LocalStore
 
-	// Token is carried through to later tasks' dial handshake as the
-	// Hocuspocus in-band auth token (mirrors provider/websocket's
-	// OnTokenAuth, #104). Unused by this task's Connect, which does not
-	// dial yet.
+	// Token is the Hocuspocus in-band auth token (mirrors
+	// provider/websocket's OnTokenAuth, #104). The in-band auth exchange
+	// that sends it is a later #165 task; the dial loop does not send it
+	// yet. Use Header for HTTP-level credentials in the meantime.
 	Token string
 
-	// Header is carried through to later tasks' dial as additional HTTP
-	// headers on the WebSocket upgrade request (e.g. a bearer token in
-	// Authorization, ahead of or instead of Token). Unused by this task's
-	// Connect.
+	// Header carries additional HTTP headers on the WebSocket upgrade
+	// request (e.g. a bearer token in Authorization, ahead of or instead of
+	// Token).
+	//
+	// New takes a defensive copy: mutating the map after New returns has no
+	// effect on what the client dials with. Without the copy a Client would
+	// alias the caller's map and every dial — including reconnects on a
+	// goroutine the caller knows nothing about — would read it concurrently
+	// with whatever the caller does to it next, which is a data race the
+	// caller has no way to see coming.
 	Header http.Header
 
 	// MaxBackoff caps the reconnect backoff the later dial loop applies
@@ -73,10 +81,10 @@ type Options struct {
 	// provider/websocket's own ping/pong keepalive. Default: 30s.
 	PingInterval time.Duration
 
-	// ReadLimit caps the size of a single frame the later dial loop will
-	// accept from the server, mirroring provider/websocket.Server's
-	// MaxMessageBytes so a client and ygo's own server agree on the ceiling.
-	// Default: 64 MiB (64<<20).
+	// ReadLimit caps the size of a single frame the dial loop will accept
+	// from the server, mirroring provider/websocket.Server's MaxMessageBytes
+	// so a client and ygo's own server agree on the ceiling. Default: 64 MiB
+	// (64<<20).
 	ReadLimit int64
 
 	// CompactEvery is how many stored updates accumulate (per room) before
@@ -88,13 +96,13 @@ type Options struct {
 
 // remoteOrigin is the sentinel origin type stamped on every update the
 // client applies to its Doc that did NOT originate from the caller's own
-// edits — currently just hydration (LoadDoc → ApplyUpdateV1), and, once the
-// later sync-loop tasks land, every update received from the server. The
-// persistence hook New registers on the Doc compares an update's origin
+// edits: hydration (LoadDoc → ApplyUpdateV1) and every update received from
+// the server. The Doc observer Connect registers compares an update's origin
 // against a single *remoteOrigin instance (this Client's c.remoteOrigin) by
-// == to tell "this update is already durable, or came from the network, so
-// don't feed it back into the store" apart from "this is the caller's own
-// edit, persist it".
+// == to tell "this came from the network, so do not send it straight back"
+// apart from "this is the caller's own edit, send it". Note it does NOT gate
+// persistence: see onDocUpdate for why every update is stored regardless of
+// origin.
 //
 // This type MUST stay a non-zero-size struct (the `_ byte` field is load-
 // bearing — do not remove it, and do not "simplify" this back to
@@ -140,9 +148,10 @@ type Status struct {
 
 // Stats are cumulative counters a caller can poll to understand what the
 // client's sync loop has been doing without wiring a full OnStatus
-// subscription. All fields are populated by later #165 tasks (the dial loop,
-// awareness merging, and their failure paths); this task defines the shape
-// and returns it correctly zeroed, since no loop runs yet.
+// subscription. Coalesced, AwarenessSuperseded and HardDrops come from the
+// outbound lane (see internal/relaylane) and are live; Dropped is reserved
+// for the send-failure accounting a later #165 task adds with reconnect, and
+// is always zero today.
 type Stats struct {
 	// Coalesced counts local updates that were merged into a pending batch
 	// rather than sent as a separate wire message, mirroring
@@ -181,20 +190,29 @@ type Client struct {
 	remoteOrigin *remoteOrigin
 	awareness    *awareness.Awareness
 
-	unsubPersist func()
+	// lane is the hand-off between the Doc observer (which runs on whichever
+	// goroutine called Transact) and the loop goroutine (the socket's only
+	// writer). See onDocUpdate for why the hand-off has to exist at all, and
+	// internal/relaylane for its bounded, coalescing, never-blocking policy.
+	// It is created in New rather than per-connection so local edits made
+	// while offline queue up for the next connection instead of needing a
+	// separate holding pen.
+	lane *relaylane.Lane
 
 	statusMu       sync.Mutex
 	statusSubs     []statusSub
 	statusSubIDGen uint64
 
-	synced    chan struct{}
-	closed    chan struct{}
-	closeOnce sync.Once
+	synced     chan struct{}
+	syncedOnce sync.Once
+	closed     chan struct{}
+	closeOnce  sync.Once
 
-	statsCoalesced           atomic.Uint64
-	statsAwarenessSuperseded atomic.Uint64
-	statsHardDrops           atomic.Uint64
-	statsDropped             atomic.Uint64
+	// statsDropped backs Stats.Dropped. The other three Stats fields are read
+	// straight off the lane (see Stats), which is the only place that
+	// accounting actually happens; duplicating them here would just be a
+	// second copy to keep in step.
+	statsDropped atomic.Uint64
 }
 
 // roomFromURL extracts the room/document name from a y-websocket URL: the
@@ -250,62 +268,131 @@ func New(o Options) (*Client, error) {
 	if o.CompactEvery <= 0 {
 		o.CompactEvery = defaultCompactEvery
 	}
+	// Defensive copy so the Client never aliases the caller's map; see
+	// Options.Header. Clone returns nil for a nil Header, which is what the
+	// dialer wants anyway.
+	o.Header = o.Header.Clone()
 
 	c := &Client{
 		opts:         o,
 		room:         room,
 		remoteOrigin: &remoteOrigin{},
 		awareness:    awareness.New(uint64(o.Doc.ClientID())),
+		lane:         relaylane.New(0), // 0 = relaylane.DefaultCap
 		synced:       make(chan struct{}),
 		closed:       make(chan struct{}),
 	}
-	c.unsubPersist = o.Doc.OnUpdate(c.persistLocalUpdate)
 	return c, nil
 }
 
-// persistLocalUpdate is registered on Doc via OnUpdate at construction time
-// (before any hydration happens) so that every locally-originated
-// transaction is durable before it matters, matching the ordering
-// LocalStore's own doc comment describes for provider/websocket's
-// persistence worker.
+// onDocUpdate is the single Doc observer this Client registers, wired up by
+// Connect after hydration and before the first dial (see Connect for why that
+// exact position). It does the two things every applied update needs, and
+// they are deliberately gated differently:
 //
-// It must skip updates whose origin is this Client's remoteOrigin sentinel:
-// those are updates the client itself applied from the store (hydration) or,
-// once the later sync-loop tasks land, from the server — writing them back
-// to the store would be redundant at best (hydration) and would corrupt the
-// "who edited this" picture at worst (echoing a server update back in as if
-// it were a fresh local edit).
-func (c *Client) persistLocalUpdate(update []byte, origin any) {
+//   - PERSIST, whatever the origin. Both local edits and updates received
+//     from the server go to the store. Persisting only local-origin updates
+//     is a tempting simplification and a silent data-loss bug: a client that
+//     syncs a large document, is closed, and reopens offline would hydrate
+//     back only the edits it made itself, having thrown away everything it
+//     ever learned from the server. Storing a remote update twice, by
+//     contrast, costs nothing — V1 updates are idempotent.
+//
+//   - SEND, only when the origin is NOT this Client's remoteOrigin sentinel.
+//     An update carrying that sentinel is one we just applied FROM the
+//     server; bouncing it straight back would be pure echo. (Hydration also
+//     uses the sentinel, but hydration cannot reach this observer at all,
+//     because Connect registers it afterwards.)
+//
+// # Why this hands off instead of writing
+//
+// This runs on whichever goroutine called Transact — the embedding
+// application's own goroutine, in the middle of its own edit. It must
+// therefore never touch the socket: gorilla/websocket allows exactly one
+// concurrent writer, and a write here would additionally park the
+// application's edit behind network I/O. So it pushes onto the lane, which
+// never blocks (a full lane merges its backlog rather than waiting or
+// dropping), and returns. The loop goroutine picks the work up from there.
+// provider/websocket removed this same head-of-line coupling server-side in
+// #187; the client must not reintroduce it.
+func (c *Client) onDocUpdate(update []byte, origin any) {
+	if c.opts.Store != nil {
+		// Best-effort: there is no failure channel for a store write yet (no
+		// Stats field or Status shape fits it), so an error here is dropped.
+		// A later #165 task that adds real failure reporting should revisit.
+		_ = c.opts.Store.StoreUpdate(c.room, update)
+	}
 	if origin == c.remoteOrigin {
 		return
 	}
-	if c.opts.Store == nil {
-		return
-	}
-	// Best-effort: this task builds no sync loop to surface a persistence
-	// failure through (no OnStatus emission exists yet for it), so there is
-	// nothing more useful to do with the error here than drop it. Later
-	// #165 tasks that add real failure reporting should reconsider this.
-	_ = c.opts.Store.StoreUpdate(c.room, update)
+	// The lane retains this slice for an unbounded time, and the same slice
+	// is handed to every other OnUpdate observer on this Doc (including the
+	// application's own). Copying is one allocation per local transaction and
+	// removes any question of who may touch it afterwards.
+	queued := make([]byte, len(update))
+	copy(queued, update)
+	c.lane.Push(cluster.KindSync, queued)
 }
 
-// Connect hydrates the Client's Doc from Store (if one was configured) and
-// then blocks until ctx is cancelled or Close is called.
+// Connect hydrates the Client's Doc from Store (if one was configured),
+// starts syncing with the server, and blocks until ctx is cancelled or Close
+// is called. It returns ctx.Err() for the former and nil for the latter.
 //
-// Hydration happens synchronously, before Connect does anything else — in
-// particular, before any attempt to reach the server, once later #165 tasks
-// add that. This is the hydrate-before-dial ordering the package doc
-// describes: an app that calls Connect against an unreachable server still
-// gets its previously-persisted content applied to Doc, because hydration
-// never depends on the network to begin with.
+// The three things it does happen in this order for reasons, and the order is
+// part of the contract:
 //
-// The dial/handshake loop that reconciles with a live server is added by
-// later #165 tasks; this task's Connect does not dial at all after
-// hydrating.
+//  1. HYDRATE, synchronously, before anything touches the network. This is
+//     the hydrate-before-dial ordering the package doc describes: an app that
+//     calls Connect against an unreachable server still gets its
+//     previously-persisted content applied to Doc, because hydration never
+//     depended on the network to begin with.
+//
+//  2. REGISTER the Doc observer — after hydration, so replaying the store's
+//     own bytes is not mistaken for a fresh local edit and echoed onto the
+//     wire, and before dialing, so no edit the caller makes from this moment
+//     on can slip past unsent. (Edits made between New and this point are not
+//     missed either, just carried differently: they are already in the Doc,
+//     so the handshake's SyncStep2 delivers them wholesale.)
+//
+//  3. DIAL and run the sync loop.
+//
+// Connect is documented as blocking until stopped, and it keeps that promise
+// even when the connection fails or ends: it reports the failure through
+// OnStatus and then parks until ctx or Close releases it, rather than
+// returning the error. Returning would make an unreachable server look like a
+// terminal condition, when for an offline-first client it is the ordinary
+// case — the Doc stays fully usable, and edits keep being persisted, with no
+// server at all. A later #165 task fills this park with reconnect and
+// backoff; the shape of Connect does not change when it does.
 func (c *Client) Connect(ctx context.Context) error {
 	if err := c.hydrate(); err != nil {
 		return err
 	}
+
+	unsub := c.opts.Doc.OnUpdate(c.onDocUpdate)
+	defer unsub()
+
+	// Fold Close into the loop's context so the loop has exactly one stop
+	// signal to watch instead of two.
+	loopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	watcherDone := make(chan struct{})
+	defer close(watcherDone)
+	go func() {
+		select {
+		case <-c.closed:
+			cancel()
+		case <-watcherDone:
+		}
+	}()
+
+	err := c.runLoop(loopCtx)
+	if loopCtx.Err() != nil {
+		// Stopped on purpose (ctx cancelled or Close): not a failure.
+		err = nil
+	}
+	c.emitStatus(Status{State: StateDisconnected, Err: err})
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -315,8 +402,14 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // hydrate loads this Client's room from Store, if one was configured, and
-// applies it to Doc under the remoteOrigin sentinel so persistLocalUpdate
-// recognises it as already-durable and does not write it straight back.
+// applies it to Doc under the remoteOrigin sentinel.
+//
+// The sentinel is not what stops the hydrated bytes being written straight
+// back to the store — Connect not having registered its observer yet is (see
+// Connect's step 2). It is used anyway because it is the truthful origin for
+// this update, and because an application with its own Doc.OnUpdate observer
+// can then tell hydration apart from a local edit exactly as it can tell a
+// server-received update apart from one.
 //
 // A Store with no prior state for this room returns (nil, nil) per
 // LocalStore's contract; hydrate treats that as a no-op rather than an
@@ -337,9 +430,12 @@ func (c *Client) hydrate() error {
 }
 
 // Synced returns a channel that is closed the first time this Client's Doc
-// reconciles with the server on a live connection (StateSynced). It never
-// closes for a Client that has not completed a sync handshake — in
-// particular, this task's Connect never closes it, since it never dials.
+// reconciles with the server on a live connection: specifically, when the
+// first SyncStep2 of a connection has been applied. It never closes for a
+// Client that has not completed a sync handshake — a Client that never
+// dialed, or that has only ever failed to reach its server, leaves it open
+// forever. It closes at most once; a reconnect re-emits StateSynced through
+// OnStatus but does not (and cannot) reopen the channel.
 //
 // Callers that want "block until this doc has whatever the server has, at
 // least once" should select on the returned channel rather than polling
@@ -381,11 +477,14 @@ func (c *Client) OnStatus(fn func(Status)) (unsub func()) {
 // the subscriber list under statusMu and releases the lock before calling
 // any of them, so a subscriber callback that calls back into this Client
 // (OnStatus, unsub, or — in later tasks — anything else that takes
-// statusMu) cannot deadlock against emitStatus's own lock. This task does
-// not call emitStatus from anywhere in Connect (there is no state
-// transition to report yet, since Connect does not dial); it exists now so
-// OnStatus is a fully working, tested part of the exported surface ahead of
-// the later tasks that will call it.
+// statusMu) cannot deadlock against emitStatus's own lock. This mirrors the
+// no-lock-held-during-callbacks rule crdt.Doc.OnUpdate and
+// provider/websocket's observers already follow.
+//
+// Every call site is on the loop goroutine (or on Connect's own goroutine
+// around it), so a subscriber that blocks stalls this Client's sync — the
+// same contract provider/websocket's hooks carry, and the reason those hooks
+// are documented as "do not block".
 func (c *Client) emitStatus(st Status) {
 	c.statusMu.Lock()
 	subs := make([]statusSub, len(c.statusSubs))
@@ -400,14 +499,24 @@ func (c *Client) emitStatus(st Status) {
 // Awareness returns this Client's Awareness instance, keyed to the same
 // ClientID as Doc — so presence/cursor state a caller sets locally via
 // SetLocalState is attributed to the same peer identity the sync protocol
-// (once later #165 tasks add it) uses for this connection.
+// uses for this connection. Propagating that state over the wire is a later
+// #165 task; the loop already carries awareness payloads outbound, but
+// nothing produces them yet.
 func (c *Client) Awareness() *awareness.Awareness {
 	return c.awareness
 }
 
-// Close signals Connect to return and unregisters this Client's Doc
-// persistence hook. It is safe to call more than once (only the first call
-// has any effect) and safe to call concurrently with Connect.
+// Close signals Connect to tear down its connection and return. It is safe to
+// call more than once (only the first call has any effect) and safe to call
+// concurrently with Connect.
+//
+// Close does not itself unregister the Doc observer: Connect owns that
+// registration for exactly as long as it runs and removes it on the way out,
+// which is both simpler than sharing the unsub function across goroutines and
+// correct for a Client that was never connected in the first place (there is
+// then nothing registered to remove). A caller that needs the observer
+// definitely gone before proceeding should wait for Connect to return, which
+// this call causes.
 //
 // Close does not close Store: the Store is constructed and owned by the
 // caller (e.g. via OpenSQLiteStore), which may want to reuse it — for
@@ -416,20 +525,25 @@ func (c *Client) Awareness() *awareness.Awareness {
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
-		c.unsubPersist()
 	})
 	return nil
 }
 
 // Stats returns a snapshot of this Client's cumulative counters. See Stats
-// for what each field means; this task's Connect runs no loop, so every
-// field is always zero until later #165 tasks add the code that increments
-// them.
+// for what each field means.
+//
+// Three of the four are read straight off the outbound lane, which is where
+// the coalescing they describe actually happens — deliberately, rather than
+// mirroring them into Client-side atomics that would then have to be kept in
+// step with the lane's own accounting. Lane.Stats is lock-free, so this is
+// safe to poll at any rate and from any goroutine, including from inside an
+// OnStatus callback.
 func (c *Client) Stats() Stats {
+	ls := c.lane.Stats()
 	return Stats{
-		Coalesced:           c.statsCoalesced.Load(),
-		AwarenessSuperseded: c.statsAwarenessSuperseded.Load(),
-		HardDrops:           c.statsHardDrops.Load(),
+		Coalesced:           ls.Coalesced,
+		AwarenessSuperseded: ls.AwarenessSuperseded,
+		HardDrops:           ls.HardDrops,
 		Dropped:             c.statsDropped.Load(),
 	}
 }

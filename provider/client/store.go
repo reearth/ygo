@@ -16,9 +16,10 @@ import (
 // exactly like the server's persistence worker does.
 //
 // The client hydrates its in-memory Doc from LoadDoc before it ever dials a
-// server, and calls StoreUpdate for every locally-applied transaction — the
-// same "durable before it matters" ordering the server's PersistenceAdapter
-// documents, applied to a client that may spend most of its life offline.
+// server, and calls StoreUpdate for every update applied to that Doc —
+// local edits and server-received updates alike — the same "durable before it
+// matters" ordering the server's PersistenceAdapter documents, applied to a
+// client that may spend most of its life offline.
 type LocalStore interface {
 	// LoadDoc returns the full binary V1 update representing stored state for
 	// room, or (nil, nil) if no state exists yet.
