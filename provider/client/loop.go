@@ -33,6 +33,17 @@ const (
 // can get wrong for no real benefit.
 const reconnectBackoffBase = 500 * time.Millisecond
 
+// readDeadlineMultiplier is how many Options.PingInterval periods of total
+// silence (no pong, no data frame — see runLoop's keepalive section) this
+// client tolerates before treating a connection as dead. 2x means a single
+// missed pong (one dropped packet, one slow GC pause, one busy event loop on
+// either side) is not by itself fatal — the NEXT ping still has a full
+// interval to succeed before the deadline expires — while two consecutive
+// misses fires well before an embedding application would notice anything
+// wrong on its own. This mirrors y-websocket's own ping-every-30s,
+// terminate-at-2x convention (#165).
+const readDeadlineMultiplier = 2
+
 // session is one connection's worth of loop state: the socket, and whatever
 // must be remembered for the lifetime of THAT connection rather than the
 // lifetime of the Client (currently just whether the handshake has completed).
@@ -65,12 +76,22 @@ const reconnectBackoffBase = 500 * time.Millisecond
 // and under load rather than in a test. A keepalive belongs either in the
 // loop's own select, or as conn.WriteControl(PingMessage, …).
 //
-// Every method on session writes data frames, and every one of them runs on
-// the loop goroutine that runLoop owns. That is not a coincidence to preserve
-// case-by-case; it is what this whole file is arranged around. The other half
-// of the arrangement is Client.onDocUpdate: a write that blocks on a slow
-// socket must never be reachable from a caller's Transact, so the observer
-// hands off to a lane instead of writing.
+// Every method on session that writes a DATA frame (write, and everything
+// that calls it) runs on the loop goroutine that runLoop owns. That is not a
+// coincidence to preserve case-by-case; it is what this whole file is
+// arranged around. session.ping (added for #165 Task 7's keepalive) is the
+// one method worth naming as an exception to that sentence rather than a
+// silent instance of it: it writes a CONTROL frame via WriteControl, which
+// gorilla documents as safe to call from ANY goroutine, concurrently with a
+// WriteMessage the loop is part-way through — so nothing would actually
+// break if ping ran elsewhere. It runs on the loop goroutine anyway, from a
+// ticker case alongside every other select case here, purely so this file
+// keeps one simple, auditable story ("every write this session performs
+// happens on the loop goroutine") instead of a data/control split that would
+// be equally correct but harder to verify at a glance. The other half of the
+// arrangement is Client.onDocUpdate: a write that blocks on a slow socket
+// must never be reachable from a caller's Transact, so the observer hands
+// off to a lane instead of writing.
 type session struct {
 	c    *Client
 	conn *gws.Conn
@@ -116,6 +137,43 @@ type session struct {
 // gorilla itself may emit control frames from inside its ReadMessage call, via
 // the concurrency-safe WriteControl path; see session's doc for the exact
 // invariant and for what that forbids a later change from adding here.
+//
+// # Keepalive (#165 Task 7): ping from the loop, deadline refreshed on the read pump
+//
+// A half-open connection — the peer vanished without ever sending a FIN or
+// RST — never produces a read error on its own; ReadMessage just blocks
+// forever, and the reconnect loop above this function never gets a chance to
+// run. This is solved with the two gorilla mechanisms designed for exactly
+// this, kept on the goroutines their own concurrency contracts require:
+//
+//   - A ping every Options.PingInterval, sent via session.ping (WriteControl,
+//     never write/WriteMessage) from THIS function's own select loop below,
+//     alongside a ticker case — not from a separate timer goroutine, and not
+//     via SetWriteDeadline+WriteMessage from anywhere, which is precisely the
+//     naive keepalive session's doc warns would corrupt the connection by
+//     racing the loop's own data writes.
+//   - A read deadline of readDeadlineMultiplier * Options.PingInterval, set
+//     once below before the read pump starts, and refreshed from two places
+//     that both run on the read pump goroutine: the pong handler (for the
+//     pong-only case, which never surfaces as a ReadMessage return — see
+//     gorilla's SetPongHandler doc) and the pump's own loop body after every
+//     successfully read frame (so ordinary sync traffic counts as liveness
+//     too, not only pongs — a busy connection that happens to need no pings
+//     must not be killed by one anyway). Refreshing the read deadline is a
+//     read-side call (conn.SetReadDeadline forwards straight to the
+//     underlying net.Conn, which is documented safe for concurrent use with
+//     unrelated reads AND writes on other goroutines — unlike
+//     conn.SetWriteDeadline, which is an unguarded field gorilla's own
+//     WriteMessage reads, see gorilla's conn.go), so doing it from the read
+//     pump while the loop goroutine is mid-write is not the hazard
+//     SetWriteDeadline from the wrong goroutine would be.
+//
+// A missed pong therefore does not need its own detection path: the read
+// deadline simply expires, ReadMessage returns an error, that error reaches
+// readErr below exactly like any other read failure, and runReconnectLoop
+// takes over from there. Keepalive's entire job is converting silence into
+// that ordinary error; it must not — and does not — grow a second reconnect
+// mechanism of its own.
 func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	c.emitStatus(Status{State: StateConnecting})
 
@@ -138,6 +196,39 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	}
 	conn.SetReadLimit(c.opts.ReadLimit)
 
+	// pingInterval and readDeadline are captured once per connection rather
+	// than re-read from c.opts wherever they are needed below: Options is
+	// immutable after New returns (see New's doc), so there is nothing to
+	// re-read, and a local keeps both the ticker below and the read-deadline
+	// math here and in the read pump simple and obviously consistent with
+	// each other.
+	pingInterval := c.opts.PingInterval
+	readDeadline := readDeadlineMultiplier * pingInterval
+
+	// Install the initial read deadline and the pong handler that renews it
+	// BEFORE the read pump goroutine below ever calls ReadMessage — there is
+	// no concurrent reader yet at this point, so setting both here needs no
+	// synchronisation of its own. See runLoop's "Keepalive" doc section above
+	// for why this call is safe to make again later from the read pump
+	// goroutine while the loop goroutine is concurrently writing.
+	if err := conn.SetReadDeadline(time.Now().Add(readDeadline)); err != nil {
+		return fmt.Errorf("client: set initial read deadline: %w", err)
+	}
+	// A pong is the one case that does NOT show up as a ReadMessage return —
+	// gorilla consumes it internally, inside ReadMessage/NextReader, before
+	// handing control back to the caller (see gorilla's SetPongHandler doc:
+	// "The handler function is called from the NextReader, ReadMessage and
+	// message reader Read methods"). Without this handler, a peer that
+	// faithfully pongs forever would still look silent to the read pump
+	// below, and the deadline would fire on a perfectly healthy connection.
+	// The handler always runs on whatever goroutine is inside ReadMessage —
+	// here, always the read pump below, never the loop goroutine — so this
+	// is a read-side call, not a write, and does not need to run on the loop
+	// goroutine the way session's other methods do.
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(readDeadline))
+	})
+
 	// connCtx is cancelled by this function's own teardown as well as by ctx,
 	// so the read pump is released whether the loop ends because the caller
 	// stopped it or because a frame handler failed.
@@ -153,6 +244,22 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 				select {
 				case readErr <- err:
 				default: // the loop is already leaving; nobody will read this
+				}
+				return
+			}
+			// Any inbound frame proves this connection is alive, not only a
+			// pong (see runLoop's "Keepalive" doc section): refresh the same
+			// deadline the pong handler above maintains, so a connection
+			// carrying ordinary sync traffic — which may need no pings at
+			// all — is never killed for silence it never actually had. This
+			// runs on the same goroutine as ReadMessage and the pong handler
+			// above (there is only ever one goroutine inside ReadMessage at
+			// a time), so it introduces no new synchronisation concern of
+			// its own.
+			if err := conn.SetReadDeadline(time.Now().Add(readDeadline)); err != nil {
+				select {
+				case readErr <- err:
+				default:
 				}
 				return
 			}
@@ -178,6 +285,17 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	s := &session{c: c, conn: conn, onSynced: onSynced}
 	c.emitStatus(Status{State: StateConnected})
 
+	// pingTicker drives session.ping below, from THIS goroutine's own select
+	// loop — see runLoop's "Keepalive" doc section for why here and not a
+	// separate timer goroutine. defer covers every remaining exit from this
+	// point on (the for/select's three return paths below), so this ticker's
+	// underlying timer is always released when the connection is, and no
+	// per-connection ticker survives past its own connection the way a
+	// leaked one would show up under `go test -race` across repeated
+	// reconnects.
+	pingTicker := time.NewTicker(pingInterval)
+	defer pingTicker.Stop()
+
 	// Open with our state vector, so the server can send back exactly what
 	// this Doc is missing. Note ygo's own server does not wait to be asked:
 	// it pushes SyncStep1 + a full SyncStep2 + awareness the moment the
@@ -202,6 +320,10 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 		case <-c.lane.Signal():
 			if err := s.flushLane(); err != nil {
 				return err
+			}
+		case <-pingTicker.C:
+			if err := s.ping(); err != nil {
+				return fmt.Errorf("client: send ping: %w", err)
 			}
 		}
 	}
@@ -269,6 +391,22 @@ func (s *session) write(frame []byte) error {
 		return err
 	}
 	return s.conn.WriteMessage(gws.BinaryMessage, frame)
+}
+
+// ping emits one WebSocket-level PING control frame, driving #165 Task 7's
+// keepalive (see runLoop's "Keepalive" doc section for the full mechanism).
+//
+// Unlike write above, this does NOT go through SetWriteDeadline+WriteMessage
+// — it uses WriteControl, which takes its own deadline argument and is the
+// one gorilla write method documented safe to call concurrently with every
+// other method, INCLUDING a WriteMessage the loop might currently be
+// part-way through (see session's doc for exactly why that distinction is
+// load-bearing, and what a keepalive built the OTHER way would have broken).
+// It still only ever runs on the loop goroutine, called from runLoop's
+// ticker case: WriteControl does not require that, but session's doc
+// explains why keeping it there anyway is the simpler invariant to audit.
+func (s *session) ping() error {
+	return s.conn.WriteControl(gws.PingMessage, nil, time.Now().Add(writeTimeout))
 }
 
 // handleFrame dispatches one inbound y-websocket frame.
