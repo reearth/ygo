@@ -204,12 +204,6 @@ func isPublicBindAddr(addr string) bool {
 	return true
 }
 
-// warnIfInsecureBind logs a prominent warning when addr exposes the server to
-// the network. ygo-server wires no authentication of its own, so a non-loopback
-// bind means any host that can reach the port can read and modify every
-// document. The default bind is loopback, so this fires only when an operator
-// overrides -addr — at which point the deployment is expected to provide auth
-// at a layer in front (e.g. an authenticating reverse proxy).
 // warnIfInertRetention logs when -keep-snapshots is set without
 // -version-interval. Retention is applied at the moment a version is captured,
 // so with nothing capturing versions the bound is never enforced — an operator
@@ -224,6 +218,12 @@ func warnIfInertRetention(log *slog.Logger, cfg Config) {
 		"retention is applied when a version is captured, and nothing captures versions")
 }
 
+// warnIfInsecureBind logs a prominent warning when addr exposes the server to
+// the network. ygo-server wires no authentication of its own, so a non-loopback
+// bind means any host that can reach the port can read and modify every
+// document. The default bind is loopback, so this fires only when an operator
+// overrides -addr — at which point the deployment is expected to provide auth
+// at a layer in front (e.g. an authenticating reverse proxy).
 func warnIfInsecureBind(log *slog.Logger, addr string) {
 	if !isPublicBindAddr(addr) {
 		return
