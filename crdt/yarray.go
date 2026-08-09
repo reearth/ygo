@@ -439,6 +439,11 @@ func (a *YArray) Delete(txn *Transaction, index, length int) {
 		if index+length > len(a.prelim) {
 			length = len(a.prelim) - index
 		}
+		// Deleted staged handles leave this array and become re-stageable
+		// (#222); their claims must not outlive their membership.
+		for _, v := range a.prelim[index : index+length] {
+			releaseStaged(v)
+		}
 		a.prelim = append(a.prelim[:index], a.prelim[index+length:]...)
 		return
 	}

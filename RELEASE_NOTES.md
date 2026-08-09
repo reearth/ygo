@@ -1,3 +1,30 @@
+## v1.47.1
+
+**Who is affected:** anyone building nested documents with the prelim
+constructors (`NewMapPrelim`/`NewArrayPrelim`/`NewTextPrelim`, v1.43.0) —
+specifically code that, by bug or by design, hands one detached handle to two
+containers.
+
+**The fix.** A shared type attaches once, but the staging entry points only
+enforced that against *attached* handles and (since v1.46.0) duplicates on
+the *same array*. Staging one handle onto two different containers — two
+detached arrays, a detached array and a detached map, or two keys of one
+detached map — succeeded at both calls, and the mistake only surfaced when
+the second container attached: a panic from inside `flushPrelim` complaining
+that `PushType` requires a detached type, pointing at a function the caller
+may never have used, with no hint which container double-staged the handle.
+
+`PushType`, `InsertType`, and `YMap.Set` now track where a detached handle is
+staged and reject a spoken-for handle **at the call site**, naming the entry
+point you actually called. The claim is released when the handle leaves its
+container — overwriting the staged key, `YMap.Delete`, or a staged
+`YArray.Delete` — so the legitimate "move it" flow (delete there, stage here)
+works, and overwriting a staged key with the same handle remains the
+documented no-op.
+
+No API changes; misuse that previously failed late and confusingly now fails
+immediately and precisely (#222).
+
 ## v1.47.0
 
 ### Added: `ygo-server` flags for periodic version capture and retention (#167)

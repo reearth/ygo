@@ -70,6 +70,10 @@ func NewArrayPrelim() *YArray {
 // nested type must occupy an item of its own, hence the separate entry point
 // (the same reason YXmlFragment exposes InsertElement/InsertText).
 //
+// A shared type attaches once: PushType panics if st is already attached,
+// already staged on this array, or staged on any other container (#222).
+// Deleting it from its staging container first makes it stageable again.
+//
 // Placement mirrors Push: anchor after the last PHYSICAL item, tombstones
 // included, matching Yjs's typeListPushGenerics.
 func (a *YArray) PushType(txn *Transaction, st sharedType) {
@@ -79,10 +83,12 @@ func (a *YArray) PushType(txn *Transaction, st sharedType) {
 	}
 	if a.detached() {
 		rejectAlreadyStaged(a.prelim, st, "PushType")
+		claimForStage(&a.abstractType, bt, "PushType")
 		a.prelim = append(a.prelim, st)
 		return
 	}
 	t := &a.abstractType
+	claimForAttach(t, bt, "PushType")
 
 	var last *Item
 	for it := t.start; it != nil; it = it.Right {
@@ -122,6 +128,41 @@ func rejectAlreadyStaged(prelim []any, st sharedType, fn string) {
 	}
 }
 
+// claimForStage records that bt is entering t's STAGED content, panicking if
+// it is already staged on a different container (#222) — the cross-container
+// counterpart of rejectAlreadyStaged, failing at the call site with the entry
+// point the caller actually used rather than later, at the losing container's
+// attach, inside flushPrelim.
+func claimForStage(t *abstractType, bt *abstractType, fn string) {
+	if bt.stagedOn != nil && bt.stagedOn != t {
+		panic("crdt: " + fn + ": this type is already staged on another container (a shared type attaches once; Delete it there first to move it)")
+	}
+	bt.stagedOn = t
+}
+
+// claimForAttach clears bt's staging claim as it is about to integrate under
+// t, panicking if that claim belongs to a DIFFERENT container (#222): a
+// staged handle is spoken for, and integrating it elsewhere would leave the
+// staging container to blow up at its own attach. The one legitimate holder
+// is t itself — a container's flushPrelim re-enters the entry points to
+// integrate its own staged children, so its claim admits and releases here.
+func claimForAttach(t *abstractType, bt *abstractType, fn string) {
+	if bt.stagedOn != nil && bt.stagedOn != t {
+		panic("crdt: " + fn + ": this type is staged on another container (a shared type attaches once; Delete it there first to move it)")
+	}
+	bt.stagedOn = nil
+}
+
+// releaseStaged drops v's staging claim if v is a shared-type handle leaving
+// a container's staged content (map overwrite or Delete, staged array
+// Delete). The handle becomes re-stageable — leaving a container is the one
+// legitimate way a staged type moves.
+func releaseStaged(v any) {
+	if st, ok := v.(sharedType); ok {
+		st.baseType().stagedOn = nil
+	}
+}
+
 // InsertType inserts a DETACHED shared type at logical position index
 // (0 = prepend, Len() = append), as its own nested item.
 //
@@ -130,6 +171,9 @@ func rejectAlreadyStaged(prelim []any, st sharedType, fn string) {
 // only way to place a nested type anywhere but the end is PushType followed by
 // Move — and Move emits ContentMove, a ygo extension other implementations
 // mis-parse, usually silently (#207).
+//
+// A shared type attaches once: InsertType panics if st is already attached,
+// already staged on this array, or staged on any other container (#222).
 //
 // Placement mirrors Insert: leftNeighbourAt uses LIVE-index semantics (it
 // skips tombstones), splitting the neighbour when the index falls inside it,
@@ -148,6 +192,7 @@ func (a *YArray) InsertType(txn *Transaction, index int, st sharedType) {
 		// around it at attach. Unresolvable indices anchor at the tail, the
 		// attached rule.
 		rejectAlreadyStaged(a.prelim, st, "InsertType")
+		claimForStage(&a.abstractType, bt, "InsertType")
 		if index < 0 || index > len(a.prelim) {
 			index = len(a.prelim)
 		}
@@ -155,6 +200,7 @@ func (a *YArray) InsertType(txn *Transaction, index int, st sharedType) {
 		return
 	}
 	t := &a.abstractType
+	claimForAttach(t, bt, "InsertType")
 	left, offset := t.leftNeighbourAt(index)
 	if offset > 0 {
 		splitItem(txn, left, offset)

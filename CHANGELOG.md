@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.47.1] — 2026-08-09
+
+### Fixed
+
+- **Staging one detached shared type onto two containers now fails at the
+  second call, not at attach.** `PushType`/`InsertType`/`YMap.Set` accepted a
+  handle that was already staged on a *different* detached container (or, for
+  a map, under another key of the same map); both stagings succeeded and the
+  losing container's attach later panicked inside `flushPrelim` with a message
+  naming `PushType` — a function the caller may never have used. Each staging
+  entry point now tracks the container a detached handle is staged on and
+  rejects a spoken-for handle at the call site, naming the entry point
+  actually invoked. Removing a staged handle (map overwrite, `YMap.Delete`,
+  staged `YArray.Delete`) releases it for restaging — moving a staged type by
+  deleting it first remains legal, and same-key overwrite with the same
+  handle stays a no-op. Pre-existing since the prelim constructors (v1.43.0),
+  narrowed but not closed by v1.46.0's same-array guard (#222).
+
 ## [1.47.0] — 2026-08-09
 
 ### Added
