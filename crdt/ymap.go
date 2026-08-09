@@ -170,6 +170,12 @@ func extractMapValue(item *Item) any {
 
 // Set writes value under key. If a live entry already exists for key, it is
 // deleted and the new item becomes the winner.
+//
+// A DETACHED shared type passed as value is staged (or attached, if this map
+// is live) as a nested type. A shared type attaches once: Set panics if the
+// value is already attached, staged under another key of this map, or staged
+// on any other container (#222). Overwriting or deleting a staged entry
+// releases its handle, making it stageable elsewhere.
 func (m *YMap) Set(txn *Transaction, key string, value any) {
 	checkUTF8("YMap.Set", "key", key)
 	checkAnyUTF8("YMap.Set", "value", value)
@@ -179,14 +185,39 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 	// Detached: stage the entry (see prelim). Re-setting a key overwrites in
 	// place and keeps its original position, as a JS Map does.
 	if t.detached() {
-		if _, exists := m.prelim[key]; !exists {
+		if st, ok := value.(sharedType); ok {
+			// A handle staged on ANOTHER container — or under another key of
+			// THIS map — is spoken for (#222): reject at the call rather than
+			// at the losing container's attach. Same key with the same handle
+			// stays the documented overwrite no-op.
+			for _, k := range m.prelimKeys {
+				if k != key && m.prelim[k] == value {
+					panic("crdt: Set: this type is already staged under another key of this map (a shared type attaches once)")
+				}
+			}
+			claimForStage(t, st.baseType(), "Set")
+		}
+		old, exists := m.prelim[key]
+		if !exists {
 			m.prelimKeys = append(m.prelimKeys, key)
+		}
+		if exists && old != value {
+			// Overwriting displaces the previous value: if it was a staged
+			// handle, it leaves this map and becomes re-stageable.
+			releaseStaged(old)
 		}
 		if m.prelim == nil {
 			m.prelim = make(map[string]any)
 		}
 		m.prelim[key] = value
 		return
+	}
+	if st, ok := value.(sharedType); ok {
+		// Attached path: a handle staged on a detached container must not
+		// integrate here (#222) — its staging container would panic at its own
+		// attach. The one legitimate claim is this map's own flushPrelim
+		// re-entering Set to integrate its staged children.
+		claimForAttach(t, st.baseType(), "Set")
 	}
 
 	// Establish a causal link from the previous value for this key so that
@@ -217,9 +248,13 @@ func (m *YMap) Delete(txn *Transaction, key string) {
 	// key and no tombstone reaches the wire. A later Set re-appends it at the
 	// end, as a JS Map does.
 	if t.detached() {
-		if _, exists := m.prelim[key]; !exists {
+		old, exists := m.prelim[key]
+		if !exists {
 			return
 		}
+		// A deleted staged handle leaves this map and becomes re-stageable
+		// (#222); its claim must not outlive its membership.
+		releaseStaged(old)
 		delete(m.prelim, key)
 		for i, k := range m.prelimKeys {
 			if k == key {

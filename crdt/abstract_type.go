@@ -43,6 +43,19 @@ type abstractType struct {
 	item    *Item            // the Item containing this type when nested
 	owner   sharedType       // back-pointer to the concrete wrapper
 	name    string           // root type name; used during V1 update encoding
+
+	// stagedOn is the container whose staged (prelim) content currently holds
+	// this DETACHED type, nil otherwise. It exists so the staging entry points
+	// (PushType/InsertType/YMap.Set) can reject a handle that is already
+	// staged on a DIFFERENT container at the call site (#222) — without it,
+	// both stagings succeeded and the loser's attach later panicked inside
+	// flushPrelim, blaming a function the caller never used. Set when a handle
+	// enters a container's staged content, cleared when it leaves it (map
+	// overwrite/Delete, staged array Delete) or when its own container's flush
+	// re-enters the entry point to integrate it (claimForAttach). A handle
+	// released this way is legitimately re-stageable — this is deliberately an
+	// owner pointer, not a sticky bit.
+	stagedOn *abstractType
 	// deepSubIDGen issues unique IDs for ObserveDeep subscriptions so that
 	// out-of-order unsubscription removes the correct entry (C5).
 	deepSubIDGen  uint64

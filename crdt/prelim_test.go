@@ -214,6 +214,11 @@ func TestDetachedReadsUnwrapStagedNestedTypes(t *testing.T) {
 	el := NewYXmlElement("div")
 	xtext := NewYXmlText()
 	arr := NewArrayPrelim()
+	// arrInner is a separate handle for the array read: this test originally
+	// staged `inner` on BOTH outer and arr, which is exactly the
+	// double-staging #222 now rejects at the call site (had both containers
+	// been attached, the second attach would have panicked in flushPrelim).
+	arrInner := NewMapPrelim()
 	doc.Transact(func(txn *Transaction) {
 		inner.Set(txn, "deep", "value")
 		list.Push(txn, []any{1.0, 2.0})
@@ -221,13 +226,14 @@ func TestDetachedReadsUnwrapStagedNestedTypes(t *testing.T) {
 		outer.Set(txn, "list", list)
 		outer.Set(txn, "el", el)
 		outer.Set(txn, "xtext", xtext)
-		arr.PushType(txn, inner)
+		arrInner.Set(txn, "deep", "value")
+		arr.PushType(txn, arrInner)
 	})
 
 	if got, ok := outer.Get("inner"); !ok || got != any(inner) {
 		t.Fatalf(`detached Get("inner") = %v, %v; want the staged *YMap handle`, got, ok)
 	}
-	if got := arr.Get(0); got != any(inner) {
+	if got := arr.Get(0); got != any(arrInner) {
 		t.Fatalf("detached array Get(0) = %v, want the staged *YMap handle", got)
 	}
 
