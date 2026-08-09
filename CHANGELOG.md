@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.46.1] — 2026-08-09
+
+### Fixed
+
+- **`WithTrackedOrigins` refuses origin tokens that cannot be told apart.**
+  Tracked-origin matching is Go interface equality, and pointers to zero-size
+  types break the "fresh pointer = unique token" idiom: every zero-size
+  allocation may share one address (`runtime.zerobase`), so two
+  `new(struct{})` tokens compare equal and tracking one silently captured the
+  other's transactions — the same aliasing that once disabled relay publishing
+  inside `provider/websocket` for six releases. The library cannot make
+  caller-supplied values distinct after the fact, so `WithTrackedOrigins` now
+  panics on a pointer-to-zero-size origin with guidance to use a non-zero-size
+  token type (e.g. `type token struct{ _ byte }`). Distinct named zero-size
+  VALUE types (`originA{}` vs `originB{}`) remain legal — interface equality
+  compares the dynamic type first, so they never alias each other. The origin
+  identity semantics are now documented on `WithTrackedOrigins`, `Transact`,
+  and `OnUpdate` (#203).
+
 ## [1.46.0] — 2026-08-09
 
 ### Added

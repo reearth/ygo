@@ -192,3 +192,87 @@ func TestUndoManager_RedoContext_OkReturnsResult(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, did, "Redo should succeed with one item on the redo stack")
 }
+
+// zeroTok is a named zero-size type: a pointer to it can NOT serve as a
+// unique per-instance token (all such pointers may share runtime.zerobase),
+// which is exactly what WithTrackedOrigins must refuse (#203).
+type zeroTok struct{}
+
+// undoTok is the safe spelling the godoc recommends: the _ byte field makes
+// every allocation distinct, so pointer identity is real.
+type undoTok struct{ _ byte }
+
+// THE #203 GUARD: WithTrackedOrigins must reject pointer-to-zero-size origin
+// tokens at construction time. Go satisfies every zero-size allocation from
+// runtime.zerobase, so two `new(struct{})` tokens compare ==, and a caller
+// who tracks one silently captures the other's transactions too — the same
+// aliasing that disabled relay publish for six releases inside
+// provider/websocket (see relayOriginSentinel's doc). The library cannot
+// give caller-supplied values distinct types after the fact, so the only
+// safe move is to refuse the un-distinguishable shape loudly.
+func TestUnit_UndoManager_WithTrackedOrigins_RejectsZeroSizePointerTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		origin any
+	}{
+		{"new(struct{})", new(struct{})},
+		{"&struct{}{}", &struct{}{}},
+		{"pointer to named empty struct", &zeroTok{}},
+		{"pointer to zero-size array", new([0]int)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := newTestDoc(1)
+			txt := doc.GetText("t")
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("WithTrackedOrigins accepted %s, a pointer to a zero-size type; "+
+						"want a construction-time panic — pointer identity for zero-size types is a lie (runtime.zerobase)", tc.name)
+				}
+			}()
+			um := NewUndoManager(doc, []sharedType{txt}, WithTrackedOrigins(tc.origin))
+			um.Destroy() // not reached
+		})
+	}
+}
+
+// The shapes the godoc points callers at must keep working, and must actually
+// be distinguishable: tracking one token never captures another's txns.
+func TestUnit_UndoManager_WithTrackedOrigins_DistinguishableTokenShapes(t *testing.T) {
+	t.Run("non-zero-size pointer tokens are distinct per allocation", func(t *testing.T) {
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+		mine, theirs := &undoTok{}, &undoTok{}
+		require.NotSame(t, mine, theirs,
+			"sanity: non-zero-size allocations must not alias")
+
+		um := NewUndoManager(doc, []sharedType{txt}, WithTrackedOrigins(mine))
+		defer um.Destroy()
+
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "mine", nil) }, mine)
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 4, " theirs", nil) }, theirs)
+
+		require.Equal(t, 1, um.UndoStackSize(), "only the tracked token's txn may be captured")
+		require.True(t, um.Undo())
+		assert.Equal(t, " theirs", txt.ToString())
+	})
+
+	t.Run("distinct named zero-size VALUE types are distinguishable by type", func(t *testing.T) {
+		// Interface equality compares dynamic type first, so two different
+		// named empty-struct types never alias each other — only pointers to
+		// them are refused. Values stay legal.
+		type originA struct{}
+		type originB struct{}
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+
+		um := NewUndoManager(doc, []sharedType{txt}, WithTrackedOrigins(originA{}))
+		defer um.Destroy()
+
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "a", nil) }, originA{})
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 1, "b", nil) }, originB{})
+
+		require.Equal(t, 1, um.UndoStackSize(), "originB{} must not be captured when tracking originA{}")
+		require.True(t, um.Undo())
+		assert.Equal(t, "b", txt.ToString())
+	})
+}

@@ -662,6 +662,15 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 // Transact executes fn inside a transaction. All insertions and deletions made
 // during fn are batched; observers fire once after fn returns.
 //
+// The optional origin value tags the transaction: observers receive it
+// (OnUpdate's origin parameter, Transaction.Origin) and UndoManager's
+// WithTrackedOrigins filters on it — always by Go interface equality (==).
+// If you mint per-caller origin tokens as pointers, use a pointer to a
+// NON-zero-size type (e.g. type token struct{ _ byte }): pointers to
+// zero-size types may all share one address (runtime.zerobase) and compare
+// equal, silently merging origins that were meant to be distinct — see
+// WithTrackedOrigins' doc for the full trap (#203).
+//
 // Transact holds the document write lock for the duration of fn. Anything
 // that takes that same non-reentrant lock MUST NOT be called from inside fn
 // — it deadlocks silently, and Go exposes no goroutine identity with which
@@ -736,6 +745,11 @@ func (d *Doc) TransactE(fn func(*Transaction) error, origin ...any) error {
 // OnUpdate registers a callback that fires after every committed transaction.
 // The callback receives the incremental V1 update bytes for that transaction
 // and the origin value passed to Transact. Returns an unsubscribe function.
+//
+// Callbacks that compare the origin (an echo guard, a per-user filter) do so
+// with Go ==, so the caution on Transact's doc applies: pointer origin
+// tokens must point at non-zero-size types, or distinct tokens may alias
+// (runtime.zerobase, #203).
 //
 // The unsubscribe function is safe to call concurrently and handles
 // out-of-order unsubscription correctly (no index-capture bug).
