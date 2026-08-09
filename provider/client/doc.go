@@ -40,20 +40,25 @@
 //
 // # What gets stored, and what gets sent
 //
-// Everything applied to the Doc is stored, whatever produced it: the app's
-// own edits AND updates received from the server. Storing only local edits
-// would mean a client that syncs a large document, closes, and reopens
-// offline hydrates back only what it typed itself, silently discarding
-// everything it ever learned from the server.
+// Both questions are decided by one thing: where an update came from. Every
+// update applied to the Doc carries an origin, and the client stamps its own
+// sentinel origins on the ones it applies itself, so the observer that handles
+// storing and sending can tell three cases apart:
 //
-// Sending is the opposite way round, and that is what the sentinel origin is
-// for. Updates the client applies from the server carry a distinct origin
-// (see remoteOrigin, and its doc comment for why that sentinel must be a
-// non-zero-size type), so the observer can tell them apart from the app's own
-// edits and decline to bounce them straight back down the socket they arrived
-// on. Hydration uses the same sentinel but never reaches the observer at all:
-// Connect registers it after hydrating, precisely so replaying the store
-// cannot echo onto the wire.
+//   - The app's own edits are stored AND sent. That includes edits made before
+//     Connect was ever called — the Doc is usable the moment New returns, so
+//     the observer is registered there, not somewhere inside Connect.
+//   - Updates received from the server are stored but NOT sent. Storing them
+//     is the point of the store: skipping them would mean a client that syncs
+//     a large document, closes, and reopens offline hydrates back only what it
+//     typed itself, silently discarding everything it ever learned. Not
+//     sending them is the echo guard.
+//   - The one update hydration applies is neither stored (it came out of the
+//     store) nor sent (the handshake conveys full state regardless).
+//
+// See remoteOrigin and hydrateOrigin for the two sentinels, why they are
+// separate types rather than one shared one, and why both must be non-zero-
+// size.
 //
 // # Concurrency
 //

@@ -96,13 +96,14 @@ type Options struct {
 
 // remoteOrigin is the sentinel origin type stamped on every update the
 // client applies to its Doc that did NOT originate from the caller's own
-// edits: hydration (LoadDoc → ApplyUpdateV1) and every update received from
-// the server. The Doc observer Connect registers compares an update's origin
-// against a single *remoteOrigin instance (this Client's c.remoteOrigin) by
-// == to tell "this came from the network, so do not send it straight back"
-// apart from "this is the caller's own edit, send it". Note it does NOT gate
-// persistence: see onDocUpdate for why every update is stored regardless of
-// origin.
+// edits, and specifically on those received from the SERVER — hydration has
+// its own sentinel, see hydrateOrigin. The Doc observer New registers compares
+// an update's origin against a single *remoteOrigin instance (this Client's
+// c.remoteOrigin) by == to tell "this came from the network, so do not send it
+// straight back" apart from "this is the caller's own edit, send it". It does
+// NOT suppress persistence: a server-received update must be stored, or a
+// client that syncs and then restarts offline loses everything it learned. See
+// onDocUpdate for the full three-way rule.
 //
 // This type MUST stay a non-zero-size struct (the `_ byte` field is load-
 // bearing — do not remove it, and do not "simplify" this back to
@@ -119,6 +120,26 @@ type Options struct {
 // allocation — rather than relying on every future caller remembering not to
 // use a bare struct{}.
 type remoteOrigin struct{ _ byte }
+
+// hydrateOrigin is the sentinel origin stamped on the one update hydration
+// applies (LoadDoc → ApplyUpdateV1). It is deliberately a SEPARATE type from
+// remoteOrigin even though both mean "not the caller's own edit", because the
+// two need opposite persistence answers: a hydrated update is already in the
+// store by definition, while a server-received one must be written to it. One
+// shared sentinel cannot express that, and the alternative — inferring it from
+// whether hydration has finished yet — would make the policy a consequence of
+// when a line of code runs rather than something stated outright. See
+// onDocUpdate for the resulting three-way rule.
+//
+// Like remoteOrigin, this MUST stay a non-zero-size struct; see remoteOrigin's
+// doc comment for the zerobase aliasing this prevents, and note that two bare
+// `struct{}` sentinels would additionally have aliased EACH OTHER here, which
+// is precisely the distinction this type exists to make.
+type hydrateOrigin struct{ _ byte }
+
+// ErrAlreadyConnected is returned by Connect when this Client has already had
+// a Connect call accepted. A Client is single-use.
+var ErrAlreadyConnected = errors.New("ygo/client: already connected")
 
 // State is a Client's coarse connection lifecycle, reported via Status.
 type State int
@@ -185,10 +206,21 @@ type statusSub struct {
 //
 // A Client's exported methods are safe for concurrent use.
 type Client struct {
-	opts         Options
-	room         string
-	remoteOrigin *remoteOrigin
-	awareness    *awareness.Awareness
+	opts          Options
+	room          string
+	remoteOrigin  *remoteOrigin
+	hydrateOrigin *hydrateOrigin
+	awareness     *awareness.Awareness
+
+	// unsubObserver removes the Doc observer New registered. Set once, in
+	// New, before this Client is reachable by any other goroutine, and read
+	// only by Close — so it needs no synchronisation of its own.
+	unsubObserver func()
+
+	// connectStarted latches when a Connect call is accepted, so a second one
+	// is refused rather than starting a rival dial loop and a rival observer
+	// on the same Doc. See Connect and ErrAlreadyConnected.
+	connectStarted atomic.Bool
 
 	// lane is the hand-off between the Doc observer (which runs on whichever
 	// goroutine called Transact) and the loop goroutine (the socket's only
@@ -274,48 +306,72 @@ func New(o Options) (*Client, error) {
 	o.Header = o.Header.Clone()
 
 	c := &Client{
-		opts:         o,
-		room:         room,
-		remoteOrigin: &remoteOrigin{},
-		awareness:    awareness.New(uint64(o.Doc.ClientID())),
-		lane:         relaylane.New(0), // 0 = relaylane.DefaultCap
-		synced:       make(chan struct{}),
-		closed:       make(chan struct{}),
+		opts:          o,
+		room:          room,
+		remoteOrigin:  &remoteOrigin{},
+		hydrateOrigin: &hydrateOrigin{},
+		awareness:     awareness.New(uint64(o.Doc.ClientID())),
+		lane:          relaylane.New(0), // 0 = relaylane.DefaultCap
+		synced:        make(chan struct{}),
+		closed:        make(chan struct{}),
 	}
+	// Register the Doc observer HERE, at the earliest possible moment, rather
+	// than somewhere inside Connect. An offline-first client's Doc is usable
+	// the instant New returns, so an application may reasonably edit it before
+	// it ever calls Connect (or without calling Connect at all); registering
+	// later would leave every such edit absent from the store and lost on the
+	// next restart. Nothing about the observer needs a connection to be
+	// correct — what an update is FOR is decided by its origin, not by when it
+	// arrives (see onDocUpdate).
+	c.unsubObserver = o.Doc.OnUpdate(c.onDocUpdate)
 	return c, nil
 }
 
 // onDocUpdate is the single Doc observer this Client registers, wired up by
-// Connect after hydration and before the first dial (see Connect for why that
-// exact position). It does the two things every applied update needs, and
-// they are deliberately gated differently:
+// New so that it is in place before the caller can possibly make an edit.
 //
-//   - PERSIST, whatever the origin. Both local edits and updates received
-//     from the server go to the store. Persisting only local-origin updates
-//     is a tempting simplification and a silent data-loss bug: a client that
-//     syncs a large document, is closed, and reopens offline would hydrate
-//     back only the edits it made itself, having thrown away everything it
-//     ever learned from the server. Storing a remote update twice, by
-//     contrast, costs nothing — V1 updates are idempotent.
+// It answers two independent questions about every update applied to the Doc —
+// "should this be stored?" and "should this be sent?" — and it answers both
+// purely from the update's ORIGIN. That is deliberate, and the reason there
+// are three sentinels' worth of distinction rather than two:
 //
-//   - SEND, only when the origin is NOT this Client's remoteOrigin sentinel.
-//     An update carrying that sentinel is one we just applied FROM the
-//     server; bouncing it straight back would be pure echo. (Hydration also
-//     uses the sentinel, but hydration cannot reach this observer at all,
-//     because Connect registers it afterwards.)
+//	origin          store?  send?  because
+//	--------------  ------  -----  ---------------------------------------
+//	hydrateOrigin   no      no     it came OUT of the store, and the
+//	                               handshake conveys full state anyway
+//	remoteOrigin    yes     no     came from the server: must be durable,
+//	                               must not be echoed back at it
+//	anything else   yes     yes    the caller's own edit
+//
+// Storing remote updates is the non-obvious one, and skipping them would be a
+// silent data-loss bug: a client that syncs a large document, closes, and
+// reopens offline would hydrate back only the edits it made itself, having
+// discarded everything it ever learned from the server. Storing one twice, by
+// contrast, costs nothing — V1 updates are idempotent.
+//
+// Expressing all of this as origin policy rather than as "whatever happens to
+// be registered at the time" is what lets the observer live in New. The
+// earlier alternative — one sentinel for both hydration and the network, with
+// hydration kept out of the store by registering this observer part-way
+// through Connect — worked, but only by making a correctness rule depend on
+// statement order, and it left every edit made between New and Connect
+// unpersisted.
 //
 // # Why this hands off instead of writing
 //
 // This runs on whichever goroutine called Transact — the embedding
-// application's own goroutine, in the middle of its own edit. It must
-// therefore never touch the socket: gorilla/websocket allows exactly one
-// concurrent writer, and a write here would additionally park the
-// application's edit behind network I/O. So it pushes onto the lane, which
-// never blocks (a full lane merges its backlog rather than waiting or
-// dropping), and returns. The loop goroutine picks the work up from there.
-// provider/websocket removed this same head-of-line coupling server-side in
-// #187; the client must not reintroduce it.
+// application's own, in the middle of its own edit. It must therefore never
+// touch the socket: gorilla/websocket allows exactly one concurrent writer,
+// and a write here would additionally park the application's edit behind
+// network I/O. So it pushes onto the lane, which never blocks (a full lane
+// merges its backlog rather than waiting or dropping), and returns. The loop
+// goroutine picks the work up from there. provider/websocket removed this same
+// head-of-line coupling server-side in #187; the client must not reintroduce
+// it.
 func (c *Client) onDocUpdate(update []byte, origin any) {
+	if origin == c.hydrateOrigin {
+		return
+	}
 	if c.opts.Store != nil {
 		// Best-effort: there is no failure channel for a store write yet (no
 		// Stats field or Status shape fits it), so an error here is dropped.
@@ -347,14 +403,10 @@ func (c *Client) onDocUpdate(update []byte, origin any) {
 //     previously-persisted content applied to Doc, because hydration never
 //     depended on the network to begin with.
 //
-//  2. REGISTER the Doc observer — after hydration, so replaying the store's
-//     own bytes is not mistaken for a fresh local edit and echoed onto the
-//     wire, and before dialing, so no edit the caller makes from this moment
-//     on can slip past unsent. (Edits made between New and this point are not
-//     missed either, just carried differently: they are already in the Doc,
-//     so the handshake's SyncStep2 delivers them wholesale.)
+//  2. DIAL and run the sync loop.
 //
-//  3. DIAL and run the sync loop.
+// (There is no "register the observer" step: New did that, so an edit made
+// before Connect was ever called is already durable. See onDocUpdate.)
 //
 // Connect is documented as blocking until stopped, and it keeps that promise
 // even when the connection fails or ends: it reports the failure through
@@ -364,13 +416,31 @@ func (c *Client) onDocUpdate(update []byte, origin any) {
 // case — the Doc stays fully usable, and edits keep being persisted, with no
 // server at all. A later #165 task fills this park with reconnect and
 // backoff; the shape of Connect does not change when it does.
+//
+// # Single use
+//
+// A Client accepts one Connect. A second call — concurrent or sequential,
+// before or after Close — returns ErrAlreadyConnected rather than starting a
+// rival dial loop against the same Doc and Store, which would mean two
+// sockets, every local edit stored and sent twice, and two goroutines each
+// believing itself the sole writer of its socket. Reconnection after a drop is
+// the loop's own job (a later #165 task), not something a caller drives by
+// calling Connect again; a caller that genuinely wants a fresh session should
+// construct a fresh Client.
+//
+// A Connect that fails during hydration is the exception: it started nothing,
+// so it does not latch, and the call may be retried once whatever the Store
+// was unhappy about is resolved.
 func (c *Client) Connect(ctx context.Context) error {
+	if !c.connectStarted.CompareAndSwap(false, true) {
+		return ErrAlreadyConnected
+	}
 	if err := c.hydrate(); err != nil {
+		// Nothing has been started, so release the guard: unlike every later
+		// failure, this one leaves the Client exactly as New returned it.
+		c.connectStarted.Store(false)
 		return err
 	}
-
-	unsub := c.opts.Doc.OnUpdate(c.onDocUpdate)
-	defer unsub()
 
 	// Fold Close into the loop's context so the loop has exactly one stop
 	// signal to watch instead of two.
@@ -426,7 +496,7 @@ func (c *Client) hydrate() error {
 	if len(blob) == 0 {
 		return nil
 	}
-	return crdt.ApplyUpdateV1(c.opts.Doc, blob, c.remoteOrigin)
+	return crdt.ApplyUpdateV1(c.opts.Doc, blob, c.hydrateOrigin)
 }
 
 // Synced returns a channel that is closed the first time this Client's Doc
@@ -510,13 +580,11 @@ func (c *Client) Awareness() *awareness.Awareness {
 // call more than once (only the first call has any effect) and safe to call
 // concurrently with Connect.
 //
-// Close does not itself unregister the Doc observer: Connect owns that
-// registration for exactly as long as it runs and removes it on the way out,
-// which is both simpler than sharing the unsub function across goroutines and
-// correct for a Client that was never connected in the first place (there is
-// then nothing registered to remove). A caller that needs the observer
-// definitely gone before proceeding should wait for Connect to return, which
-// this call causes.
+// It also unregisters the Doc observer New installed, so a Doc that outlives
+// its Client stops writing to the Store (and stops queueing sends that nothing
+// will ever drain). The unsub function is written once, in New, before the
+// Client is reachable by any other goroutine, and read only here under
+// closeOnce — so this needs no lock and cannot race Connect.
 //
 // Close does not close Store: the Store is constructed and owned by the
 // caller (e.g. via OpenSQLiteStore), which may want to reuse it — for
@@ -525,6 +593,7 @@ func (c *Client) Awareness() *awareness.Awareness {
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
+		c.unsubObserver()
 	})
 	return nil
 }
