@@ -1,3 +1,27 @@
+## v1.46.0
+
+One addition: `YArray.InsertType`, completing the prelim constructor surface
+from v1.43.0. `PushType` could attach a nested type only at the end of an
+array; `InsertType` places one at any index. The gap mattered because the
+obvious workaround — `PushType` then `Move` — emits `ContentMove`, a ygo wire
+extension other implementations mis-parse, usually silently (#207), so
+mid-array placement of a nested type had no safe expression. No breaking API
+changes.
+
+### Added
+
+- **`YArray.InsertType(txn, index, type)`.** Attached placement mirrors
+  `Insert`: live-index semantics, splitting a plain-value run when the index
+  falls inside it, and any unresolvable index anchoring at the tail. On a
+  detached array the type splices into the staged content, and plain-value runs
+  split around it when the array attaches. Two conformance fixtures pin the
+  wire shape byte-identical to `yjs@13.6.30` — a nested type inserted between
+  two attached cells, and an interior insert into a detached array's staged
+  run — and a parity suite holds staged boundary behaviour identical to
+  attached for interior, ends, beyond-the-end and negative indices. The
+  rejection message for a shared type passed to `Insert`/`Push` as a plain
+  value now points at `InsertType` first.
+
 ## v1.45.0
 
 **Who is affected:** anyone running `Server.AutoVersionEvery` together with
