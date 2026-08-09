@@ -11,6 +11,42 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
+// Settle-detection tuning for TestClient_SuppressesEchoAfterConvergence.
+// See that test's doc for why this is poll-based rather than a fixed sleep.
+const (
+	echoSettlePollInterval = 50 * time.Millisecond
+	echoSettleStableRuns   = 3
+	echoSettleTimeout      = 5 * time.Second
+	echoQuietWindow        = 500 * time.Millisecond
+)
+
+// waitForCountToSettle polls count every echoSettlePollInterval and returns
+// once it has read the SAME value echoSettleStableRuns times in a row (the
+// wire is presumed quiescent), or (0, false) if echoSettleTimeout elapses
+// first without ever seeing that many identical readings in a row — which is
+// what an echo storm looks like: the count never stops changing.
+func waitForCountToSettle(count func() uint64) (settled uint64, ok bool) {
+	deadline := time.Now().Add(echoSettleTimeout)
+	var last uint64
+	streak := 0
+	for {
+		cur := count()
+		if streak > 0 && cur == last {
+			streak++
+		} else {
+			streak = 1
+		}
+		last = cur
+		if streak >= echoSettleStableRuns {
+			return cur, true
+		}
+		if time.Now().After(deadline) {
+			return 0, false
+		}
+		time.Sleep(echoSettlePollInterval)
+	}
+}
+
 // TestClient_SuppressesEchoAfterConvergence protects the "send?" half of
 // onDocUpdate's origin table (#165): a remote-origin update must be stored
 // but never re-sent. Without that check, two clients relaying through the
@@ -33,6 +69,22 @@ import (
 // whatever the initial handshake needed) and then falls silent; a
 // ping-ponging one keeps calling it for as long as the quiet window lasts,
 // as fast as the loopback socket and goroutine scheduler allow.
+//
+// Settling is detected by POLLING store.count(), not by sleeping a fixed
+// buffer and hoping it was long enough: a fixed buffer has to guess how long
+// the legitimate A -> server -> B round trip (plus any handshake tail) takes
+// on whatever machine is running the test, and a loaded CI runner can make
+// that guess wrong — producing a failure that has nothing to do with an echo
+// regression. waitForCountToSettle instead waits for N consecutive identical
+// readings, which adapts to however long real convergence actually takes,
+// while still failing loudly on its own timeout if the count never stops
+// changing (exactly what a genuine echo storm looks like — see the mutation
+// evidence in the task report). Only the final regression check — does the
+// count grow across a further quiet window once already settled — uses a
+// plain sleep, because that duration is not being used to infer "settled";
+// it only needs to be long enough for an echo storm to show itself, and
+// running it longer than necessary on a slow machine costs time, not
+// correctness.
 func TestClient_SuppressesEchoAfterConvergence(t *testing.T) {
 	_, ts := startServer(t)
 	const room = "echo"
@@ -53,16 +105,16 @@ func TestClient_SuppressesEchoAfterConvergence(t *testing.T) {
 		return docB.GetText("t").ToString() == "hello"
 	}, 5*time.Second, 10*time.Millisecond, "A's insert never reached B")
 
-	// Let any in-flight round trip land before taking the baseline, so the
-	// quiet window below measures silence rather than catching the
-	// legitimate A -> server -> B delivery mid-flight.
-	time.Sleep(100 * time.Millisecond)
-	settled := store.count()
+	settled, ok := waitForCountToSettle(store.count)
+	require.True(t, ok,
+		"store-update count never settled (never saw %d consecutive identical "+
+			"readings within %s); a count that never stops changing means updates "+
+			"are ping-ponging instead of converging", echoSettleStableRuns, echoSettleTimeout)
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(echoQuietWindow)
 	require.Equal(t, settled, store.count(),
-		"store-update count grew during a 500ms quiet window after convergence; "+
-			"updates are ping-ponging instead of settling")
+		"store-update count grew during a %s quiet window after settling; "+
+			"updates are ping-ponging instead of settling", echoQuietWindow)
 }
 
 // TestClient_RestartHydratesServerAuthoredTextOffline is the end-to-end form
