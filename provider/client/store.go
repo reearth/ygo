@@ -1,6 +1,3 @@
-// Package client implements an embeddable offline-first sync client for ygo
-// (#165): a local Doc that stays usable while disconnected and reconciles
-// with a websocket server when a connection is available.
 package client
 
 import (
