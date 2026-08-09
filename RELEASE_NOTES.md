@@ -1,4 +1,6 @@
-## v1.46.1
+## v1.47.0
+
+### Fixed: zero-size origin tokens alias in `WithTrackedOrigins` (#203)
 
 **Who is affected:** anyone using `UndoManager` with `WithTrackedOrigins`,
 and more broadly anyone minting transaction-origin tokens as pointers.
