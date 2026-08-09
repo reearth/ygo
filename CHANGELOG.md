@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.46.0] — 2026-08-05
+## [1.46.0] — 2026-08-09
 
 ### Added
 
@@ -21,6 +21,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   detached array the type splices into the staged content and plain-value runs
   split around it at attach. Conformance fixtures pin both shapes byte-identical
   to `yjs@13.6.30`, and the plain-value rejection now names `InsertType` first.
+
+### Fixed
+
+- **`Server.Shutdown` no longer silently discards queued outbound relay
+  updates.** Shutdown used to cancel the relay context as its second act —
+  before closing peer connections and before the persistence drain — while
+  each lane worker's cancellation path returned without draining and nothing
+  joined the workers. Everything peers committed during that window vanished
+  with `RelayStats().Dropped` and `HardDrops` both reading zero, and a
+  `relay.Publish` call could still be in flight after `Shutdown` returned,
+  making the documented "caller `Close()`s the relay last" ownership rule
+  unsafe. `Shutdown` now retires every outbound lane after the persistence
+  drain, drains them under the still-live relay context (so the final tail is
+  actually published), joins the lane workers bounded by `Shutdown`'s ctx,
+  and only then cancels the relay context — which also stops inbound
+  delivery, safely deferred because `Inject`/`Apply`/`BroadcastUpdate` have
+  refused with `ErrServerShutdown` since `shutdownCh` closed at the top of
+  `Shutdown`. A backlog that cannot be delivered before the caller's ctx
+  expires is counted in `Dropped` instead of vanishing: there is no longer
+  any path where updates are lost while both counters read zero (#202).
+
+### Changed
+
+- **`RelayStats.Dropped` now counts every lost outbound payload, not only
+  pre-lane discards.** Previously it only counted payloads that never reached
+  a lane; a payload taken from a lane and then lost — `relay.Publish`
+  returning an error (no retry path exists), or a backlog discarded because
+  shutdown could not deliver it — was logged but uncounted. All three paths
+  now increment `Dropped`, and the documented shutdown exception ("`Dropped`
+  reading zero after a `Shutdown` does not mean nothing was lost") is gone:
+  zero now means zero (#202).
+
+- **Contract amendment for `cluster.Relay` implementers:** `Publish` must
+  return promptly once its ctx is cancelled. `Server.Shutdown` relies on this
+  to unwedge a blocked `Publish` after the caller's deadline; an
+  implementation that ignores cancellation stalls the shutdown join and
+  leaves its worker goroutine running past `Shutdown`. Both shipped relays
+  (`cluster.MemRelay`, `cluster/redis`) already conform (#202).
 
 ## [1.45.0] — 2026-08-05
 

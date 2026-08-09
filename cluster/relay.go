@@ -132,6 +132,17 @@ type Relay interface {
 	// own mutex, releases it, then sends on per-node channels; cluster/redis's
 	// Publish deliberately takes no lock at all and uses atomics plus
 	// channels.
+	//
+	// Publish MUST return promptly once ctx is cancelled (returning ctx's
+	// error for whatever it could not deliver). websocket.Server.Shutdown
+	// relies on this to unwedge a blocked Publish after its own deadline: it
+	// cancels the relay context and then joins the lane workers, counting
+	// every payload an aborted Publish abandons in RelayStats().Dropped
+	// (#202). A Publish that ignores cancellation stalls that join and
+	// leaves its worker goroutine running past Shutdown. Both shipped relays
+	// conform: MemRelay selects on ctx around its per-node channel sends,
+	// and cluster/redis's Publish selects on ctx around the hand-off to its
+	// publisher goroutine.
 	Publish(ctx context.Context, out Outbound) error
 	// Start binds a Sink for one node and begins delivering inbound changes to
 	// it. Each node (each Server) calls Start once; a relay shared across

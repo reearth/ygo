@@ -380,18 +380,20 @@ If a deployment needs at-least-once delivery (no catch-up dependency on
 persistence), a Redis Streams-based adapter (`XADD` + last-read-id
 tracking) would replace this one. Tracked separately; not in v1.21.0.
 
-**`Shutdown` discards queued outbound updates, uncounted.** `Server.Shutdown`
-cancels the relay context before closing peer connections and before the
-persistence drain, so peers can keep committing for the rest of shutdown —
-potentially seconds — after outbound relay delivery has already stopped.
-Anything still queued in a room's outbound lane at that point, or enqueued
-afterward, is discarded with neither `Dropped` nor `HardDrops` incrementing:
-those counters reading zero after a `Shutdown` does not mean nothing was
-lost. This is pre-existing behaviour (the single shared outbound worker it
-replaced discarded the same way), not a regression from #187 — but it is
-worth calling out explicitly here, since the `Stats()`/`RelayStats()`
-section above establishes those same counters as the "always zero, alert on
-presence" signal for every other code path.
+**`Shutdown` drains queued outbound updates, and counts what it cannot
+deliver** (#202). `Server.Shutdown` used to cancel the relay context as its
+second act — before closing peer connections and before the persistence
+drain — so everything peers committed for the rest of shutdown was discarded
+with neither `Dropped` nor `HardDrops` incrementing. Since the #202 fix the
+relay context is cancelled at the *end* of `Shutdown`: each room's outbound
+lane is retired and drained while publishing still works, the lane workers
+are joined (bounded by `Shutdown`'s ctx, so no `Publish` call outlives a
+`Shutdown` that completed within its budget), and only then is the context
+cancelled. A backlog that cannot be delivered before the caller's ctx
+expires is counted in `RelayStats().Dropped` instead of vanishing. `Dropped`
+and `HardDrops` both reading zero after a `Shutdown` therefore means what it
+should: nothing was lost. Give `Shutdown` a real deadline — it is also the
+delivery budget for the final outbound tail.
 
 ### Observability: `Stats()`
 

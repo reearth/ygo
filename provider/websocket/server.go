@@ -420,7 +420,9 @@ type Server struct {
 
 	// relay, when non-nil, mirrors local doc/awareness changes to other server
 	// nodes and applies inbound changes. Set once via AttachRelay. relayCtx /
-	// relayCancel govern the relay's delivery lifetime; cancelled on Shutdown.
+	// relayCancel govern the relay's delivery lifetime; cancelled at the END
+	// of Shutdown, after the outbound lanes have been retired, drained and
+	// joined (#202 — see Shutdown's step comment).
 	// relaySentinel is the origin stamped on relay-injected changes so the
 	// per-room observers can drop echoes (identity guard: a *relayOriginSentinel,
 	// see that type's doc comment in cluster.go for why it must never be a
@@ -443,6 +445,18 @@ type Server struct {
 	relayLanesMu  sync.RWMutex
 	relayLanes    map[string]*relayRoomLane
 	relayDropped  atomic.Uint64
+
+	// relayWG counts live lane-worker goroutines (one per relayLaneWorker,
+	// Add under relayLanesMu in ensureRelayLane, Done when the worker
+	// returns) so Shutdown can JOIN them: without the join, a relay.Publish
+	// call could still be in flight after Shutdown returned, making the
+	// documented "the caller must Close() the relay once every attached
+	// server is done with it" rule unsafe for relays that free resources in
+	// Close (#202). The Add-vs-Wait ordering is safe because every Add
+	// happens under relayLanesMu while relayLanes is non-nil, and Shutdown's
+	// waits only start after retireRelayLanes has set relayLanes to nil under
+	// that same mutex — after which no Add can ever happen again.
+	relayWG sync.WaitGroup
 
 	// relayRetired accumulates the Coalesced/AwarenessSuperseded/HardDrops of
 	// every outbound lane this server has ever retired, folded in (under
@@ -993,16 +1007,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// Stop THIS server's relay delivery by cancelling the relay context: this
-	// winds down the relay worker and the relay's per-node delivery goroutine
-	// (started under relayCtx). It does NOT Close the relay — the caller owns
-	// the relay lifetime and must Close() it once every attached server is done,
-	// because a single relay is commonly shared across multiple in-process
-	// Servers (the MemRelay pattern) and Closing it would stop delivery for all
-	// of them (FIX C). No-op when no relay is attached.
-	if s.relayCancel != nil {
-		s.relayCancel()
-	}
+	// NOTE the relay context is deliberately NOT cancelled here (#202). It
+	// used to be, and that ordering silently discarded the outbound tail:
+	// peers keep committing for the whole connection-close-plus-persistence
+	// -drain window below, every one of those updates lands in a room lane
+	// whose worker had already exited on ctx.Done() without draining, and no
+	// counter fired. Cancellation now happens at the END of Shutdown, after
+	// the lanes have been retired, drained under the still-live relay
+	// context, and joined. Delaying it is safe for the INBOUND side because
+	// Inject (like Apply and BroadcastUpdate) refuses with ErrServerShutdown
+	// the moment shutdownCh closes — which was this function's first act —
+	// so the relay's delivery goroutine outliving this point cannot mutate
+	// any room; its deliveries just bounce.
 
 	// Collect all active peer connections and persistence channels.
 	s.rmu.RLock()
@@ -1061,7 +1077,61 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 
+	// Wind down outbound relay delivery (#202), in three ordered steps. The
+	// peers are gone and the persistence drain is over, so nothing can feed
+	// the lanes anymore (Apply/BroadcastUpdate/Inject have been refusing
+	// since shutdownCh closed); whatever the lanes still hold is the final
+	// outbound tail.
+	//
+	// 1. Retire every remaining lane (rooms evicted during the connection
+	//    closes above already retired theirs via stopRelayLane; this catches
+	//    idle-resident and Apply-created rooms). Each worker sees its done
+	//    channel close and performs its usual final drain — under the relay
+	//    context, which is STILL LIVE, so the tail is actually published.
+	// 2. Join the workers, bounded by ctx: Shutdown does not return while a
+	//    relay.Publish is in flight unless the caller's deadline forces it.
+	// 3. Cancel the relay context. This stops the relay's per-node inbound
+	//    delivery goroutine and unwedges any Publish still blocked past the
+	//    caller's deadline — a conforming Relay returns on ctx cancellation,
+	//    and every payload a cancelled Publish abandons is counted in
+	//    RelayStats().Dropped by publishRelay, so a Shutdown that could not
+	//    deliver never reads as lossless. The second join then reaps the
+	//    unwedged workers; with ctx already expired it returns immediately,
+	//    in which case ctx.Err() below tells the caller the join is
+	//    incomplete.
+	//
+	// It does NOT Close the relay — the caller owns the relay lifetime and
+	// must Close() it once every attached server is done, because a single
+	// relay is commonly shared across multiple in-process Servers (the
+	// MemRelay pattern) and Closing it would stop delivery for all of them
+	// (FIX C). No-op when no relay is attached.
+	s.retireRelayLanes()
+	s.waitRelayWorkers(ctx)
+	if s.relayCancel != nil {
+		s.relayCancel()
+	}
+	s.waitRelayWorkers(ctx)
+
 	return ctx.Err()
+}
+
+// waitRelayWorkers blocks until every lane worker has returned or ctx
+// expires, whichever comes first. The helper goroutine holds no lock and
+// exits as soon as the WaitGroup drains, so an expired-ctx return leaks it
+// only for as long as the workers themselves keep running.
+func (s *Server) waitRelayWorkers(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		s.relayWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // NewServerWithPersistence returns a Server that loads and stores room state
