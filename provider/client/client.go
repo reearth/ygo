@@ -72,8 +72,8 @@ type Options struct {
 	// caller has no way to see coming.
 	Header http.Header
 
-	// MaxBackoff caps the reconnect backoff the later dial loop applies
-	// between failed attempts. Default: 30s.
+	// MaxBackoff caps the reconnect backoff the dial loop applies between
+	// failed attempts. Default: 30s.
 	MaxBackoff time.Duration
 
 	// PingInterval is the cadence at which the later dial loop sends
@@ -171,8 +171,11 @@ type Status struct {
 // client's sync loop has been doing without wiring a full OnStatus
 // subscription. Coalesced, AwarenessSuperseded and HardDrops come from the
 // outbound lane (see internal/relaylane) and are live; Dropped is reserved
-// for the send-failure accounting a later #165 task adds with reconnect, and
-// is always zero today.
+// for the send-failure accounting a later #165 task (Stats/Close hardening)
+// adds, and is always zero today — reconnecting (see runReconnectLoop) does
+// not by itself lose anything a Dropped counter would need to report: a
+// failed connection's unsent lane contents are superseded by the next
+// connection's full handshake resync (see flushLane's doc), not discarded.
 type Stats struct {
 	// Coalesced counts local updates that were merged into a pending batch
 	// rather than sent as a separate wire message, mirroring
@@ -409,13 +412,24 @@ func (c *Client) onDocUpdate(update []byte, origin any) {
 // before Connect was ever called is already durable. See onDocUpdate.)
 //
 // Connect is documented as blocking until stopped, and it keeps that promise
-// even when the connection fails or ends: it reports the failure through
-// OnStatus and then parks until ctx or Close releases it, rather than
-// returning the error. Returning would make an unreachable server look like a
-// terminal condition, when for an offline-first client it is the ordinary
-// case — the Doc stays fully usable, and edits keep being persisted, with no
-// server at all. A later #165 task fills this park with reconnect and
-// backoff; the shape of Connect does not change when it does.
+// even when a connection fails: it reports the failure through OnStatus as
+// StateDisconnected, then — rather than returning the error, or parking for
+// good — waits out a jittered backoff and dials again, indefinitely, until
+// ctx is cancelled or Close is called. Returning on the first failure would
+// make an unreachable server look like a terminal condition, when for an
+// offline-first client it is the ordinary case: the Doc stays fully usable,
+// and edits keep being persisted, with no server reachable at all. See
+// runReconnectLoop (loop.go) for the retry loop itself and backoff (backoff.go)
+// for the delay schedule between attempts.
+//
+// Every reconnect re-runs the full y-protocol handshake from scratch. That is
+// deliberately ALL reconnect does: there is no separate offline-op queue
+// anywhere in this client. An edit made while disconnected sits in the Doc
+// (and, redundantly, in the outbound lane — see flushLane's doc for why that
+// redundancy is harmless) until the next connection's SyncStep1/SyncStep2
+// exchange, whose whole job is declaring what each side has and sending
+// whatever the other is missing. That exchange is what carries the edit to
+// the server; nothing here replays it.
 //
 // # Single use
 //
@@ -424,9 +438,9 @@ func (c *Client) onDocUpdate(update []byte, origin any) {
 // rival dial loop against the same Doc and Store, which would mean two
 // sockets, every local edit stored and sent twice, and two goroutines each
 // believing itself the sole writer of its socket. Reconnection after a drop is
-// the loop's own job (a later #165 task), not something a caller drives by
-// calling Connect again; a caller that genuinely wants a fresh session should
-// construct a fresh Client.
+// entirely internal to this one Connect call's own loop, not something a
+// caller drives by calling Connect again; a caller that genuinely wants a
+// fresh session should construct a fresh Client.
 //
 // A Connect that fails during hydration is the exception: it started nothing,
 // so it does not latch, and the call may be retried once whatever the Store
@@ -456,12 +470,17 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 	}()
 
-	err := c.runLoop(loopCtx)
-	if loopCtx.Err() != nil {
-		// Stopped on purpose (ctx cancelled or Close): not a failure.
-		err = nil
-	}
-	c.emitStatus(Status{State: StateDisconnected, Err: err})
+	// runReconnectLoop only ever returns once loopCtx is done (see its own
+	// doc): every connection failure along the way is already reported
+	// through OnStatus as it happens, so there is nothing left to inspect
+	// once it returns. The final, unconditional emission below is the
+	// bookend StateDisconnected's own doc describes ("after Close") — it is
+	// deliberately Err: nil even if the very last attempt before the stop
+	// had failed, because THAT failure was already reported with its real
+	// error by runReconnectLoop; this one specifically means "and now the
+	// client is stopped, on purpose."
+	c.runReconnectLoop(loopCtx)
+	c.emitStatus(Status{State: StateDisconnected})
 
 	select {
 	case <-ctx.Done():
