@@ -246,18 +246,21 @@ Notes:
   `Stats()`" below for the vocabulary this shows up under).
 - `Publish` may be called **concurrently for distinct rooms**, and — briefly,
   across a room's eviction/reload handoff — **twice concurrently for the same
-  room**. See "Contract: concurrent calls" below; your `Relay` must be safe
-  for both.
+  room**. It must also **return promptly when its ctx is cancelled** —
+  `Server.Shutdown` depends on that to stay bounded. See "Contract:
+  concurrent calls and cancellation" below; your `Relay` must be safe for all
+  three.
 - Combine the relay with a `PersistenceAdapter` /
   [`VersionedPersistence`](PERSISTENCE.md) for durability — the relay handles
   live fan-out (including awareness), persistence handles restart recovery.
 
-### Contract: concurrent calls
+### Contract: concurrent calls and cancellation
 
 Both halves of `cluster.Relay`/`cluster.Sink` now permit concurrency that a
-relay written against the pre-#187 provider could safely assume away.
-Anyone implementing a custom `Relay` (or a custom `Sink`, though the shipped
-`*websocket.Server` already handles this) needs both of these:
+relay written against the pre-#187 provider could safely assume away, and
+since #202 `Publish` carries a cancellation obligation. Anyone implementing
+a custom `Relay` (or a custom `Sink`, though the shipped `*websocket.Server`
+already handles this) needs all three of these:
 
 - **`Sink.Inject` may be called concurrently for distinct rooms.** Calls for
   the *same* room must still be serialised and delivered in publish order.
@@ -284,6 +287,19 @@ Anyone implementing a custom `Relay` (or a custom `Sink`, though the shipped
   list under its own mutex, releases it, then sends on per-node channels;
   `cluster/redis`'s `Publish` deliberately takes no lock at all and uses
   atomics plus channels.
+- **`Relay.Publish` must return promptly once its ctx is cancelled** (#202,
+  v1.46.0), returning the ctx error for whatever it could not deliver.
+  `Server.Shutdown` relies on this to unwedge a blocked `Publish` after the
+  caller's deadline: it drains each room's outbound lane while the relay
+  context is still live, joins the lane workers bounded by `Shutdown`'s own
+  ctx, then cancels the relay context — and counts every payload an aborted
+  `Publish` abandons in `RelayStats().Dropped`. A `Publish` that ignores
+  cancellation stalls that join and leaves its worker goroutine running past
+  `Shutdown`. Both shipped relays conform: `MemRelay` selects on ctx around
+  its per-node channel sends, and `cluster/redis`'s `Publish` selects on ctx
+  at the hand-off to its publisher goroutine. A custom relay whose broker
+  client offers no cancellable send should wrap the send so the `Publish`
+  call itself can still abandon it and return.
 
 A relay that appends to an unsynchronised buffer, or keeps an unlocked
 per-room sequence counter, on either the inbound or outbound side, is not
