@@ -17,9 +17,19 @@
 //	-max-peers-per-room per-room peer cap (0 = unlimited)
 //	-max-rooms          cap on total resident rooms (0 = unlimited)
 //	-max-message-bytes  per-message read cap in bytes (default 64 MiB)
+//	-max-awareness-clients
+//	                    per-room cap on distinct awareness client entries
+//	                    (default 10000; 0 = unlimited)
+//	-awareness-expiry   reclaim a remote client's presence after this idle
+//	                    duration (default 30s; 0 = disabled)
 //	-redis              Redis address for cross-process relay; empty = disabled
 //	-path               URL path pattern for the WebSocket handler (default "/yjs/{room}")
 //	-log                log format: "text" or "json" (default "text")
+//	-version-interval   capture a version of each CHANGED room at most this
+//	                    often; a quiet room is never re-versioned (0 = disabled)
+//	-keep-snapshots     retain this many auto-captured versions per room;
+//	                    applied on capture, so it needs -version-interval
+//	                    (0 = keep all)
 //
 // The process serves until it receives SIGINT or SIGTERM, then shuts down
 // gracefully: it stops accepting connections, drains in-flight work, detaches
@@ -83,6 +93,17 @@ type Config struct {
 	Path string
 	// Log is the log format: "text" or "json".
 	Log string
+	// VersionInterval enables periodic version capture: each room that CHANGED
+	// since its last version is captured at most this often, giving a
+	// user-facing history without the application driving one. A quiet room is
+	// never re-versioned. 0 = disabled.
+	VersionInterval time.Duration
+	// KeepSnapshots bounds retained auto-captured versions per room. It is
+	// applied when a version is captured, so it does nothing without
+	// VersionInterval. Retention is per LABEL, so it only ever trims the
+	// server's own auto versions and cannot evict a snapshot an application
+	// named deliberately. 0 = keep all.
+	KeepSnapshots int
 }
 
 // parseFlags parses the supplied arguments into a Config. It uses a dedicated
@@ -90,9 +111,21 @@ type Config struct {
 // tests and never calls os.Exit on a parse error — it returns the error so the
 // caller decides.
 func parseFlags(args []string) (Config, error) {
+	var cfg Config
+	fs := newFlagSet(&cfg)
+	if err := fs.Parse(args); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// newFlagSet declares every flag against cfg and returns the FlagSet without
+// parsing. Split out from parseFlags so a test can enumerate the flags via
+// VisitAll and assert the package doc's Usage block lists all of them — two
+// flags had already drifted out of that block before this seam existed.
+func newFlagSet(cfg *Config) *flag.FlagSet {
 	fs := flag.NewFlagSet("ygo-server", flag.ContinueOnError)
 
-	var cfg Config
 	fs.StringVar(&cfg.Addr, "addr", "127.0.0.1:1234",
 		"TCP listen address (default loopback-only; a non-loopback bind exposes the server, which has no built-in auth)")
 	fs.StringVar(&cfg.Store, "store", "", "SQLite DB path (empty = ephemeral in-memory; lost on restart)")
@@ -106,11 +139,12 @@ func parseFlags(args []string) (Config, error) {
 	fs.StringVar(&cfg.Redis, "redis", "", "Redis address for cross-process relay (empty = disabled)")
 	fs.StringVar(&cfg.Path, "path", "/yjs/{room}", "URL path pattern for the WebSocket handler")
 	fs.StringVar(&cfg.Log, "log", "text", `log format: "text" or "json"`)
+	fs.DurationVar(&cfg.VersionInterval, "version-interval", 0,
+		"capture a version of each CHANGED room at most this often; a quiet room is never re-versioned (0 = disabled)")
+	fs.IntVar(&cfg.KeepSnapshots, "keep-snapshots", 0,
+		"retain this many auto-captured versions per room; applied on capture, so it needs -version-interval (0 = keep all)")
 
-	if err := fs.Parse(args); err != nil {
-		return Config{}, err
-	}
-	return cfg, nil
+	return fs
 }
 
 // newLogger builds a slog.Logger writing to stderr in the requested format.
@@ -170,6 +204,20 @@ func isPublicBindAddr(addr string) bool {
 	return true
 }
 
+// warnIfInertRetention logs when -keep-snapshots is set without
+// -version-interval. Retention is applied at the moment a version is captured,
+// so with nothing capturing versions the bound is never enforced — an operator
+// who asked for one would otherwise believe it was in force. Same reasoning as
+// warnIfInsecureBind: a configuration that silently does nothing deserves to
+// say so at startup, where it will actually be read.
+func warnIfInertRetention(log *slog.Logger, cfg Config) {
+	if cfg.KeepSnapshots <= 0 || cfg.VersionInterval > 0 {
+		return
+	}
+	log.Warn("-keep-snapshots has no effect without -version-interval: " +
+		"retention is applied when a version is captured, and nothing captures versions")
+}
+
 // warnIfInsecureBind logs a prominent warning when addr exposes the server to
 // the network. ygo-server wires no authentication of its own, so a non-loopback
 // bind means any host that can reach the port can read and modify every
@@ -216,7 +264,16 @@ func run(ctx context.Context, cfg Config, ready chan<- struct{}) error {
 	if err != nil {
 		return err
 	}
-	srv := ygows.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
+	// The adapter is named rather than inlined because auto-versioning splits
+	// across both objects: the capture cadence is the server's concern
+	// (AutoVersionEvery) while retention is the adapter's (KeepSnapshots). Both
+	// are set before serving, as KeepSnapshots' contract requires.
+	adapter := persistence.NewLegacyAdapter(store)
+	adapter.KeepSnapshots = cfg.KeepSnapshots
+	srv := ygows.NewServerWithPersistence(adapter)
+	srv.AutoVersionEvery = cfg.VersionInterval
+
+	warnIfInertRetention(log, cfg)
 
 	srv.AllowedOrigins = parseOrigins(cfg.Origins)
 	srv.MaxConnections = cfg.MaxConns

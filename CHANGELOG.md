@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.47.0] — 2026-08-09
 
+### Added
+
+- **`cmd/ygo-server` can capture versions on a timer.** Two flags wire the
+  binary to the auto-versioning the library has supported since v1.41.0:
+  `-version-interval` sets how often each **changed** room is captured (a quiet
+  room is never re-versioned), and `-keep-snapshots` bounds how many
+  auto-captured versions each room retains. Both default to off, so a default
+  run is unchanged. Retention is per label, so `-keep-snapshots` only ever trims
+  the server's own `auto` versions and cannot evict a snapshot an application
+  named deliberately. Setting `-keep-snapshots` without `-version-interval` now
+  warns at startup, because retention is applied at capture time and would
+  otherwise be silently inert (#167).
+
 ### Fixed
+
+- **`ygo-server`'s documented flag list was missing two flags.**
+  `-awareness-expiry` and `-max-awareness-clients` had shipped without being
+  added to the package doc's `Usage` block. Both are documented now, and a test
+  asserts every declared flag appears there so the list cannot drift again
+  (#167).
 
 - **`WithTrackedOrigins` refuses origin tokens that cannot be told apart.**
   Tracked-origin matching is Go interface equality, and pointers to zero-size

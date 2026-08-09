@@ -18,6 +18,10 @@ testdata/fuzz/
 # Build output
 /dist/
 /bin/
+# `go build ./cmd/ygo-server/` drops the binary in the repo root, where
+# nothing else ignores it — a 16MB artifact one `git add -A` away from being
+# committed.
+/ygo-server
 
 # Go workspace
 go.work

@@ -209,7 +209,7 @@ func main() {
 
 ### Run a server
 
-For a ready-to-run binary — with flags for origins, connection/room limits, an optional Redis cluster relay (`-redis`), and SQLite persistence (`-store`) — use [`cmd/ygo-server`](cmd/ygo-server/):
+For a ready-to-run binary — with flags for origins, connection/room limits, an optional Redis cluster relay (`-redis`), SQLite persistence (`-store`), and periodic version capture (`-version-interval`, `-keep-snapshots`) — use [`cmd/ygo-server`](cmd/ygo-server/):
 
 ```bash
 # Binds 127.0.0.1:1234 by default (loopback only). The server has no built-in

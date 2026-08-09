@@ -1,5 +1,39 @@
 ## v1.47.0
 
+### Added: `ygo-server` flags for periodic version capture and retention (#167)
+
+**Who is affected:** anyone running the `ygo-server` binary who wants a version
+history without writing one. The library is unchanged; this release only wires
+existing capability to the command line.
+
+**Two new flags.**
+
+```
+-version-interval duration   capture a version of each CHANGED room at most this often
+-keep-snapshots int          retain this many auto-captured versions per room
+```
+
+Both default to off, so a default run behaves exactly as before.
+
+`-version-interval 15m` captures at most one version per room per 15 minutes,
+and only for rooms that actually changed — a quiet room is never re-versioned,
+which is what keeps a history panel usable rather than full of identical
+entries.
+
+`-keep-snapshots 50` bounds the auto-captured versions. Retention is **per
+label**, so it trims only the server's own `auto` versions and cannot evict a
+snapshot your application named deliberately (say `before-migration`). That
+guarantee is v1.45.0's label-scoped retention; without it this flag would have
+been a footgun.
+
+Setting `-keep-snapshots` without `-version-interval` warns at startup:
+retention is applied at the moment a version is captured, so with nothing
+capturing, the bound is never enforced.
+
+**Also:** `-awareness-expiry` and `-max-awareness-clients` were missing from the
+binary's documented flag list and are now included, with a test that keeps the
+list from drifting again.
+
 ### Fixed: zero-size origin tokens alias in `WithTrackedOrigins` (#203)
 
 **Who is affected:** anyone using `UndoManager` with `WithTrackedOrigins`,
