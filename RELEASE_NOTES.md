@@ -1,16 +1,17 @@
 ## v1.46.0
 
-One addition: `YArray.InsertType`, completing the prelim constructor surface
-from v1.43.0. `PushType` could attach a nested type only at the end of an
-array; `InsertType` places one at any index. The gap mattered because the
-obvious workaround — `PushType` then `Move` — emits `ContentMove`, a ygo wire
-extension other implementations mis-parse, usually silently (#207), so
-mid-array placement of a nested type had no safe expression. No breaking API
-changes.
+Two changes. `YArray.InsertType` completes the prelim constructor surface
+from v1.43.0, and `Server.Shutdown` no longer silently discards queued
+outbound relay updates (#202).
 
 ### Added
 
-- **`YArray.InsertType(txn, index, type)`.** Attached placement mirrors
+- **`YArray.InsertType(txn, index, type)`** places a detached shared type at
+  any index; `PushType` could attach one only at the end. The gap mattered
+  because the obvious workaround — `PushType` then `Move` — emits
+  `ContentMove`, a ygo wire extension other implementations mis-parse,
+  usually silently (#207), so mid-array placement of a nested type had no
+  safe expression. Attached placement mirrors
   `Insert`: live-index semantics, splitting a plain-value run when the index
   falls inside it, and any unresolvable index anchoring at the tail. On a
   detached array the type splices into the staged content, and plain-value runs
@@ -21,6 +22,53 @@ changes.
   attached for interior, ends, beyond-the-end and negative indices. The
   rejection message for a shared type passed to `Insert`/`Push` as a plain
   value now points at `InsertType` first.
+
+### Fixed: shutdown relay-tail loss (#202)
+
+**Who is affected:** every clustered deployment — any server with a
+`cluster.Relay` attached — plus authors of third-party `Relay`
+implementations.
+
+**The fix.** `Server.Shutdown` cancelled the relay context as its second act,
+before closing peer connections and before the persistence drain. Peers kept
+committing for the rest of shutdown — potentially seconds — into per-room
+outbound lanes whose workers had already exited without draining, and nothing
+joined those workers. Two consequences, both fixed (#202):
+
+1. **Silent, uncounted tail loss.** Every update queued in that window was
+   discarded with `RelayStats().Dropped` and `HardDrops` both reading zero,
+   so an operator alerting on those counters concluded nothing was lost. On a
+   hot room — never reloaded from persistence — the peer node never converged
+   on those updates. `Shutdown` now drains each lane while publishing still
+   works and cancels the relay context last; whatever it cannot deliver
+   within your ctx budget is counted in `Dropped`. There is no longer any
+   path where updates vanish while both counters read zero — v1.42.0's
+   "`Dropped`/`HardDrops` should always be zero; alert on their presence"
+   operator model now holds across `Shutdown` too, and the exception
+   documented there is retired.
+
+2. **`Publish` could outlive `Shutdown`.** Nothing joined the lane workers,
+   so a `relay.Publish` call could still be in flight after `Shutdown`
+   returned — unsafe for a relay that frees resources in `Close()`, despite
+   the documented rule that the caller `Close()`s the relay once every
+   attached server is done. `Shutdown` now joins the workers, bounded by its
+   ctx.
+
+**What changes for you.** Give `Shutdown` a real deadline: its ctx is now
+also the delivery budget for the final outbound tail, and a `Shutdown` that
+could not finish within it returns the ctx error with the undelivered backlog
+counted in `Dropped`. `RelayStats.Dropped` is broader — it now also counts
+payloads lost to a failed `relay.Publish` call at any time, not just pre-lane
+discards — so a deployment that graphs it may see non-zero values it
+previously missed; they were always losses, just invisible ones. Inbound
+shutdown ordering is unchanged in effect: `Inject` has always refused with
+`ErrServerShutdown` from the moment `Shutdown` begins, so cancelling the
+relay context later cannot let remote changes mutate rooms.
+
+**For `Relay` implementers:** the `Publish` contract now states explicitly
+that it must return promptly once its ctx is cancelled — `Shutdown` relies on
+this to unwedge a blocked `Publish` after your deadline. Both shipped relays
+already conform.
 
 ## v1.45.0
 

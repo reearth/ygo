@@ -177,6 +177,11 @@ func (s *Server) ensureRelayLane(room string) *relayRoomLane {
 	prev, hadPrev := s.relayLanes[room]
 	l := &relayRoomLane{lane: relaylane.New(0), done: make(chan struct{})}
 	s.relayLanes[room] = l
+	// Register the worker on relayWG INSIDE the locked section: Shutdown's
+	// retireRelayLanes sets s.relayLanes to nil under this same mutex before
+	// its Waits start, so every Add is either strictly ordered before those
+	// Waits or never happens at all (the nil check above already returned).
+	s.relayWG.Add(1)
 	if hadPrev {
 		// This is the OTHER place (besides stopRelayLane) a lane can be
 		// retired, so it needs the identical fold: without it, a predecessor
@@ -251,9 +256,18 @@ func (s *Server) relayLaneFor(room string) *relayRoomLane {
 // the same time — that is a different, deliberately accepted overlap between
 // two distinct lanes, not a violation of this one.
 func (s *Server) relayLaneWorker(ctx context.Context, room string, l *relayRoomLane) {
+	defer s.relayWG.Done()
 	for {
 		select {
 		case <-ctx.Done():
+			// The relay context is dead, so the backlog cannot be published —
+			// but it must not vanish while Dropped reads zero (#202): count
+			// every abandoned payload. In the ordinary Shutdown sequence this
+			// case is rare (retireRelayLanes closes l.done and the final drain
+			// runs under a still-live relay context first); it is reached when
+			// Shutdown's ctx expired before the drain finished, or on a lane
+			// still live at cancellation time.
+			s.discardRelayLane(room, l)
 			return
 		case <-l.done:
 			s.drainRelayLane(ctx, room, l)
@@ -261,6 +275,62 @@ func (s *Server) relayLaneWorker(ctx context.Context, room string, l *relayRoomL
 		case <-l.lane.Signal():
 			s.drainRelayLane(ctx, room, l)
 		}
+	}
+}
+
+// discardRelayLane empties l without publishing, counting every abandoned
+// payload in relayDropped so the loss is visible in RelayStats(). Only called
+// once the relay context is cancelled — publishing is no longer possible.
+func (s *Server) discardRelayLane(room string, l *relayRoomLane) {
+	n := 0
+	for {
+		if _, ok := l.lane.TakeSync(); ok {
+			n++
+			continue
+		}
+		if _, ok := l.lane.TakeAwareness(); ok {
+			n++
+			continue
+		}
+		break
+	}
+	if n > 0 {
+		s.relayDropped.Add(uint64(n))
+		s.log().Warn("relay outbound: shutdown discarded undeliverable backlog",
+			"room", room, "payloads", n)
+	}
+}
+
+// retireRelayLanes retires EVERY remaining outbound lane at once and marks
+// the lane table closed: called only from Shutdown, after peers are gone and
+// the persistence drain is over. Setting s.relayLanes to nil (rather than
+// deleting entries) makes ensureRelayLane refuse new lanes from this point on
+// — it already treats a nil map as "no relay attached" — so no worker can be
+// created after Shutdown's WaitGroup joins begin, and a straggling
+// enqueueRelayOutbound finds no lane and counts its payload in Dropped
+// instead of parking it where nothing will ever drain it. RelayStats() keeps
+// reporting: it reads s.relayRetired (folded here) plus a range over the nil
+// map, which is a no-op.
+//
+// Concurrency with the other two retirement sites is the same
+// identity-under-mutex dance they play with each other: a stopRelayLane that
+// got there first already removed its lane from the map (so it is not in
+// this snapshot, and only that call closes its done); one that arrives after
+// finds s.relayLanes[room] no longer matching (nil map) and skips its own
+// close — never a double close.
+func (s *Server) retireRelayLanes() {
+	s.relayLanesMu.Lock()
+	lanes := s.relayLanes
+	s.relayLanes = nil
+	for _, l := range lanes {
+		st := l.lane.Stats()
+		s.relayRetired.Coalesced += st.Coalesced
+		s.relayRetired.AwarenessSuperseded += st.AwarenessSuperseded
+		s.relayRetired.HardDrops += st.HardDrops
+	}
+	s.relayLanesMu.Unlock()
+	for _, l := range lanes {
+		close(l.done)
 	}
 }
 
@@ -282,6 +352,12 @@ func (s *Server) publishRelay(ctx context.Context, room string, kind cluster.Kin
 	if err := s.relay.Publish(ctx, cluster.Outbound{
 		Room: room, Kind: kind, Data: data,
 	}); err != nil {
+		// The payload was already taken off the lane, so a failed Publish
+		// loses it — count it (#202). There is no retry path: KindSync blobs
+		// are only recoverable via a room reload's sync step, which a hot
+		// room never performs, so "logged but uncounted" would be exactly
+		// the silent divergence RelayStats.Dropped exists to surface.
+		s.relayDropped.Add(1)
 		s.log().Warn("relay publish failed", "room", room, "kind", kind, "err", err)
 	}
 }
@@ -487,18 +563,20 @@ type RelayStats struct {
 	// HardDrops counts payloads lost because a merge failed on a saturated
 	// lane. Should always be zero.
 	HardDrops uint64
-	// Dropped counts payloads discarded before ever reaching a lane (no
+	// Dropped counts every payload that was lost after the commit path
+	// handed it to the outbound side: discarded before reaching a lane (no
 	// relay attached at enqueue time, or a genuine straggler that lost its
 	// race against its lane's own retirement — see enqueueRelayOutbound's
-	// doc). Should always be zero in a healthy deployment.
+	// doc), taken from a lane but abandoned because relay.Publish returned
+	// an error (there is no retry path — see publishRelay), or still queued
+	// in a lane when Shutdown had to give up on delivery (see
+	// discardRelayLane). Should always be zero in a healthy deployment.
 	//
-	// Exception: Server.Shutdown cancels the relay context before closing
-	// peer connections and before the persistence drain, so peers can keep
-	// committing for the rest of shutdown. Whatever is still queued in a
-	// room's outbound lane at that point, or enqueued afterward, is
-	// discarded without incrementing Dropped (or HardDrops) — see
-	// docs/CLUSTERING.md's "Delivery semantics" section. Dropped reading
-	// zero after a Shutdown does not mean nothing was lost.
+	// Since the #202 fix there is no shutdown exception: Server.Shutdown
+	// drains each lane under the still-live relay context before cancelling
+	// it, and whatever it cannot deliver within its ctx budget is counted
+	// here. Dropped and HardDrops both reading zero after a Shutdown means
+	// nothing was lost.
 	Dropped uint64
 }
 
