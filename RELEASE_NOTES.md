@@ -1,3 +1,39 @@
+## v1.47.0
+
+### Fixed: zero-size origin tokens alias in `WithTrackedOrigins` (#203)
+
+**Who is affected:** anyone using `UndoManager` with `WithTrackedOrigins`,
+and more broadly anyone minting transaction-origin tokens as pointers.
+
+**The fix.** Tracked-origin matching is Go interface equality (`==`), and Go
+satisfies every zero-size allocation from a single address
+(`runtime.zerobase`) — so two origin tokens minted as `new(struct{})` compare
+equal even though the code plainly intends two distinct identities. An
+UndoManager tracking one such token silently captured the other's
+transactions too: user B's edits landing on user A's undo stack, with no
+error anywhere. This is the same aliasing that silently disabled relay
+publishing inside `provider/websocket` for six releases (fixed in v1.42.0);
+this occurrence sat on a public API where the library cannot fix the values
+for you (#203).
+
+**What changes for you.** `WithTrackedOrigins` now panics at construction
+when given a pointer to a zero-size type, naming the offending type and the
+fix. If you hit the panic, change your token type from `struct{}` to
+something with size — the conventional spelling is:
+
+```go
+type originToken struct{ _ byte }
+tok := &originToken{} // every allocation is now a distinct origin
+```
+
+Distinct named zero-size *value* types (`originA{}` vs `originB{}`) remain
+legal and correct — interface equality compares the dynamic type first, so
+they never alias each other. Ordinary comparable values (strings, ints) are
+unaffected. The identity semantics are now documented on
+`WithTrackedOrigins`, `Doc.Transact`, and `Doc.OnUpdate`.
+
+No API surface changes; strictly a misuse guard plus documentation.
+
 ## v1.46.0
 
 Two changes. `YArray.InsertType` completes the prelim constructor surface

@@ -2,6 +2,8 @@ package crdt
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -41,7 +43,40 @@ func WithCaptureTimeout(d time.Duration) UndoManagerOption {
 //
 // This is useful for multi-user documents where each user has a distinct
 // origin tag and should only be able to undo their own changes.
+//
+// Matching is Go interface equality (==), so origin values must be
+// DISTINGUISHABLE under ==. Values that compare equal are one origin, not
+// two — most surprisingly for pointers to zero-size types: Go satisfies
+// every zero-size allocation from one address (runtime.zerobase), so
+//
+//	a := new(struct{})
+//	b := new(struct{})
+//	// a == b — both may point at runtime.zerobase
+//
+// two "unique" tokens minted that way alias, and tracking one silently
+// captures the other's transactions too. This exact aliasing once disabled
+// relay publishing inside provider/websocket for six releases (#203, and
+// see relayOriginSentinel's doc in that package). Because the library
+// cannot make caller-supplied values distinct after the fact,
+// WithTrackedOrigins PANICS when given a pointer to a zero-size type.
+//
+// Safe token shapes:
+//   - a pointer to a NON-zero-size type — e.g. type token struct{ _ byte };
+//     &token{} — every allocation is a distinct origin;
+//   - distinct named types compared by value — originA{} and originB{}
+//     never alias each other (interface equality compares the dynamic type
+//     first), though every originA{} is the same origin as every other;
+//   - ordinary comparable values (strings, ints) with the usual value
+//     semantics: "alice" from anywhere is the origin "alice".
 func WithTrackedOrigins(origins ...any) UndoManagerOption {
+	for _, o := range origins {
+		if t := reflect.TypeOf(o); t != nil && t.Kind() == reflect.Pointer && t.Elem().Size() == 0 {
+			panic(fmt.Sprintf(
+				"crdt: WithTrackedOrigins: %T is a pointer to a zero-size type and cannot serve as a unique origin token "+
+					"(all zero-size allocations may share one address, runtime.zerobase, so two such tokens compare ==); "+
+					"use a pointer to a non-zero-size type instead, e.g. type token struct{ _ byte }", o))
+		}
+	}
 	return func(u *UndoManager) {
 		u.trackedOrigins = make(map[any]struct{}, len(origins))
 		for _, o := range origins {
