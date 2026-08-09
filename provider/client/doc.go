@@ -62,12 +62,23 @@
 //
 // # Concurrency
 //
-// Connect runs one goroutine that owns the socket, and it is the only writer
-// to it. The Doc observer runs on whichever goroutine called Transact — the
-// application's own — so it never writes to the socket and never blocks on
-// the network: it hands the update to a bounded, coalescing queue
-// (internal/relaylane) and returns immediately. An application's edit is
-// therefore never slowed by a slow server, which is the client-side
-// counterpart of the head-of-line coupling provider/websocket removed in
-// #187.
+// Connect runs one goroutine that owns the socket and is the only writer of
+// data frames to it. The Doc observer runs on whichever goroutine called
+// Transact — the application's own — and never writes to the socket and never
+// blocks on the network: it hands the update to a bounded, coalescing queue
+// (internal/relaylane) and returns. An application's edit is therefore never
+// slowed by a slow server, which is the client-side counterpart of the
+// head-of-line coupling provider/websocket removed in #187.
+//
+// It IS slowed by a slow Store. The observer calls LocalStore.StoreUpdate
+// synchronously, on the application's own goroutine, before handing off — so
+// an edit does not return until it is durable. That ordering is deliberate
+// (durability is the store's entire purpose here, and an edit reported
+// complete before it is safe would defeat it), but it has a real cost worth
+// knowing about: the bundled SQLite store serialises all writers behind a
+// single connection, so an application edit can queue behind the sync loop
+// writing a server-received update, and vice versa. Neither blocks the other
+// indefinitely and neither can deadlock, but a store on slow storage shows up
+// as edit latency in the application. A store that cannot afford that should
+// buffer internally and make StoreUpdate cheap.
 package client

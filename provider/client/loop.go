@@ -36,13 +36,35 @@ const (
 //
 // # Single-writer invariant
 //
-// Every method on session writes to conn, and every one of them runs on the
-// loop goroutine that runLoop owns. That is not a coincidence to preserve
-// case-by-case; it is the invariant this whole file is arranged around.
-// gorilla/websocket permits only one concurrent writer, and — more
-// importantly — a write that blocks on a slow socket must never be reachable
-// from a caller's Transact. See Client.onDocUpdate for the other half of the
-// arrangement (the observer hands off to a lane instead of writing).
+// The precise rule, because a looser statement of it would be false and the
+// difference matters: **the loop goroutine is the only writer of DATA frames**
+// (WriteMessage). Control frames may additionally be emitted by the read
+// goroutine, and MUST only ever be emitted via conn.WriteControl.
+//
+// That second clause is not a concession this file makes — gorilla does it
+// unprompted, from inside ReadMessage. Its default ping handler answers with a
+// pong (conn.go:1161), its default close handler echoes a close frame
+// (conn.go:984), and exceeding the read limit sends CloseMessageTooBig
+// (conn.go:925). All three run on whichever goroutine is in ReadMessage, i.e.
+// this file's read pump. It is safe because WriteControl is the one write
+// method gorilla documents as callable concurrently with every other method;
+// it takes its own mutex and does not touch the shared write buffer that
+// WriteMessage owns.
+//
+// So: anything added to the read side later must use WriteControl and nothing
+// else. In particular, an application-level keepalive built the obvious way —
+// SetWriteDeadline followed by WriteMessage, from the read goroutine or a
+// timer goroutine — would corrupt the connection by interleaving with a data
+// frame the loop is part-way through writing, and would do so intermittently
+// and under load rather than in a test. A keepalive belongs either in the
+// loop's own select, or as conn.WriteControl(PingMessage, …).
+//
+// Every method on session writes data frames, and every one of them runs on
+// the loop goroutine that runLoop owns. That is not a coincidence to preserve
+// case-by-case; it is what this whole file is arranged around. The other half
+// of the arrangement is Client.onDocUpdate: a write that blocks on a slow
+// socket must never be reachable from a caller's Transact, so the observer
+// hands off to a lane instead of writing.
 type session struct {
 	c    *Client
 	conn *gws.Conn
@@ -65,11 +87,12 @@ type session struct {
 // # Why the reads happen on a separate goroutine
 //
 // gorilla/websocket's ReadMessage blocks, and the loop must simultaneously be
-// able to notice outbound work appearing on the lane. So a read pump
-// goroutine does nothing but ReadMessage and hand frames to the loop over a
-// channel; the loop goroutine remains the only writer. The read pump never
-// touches the Doc, the lane, or the socket's write side, so it cannot violate
-// the single-writer invariant no matter how it is scheduled.
+// able to notice outbound work appearing on the lane. So a read pump goroutine
+// does nothing but ReadMessage and hand frames to the loop over a channel. It
+// never touches the Doc or the lane, and it never writes a data frame — though
+// gorilla itself may emit control frames from inside its ReadMessage call, via
+// the concurrency-safe WriteControl path; see session's doc for the exact
+// invariant and for what that forbids a later change from adding here.
 func (c *Client) runLoop(ctx context.Context) error {
 	c.emitStatus(Status{State: StateConnecting})
 

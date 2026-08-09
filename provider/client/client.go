@@ -472,13 +472,18 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // hydrate loads this Client's room from Store, if one was configured, and
-// applies it to Doc under the remoteOrigin sentinel.
+// applies it to Doc under the hydrateOrigin sentinel.
 //
-// The sentinel is not what stops the hydrated bytes being written straight
-// back to the store — Connect not having registered its observer yet is (see
-// Connect's step 2). It is used anyway because it is the truthful origin for
-// this update, and because an application with its own Doc.OnUpdate observer
-// can then tell hydration apart from a local edit exactly as it can tell a
+// That sentinel is load-bearing, and it is specifically the reason hydration
+// needs one of its own rather than sharing remoteOrigin. The Doc observer is
+// registered by New, so it is already live when this runs and WILL see this
+// update; the only thing stopping it writing the store's own bytes straight
+// back to the store — on every start, forever — is recognising the origin.
+// remoteOrigin could not serve here, because updates carrying THAT origin must
+// be persisted (see onDocUpdate's table).
+//
+// It also gives an application with its own Doc.OnUpdate observer a way to
+// tell hydration apart from a local edit, exactly as it can tell a
 // server-received update apart from one.
 //
 // A Store with no prior state for this room returns (nil, nil) per

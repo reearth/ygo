@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,26 +26,6 @@ func (s *countingStore) StoreUpdate(room string, update []byte) error {
 }
 
 func (s *countingStore) count() uint64 { return s.storeUpdates.Load() }
-
-// awaitStatus blocks until this Client reports want, or fails the test. Used
-// by lifecycle tests that need to know a Connect goroutine has actually
-// reached a given point rather than guessing with a sleep.
-func awaitStatus(t *testing.T, c *Client, want State) {
-	t.Helper()
-	hit := make(chan struct{})
-	var once sync.Once
-	unsub := c.OnStatus(func(s Status) {
-		if s.State == want {
-			once.Do(func() { close(hit) })
-		}
-	})
-	defer unsub()
-	select {
-	case <-hit:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("client never reported state %v", want)
-	}
-}
 
 // TestClient_PersistsLocalEditMadeBeforeConnect pins down the rule that a
 // local edit is durable from the moment it is made, not from the moment
@@ -88,9 +67,13 @@ func TestClient_PersistsLocalEditMadeBeforeConnect(t *testing.T) {
 
 	// Now run Connect against a server that refuses every connection, and let
 	// it get all the way to reporting the failure, so hydration has definitely
-	// run by the time the assertions below happen.
+	// run by the time the assertions below happen. The waiter is armed BEFORE
+	// Connect starts: a refused dial reaches StateDisconnected in microseconds
+	// and OnStatus does not replay, so subscribing afterwards would be a race
+	// against the Connect goroutine.
+	disconnected := statusWaiter(t, c, StateDisconnected)
 	connect(t, c)
-	awaitStatus(t, c, StateDisconnected)
+	disconnected()
 
 	if got := store.count(); got != 1 {
 		t.Fatalf("store.count() after hydration = %d, want 1 (hydrated bytes must not be re-persisted)", got)
@@ -126,10 +109,12 @@ func TestClient_Connect_SecondCallRejected(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
+	// Armed before Connect starts, for the reason statusWaiter documents.
+	disconnected := statusWaiter(t, c, StateDisconnected)
 	connect(t, c)
-	// Wait until the first Connect has actually started its loop, so this
-	// test cannot pass by racing ahead of it.
-	awaitStatus(t, c, StateDisconnected)
+	// Wait until the first Connect has actually run its loop, so this test
+	// cannot pass by racing ahead of it.
+	disconnected()
 
 	if err := c.Connect(context.Background()); !errors.Is(err, ErrAlreadyConnected) {
 		t.Fatalf("second Connect returned %v, want ErrAlreadyConnected", err)

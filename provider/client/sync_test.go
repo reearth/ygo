@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,26 +10,6 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 )
-
-// connect runs c.Connect on its own goroutine and registers cleanup that stops
-// it and waits for it to return, so a failing test can never leave a live
-// socket, a read pump, or the Connect goroutine itself behind to interfere
-// with the next test (or to be reported by -race after the fact).
-func connect(t *testing.T, c *Client) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- c.Connect(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		_ = c.Close()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("Connect did not return after cancel + Close")
-		}
-	})
-}
 
 // TestClient_SyncRoundTrip is the acceptance test for the dial/handshake/live
 // sync loop (#165): a Client must converge with a real provider/websocket
@@ -82,4 +63,53 @@ func TestClient_SyncRoundTrip(t *testing.T) {
 		return sd != nil && sd.GetText("t").ToString() == "client-server"
 	}, 5*time.Second, 10*time.Millisecond,
 		"local edit did not reach the server")
+}
+
+// TestClient_PersistsUpdatesReceivedFromServer covers the middle row of
+// onDocUpdate's origin table — remote-origin updates are STORED (and, by the
+// same rule, not sent back) — which is the row the hydrate/remote sentinel
+// split exists to make expressible.
+//
+// The failure it guards against is quiet and total. If server-received updates
+// were skipped for persistence, everything would still look correct while the
+// process lived: the Doc would hold the server's content, sync would work, the
+// round-trip test above would pass. The damage only shows up on the next
+// offline start, when hydration returns a document containing whatever the
+// user typed themselves and nothing they were ever sent — with no error
+// anywhere to indicate the rest was discarded rather than never received.
+// Asserting on the Doc therefore proves nothing here; the store has to be read
+// back on its own terms, which is why this replays it into a fresh Doc.
+//
+// No polling is needed: the store write happens inside ApplySyncMessage's
+// observer callback, which handleFrame completes before it calls markSynced,
+// so by the time Synced() is readable the write has already returned.
+func TestClient_PersistsUpdatesReceivedFromServer(t *testing.T) {
+	srv, ts := startServer(t)
+	const room = "remotepersist"
+
+	require.NoError(t, srv.Apply(context.Background(), room,
+		func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := doc.GetText("t")
+			transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "from-server", nil) })
+		}))
+
+	store, err := OpenSQLiteStore(filepath.Join(t.TempDir(), "remote.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, doc := dialSynced(t, ts, room, Options{Store: store})
+	require.Equal(t, "from-server", doc.GetText("t").ToString(),
+		"handshake must have delivered the server's content")
+
+	// The real assertion: a cold start that never reaches the network must be
+	// able to reconstruct that content from the store alone.
+	blob, err := store.LoadDoc(room)
+	require.NoError(t, err)
+	require.NotEmpty(t, blob,
+		"server-received update was never persisted; an offline restart would lose it")
+
+	fresh := crdt.New()
+	require.NoError(t, crdt.ApplyUpdateV1(fresh, blob, nil))
+	require.Equal(t, "from-server", fresh.GetText("t").ToString(),
+		"store did not round-trip the server's content")
 }
