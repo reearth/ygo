@@ -285,6 +285,18 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	s := &session{c: c, conn: conn, onSynced: onSynced}
 	c.emitStatus(Status{State: StateConnected})
 
+	// #165 Task 8: whatever this connection's Awareness view learned about
+	// OTHER clients belongs to THIS connection, not to whichever one comes
+	// next. Deferred here (rather than, say, only on a clean ctx-cancelled
+	// exit) so it runs on every path this function can return by — a read
+	// error, a write error, or ctx being cancelled — mirroring y-websocket's
+	// WebsocketProvider.removeAwarenessStates, which fires on disconnect
+	// unconditionally. See dropRemoteAwareness's own doc for why the removal
+	// is applied under c.remoteOrigin specifically, and flushLane's doc for
+	// how that keeps a bare reconnect from looking like a mass "everyone left"
+	// announcement to the NEXT connection.
+	defer c.dropRemoteAwareness()
+
 	// pingTicker drives session.ping below, from THIS goroutine's own select
 	// loop — see runLoop's "Keepalive" doc section for why here and not a
 	// separate timer goroutine. defer covers every remaining exit from this
@@ -322,6 +334,19 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 				return err
 			}
 		case <-pingTicker.C:
+			// #165 Task 8: the same cadence driving the WebSocket-level
+			// keepalive also re-announces local awareness presence, so a
+			// client that set local state once and then went quiet is not
+			// reaped by a server's AwarenessExpiry sweep (see
+			// provider/websocket/server.go's AwarenessExpiry doc: "set this
+			// comfortably above the clients' presence keep-alive interval" —
+			// PingInterval IS that interval, client-side). Heartbeat is a
+			// no-op when no local state has ever been set (see its own doc);
+			// when it does have an effect, it is c.awareness's OnUpdate
+			// observer (onAwarenessUpdate, registered by New) that actually
+			// pushes the re-announcement onto the lane — this call only
+			// needs to trigger that side effect, not duplicate the hand-off.
+			s.c.awareness.Heartbeat()
 			if err := s.ping(); err != nil {
 				return fmt.Errorf("client: send ping: %w", err)
 			}
@@ -446,26 +471,82 @@ func (s *session) handleFrame(frame []byte) error {
 		if subErr == nil && subType == ygsync.MsgSyncStep2 && !s.synced {
 			s.synced = true
 			s.c.markSynced()
+			// #165 Task 8: a rejoining client's own presence must not look
+			// expired to whoever it just handshook with — including a
+			// brand-new room that never heard of it before (see
+			// TestClient_Awareness_ReconnectRebroadcastsWithAdvancedClock).
+			// Heartbeat bumps this client's own awareness clock past
+			// anything any peer previously saw and, via onAwarenessUpdate,
+			// re-announces it over the lane immediately rather than waiting
+			// up to a full PingInterval for the next ping-ticker heartbeat
+			// above. A no-op if no local state has ever been set.
+			//
+			// TWO Heartbeat calls, not one, and this is not a defensive
+			// round number: whatever connection we just lost did not end
+			// peacefully from a peer's point of view — provider/websocket's
+			// own peer.handleDisconnect synthesises a null-state removal for
+			// every clientID the dead connection owned, AT THAT CLIENT'S
+			// LAST-KNOWN-CLOCK PLUS ONE (see encodeAwarenessRemoval's doc:
+			// "clock incremented by 1"), and broadcasts it to every peer
+			// that was still connected when the disconnect happened. This
+			// client's OWN local clock is untouched by that broadcast — a
+			// disconnecting peer never receives its own removal notice — so
+			// a single Heartbeat here (also a plain +1 from the same
+			// pre-disconnect clock) computes the EXACT SAME number the
+			// server's synthetic tombstone already used. Awareness.ApplyUpdate's
+			// clock gate accepts a NEWER non-null entry unconditionally, but
+			// at an EQUAL clock a non-null entry can never override an
+			// existing null one (see its doc's "equal clock" comment) — so a
+			// peer who received that tombstone before this reconnect's
+			// re-announcement arrives would keep it, permanently, one tie
+			// away from correct. Bumping by 2 clears that exact margin
+			// unconditionally, without needing to know whether the tombstone
+			// was actually sent, received, or still outstanding anywhere.
+			s.c.awareness.Heartbeat()
+			s.c.awareness.Heartbeat()
 			if s.onSynced != nil {
 				s.onSynced()
 			}
 		}
 
 	case wireMsgAwareness:
-		// Awareness is a later #165 task's job. When it lands, note that
-		// payload here is still VarBytes-WRAPPED — decodeEnvelope is
+		// Awareness payload is VarBytes-WRAPPED — decodeEnvelope is
 		// deliberately type-agnostic and strips only the outer tag — so it
-		// must be unwrapped with encoding.NewDecoder(payload).ReadVarBytes()
-		// before being handed to Awareness.ApplyUpdate, exactly as
-		// provider/websocket/peer.go's `case msgAwareness` does. Dropping the
-		// frame until then is harmless: awareness is idempotent heartbeat
-		// state that the next update supersedes in full.
+		// must be unwrapped here before reaching Awareness.ApplyUpdate,
+		// exactly as provider/websocket/peer.go's `case msgAwareness` does.
+		awBytes, err := encoding.NewDecoder(payload).ReadVarBytes()
+		if err != nil {
+			return nil // malformed frame — drop, see this method's doc
+		}
+		// remoteOrigin: this came from the network, so onAwarenessUpdate
+		// (registered on this same Awareness instance) must not echo it back
+		// out — see that observer's doc for the full argument, which mirrors
+		// onDocUpdate's send-suppression for server-received Doc updates.
+		if err := s.c.awareness.ApplyUpdate(awBytes, s.c.remoteOrigin); err != nil {
+			return nil // unappliable — drop, see this method's doc
+		}
+
+	case wireMsgQueryAwareness:
+		// A peer wants everything we know, mirroring provider/websocket/
+		// peer.go's `case msgQueryAwareness`, which answers unconditionally
+		// with sendAwareness(room.awareness.EncodeUpdate(nil)) regardless of
+		// that peer's own sync state. Answered directly here, on this
+		// goroutine (the loop's own — see session's doc): this is a reply to
+		// a frame just read, exactly like the SyncStep1->SyncStep2 reply
+		// above, not a change that needs the lane's cross-goroutine hand-off.
+		reply := encodeEnvelope(wireMsgAwareness, encoding.EncodeBytes(func(enc *encoding.Encoder) {
+			enc.WriteVarBytes(s.c.awareness.EncodeUpdate(nil))
+		}))
+		if err := s.write(reply); err != nil {
+			return fmt.Errorf("client: send awareness query reply: %w", err)
+		}
 	}
 	return nil
 }
 
-// flushLane drains every outbound payload the Doc observer (and, later,
-// awareness) handed off and writes it to the socket.
+// flushLane drains every outbound payload the Doc observer AND the Awareness
+// observer (onDocUpdate, onAwarenessUpdate) handed off and writes it to the
+// socket.
 //
 // The Lane's signal is coalescing (capacity 1), so one wake-up can stand for
 // any number of pushes: the drain must continue until both takes report
@@ -498,21 +579,30 @@ func (s *session) handleFrame(frame []byte) error {
 // already-solved problem, at the cost of a second source of truth for
 // pending writes that could disagree with the Doc.
 //
-// For a TakeAwareness payload, the same argument does NOT hold, and a future
-// implementer must not assume it does just because this comment is right
-// above that branch too: awareness state is not doc state, so it is not
-// part of what SyncStep1/SyncStep2 exchange, and a dropped awareness blob is
-// not "still sitting" anywhere the handshake will ever look. This is latent
-// today — nothing produces an awareness payload yet, so TakeAwareness never
-// actually returns one until a later #165 task wires Awareness.SetLocalState
-// (or similar) to push onto the lane — but latent is not the same as safe to
-// ignore, because THIS comment is exactly what that task's implementer will
-// read first. Whatever makes a dropped awareness write harmless will have to
-// be awareness's own mechanism (its next local-state emit, or a periodic
-// heartbeat, superseding the lost one — awareness is designed to be safely
-// supersedable state, unlike a CRDT update) — confirm that property
-// explicitly against the real implementation when that task lands, rather
-// than inheriting this paragraph's KindSync conclusion by proximity.
+// For a TakeAwareness payload, the same argument does NOT hold: awareness
+// state is not doc state, so it is not part of what SyncStep1/SyncStep2
+// exchange, and a dropped awareness blob is not "still sitting" anywhere a
+// handshake will look. #165 Task 8 is what resolves this, and the mechanism
+// is exactly what the paragraph above anticipated — awareness's OWN
+// supersedable-state property, not a KindSync-style retry: whatever this
+// call just lost is superseded, within at most one PingInterval, by ONE of
+// two Heartbeat call sites in runLoop:
+//
+//   - if the write failed because THIS connection is dying (the ordinary
+//     case — flushLane's error return ends runLoop), the very next
+//     connection's handshake fires Heartbeat() the moment its SyncStep2
+//     applies (see handleFrame), before this Client's local state has any
+//     chance to look stale to whoever it just (re)joined;
+//   - if the connection is still alive and only this one send failed
+//     transiently, or nothing failed but a local-state change was never
+//     even attempted while fully offline, the ping ticker's own Heartbeat()
+//     call (runLoop's `case <-pingTicker.C`) re-announces at latest
+//     PingInterval later regardless.
+//
+// Either way, "put the payload back on a failed write" is exactly as wrong
+// here as the KindSync paragraph above says it is for sync — it would just
+// be solving an already-solved problem via a second mechanism instead of
+// one.
 func (s *session) flushLane() error {
 	for {
 		if update, ok := s.c.lane.TakeSync(); ok {

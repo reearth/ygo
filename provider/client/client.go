@@ -14,6 +14,7 @@ import (
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/cluster"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/internal/relaylane"
 )
 
@@ -220,6 +221,11 @@ type Client struct {
 	// only by Close — so it needs no synchronisation of its own.
 	unsubObserver func()
 
+	// unsubAwareness removes the Awareness.OnUpdate observer New registered
+	// (see onAwarenessUpdate). Same lifecycle and same "no synchronisation
+	// needed" reasoning as unsubObserver above.
+	unsubAwareness func()
+
 	// connectStarted latches when a Connect call is accepted, so a second one
 	// is refused rather than starting a rival dial loop and a rival observer
 	// on the same Doc. See Connect and ErrAlreadyConnected.
@@ -327,6 +333,13 @@ func New(o Options) (*Client, error) {
 	// correct — what an update is FOR is decided by its origin, not by when it
 	// arrives (see onDocUpdate).
 	c.unsubObserver = o.Doc.OnUpdate(c.onDocUpdate)
+	// Register the Awareness observer here for the same reason as the Doc
+	// observer just above: an offline-first client's Awareness is usable
+	// (SetLocalState, Heartbeat) the instant New returns, before Connect is
+	// ever called, and a caller doing so before Connect must not have that
+	// state silently dropped — it should simply queue on the lane (see
+	// onAwarenessUpdate) until a connection exists to flush it over.
+	c.unsubAwareness = c.awareness.OnUpdate(c.onAwarenessUpdate)
 	return c, nil
 }
 
@@ -391,6 +404,42 @@ func (c *Client) onDocUpdate(update []byte, origin any) {
 	queued := make([]byte, len(update))
 	copy(queued, update)
 	c.lane.Push(cluster.KindSync, queued)
+}
+
+// onAwarenessUpdate is the single Awareness.OnUpdate observer this Client
+// registers, wired up by New for the same "usable before Connect" reason
+// onDocUpdate is (#165 Task 8).
+//
+// Unlike onDocUpdate's three-way origin table, awareness has no store and no
+// hydration, so there is only one distinction that matters: did this update
+// originate from OUR OWN awareness calls (SetLocalState, Heartbeat — origin
+// nil) or was it applied because the NETWORK told us something (ApplyUpdate,
+// always called with origin c.remoteOrigin — see handleFrame's wireMsgAwareness
+// case, and dropRemoteAwareness's own local-bookkeeping use of the same
+// sentinel below)? Only the former should ever be sent back out; echoing the
+// latter would bounce every remote peer's presence back at the server
+// forever, the awareness analogue of the doc-side echo storm
+// TestClient_SuppressesEchoAfterConvergence (offline_test.go) guards against.
+//
+// Only the affected client IDs are re-encoded and pushed, not the Client's
+// entire known state (EncodeUpdate(nil)) — SetLocalState and Heartbeat only
+// ever touch the local clientID, so evt's Added/Updated/Removed already is
+// that one ID in every real call; encoding just those IDs keeps the wire
+// message from also re-broadcasting every remote entry's unchanged state on
+// every local presence tick.
+func (c *Client) onAwarenessUpdate(evt awareness.UpdateEvent) {
+	if evt.Origin == c.remoteOrigin {
+		return
+	}
+	n := len(evt.Added) + len(evt.Updated) + len(evt.Removed)
+	if n == 0 {
+		return
+	}
+	ids := make([]uint64, 0, n)
+	ids = append(ids, evt.Added...)
+	ids = append(ids, evt.Updated...)
+	ids = append(ids, evt.Removed...)
+	c.lane.Push(cluster.KindAwareness, c.awareness.EncodeUpdate(ids))
 }
 
 // Connect hydrates the Client's Doc from Store (if one was configured),
@@ -593,22 +642,101 @@ func (c *Client) emitStatus(st Status) {
 // Awareness returns this Client's Awareness instance, keyed to the same
 // ClientID as Doc — so presence/cursor state a caller sets locally via
 // SetLocalState is attributed to the same peer identity the sync protocol
-// uses for this connection. Propagating that state over the wire is a later
-// #165 task; the loop already carries awareness payloads outbound, but
-// nothing produces them yet.
+// uses for this connection.
+//
+// Local state set here (or updated via Heartbeat) propagates to the server —
+// and from there, to every other peer in the room — via onAwarenessUpdate,
+// the observer New registers on this same instance: it holds regardless of
+// whether Connect has been called yet, exactly like Doc edits (see New's
+// doc). Once connected, it is additionally kept alive automatically: every
+// successful handshake (including a reconnect's) and every PingInterval tick
+// re-announces it at a bumped clock, so a quiet client is not reaped by a
+// server's AwarenessExpiry sweep (see runLoop's ping ticker case and its
+// sync-step-2 completion branch).
 func (c *Client) Awareness() *awareness.Awareness {
 	return c.awareness
+}
+
+// dropRemoteAwareness marks every REMOTE client's state in this Client's own
+// Awareness as removed, leaving only the local client's own entry intact.
+// Called once per connection teardown (see runLoop's defer) to mirror
+// y-websocket's WebsocketProvider.removeAwarenessStates on disconnect:
+// presence learned over a socket that no longer exists is stale the instant
+// the socket dies, and a caller polling GetStates afterwards should not keep
+// seeing peers this Client can no longer actually hear from.
+//
+// The removal is applied via Awareness.ApplyUpdate carrying c.remoteOrigin —
+// deliberately the SAME sentinel handleFrame's wireMsgAwareness case stamps
+// on every network-applied update, not a new one-off flag — specifically so
+// onAwarenessUpdate's existing "do not re-send what came from the network"
+// rule (see its doc) already covers this for free. Without that, this
+// purely-local bookkeeping change would sit on the lane and get flushed to
+// the NEXT connection as if it were real news, telling a possibly brand-new
+// room about client IDs it has never heard of and, for a room that DID
+// survive the disconnect, incorrectly announcing peers who are still
+// perfectly present as removed.
+//
+// This builds the removal update by hand (WriteVarUint/WriteVarString)
+// rather than via Awareness.EncodeUpdate, because EncodeUpdate always
+// encodes each client's CURRENTLY STORED state — there is no "force this ID
+// to null" mode — whereas a removal update's whole point is to override
+// that stored state.
+//
+// Each entry's clock is the client's CURRENT last-known clock, deliberately
+// NOT bumped by one. GetStates only returns entries that are still active
+// (State != nil, see its own doc), so every id here satisfies
+// ApplyUpdate's "equal clock + null + currently-active → accept" rule
+// as-is — no increment is needed to clear that gate for THIS call. Bumping
+// it anyway (an earlier version of this method did) creates a poisoned
+// tombstone: if the remote peer's own next real update happens to carry
+// that exact same clock+1 (its ordinary Heartbeat/SetLocalState bump from
+// the same last-known clock this method just read), it arrives as a
+// non-null entry at a clock EQUAL to this tombstone's — and ApplyUpdate's
+// equal-clock gate only accepts a null entry overriding a non-null current,
+// never the reverse, so the peer's genuine reappearance would be silently
+// dropped. Leaving the clock unbumped avoids the collision entirely: the
+// peer's real next update is only ever accepted by the ordinary
+// strictly-newer-clock path once it actually arrives.
+func (c *Client) dropRemoteAwareness() {
+	states := c.awareness.GetStates()
+	localID := c.awareness.ClientID()
+
+	var ids []uint64
+	for id := range states {
+		if id != localID {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(uint64(len(ids)))
+	for _, id := range ids {
+		enc.WriteVarUint(id)
+		enc.WriteVarUint(states[id].Clock)
+		enc.WriteVarString("null")
+	}
+	// ApplyUpdate's only error is a malformed update; this one is built
+	// correctly by construction, so there is nothing a caller could do with
+	// an error here that isn't already implied by "removal didn't happen" —
+	// which is itself harmless (see this method's doc: the entries are
+	// stale local bookkeeping, not data anything depends on).
+	_ = c.awareness.ApplyUpdate(enc.Bytes(), c.remoteOrigin)
 }
 
 // Close signals Connect to tear down its connection and return. It is safe to
 // call more than once (only the first call has any effect) and safe to call
 // concurrently with Connect.
 //
-// It also unregisters the Doc observer New installed, so a Doc that outlives
-// its Client stops writing to the Store (and stops queueing sends that nothing
-// will ever drain). The unsub function is written once, in New, before the
-// Client is reachable by any other goroutine, and read only here under
-// closeOnce — so this needs no lock and cannot race Connect.
+// It also unregisters the Doc observer AND the Awareness observer New
+// installed, so a Doc/Awareness pair that outlives its Client stops writing
+// to the Store, stops queueing doc sends, and stops queueing awareness
+// re-announcements that nothing will ever drain. Both unsub functions are
+// written once, in New, before the Client is reachable by any other
+// goroutine, and read only here under closeOnce — so this needs no lock and
+// cannot race Connect.
 //
 // Close does not close Store: the Store is constructed and owned by the
 // caller (e.g. via OpenSQLiteStore), which may want to reuse it — for
@@ -618,6 +746,7 @@ func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
 		c.unsubObserver()
+		c.unsubAwareness()
 	})
 	return nil
 }
