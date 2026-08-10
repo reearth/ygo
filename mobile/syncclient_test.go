@@ -344,6 +344,107 @@ func TestSyncClient_CloseFromOnStatusDoesNotDeadlock(t *testing.T) {
 	}
 }
 
+// slowStatusObserver blocks its very first OnStatus call until the test
+// releases it via unblock, and records every call (including that first one,
+// once released) in delivery order. entered closes the moment the first call
+// has started blocking, giving the test a deterministic signal to synchronize
+// on instead of a sleep-and-hope.
+type slowStatusObserver struct {
+	mu      sync.Mutex
+	calls   []statusCall
+	once    sync.Once
+	entered chan struct{}
+	unblock chan struct{}
+}
+
+func newSlowStatusObserver() *slowStatusObserver {
+	return &slowStatusObserver{
+		entered: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+}
+
+func (o *slowStatusObserver) OnStatus(state int64, errMsg string) {
+	o.once.Do(func() {
+		close(o.entered)
+		<-o.unblock
+	})
+	o.mu.Lock()
+	o.calls = append(o.calls, statusCall{state: state, errMsg: errMsg})
+	o.mu.Unlock()
+}
+
+func (o *slowStatusObserver) sawDisconnected() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, c := range o.calls {
+		if c.state == SyncStateDisconnected {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSyncClient_CloseDeliversTerminalStatusDespiteSlowObserver is #165's
+// final whole-branch review, the last open finding: statusDrain used to check
+// p.stopped BEFORE checking whether the queue was actually empty, so
+// SyncClient.Close could push the clean, terminal StateDisconnected
+// client.Client.Connect emits inside its connectWG window (see that method's
+// own doc), immediately call statusPend.stop(), and have the drain goroutine
+// observe "stopped" before it ever got back around to popping that queued
+// entry — abandoning the one status Close's own doc promises is never lost.
+// Platform code relying on that promise (e.g. flipping a "connected"
+// indicator back off) would see it stick forever.
+//
+// This reproduces exactly that race deterministically instead of hoping a
+// timing accident lines up: obs blocks inside its FIRST OnStatus call (which
+// fires for whatever status is emitted first, e.g. StateConnecting) until
+// this test releases it. While it is blocked, Close() runs to completion —
+// which, per Close's own doc, means client.Client.Close has already joined
+// the loop goroutine and pushed every status it will ever emit, including
+// the terminal StateDisconnected, onto statusPend, and then called
+// statusPend.stop(). So by the time obs is released, the queue already holds
+// a real, undelivered status AND stopped is already true — precisely the
+// state that used to make statusDrain give up without delivering it.
+func TestSyncClient_CloseDeliversTerminalStatusDespiteSlowObserver(t *testing.T) {
+	_, ts := startTestServer(t)
+	sc, err := NewSyncClient(wsTestURL(ts, "slow-status-close"), "", "")
+	if err != nil {
+		t.Fatalf("NewSyncClient: %v", err)
+	}
+
+	obs := newSlowStatusObserver()
+	sc.SetOnStatus(obs)
+	sc.Connect()
+
+	select {
+	case <-obs.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("observer's first OnStatus call never started; no status was ever delivered")
+	}
+
+	// The drain goroutine is now blocked inside obs.OnStatus. Close must not
+	// wait for it (see Close's own doc) — it only needs to have pushed the
+	// terminal status and called stop before returning.
+	closeDone := make(chan struct{})
+	go func() {
+		sc.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() did not return; it must not block on the (blocked) status observer")
+	}
+
+	// Release the observer now that Close has already run stop() with the
+	// terminal status sitting in the queue — the exact race this test exists
+	// to force.
+	close(obs.unblock)
+
+	waitFor(t, 5*time.Second, obs.sawDisconnected)
+}
+
 // TestSyncClient_BadDBPath_ReturnsError proves the other half of Important
 // 2's coverage gap: a dbPath NewSyncClient cannot actually open as a local
 // SQLite database must fail construction outright — via NewSyncClient's own

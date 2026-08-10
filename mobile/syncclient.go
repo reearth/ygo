@@ -79,9 +79,12 @@ func (p *statusPending) push(st client.Status) {
 	p.mu.Unlock()
 }
 
-// stop signals statusDrain to exit once it next wakes, abandoning any
-// still-queued statuses. It does NOT join statusDrain — see that function's
-// own doc for why, mirroring mobile/observe.go's Subscription.Close.
+// stop signals statusDrain to exit once its queue has been fully delivered
+// and it next wakes with nothing left to send — see statusDrain's own doc for
+// why a non-empty queue takes priority over the stopped flag (#165 final
+// whole-branch review's last open finding). It does NOT join statusDrain —
+// see that function's own doc for why, mirroring mobile/observe.go's
+// Subscription.Close.
 func (p *statusPending) stop() {
 	p.mu.Lock()
 	p.stopped = true
@@ -93,22 +96,33 @@ func (p *statusPending) stop() {
 // SyncStatusObserver, one at a time, in the order provider/client.Client
 // produced them, on a goroutine that is NEVER that Client's own loop
 // goroutine — see handleStatus's and SyncStatusObserver's own doc for why
-// that separation is the entire point of this indirection. It exits once
-// p.stopped is observed, abandoning any still-queued statuses; a status
-// already dequeued before that point is still delivered. Not joined by
-// SyncClient.Close, for the same reason mobile/observe.go's docDrain/
-// awarenessDrain are not joined by Subscription.Close: this goroutine may
-// currently be inside the observer's OnStatus call, which is free to call
-// back into this SyncClient (including Close itself — see
-// SyncStatusObserver's doc), so waiting for it here could deadlock against
-// exactly the call this indirection exists to make safe.
+// that separation is the entire point of this indirection. It exits only
+// once p.stopped is observed AND the queue is empty — unlike
+// mobile/observe.go's docDrain/awarenessDrain, which abandon their queue the
+// moment stop is observed (see their own docs for why that is fine for
+// them), this drain must not: SyncClient.Close pushes the terminal
+// StateDisconnected client.Client.Connect emits inside its connectWG window
+// and THEN calls stop, so a stopped-takes-priority check here could observe
+// stopped==true with that very status still sitting in the queue and drop
+// it — silently leaving a platform observer's "connected" indicator stuck
+// forever (#165 final whole-branch review; see
+// TestSyncClient_CloseDeliversTerminalStatusDespiteSlowObserver for the
+// reproduction and Close's own doc for the delivery guarantee this
+// satisfies). Checking queue length first means every status already queued
+// by the time stop is called is still delivered, in order, before this
+// goroutine exits. Not joined by SyncClient.Close, for the same reason
+// mobile/observe.go's docDrain/awarenessDrain are not joined by
+// Subscription.Close: this goroutine may currently be inside the observer's
+// OnStatus call, which is free to call back into this SyncClient (including
+// Close itself — see SyncStatusObserver's doc), so waiting for it here could
+// deadlock against exactly the call this indirection exists to make safe.
 func statusDrain(p *statusPending, s *SyncClient) {
 	for {
 		p.mu.Lock()
 		for len(p.queue) == 0 && !p.stopped {
 			p.cond.Wait()
 		}
-		if p.stopped {
+		if p.stopped && len(p.queue) == 0 {
 			p.mu.Unlock()
 			return
 		}
@@ -386,16 +400,25 @@ func (s *SyncClient) SyncedOnce() bool {
 // a SyncStatusObserver.OnStatus callback.
 //
 // By the time s.c.Close() returns, every Status that Client will ever emit
-// has already been pushed to statusPend (see client.Client.Close's own doc:
-// it joins the loop goroutine before returning, and every status is emitted
-// from inside that goroutine's own call stack). statusPend.stop() is called
-// AFTER that, so no legitimately-emitted status is lost to the stop
-// racing ahead of its own push — but stop does not JOIN statusDrain, for the
-// same reason mobile/observe.go's Subscription.Close does not join
-// docDrain/awarenessDrain: that goroutine may currently be inside the
-// observer's OnStatus call (possibly this very call, if Close was invoked
-// from inside one), and waiting for it here would defeat the whole point of
-// dispatching off provider/client's own loop goroutine in the first place.
+// — including the terminal StateDisconnected Connect emits inside its
+// connectWG window — has already been pushed to statusPend (see
+// client.Client.Close's own doc: it joins the loop goroutine before
+// returning, and every status is emitted from inside that goroutine's own
+// call stack). statusPend.stop() is called AFTER that, so no
+// legitimately-emitted status is lost to the stop racing ahead of its own
+// push. That alone would not be enough on its own, though: statusDrain must
+// also actually deliver whatever is sitting in the queue at that point
+// rather than abandoning it just because stopped is now true — which is
+// exactly what it does (see statusDrain's own doc; this was #165's final
+// whole-branch review's last open finding, reproduced by
+// TestSyncClient_CloseDeliversTerminalStatusDespiteSlowObserver). stop does
+// not JOIN statusDrain, for the same reason mobile/observe.go's
+// Subscription.Close does not join docDrain/awarenessDrain: that goroutine
+// may currently be inside the observer's OnStatus call (possibly this very
+// call, if Close was invoked from inside one), and waiting for it here would
+// defeat the whole point of dispatching off provider/client's own loop
+// goroutine in the first place. A slow or blocked observer therefore delays
+// delivery of the terminal status, but never loses it.
 //
 // It does NOT close Doc() — see Doc's own doc for why the document must
 // remain usable after Close.
