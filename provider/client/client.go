@@ -56,9 +56,15 @@ type Options struct {
 	Store LocalStore
 
 	// Token is the Hocuspocus in-band auth token (mirrors
-	// provider/websocket's OnTokenAuth, #104). The in-band auth exchange
-	// that sends it is a later #165 task; the dial loop does not send it
-	// yet. Use Header for HTTP-level credentials in the meantime.
+	// provider/websocket's OnTokenAuth, #104). When set, the dial loop sends
+	// it as an Auth (tag 2) Token sub-message on every connection, before
+	// the sync handshake (see loop.go's runLoop and wire.go's
+	// encodeAuthToken, #165 Task 9). A server that rejects it (a
+	// PermissionDenied reply) makes Connect return ErrAuthRejected — a
+	// TERMINAL failure, not one the reconnect loop retries; see that
+	// sentinel's doc. Left at its zero value (the default), nothing changes
+	// from the plain y-websocket flow: no Auth frame is ever sent. Use
+	// Header for HTTP-level credentials instead of, or in addition to, this.
 	Token string
 
 	// Header carries additional HTTP headers on the WebSocket upgrade
@@ -141,6 +147,27 @@ type hydrateOrigin struct{ _ byte }
 // ErrAlreadyConnected is returned by Connect when this Client has already had
 // a Connect call accepted. A Client is single-use.
 var ErrAlreadyConnected = errors.New("ygo/client: already connected")
+
+// ErrAuthRejected is returned by Connect — and set as Err on the final
+// StateDisconnected status that precedes that return — when Options.Token
+// was rejected by the server's Hocuspocus in-band auth (provider/websocket's
+// #104 OnTokenAuth hook returning a non-nil error, surfaced to this client as
+// a PermissionDenied reply; see loop.go's handleFrame wireMsgAuth case).
+//
+// Unlike every other connection failure runReconnectLoop (loop.go) handles,
+// this one is TERMINAL: retrying with the same rejected token can never
+// succeed — the server will keep rejecting it — so treating it like an
+// ordinary transient failure would turn a bad credential into an indefinite
+// hammering of the server instead of a prompt, actionable error. See
+// runReconnectLoop's doc for exactly where this is checked, ahead of the
+// backoff sleep, so a rejection is reported and returned on the FIRST
+// attempt rather than after however many cycles it would have taken a
+// caller to notice and cancel ctx themselves (#165 Task 9, #104).
+//
+// runLoop wraps this with additional context via fmt.Errorf's %w verb, so
+// callers must use errors.Is(err, ErrAuthRejected) rather than comparing the
+// returned error directly.
+var ErrAuthRejected = errors.New("ygo/client: auth rejected by server")
 
 // State is a Client's coarse connection lifecycle, reported via Status.
 type State int
@@ -564,16 +591,27 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 	}()
 
-	// runReconnectLoop only ever returns once loopCtx is done (see its own
-	// doc): every connection failure along the way is already reported
-	// through OnStatus as it happens, so there is nothing left to inspect
-	// once it returns. The final, unconditional emission below is the
-	// bookend StateDisconnected's own doc describes ("after Close") — it is
+	// runReconnectLoop returns nil in the ordinary case — it only stops
+	// because loopCtx is done (see its own doc) — with every connection
+	// failure along the way already reported through OnStatus as it
+	// happened, so there is nothing left to inspect once it returns nil.
+	// The final, unconditional emission below is the bookend
+	// StateDisconnected's own doc describes ("after Close") — it is
 	// deliberately Err: nil even if the very last attempt before the stop
 	// had failed, because THAT failure was already reported with its real
 	// error by runReconnectLoop; this one specifically means "and now the
 	// client is stopped, on purpose."
-	c.runReconnectLoop(loopCtx)
+	//
+	// A non-nil return is the one exception (#165 Task 9): a terminal
+	// failure — currently only ErrAuthRejected — that runReconnectLoop
+	// deliberately did NOT retry. It has already reported that failure via
+	// OnStatus too (see its own doc), so this just surfaces the same error
+	// through Connect's return value instead of falling through to the
+	// "stopped on purpose" bookend below, which would misreport a rejected
+	// token as a clean stop.
+	if err := c.runReconnectLoop(loopCtx); err != nil {
+		return err
+	}
 	c.emitStatus(Status{State: StateDisconnected})
 
 	select {

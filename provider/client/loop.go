@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -308,6 +309,40 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	pingTicker := time.NewTicker(pingInterval)
 	defer pingTicker.Stop()
 
+	// #165 Task 9: when Options.Token is set, send the Hocuspocus in-band
+	// Auth (tag 2) Token sub-message BEFORE the sync handshake below, on
+	// this same connection and from this same loop goroutine — the
+	// single-writer invariant documented on session above still binds here:
+	// this is just one more DATA frame the loop writes, exactly like the
+	// SyncStep1 that follows it.
+	//
+	// The reply (Authenticated or PermissionDenied) is deliberately NOT
+	// awaited synchronously here with its own read loop: ygo's own server
+	// does not gate its initial sync push on auth at all (see
+	// provider/websocket's OnTokenAuth doc: "the initial sync is served
+	// before any PermissionDenied"), so this client does not need to either.
+	// It sends the token and lets the ordinary frame dispatch in the for/
+	// select loop below (handleFrame's wireMsgAuth case) react to whatever
+	// comes back, in whatever order it arrives relative to the sync frames
+	// — including a PermissionDenied that arrives AFTER this connection has
+	// already completed a handshake and reported StateSynced, which is the
+	// server's documented behaviour, not a bug in either side. That case
+	// makes handleFrame return ErrAuthRejected, which runReconnectLoop (see
+	// its own doc) treats as terminal rather than something to back off and
+	// retry.
+	//
+	// When Token is empty (the default, and the whole of #165 through Task
+	// 8), nothing here executes: this connection sends exactly what it
+	// always has, byte for byte — plain y-websocket, no Auth frame, ever.
+	// See auth_test.go's TestClient_Auth_EmptyTokenSendsNoAuthFrame for the
+	// proof, by observation on a raw server, rather than by reading this
+	// comment.
+	if c.opts.Token != "" {
+		if err := s.write(encodeAuthToken(c.opts.Token)); err != nil {
+			return fmt.Errorf("client: send auth token: %w", err)
+		}
+	}
+
 	// Open with our state vector, so the server can send back exactly what
 	// this Doc is missing. Note ygo's own server does not wait to be asked:
 	// it pushes SyncStep1 + a full SyncStep2 + awareness the moment the
@@ -356,17 +391,44 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 
 // runReconnectLoop is Connect's actual dial loop: it runs runLoop over and
 // over — dial, handshake, live sync, until that connection ends — applying
-// a jittered backoff between failed attempts, until ctx is cancelled or the
+// a jittered backoff between failed attempts, until ctx is cancelled, the
 // Client is closed (both collapse to ctx being done, by the time this is
-// called; see Connect). It has no return value because it has nothing
-// meaningful to return: it only ever exits once ctx is done, and every
+// called; see Connect), or a TERMINAL failure occurs. It returns nil in the
+// first two cases — there is nothing meaningful to return, since every
 // connection failure along the way is reported through OnStatus as it
-// happens (as StateDisconnected{Err: err}) rather than surfaced here.
+// happens (as StateDisconnected{Err: err}) rather than surfaced via a return
+// value — and returns that failure's error in the third.
 //
-// Each reconnect re-runs runLoop's full handshake from scratch. That re-run
-// is deliberately the ONLY recovery mechanism here: see flushLane's doc and
-// the package doc for why an edit made while disconnected needs no separate
-// replay path, and reconnect_test.go for the end-to-end proof.
+// # Terminal vs retryable (#165 Task 9)
+//
+// Almost every way runLoop can fail is retryable by construction: a refused
+// dial, a dropped connection, a keepalive timeout are all conditions that
+// may no longer hold by the next attempt, and backing off before trying
+// again is exactly the right response. An auth rejection (ErrAuthRejected,
+// from a PermissionDenied reply to Options.Token — see loop.go's handleFrame
+// wireMsgAuth case) is categorically different: the token that was just
+// rejected will be rejected again, and again, forever, because retrying
+// changes nothing about it. Folding that into the ordinary retryable path
+// would turn a bad credential into an indefinite hammering of the server
+// with a request that can never succeed — worse than useless, since it also
+// hides the real problem behind an endless StateDisconnected/StateConnecting
+// churn instead of surfacing it once, clearly, through Connect's return
+// value.
+//
+// So: the errors.Is check below runs BEFORE bo.next()'s backoff sleep, not
+// after — a terminal failure is reported and returned on the very FIRST
+// attempt, exactly as newly-observed as any other failure, but without ever
+// reaching the code that would retry it. See ErrAuthRejected's own doc for
+// the sentinel and the errors.Is-through-wrapping contract callers get, and
+// auth_test.go's TestClient_Auth_WrongTokenIsTerminal for the proof that no
+// second attempt happens (a would-be retry's OnTokenAuth invocation would be
+// directly observable server-side, and isn't).
+//
+// Each RETRYABLE reconnect re-runs runLoop's full handshake from scratch.
+// That re-run is deliberately the ONLY recovery mechanism here: see
+// flushLane's doc and the package doc for why an edit made while
+// disconnected needs no separate replay path, and reconnect_test.go for the
+// end-to-end proof.
 //
 // # Backoff: base 500ms, capped at Options.MaxBackoff, reset on handshake
 //
@@ -381,7 +443,7 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 // succeeded but the handshake never got that far — leaves bo exactly where
 // it was, so the NEXT attempt's delay keeps widening rather than resetting
 // into a hot loop against a server that isn't actually serving anything.
-func (c *Client) runReconnectLoop(ctx context.Context) {
+func (c *Client) runReconnectLoop(ctx context.Context) error {
 	bo := backoff{base: reconnectBackoffBase, max: c.opts.MaxBackoff}
 
 	for {
@@ -393,7 +455,16 @@ func (c *Client) runReconnectLoop(ctx context.Context) {
 			// ever changes — a race where ctx happened to be cancelled at
 			// almost the same moment a real failure occurred. Either way,
 			// a deliberate stop is not something to report as a failure.
-			return
+			return nil
+		}
+
+		if errors.Is(err, ErrAuthRejected) {
+			// See this function's "Terminal vs retryable" doc section
+			// above: report it exactly like any other failure, then stop —
+			// deliberately BEFORE bo.next()'s backoff sleep below, so a
+			// rejected token never reaches a second attempt.
+			c.emitStatus(Status{State: StateDisconnected, Err: err})
+			return err
 		}
 
 		c.emitStatus(Status{State: StateDisconnected, Err: err})
@@ -403,7 +474,7 @@ func (c *Client) runReconnectLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return
+			return nil
 		case <-timer.C:
 		}
 	}
@@ -547,6 +618,30 @@ func (s *session) handleFrame(frame []byte) error {
 		if err := s.c.awareness.ApplyUpdate(awBytes, s.c.remoteOrigin); err != nil {
 			return nil // unappliable — drop, see this method's doc
 		}
+
+	case wireMsgAuth:
+		// Hocuspocus in-band Auth (tag 2) reply (#104, #165 Task 9) — only
+		// ever produced by a server with OnTokenAuth configured (see
+		// peer.handleAuth's nil-hook no-op); a server with no hook, or a
+		// connection that never sent Token, produces none of these, so this
+		// case is unreachable in practice unless Options.Token was set.
+		subType, reason, err := decodeAuthReply(payload)
+		if err != nil {
+			return nil // malformed reply — drop, see this method's doc
+		}
+		if subType == authTypePermissionDenied {
+			// TERMINAL, not a connection failure to retry: see
+			// ErrAuthRejected's doc and runReconnectLoop's, which checks
+			// errors.Is against exactly this wrapped error before it would
+			// otherwise fall through to the backoff sleep.
+			return fmt.Errorf("client: %w: %s", ErrAuthRejected, reason)
+		}
+		// authTypeAuthenticated (or any other/future sub-type this client
+		// does not recognize) needs no action here: the handshake above
+		// already proceeds unconditionally, and #165's YAGNI scope for this
+		// task is the token exchange itself, not surfacing the granted
+		// scope (ConnectionConfig.ReadOnly) back to the caller — Options
+		// already has Header for anything finer-grained than accept/reject.
 
 	case wireMsgQueryAwareness:
 		// Answered directly here, on this goroutine (the loop's own — see
