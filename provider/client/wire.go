@@ -54,6 +54,54 @@ const (
 	authTypeAuthenticated = uint64(2)
 )
 
+// wsCodeUnauthorized mirrors provider/websocket/server.go's identically
+// named unexported constant (4401, the WebSocket close code
+// peer.handleAuth's rejection path passes to enqueueClose alongside the
+// PermissionDenied data frame). Like authTypeToken and friends above, this
+// is pinned by VALUE rather than by importing provider/websocket, since the
+// server's constant is itself unexported.
+//
+// # Why this client needs its own copy of a close code (#165)
+//
+// Before this constant existed, a rejected token was ONLY detectable from
+// the PermissionDenied data frame (handleFrame's wireMsgAuth case, below) —
+// nothing else on this connection was treated as evidence of a rejection.
+// That is provably insufficient on its own: peer.go's sendCloseFrame calls
+// conn.Close() immediately after queuing the close control frame that
+// follows PermissionDenied, and closing a TCP socket that still has *unread
+// inbound* bytes buffered from this client (this client's handleFrame
+// replies to the server's own unconditional initial SyncStep1/awareness
+// push before it has any idea its Token is about to be rejected, so there
+// is normally something of this client's own still sitting unread
+// server-side at exactly this moment) is a textbook trigger for the kernel
+// to emit an RST instead of a graceful FIN — and a well-established
+// property of RST-terminated connections is that data already sitting in
+// the OTHER side's own unread receive buffer is not guaranteed to survive
+// it. A client that never gets to read the PermissionDenied frame before
+// its connection dies this way sees only a close, indistinguishable from
+// any other severed connection, with the ordinary read-error handling below
+// (before this constant) then backing off and redialing the same doomed
+// token.
+//
+// That specific RST mechanism is this file's best explanation for the
+// intermittent CI failure that motivated this fix (auth_test.go's
+// TestClient_Auth_WrongTokenIsTerminal, driving ygo's own
+// provider/websocket.Server, occasionally saw a second OnTokenAuth call —
+// never reproduced locally across 30 -race runs) — it is INFERRED from how
+// peer.go and gorilla/websocket both behave, not something this package
+// instrumented and captured directly off a real socket. What IS directly
+// established, independent of that inference being exactly right, is the
+// defect itself: this client's terminality check depended entirely on
+// reading one specific frame, with nothing to fall back on if that frame
+// were ever lost for ANY reason. auth_test.go's
+// TestClient_Auth_UnauthorizedCloseWithoutDenialFrameIsTerminal proves this
+// deterministically — no RST or scheduling race required — with a raw
+// server that reads the client's frames normally (so nothing about THIS
+// client's own sends fails) but sends only this close code, never a
+// PermissionDenied frame, at all. See runLoop's readErr case for where the
+// close code is checked (via gws.IsCloseError) as the fallback signal.
+const wsCodeUnauthorized = 4401
+
 // encodeAuthToken builds the client->server Auth (tag 2) frame carrying a
 // Token (sub-type 0) sub-message: envelope(wireMsgAuth,
 // VarUint(authTypeToken) VarString(token)). This is the exact shape

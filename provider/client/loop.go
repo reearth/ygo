@@ -415,7 +415,11 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	// server's documented behaviour, not a bug in either side. That case
 	// makes handleFrame return ErrAuthRejected, which runReconnectLoop (see
 	// its own doc) treats as terminal rather than something to back off and
-	// retry.
+	// retry. The readErr case above this select's frame case recognises the
+	// SAME rejection from the WS close code alone, for the case where this
+	// PermissionDenied frame never arrives at all — see wsCodeUnauthorized's
+	// doc for why that happens and why detecting it only here would not be
+	// enough.
 	//
 	// When Token is empty (the default, and the whole of #165 through Task
 	// 8), nothing here executes: this connection sends exactly what it
@@ -466,6 +470,30 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 			_ = s.flushLane(ctx, closeDrainTimeout)
 			return nil
 		case err := <-readErr:
+			// #165: a rejected token is TERMINAL (see ErrAuthRejected's doc
+			// and runReconnectLoop's "Terminal vs retryable" section)
+			// specifically so a bad credential is reported once instead of
+			// retried forever — but that guarantee must not depend on this
+			// connection having actually delivered the PermissionDenied
+			// DATA frame handleFrame's wireMsgAuth case below reacts to.
+			// See wsCodeUnauthorized's own doc for why that frame can be
+			// lost to an RST even though the server wrote it first: this
+			// case recognises the SAME rejection from the WS close code
+			// alone, which — unlike the data frame — cannot be lost the
+			// same way, because gorilla's CloseError is synthesised the
+			// instant the close frame's header is parsed, not from a
+			// payload that an abrupt reset could truncate.
+			//
+			// Gated on c.opts.Token != "": a connection that never sent a
+			// Token cannot legitimately be having ITS token rejected, so an
+			// unrelated server closing with the same numeric code (unlikely,
+			// but not this client's business to assume away) is left as an
+			// ordinary retryable failure below instead of misreported as an
+			// auth rejection that never happened.
+			if c.opts.Token != "" && gws.IsCloseError(err, wsCodeUnauthorized) {
+				return fmt.Errorf("client: %w (via close code, no denial frame observed): %s",
+					ErrAuthRejected, err)
+			}
 			return fmt.Errorf("client: read from %q: %w", c.opts.URL, err)
 		case frame := <-frames:
 			if err := s.handleFrame(frame); err != nil {
@@ -519,8 +547,10 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 // may no longer hold by the next attempt, and backing off before trying
 // again is exactly the right response. An auth rejection (ErrAuthRejected,
 // from a PermissionDenied reply to Options.Token — see loop.go's handleFrame
-// wireMsgAuth case) is categorically different: the token that was just
-// rejected will be rejected again, and again, forever, because retrying
+// wireMsgAuth case, or from the server's WS close code alone when that reply
+// frame never arrives — see this function's readErr case and
+// wsCodeUnauthorized's doc) is categorically different: the token that was
+// just rejected will be rejected again, and again, forever, because retrying
 // changes nothing about it. Folding that into the ordinary retryable path
 // would turn a bad credential into an indefinite hammering of the server
 // with a request that can never succeed — worse than useless, since it also

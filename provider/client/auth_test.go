@@ -223,6 +223,136 @@ func TestClient_Auth_EmptyTokenSendsNoAuthFrame(t *testing.T) {
 	}
 }
 
+// TestClient_Auth_UnauthorizedCloseWithoutDenialFrameIsTerminal is the
+// deterministic reproduction for #165's missed-frame race: a server that
+// rejects Options.Token is SUPPOSED to make the client stop retrying
+// (TestClient_Auth_WrongTokenIsTerminal above), but that test drives ygo's
+// own provider/websocket.Server, which — correctly — writes the
+// PermissionDenied DATA frame before it enqueues the WS close. Ordinarily
+// this client's handleFrame reads that data frame and returns
+// ErrAuthRejected before the close is ever relevant.
+//
+// The bug this reproduces is what happens when that data frame does not
+// survive to be read: peer.go's sendCloseFrame calls conn.Close()
+// immediately after queuing the close control frame, and closing a TCP
+// socket that still has unread bytes buffered FROM the client (this client
+// replies to the server's own unconditional initial SyncStep1/awareness push
+// before it has any idea its Token is about to be rejected) can make the
+// kernel emit an RST instead of a graceful FIN — an RST that can arrive
+// ahead of, or interrupt delivery of, data the server genuinely wrote first.
+// TestClient_Auth_WrongTokenIsTerminal's own doc says this does not
+// reproduce locally in 30 -race runs; it depends on a scheduling/TCP-stack
+// race real production traffic can hit but a fast loopback test rarely does.
+//
+// Rather than fight that timing, this test forces the LOSS outright: a raw,
+// hand-rolled WebSocket server (not provider/websocket.Server) that sends
+// ONLY the close frame — wsCodeUnauthorized, never a PermissionDenied data
+// frame at all. That is the worst case the real race can produce, made
+// certain instead of probabilistic, which is exactly what "force the race
+// deterministically rather than hoping for it" means here: a fix that
+// depends on the client ever seeing that data frame fails this every time;
+// a fix that treats the close code itself as sufficient passes it every
+// time, regardless of what any particular run's scheduler does.
+//
+// Before wsCodeUnauthorized existed (loop.go's runLoop readErr case), this
+// server's close was indistinguishable from any ordinary dropped connection:
+// runReconnectLoop would back off and redial with the same rejected token,
+// which is directly observable here as connAttempts exceeding 1.
+func TestClient_Auth_UnauthorizedCloseWithoutDenialFrameIsTerminal(t *testing.T) {
+	upgrader := gws.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	var connAttempts atomic.Int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		connAttempts.Add(1)
+
+		// Synchronously read the two frames runLoop unconditionally sends
+		// before this handler decides anything: the Auth Token, then
+		// SyncStep1 (see runLoop — both are sent up front, unprompted, on
+		// every connection with Options.Token set, regardless of what the
+		// server ever does). This mirrors peer.handleAuth's actual
+		// causality on a real server: OnTokenAuth's hook — and therefore
+		// the decision to deny and close — only runs AFTER the server has
+		// already read the client's Token frame, so the client's own
+		// writes have necessarily already succeeded by the time a real
+		// server closes anything.
+		//
+		// An earlier version of this test skipped this and wrote the close
+		// the instant the connection was accepted, without ever reading
+		// from it. That is NOT equivalent to forcing the same race harder —
+		// it manufactures a DIFFERENT bug that has nothing to do with this
+		// test's subject: closing a socket this fast can make the client's
+		// own SyncStep1 write fail locally (a plain "broken pipe", carrying
+		// no close code at all) before the client ever reaches the
+		// close-code check this test exists to exercise, which is a
+		// scenario a real, read-then-decide server (ygo's own, or any
+		// other Hocuspocus-compliant one) cannot produce in the first
+		// place, and this test has no business exercising it either. A
+		// generous 3s per-read deadline keeps a real regression here (the
+		// client failing to send what it always has) an ordinary test
+		// failure instead of a hang.
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		for i := 0; i < 2; i++ {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				t.Errorf("test server: expected the client's unprompted frame %d (Auth Token, "+
+					"then SyncStep1), got: %v", i, err)
+				return
+			}
+		}
+
+		// NOW — and only now, with both of the client's own writes already
+		// landed — send NOTHING but the close: no SyncStep1/2, no
+		// awareness, and — the entire point of this test — no
+		// PermissionDenied Auth (tag 2) data frame either. If the client's
+		// terminality check depended on ever reading that frame, this
+		// server proves it by never providing one.
+		_ = conn.WriteControl(gws.CloseMessage,
+			gws.FormatCloseMessage(wsCodeUnauthorized, "Unauthorized"),
+			time.Now().Add(2*time.Second))
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	c, err := New(Options{
+		URL:   "ws" + strings.TrimPrefix(ts.URL, "http") + "/auth-close-only",
+		Doc:   crdt.New(),
+		Token: "wrong-token",
+	})
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- c.Connect(context.Background()) }()
+
+	var connectErr error
+	select {
+	case connectErr = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Connect did not return for a close-code-only rejection; it appears to be " +
+			"retrying forever instead of treating the close code as terminal")
+	}
+
+	require.ErrorIs(t, connectErr, ErrAuthRejected,
+		"Connect's returned error must satisfy errors.Is(err, ErrAuthRejected) even when the "+
+			"PermissionDenied data frame was never sent at all — the WS close code alone must "+
+			"be sufficient")
+
+	// Same ~2s / several-backoff-cycles margin as TestClient_Auth_WrongTokenIsTerminal's own
+	// authCalls assertion, applied to connection attempts instead of the (here nonexistent)
+	// OnTokenAuth hook: if runReconnectLoop had treated this close as an ordinary retryable
+	// failure, a second dial — and thus a second call into this handler — would land well
+	// within this window.
+	time.Sleep(2 * time.Second)
+	require.Equal(t, int32(1), connAttempts.Load(),
+		"the server accepted more than one connection attempt: the reconnect loop redialed "+
+			"a rejected token after missing the PermissionDenied data frame instead of stopping "+
+			"on the close code alone")
+}
+
 // TestAuth_ConstantsMatchServer pins authTypeToken/authTypePermissionDenied/
 // authTypeAuthenticated to provider/websocket/server.go's identically-named
 // constants byte-for-byte, the same way wire_test.go's

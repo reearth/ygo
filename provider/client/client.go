@@ -78,11 +78,13 @@ type Options struct {
 	// it as an Auth (tag 2) Token sub-message on every connection, before
 	// the sync handshake (see loop.go's runLoop and wire.go's
 	// encodeAuthToken, #165 Task 9). A server that rejects it (a
-	// PermissionDenied reply) makes Connect return ErrAuthRejected — a
-	// TERMINAL failure, not one the reconnect loop retries; see that
-	// sentinel's doc. Left at its zero value (the default), nothing changes
-	// from the plain y-websocket flow: no Auth frame is ever sent. Use
-	// Header for HTTP-level credentials instead of, or in addition to, this.
+	// PermissionDenied reply, or — if that reply frame is lost, see
+	// wsCodeUnauthorized's doc — just the server's close code) makes Connect
+	// return ErrAuthRejected — a TERMINAL failure, not one the reconnect
+	// loop retries; see that sentinel's doc. Left at its zero value (the
+	// default), nothing changes from the plain y-websocket flow: no Auth
+	// frame is ever sent. Use Header for HTTP-level credentials instead of,
+	// or in addition to, this.
 	//
 	// # NOT a confidentiality gate
 	//
@@ -188,8 +190,14 @@ var ErrAlreadyConnected = errors.New("ygo/client: already connected")
 // ErrAuthRejected is returned by Connect — and set as Err on the final
 // StateDisconnected status that precedes that return — when Options.Token
 // was rejected by the server's Hocuspocus in-band auth (provider/websocket's
-// #104 OnTokenAuth hook returning a non-nil error, surfaced to this client as
-// a PermissionDenied reply; see loop.go's handleFrame wireMsgAuth case).
+// #104 OnTokenAuth hook returning a non-nil error). This client learns of
+// that rejection one of two ways: the ordinary case is a PermissionDenied
+// reply (see loop.go's handleFrame wireMsgAuth case); the fallback is the
+// server's WS close code alone, recognised in runLoop's readErr case, for
+// when that reply frame is lost to the connection tearing down before it is
+// fully read (see wsCodeUnauthorized's doc, #165) — a caller sees the same
+// ErrAuthRejected either way and cannot, and need not, distinguish which
+// path produced it.
 //
 // Unlike every other connection failure runReconnectLoop (loop.go) handles,
 // this one is TERMINAL: retrying with the same rejected token can never
