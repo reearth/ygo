@@ -57,6 +57,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   poll-friendly mirror of `Synced()` for platform code that cannot receive
   on a Go channel. See [mobile/README.md](mobile/README.md#self-syncing-syncclient).
 
+### Fixed
+
+- **`provider/websocket`: a disconnect-synthesised awareness removal could
+  tie with, and suppress, that same client's rejoin (#226).**
+  `encodeAwarenessRemoval` used to encode a disconnecting client's removal
+  at that client's current clock **plus one**. `Awareness.Heartbeat`, which
+  a rejoining client calls to re-announce itself, also bumps by exactly one
+  from that same base clock — so a prompt reconnect landed on the identical
+  clock as the server's removal. At an equal clock,
+  `Awareness.ApplyUpdate`'s tie-break always favors the null (removal) side
+  over an active one, regardless of which a given peer received first, so
+  every other peer in the room could end up believing the rejoining client
+  had left, even though it was back and announcing itself correctly.
+  `encodeAwarenessRemoval` now encodes the removal at the client's current
+  clock **unbumped**, matching y-protocols' `removeAwarenessStates` (which
+  bumps only for the awareness instance's own local client, never when
+  synthesising a removal on another client's behalf). This makes any
+  subsequent genuine heartbeat from the rejoining client strictly newer
+  than the removal, so the tie no longer arises.
+
 ## [1.47.1] — 2026-08-09
 
 ### Fixed

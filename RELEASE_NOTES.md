@@ -105,6 +105,43 @@ symbols in new packages, which is why this ships as a MINOR release under
 this project's semver-by-API-surface convention even though nothing already
 shipped changes behaviour.
 
+### Fixed: a disconnect-triggered awareness removal could suppress a rejoining client's presence (#226)
+
+**Who is affected:** anyone running `provider/websocket` with awareness
+enabled — this is a **server-side behaviour change** affecting existing
+deployments, not just new code from this release. Any room where clients
+disconnect and quickly reconnect (a page refresh, a flaky connection, a
+`provider/client` reconnect) was exposed.
+
+**The bug.** When a peer disconnected, `peer.go`'s `encodeAwarenessRemoval`
+synthesised that peer's removal at its current awareness clock **plus
+one**. A client that reconnects and re-announces its presence calls
+`Awareness.Heartbeat`, which *also* bumps by exactly one from that same base
+clock — so a prompt reconnect computed the identical clock as the server's
+removal. `Awareness.ApplyUpdate`'s equal-clock rule always resolves a tie in
+favor of the null (removed) side over an active one, no matter which a
+given peer receives first, so every other peer in the room could end up
+believing the rejoining client had left — even though it was back and
+correctly announcing itself. In the worst case (a half-open connection that
+`AwarenessExpiry` exists to catch), the server could synthesise the removal
+well after the client had already reconnected, at a clock *higher* than the
+rejoin, which no client-side workaround could fully cover.
+
+**The fix.** `encodeAwarenessRemoval` no longer bumps the clock: it encodes
+the removal at exactly the clock the room's shared `Awareness` currently
+holds for that client. The existing equal-clock rule already admits an
+unbumped removal, and leaving it unbumped means any subsequent genuine
+heartbeat from the rejoining client is strictly newer than the removal, so
+the tie class this bug depended on no longer arises. This also brings ygo
+in line with y-protocols' `removeAwarenessStates`, which bumps the clock
+only when the removed client is the awareness instance's own local client —
+never when synthesising a removal on another client's behalf, which is
+exactly this function's case. `provider/client`'s existing double-heartbeat
+margin on reconnect (added for #165) is unaffected and remains in place —
+it now exists purely as defense-in-depth against third-party servers
+(Hocuspocus, y-websocket, or any other implementation of this wire
+protocol) that may still compute removal clocks the old way.
+
 ## v1.47.1
 
 **Who is affected:** anyone building nested documents with the prelim

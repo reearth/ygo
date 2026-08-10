@@ -725,41 +725,49 @@ func (s *session) handleFrame(frame []byte) error {
 			// above. A no-op if no local state has ever been set.
 			//
 			// TWO Heartbeat calls, not one, and this is not a defensive
-			// round number: whatever connection we just lost did not end
-			// peacefully from a peer's point of view — provider/websocket's
-			// own peer.handleDisconnect synthesises a null-state removal for
-			// every clientID the dead connection owned, at that clientID's
-			// CURRENT clock (as the room's shared Awareness sees it AT THE
-			// MOMENT handleDisconnect runs) plus one (see encodeAwarenessRemoval,
-			// peer.go: "clock incremented by 1" — it reads aw.GetStates()
-			// live, not a value captured back at disconnect time). This
-			// client's OWN local clock is untouched by that broadcast — a
-			// disconnecting peer never receives its own removal notice — so
-			// a single Heartbeat here (also a plain +1 from our
-			// pre-disconnect clock) computes the EXACT SAME number the
-			// server's synthetic tombstone would use IF handleDisconnect ran
-			// before we reconnected and republished. Awareness.ApplyUpdate's
-			// clock gate accepts a NEWER non-null entry unconditionally, but
-			// at an EQUAL clock a non-null entry can never override an
-			// existing null one (its doc's "equal clock" comment) — so a
-			// peer who received that tombstone before our own +1 arrived
-			// would keep it, permanently, one tie away from correct.
+			// round number — it is sized for servers OTHER than our own.
 			//
-			// +2 clears THAT margin — the ordinary case where handleDisconnect
-			// fires promptly (an explicit close, or CloseRoom) and races our
-			// own reconnect from the SAME base clock. It does NOT eliminate
-			// the race in general: on a half-open/NAT-timeout drop — the case
-			// AwarenessExpiry exists for — the server may not run
-			// handleDisconnect until long after we already reconnected and
-			// heartbeated past +2, and because encodeAwarenessRemoval reads
-			// the room's CURRENT clock at removal time (not a value pinned to
-			// the original disconnect), a sufficiently delayed removal is
-			// always exactly "whatever we most recently published" + 1,
-			// regardless of how far we have advanced by then. No client-side
-			// margin closes that window — only a server-side fix (not sending
-			// encodeAwarenessRemoval a clock unrelated to what has since been
-			// republished) would, and that is out of scope for this package
-			// (tracked separately, not fixed here). What DOES bound the
+			// As of #226, ygo's own provider/websocket no longer bumps a
+			// disconnect-synthesised removal's clock (see
+			// encodeAwarenessRemoval, peer.go): it now encodes the removal
+			// at each clientID's CURRENT clock, exactly as the room's
+			// shared Awareness sees it at the moment handleDisconnect
+			// runs — unbumped. Against our own server, a SINGLE Heartbeat
+			// here already clears that removal unconditionally: Heartbeat's
+			// own +1 (from our pre-disconnect clock — this client's OWN
+			// local clock is untouched by a removal broadcast, since a
+			// disconnecting peer never receives its own removal notice)
+			// makes our re-announcement strictly NEWER than any removal our
+			// server could have synthesised from that same base, so
+			// Awareness.ApplyUpdate's ordinary newer-clock path — not the
+			// equal-clock one — admits it every time, regardless of
+			// arrival order.
+			//
+			// The SECOND call exists for every OTHER WebSocket server this
+			// package must interoperate with — Hocuspocus, y-websocket, or
+			// any other implementation of this wire protocol — none of
+			// which this package controls, and none of which is guaranteed
+			// to compute a disconnect removal's clock the way ygo's own
+			// server now does. A server that still encodes a removal at
+			// clock+1 from that same base (the behaviour ygo's own server
+			// had before #226) would tie a single Heartbeat's own +1 bump:
+			// ApplyUpdate's clock gate accepts a NEWER non-null entry
+			// unconditionally, but at an EQUAL clock a non-null entry can
+			// never override an existing null one (its doc's "equal clock"
+			// comment) — so a peer who received that server's tombstone
+			// before our own +1 arrived would keep it, permanently, one tie
+			// away from correct. The second Heartbeat clears exactly that
+			// margin.
+			//
+			// Neither call eliminates every race against such a
+			// third-party server in general: on a half-open/NAT-timeout
+			// drop — the case AwarenessExpiry exists for — a server slow to
+			// notice the disconnect may synthesise its removal long after
+			// we have already reconnected and heartbeated past both bumps,
+			// and because a removal computed from "whatever we most
+			// recently published" always trails by however much that
+			// server's own clock-bump policy adds, no fixed client-side
+			// margin closes that window in general. What DOES bound the
 			// exposure from our side is onAwarenessUpdate's self-clientID
 			// exception (see its doc): when a belated removal like this
 			// reaches us — it necessarily targets our OWN clientID, and we
