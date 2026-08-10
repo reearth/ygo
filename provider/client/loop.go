@@ -485,23 +485,45 @@ func (s *session) handleFrame(frame []byte) error {
 			// round number: whatever connection we just lost did not end
 			// peacefully from a peer's point of view — provider/websocket's
 			// own peer.handleDisconnect synthesises a null-state removal for
-			// every clientID the dead connection owned, AT THAT CLIENT'S
-			// LAST-KNOWN-CLOCK PLUS ONE (see encodeAwarenessRemoval's doc:
-			// "clock incremented by 1"), and broadcasts it to every peer
-			// that was still connected when the disconnect happened. This
+			// every clientID the dead connection owned, at that clientID's
+			// CURRENT clock (as the room's shared Awareness sees it AT THE
+			// MOMENT handleDisconnect runs) plus one (see encodeAwarenessRemoval,
+			// peer.go: "clock incremented by 1" — it reads aw.GetStates()
+			// live, not a value captured back at disconnect time). This
 			// client's OWN local clock is untouched by that broadcast — a
 			// disconnecting peer never receives its own removal notice — so
-			// a single Heartbeat here (also a plain +1 from the same
+			// a single Heartbeat here (also a plain +1 from our
 			// pre-disconnect clock) computes the EXACT SAME number the
-			// server's synthetic tombstone already used. Awareness.ApplyUpdate's
+			// server's synthetic tombstone would use IF handleDisconnect ran
+			// before we reconnected and republished. Awareness.ApplyUpdate's
 			// clock gate accepts a NEWER non-null entry unconditionally, but
 			// at an EQUAL clock a non-null entry can never override an
-			// existing null one (see its doc's "equal clock" comment) — so a
-			// peer who received that tombstone before this reconnect's
-			// re-announcement arrives would keep it, permanently, one tie
-			// away from correct. Bumping by 2 clears that exact margin
-			// unconditionally, without needing to know whether the tombstone
-			// was actually sent, received, or still outstanding anywhere.
+			// existing null one (its doc's "equal clock" comment) — so a
+			// peer who received that tombstone before our own +1 arrived
+			// would keep it, permanently, one tie away from correct.
+			//
+			// +2 clears THAT margin — the ordinary case where handleDisconnect
+			// fires promptly (an explicit close, or CloseRoom) and races our
+			// own reconnect from the SAME base clock. It does NOT eliminate
+			// the race in general: on a half-open/NAT-timeout drop — the case
+			// AwarenessExpiry exists for — the server may not run
+			// handleDisconnect until long after we already reconnected and
+			// heartbeated past +2, and because encodeAwarenessRemoval reads
+			// the room's CURRENT clock at removal time (not a value pinned to
+			// the original disconnect), a sufficiently delayed removal is
+			// always exactly "whatever we most recently published" + 1,
+			// regardless of how far we have advanced by then. No client-side
+			// margin closes that window — only a server-side fix (not sending
+			// encodeAwarenessRemoval a clock unrelated to what has since been
+			// republished) would, and that is out of scope for this package
+			// (tracked separately, not fixed here). What DOES bound the
+			// exposure from our side is onAwarenessUpdate's self-clientID
+			// exception (see its doc): when a belated removal like this
+			// reaches us — it necessarily targets our OWN clientID, and we
+			// are still connected to receive it — Awareness.ApplyUpdate's
+			// self-state protection re-emits our current state at a clock
+			// past the removal's, and onAwarenessUpdate now forwards that
+			// correction immediately instead of waiting out a PingInterval.
 			s.c.awareness.Heartbeat()
 			s.c.awareness.Heartbeat()
 			if s.onSynced != nil {
@@ -527,15 +549,33 @@ func (s *session) handleFrame(frame []byte) error {
 		}
 
 	case wireMsgQueryAwareness:
-		// A peer wants everything we know, mirroring provider/websocket/
-		// peer.go's `case msgQueryAwareness`, which answers unconditionally
-		// with sendAwareness(room.awareness.EncodeUpdate(nil)) regardless of
-		// that peer's own sync state. Answered directly here, on this
-		// goroutine (the loop's own — see session's doc): this is a reply to
-		// a frame just read, exactly like the SyncStep1->SyncStep2 reply
-		// above, not a change that needs the lane's cross-goroutine hand-off.
+		// Answered directly here, on this goroutine (the loop's own — see
+		// session's doc): this is a reply to a frame just read, exactly like
+		// the SyncStep1->SyncStep2 reply above, not a change that needs the
+		// lane's cross-goroutine hand-off.
+		//
+		// Deliberately EncodeUpdate([our own clientID]), NOT EncodeUpdate(nil)
+		// (which is what provider/websocket/peer.go's `case msgQueryAwareness`
+		// answers with, server-side — a room's Awareness genuinely represents
+		// every peer in it, so "everything I know" is the right answer THERE).
+		// This Client's own c.awareness is not that: dropRemoteAwareness (see
+		// its doc) leaves behind manufactured null-state tombstones, at
+		// clocks this Client invented locally rather than learned from any
+		// peer, for every remote clientID it has ever seen disconnect. Those
+		// tombstones are deliberately kept OFF the outbound lane (dropRemoteAwareness
+		// applies them under c.remoteOrigin precisely so onAwarenessUpdate
+		// never sends them) — but EncodeUpdate(nil) walks every entry
+		// regardless of how it got there, so answering a query with it would
+		// leak exactly what that suppression exists to prevent: a peer
+		// asking us cold would receive "clientID X removed at clock C",
+		// accepted under ApplyUpdate's equal-clock/null-over-active rule,
+		// and would evict a peer that may still be perfectly present
+		// elsewhere in the room. Answering with only our own clientID's
+		// entry is what "the client's full LOCAL state" (this method's own
+		// name) actually means — this Client is not the room, and has no
+		// business re-asserting claims about anyone else's presence.
 		reply := encodeEnvelope(wireMsgAwareness, encoding.EncodeBytes(func(enc *encoding.Encoder) {
-			enc.WriteVarBytes(s.c.awareness.EncodeUpdate(nil))
+			enc.WriteVarBytes(s.c.awareness.EncodeUpdate([]uint64{s.c.awareness.ClientID()}))
 		}))
 		if err := s.write(reply); err != nil {
 			return fmt.Errorf("client: send awareness query reply: %w", err)
@@ -582,27 +622,42 @@ func (s *session) handleFrame(frame []byte) error {
 // For a TakeAwareness payload, the same argument does NOT hold: awareness
 // state is not doc state, so it is not part of what SyncStep1/SyncStep2
 // exchange, and a dropped awareness blob is not "still sitting" anywhere a
-// handshake will look. #165 Task 8 is what resolves this, and the mechanism
-// is exactly what the paragraph above anticipated — awareness's OWN
-// supersedable-state property, not a KindSync-style retry: whatever this
-// call just lost is superseded, within at most one PingInterval, by ONE of
-// two Heartbeat call sites in runLoop:
+// handshake will look. #165 Task 8 covers MOST of this via awareness's own
+// supersedable-state property, not a KindSync-style retry — but only for an
+// ACTIVE local state, and that qualifier is load-bearing, not a nicety:
 //
-//   - if the write failed because THIS connection is dying (the ordinary
-//     case — flushLane's error return ends runLoop), the very next
-//     connection's handshake fires Heartbeat() the moment its SyncStep2
-//     applies (see handleFrame), before this Client's local state has any
-//     chance to look stale to whoever it just (re)joined;
-//   - if the connection is still alive and only this one send failed
-//     transiently, or nothing failed but a local-state change was never
-//     even attempted while fully offline, the ping ticker's own Heartbeat()
-//     call (runLoop's `case <-pingTicker.C`) re-announces at latest
-//     PingInterval later regardless.
-//
-// Either way, "put the payload back on a failed write" is exactly as wrong
-// here as the KindSync paragraph above says it is for sync — it would just
-// be solving an already-solved problem via a second mechanism instead of
-// one.
+//   - a dropped ACTIVE-state announcement (SetLocalState(map) or an ordinary
+//     Heartbeat) is superseded within at most one PingInterval by one of two
+//     Heartbeat call sites in runLoop: if the write failed because THIS
+//     connection is dying (the ordinary case — flushLane's error return ends
+//     runLoop), the very next connection's handshake fires Heartbeat() the
+//     moment its SyncStep2 applies (see handleFrame), before this Client's
+//     local state has any chance to look stale to whoever it just (re)joined;
+//     if the connection survives and only this one send failed transiently,
+//     the ping ticker's own Heartbeat() call re-announces at most PingInterval
+//     later regardless;
+//   - a lost payload from a local-state change attempted while fully
+//     offline is not covered by either Heartbeat call above — neither runs
+//     while there is no live connection to run on. It is instead simply never
+//     lost in the first place: onAwarenessUpdate's lane.Push happened
+//     synchronously when SetLocalState/Heartbeat was called, independent of
+//     connection state (see relaylane's never-blocks contract), so the
+//     payload sits in the lane — awaiting a live loop to flush it, same as a
+//     TakeSync payload sits in the Doc — until the FIRST connection's
+//     flushLane runs, not "the ping ticker eventually resends it";
+//   - a dropped REMOVAL (SetLocalState(nil)) is the one gap Heartbeat cannot
+//     close: Heartbeat is a documented no-op once the local state is nil
+//     (see its doc — "No-op when no local state is set"), so it never
+//     re-sends a removal that a failed write lost. If this Client goes on to
+//     disconnect for real, the removal is superseded by provider/websocket's
+//     own disconnect-triggered synthetic removal (peer.handleDisconnect,
+//     encodeAwarenessRemoval) once THAT peer connection is torn down — but if
+//     it stays connected doing nothing else afterward, peers keep showing
+//     this Client's last-known ACTIVE state until it calls SetLocalState
+//     again (active or nil) or actually disconnects. Nothing in this package
+//     retries the removal write itself, for the same reason the KindSync
+//     paragraph above gives: a retry queue here would be a second, competing
+//     source of truth for pending sends.
 func (s *session) flushLane() error {
 	for {
 		if update, ok := s.c.lane.TakeSync(); ok {

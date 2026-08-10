@@ -427,8 +427,40 @@ func (c *Client) onDocUpdate(update []byte, origin any) {
 // that one ID in every real call; encoding just those IDs keeps the wire
 // message from also re-broadcasting every remote entry's unchanged state on
 // every local presence tick.
+//
+// # One narrow exception to "never re-send a remoteOrigin event"
+//
+// Awareness.ApplyUpdate has its own self-state protection (#73 vector C1,
+// awareness/awareness.go): if the update this Client just applied under
+// c.remoteOrigin contained a null entry for OUR OWN clientID, ApplyUpdate
+// does not honor it — it bumps a.clock past the incoming value and re-emits
+// our current (still-active) state, in the SAME ApplyUpdate call, so our
+// in-memory Awareness never actually looks removed. But that correction is
+// reported back to us with Origin still set to whatever ApplyUpdate's
+// caller passed in — c.remoteOrigin — because from ApplyUpdate's point of
+// view this update DID arrive from the network; it has no way to know the
+// caller is about to reinterpret it. Left fully suppressed, that correction
+// would never reach the wire: every OTHER peer that already accepted the
+// bad null entry (a legitimate accept under ApplyUpdate's own clock gate —
+// see loop.go's handshake-completion comment for a concrete way such a
+// belated, wrongly-targeted removal can arise) keeps believing we are gone
+// until this Client's next periodic Heartbeat, up to a full PingInterval
+// later by default.
+//
+// So: when the remoteOrigin event's Updated set contains our own clientID
+// (self-state protection's only possible outcome is to add it there — see
+// ApplyUpdate's source; never Added, never Removed) AND we still have an
+// active local state to reassert (GetLocalState() != nil — if it's nil,
+// ApplyUpdate found nothing worth correcting and there is nothing to
+// re-announce), forward ONLY that one clientID. This must stay exactly this
+// narrow: forwarding the rest of a remoteOrigin event's IDs here would
+// reopen the general echo storm this whole suppression exists to prevent.
 func (c *Client) onAwarenessUpdate(evt awareness.UpdateEvent) {
 	if evt.Origin == c.remoteOrigin {
+		if !containsClientID(evt.Updated, c.awareness.ClientID()) || c.awareness.GetLocalState() == nil {
+			return
+		}
+		c.lane.Push(cluster.KindAwareness, c.awareness.EncodeUpdate([]uint64{c.awareness.ClientID()}))
 		return
 	}
 	n := len(evt.Added) + len(evt.Updated) + len(evt.Removed)
@@ -440,6 +472,19 @@ func (c *Client) onAwarenessUpdate(evt awareness.UpdateEvent) {
 	ids = append(ids, evt.Updated...)
 	ids = append(ids, evt.Removed...)
 	c.lane.Push(cluster.KindAwareness, c.awareness.EncodeUpdate(ids))
+}
+
+// containsClientID reports whether ids contains target. A small linear
+// helper rather than a set: onAwarenessUpdate's ids lists are always tiny
+// (one entry in every real call this package makes; see that method's doc),
+// so there is nothing for a map to buy here.
+func containsClientID(ids []uint64, target uint64) bool {
+	for _, id := range ids {
+		if id == target {
+			return true
+		}
+	}
+	return false
 }
 
 // Connect hydrates the Client's Doc from Store (if one was configured),

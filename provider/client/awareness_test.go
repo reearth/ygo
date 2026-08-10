@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,11 +210,21 @@ func TestClient_Awareness_QueryAnsweredWithFullLocalState(t *testing.T) {
 // server's own sweep tick — so every sweep observes a recently-refreshed
 // entry.
 //
-// require.Never (not require.Eventually) is deliberate: the property under
-// test is "at no point during this window does B stop seeing A", not "B
-// eventually sees A again" — the latter would also be satisfied by a client
-// that flickered offline and reappeared, which is exactly the false-negative
-// a naive fixed-sleep-then-check test would miss.
+// # Why the proof is a THIRD, LATE-JOINING peer, not a peer connected throughout
+//
+// An earlier version of this test kept a second peer B connected across the
+// whole window and asserted B kept seeing A. That is vacuous: it passes
+// identically whether or not either Heartbeat call site exists, because
+// nothing in provider/websocket's own RemoveExpired sweep tells an
+// ALREADY-CONNECTED peer that a room's Awareness changed — the only
+// broadcastAwareness call sites are the inbound-frame path and disconnect
+// (see peer.go); an expiry sweep mutates the room's Awareness in place with
+// no broadcast of its own. B would keep showing A regardless, off residual
+// state alone. The one thing that DOES reflect the room's server-side
+// Awareness honestly is a NEW peer's join snapshot (sendAwareness on
+// upgrade, EncodeUpdate(nil) of whatever the room currently holds) — so C
+// joins only AFTER several expiry-sweep ticks have had the chance to act,
+// and its snapshot is what this test actually checks.
 func TestClient_Awareness_HeartbeatSurvivesServerExpiry(t *testing.T) {
 	const awarenessExpiry = 200 * time.Millisecond
 	_, ts := startServer(t, func(s *ygws.Server) { s.AwarenessExpiry = awarenessExpiry })
@@ -221,18 +232,277 @@ func TestClient_Awareness_HeartbeatSurvivesServerExpiry(t *testing.T) {
 
 	const pingInterval = 50 * time.Millisecond // well under AwarenessExpiry/2's sweep tick
 	a, _ := dialSynced(t, ts, room, Options{PingInterval: pingInterval})
-	b, _ := dialSynced(t, ts, room, Options{})
 
 	a.Awareness().SetLocalState(map[string]any{"name": "a"})
-	require.Eventually(t, func() bool {
-		cs, ok := b.Awareness().GetStates()[a.Awareness().ClientID()]
-		return ok && cs.State["name"] == "a"
-	}, 5*time.Second, 10*time.Millisecond, "B never observed A's local awareness state")
 
-	require.Never(t, func() bool {
-		_, ok := b.Awareness().GetStates()[a.Awareness().ClientID()]
+	// Let several expiry-sweep ticks (AwarenessExpiry/2 apart, per
+	// StartAutoExpiry's doc) elapse while A does nothing but heartbeat.
+	time.Sleep(5 * awarenessExpiry)
+
+	c, _ := dialSynced(t, ts, room, Options{})
+	require.Eventually(t, func() bool {
+		cs, ok := c.Awareness().GetStates()[a.Awareness().ClientID()]
+		return ok && cs.State["name"] == "a"
+	}, 5*time.Second, 10*time.Millisecond,
+		"a late-joining peer's own join snapshot did not include A's presence; "+
+			"A's heartbeat did not keep the room's server-side Awareness alive "+
+			"across the expiry window")
+}
+
+// TestClient_Awareness_SelfCorrectionEscapesEchoSuppression protects the one
+// narrow exception onAwarenessUpdate carries (#165 Task 8 review, Important
+// 1b; see that method's doc): Awareness.ApplyUpdate's own self-state
+// protection (#73 vector C1) can be triggered by a network-origin update
+// that wrongly targets THIS Client's own clientID with a null entry — a
+// belated provider/websocket disconnect-triggered removal landing after a
+// fast reconnect is one concrete way that happens (see loop.go's
+// handshake-completion comment). ApplyUpdate corrects its own in-memory
+// state immediately, but reports the correction with Origin still set to
+// c.remoteOrigin (from onAwarenessUpdate's point of view, this update DID
+// arrive over the wire). Without this exception, the correction would never
+// reach the wire, and every peer that already accepted the bad removal
+// would keep believing this Client is gone for up to a full PingInterval.
+//
+// A hand-rolled raw server is used so it can inject the poisoned entry
+// directly and then watch for the resulting re-announcement — nothing
+// alive in ygo's own server actually manufactures a wrongly-targeted
+// removal like this without the belated-disconnect race this test is
+// standing in for.
+func TestClient_Awareness_SelfCorrectionEscapesEchoSuppression(t *testing.T) {
+	doc := crdt.New()
+	ownID := uint64(doc.ClientID())
+	const poisonClock = uint64(5) // comfortably past the clock a lone SetLocalState call produces (1)
+
+	upgrader := gws.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	correctionCh := make(chan map[string]any, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, err := conn.ReadMessage(); err != nil { // drain SyncStep1
+			return
+		}
+
+		// The poison: a null entry targeting ownID at a clock well past
+		// what this Client has published, mirroring the shape (if not the
+		// exact origin) of a belated disconnect-triggered removal.
+		poison := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+			enc.WriteVarUint(1)
+			enc.WriteVarUint(ownID)
+			enc.WriteVarUint(poisonClock)
+			enc.WriteVarString("null")
+		})
+		frame := encodeEnvelope(wireMsgAwareness, encoding.EncodeBytes(func(enc *encoding.Encoder) {
+			enc.WriteVarBytes(poison)
+		}))
+		if err := conn.WriteMessage(gws.BinaryMessage, frame); err != nil {
+			return
+		}
+
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			msgType, payload, err := decodeEnvelope(data)
+			if err != nil || msgType != wireMsgAwareness {
+				continue
+			}
+			awBytes, err := encoding.NewDecoder(payload).ReadVarBytes()
+			if err != nil {
+				continue
+			}
+			scratch := awareness.New(0)
+			if err := scratch.ApplyUpdate(awBytes, nil); err != nil {
+				continue
+			}
+			cs, ok := scratch.GetStates()[ownID]
+			// Skip anything at or below poisonClock: that is either this
+			// Client's ORIGINAL pre-poison announcement (clock 1) or the
+			// poison being read back, neither of which proves a
+			// correction was sent. Only a clock strictly greater than the
+			// poison's can be the self-correction under test.
+			if !ok || cs.Clock <= poisonClock {
+				continue
+			}
+			correctionCh <- cs.State
+			return
+		}
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	c, err := New(Options{
+		URL: "ws" + strings.TrimPrefix(ts.URL, "http") + "/self-correction",
+		Doc: doc,
+	})
+	require.NoError(t, err)
+	c.Awareness().SetLocalState(map[string]any{"name": "c"})
+	connect(t, c)
+
+	select {
+	case state := <-correctionCh:
+		require.Equal(t, "c", state["name"])
+	case <-time.After(5 * time.Second):
+		t.Fatal("client never re-announced its own state after a network-origin " +
+			"update wrongly targeted its own clientID with a removal")
+	}
+}
+
+// TestClient_Awareness_DropsRemoteStateOnDisconnect_WithoutLeakingTombstones
+// covers two required behaviours together because they are two ends of the
+// SAME mechanism (#165 Task 8 review, Important 3 + Important 4;
+// dropRemoteAwareness):
+//
+//  1. A remote peer's state must actually disappear from THIS Client's own
+//     Awareness once the connection carrying it is lost — the brief's
+//     disconnect requirement, previously unexercised: deleting
+//     dropRemoteAwareness's call site (loop.go's runLoop) left every other
+//     test in this file passing.
+//  2. The manufactured tombstone dropRemoteAwareness leaves behind must
+//     never leak back out: neither unprompted on the next connection
+//     (dropRemoteAwareness's own "must not re-broadcast" design, verified
+//     here rather than assumed) nor in answer to a queryAwareness probe —
+//     loop.go's wireMsgQueryAwareness case answers with only this Client's
+//     own clientID specifically so a manufactured tombstone about someone
+//     ELSE is never handed to a peer that asks.
+//
+// A hand-rolled raw server is used (not ygo's own provider/websocket.Server)
+// so the FIRST connection can inject a synthetic remote clientID directly,
+// and the SECOND (the client's own automatic reconnect) can inspect exactly
+// what the client sends unprompted and in reply to an explicit query —
+// neither of which a real server's own handshake sequence would let this
+// test isolate.
+func TestClient_Awareness_DropsRemoteStateOnDisconnect_WithoutLeakingTombstones(t *testing.T) {
+	const ghostID = uint64(999)
+
+	upgrader := gws.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	var connNum atomic.Int32
+	ghostAnnounced := make(chan struct{})
+	closeFirst := make(chan struct{})
+	secondConnLeaked := make(chan bool, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if connNum.Add(1) == 1 {
+			if _, _, err := conn.ReadMessage(); err != nil { // drain SyncStep1
+				return
+			}
+			ghost := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+				enc.WriteVarUint(1)
+				enc.WriteVarUint(ghostID)
+				enc.WriteVarUint(uint64(1))
+				enc.WriteVarString(`{"name":"ghost"}`)
+			})
+			frame := encodeEnvelope(wireMsgAwareness, encoding.EncodeBytes(func(enc *encoding.Encoder) {
+				enc.WriteVarBytes(ghost)
+			}))
+			if err := conn.WriteMessage(gws.BinaryMessage, frame); err != nil {
+				return
+			}
+			close(ghostAnnounced)
+			<-closeFirst // hold the connection open until the test is ready for it to die
+			return
+		}
+
+		// Second (and every later) connection: drain SyncStep1, explicitly
+		// query what the client knows, then collect everything it sends —
+		// both the query reply and anything unprompted — for a bounded
+		// window.
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if err := conn.WriteMessage(gws.BinaryMessage, encodeEnvelope(wireMsgQueryAwareness, nil)); err != nil {
+			return
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		leaked := false
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			msgType, payload, err := decodeEnvelope(data)
+			if err != nil || msgType != wireMsgAwareness {
+				continue
+			}
+			awBytes, err := encoding.NewDecoder(payload).ReadVarBytes()
+			if err != nil {
+				continue
+			}
+			d := encoding.NewDecoder(awBytes)
+			cnt, err := d.ReadVarUint()
+			if err != nil {
+				continue
+			}
+			for i := uint64(0); i < cnt; i++ {
+				cid, err := d.ReadVarUint()
+				if err != nil {
+					break
+				}
+				if _, err := d.ReadVarUint(); err != nil { // clock
+					break
+				}
+				if _, err := d.ReadVarBytes(); err != nil { // state JSON
+					break
+				}
+				if cid == ghostID {
+					leaked = true
+				}
+			}
+		}
+		select {
+		case secondConnLeaked <- leaked:
+		default:
+		}
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	c, err := New(Options{
+		URL:        "ws" + strings.TrimPrefix(ts.URL, "http") + "/drop-remote",
+		Doc:        crdt.New(),
+		MaxBackoff: 500 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	connect(t, c)
+
+	select {
+	case <-ghostAnnounced:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first connection's synthetic remote clientID was never sent")
+	}
+	require.Eventually(t, func() bool {
+		_, ok := c.Awareness().GetStates()[ghostID]
+		return ok
+	}, 2*time.Second, 10*time.Millisecond, "client never applied the synthetic remote clientID")
+
+	disc := statusWaiter(t, c, StateDisconnected)
+	close(closeFirst)
+	disc()
+
+	require.Eventually(t, func() bool {
+		_, ok := c.Awareness().GetStates()[ghostID]
 		return !ok
-	}, 5*awarenessExpiry, 20*time.Millisecond,
-		"A's presence disappeared from B despite A's PingInterval heartbeat being "+
-			"well under the server's AwarenessExpiry sweep")
+	}, 2*time.Second, 10*time.Millisecond,
+		"ghost clientID was not dropped from this Client's own Awareness after disconnect")
+
+	select {
+	case leaked := <-secondConnLeaked:
+		require.False(t, leaked,
+			"reconnect leaked the dropped ghost clientID, either unprompted or in a queryAwareness reply")
+	case <-time.After(5 * time.Second):
+		t.Fatal("second connection never completed its read window")
+	}
 }
