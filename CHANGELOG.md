@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.48.0] — 2026-08-10
+
+### Added
+
+- **`provider/client`: an embeddable offline-first sync client (#165).** A
+  `*crdt.Doc` that is immediately readable and editable — connected,
+  disconnected, or never-yet-connected — hydrated from a local store before
+  any dial (`client.New`/`client.Options.StorePath`, a CGo-free SQLite store
+  by default), and kept in sync with any `provider/websocket`-compatible
+  server via the same wire protocol (`client.Connect`). There is
+  deliberately **no separate offline-op queue**: the y-protocol sync
+  handshake (SyncStep1/SyncStep2) already declares what each side has and
+  sends what the other is missing, so an edit made while disconnected is
+  simply carried by the next successful handshake — the local store exists
+  only for the gap the handshake cannot cover, the process itself going
+  away while still offline. Reconnect uses jittered exponential backoff
+  (`Options.MaxBackoff`, default 30s) reset only on a **completed
+  handshake**, not merely a successful dial, plus WebSocket ping/pong
+  keepalive (`Options.PingInterval`, default 30s) so a half-open connection
+  converts to an ordinary retryable error instead of hanging forever.
+  Awareness re-broadcasts on every reconnect and heartbeat so a quiet
+  client is not reaped by a server's `AwarenessExpiry`. Optional in-band
+  Hocuspocus token auth (`Options.Token`) mirrors `provider/websocket`'s
+  `OnTokenAuth`; a rejected token is terminal (`ErrAuthRejected`), not
+  retried — see its doc for why this is **not** a confidentiality gate (the
+  server serves a room's full content before it has read the token).
+  `Client.Stats().Dropped` follows a durability-based rule, not a
+  connection-based one: a document update backed by a local `Store` is
+  never counted (the store, and the next hydrate+handshake, still deliver
+  it), a storeless one is, and awareness updates always are, since presence
+  is not document state and the handshake never carries it. The outbound
+  path reuses `internal/relaylane` — the same bounded, coalescing lane
+  `provider/websocket` uses server-side — so an application's `Transact`
+  never blocks on the network. `Client.Close` follows the same
+  durability-first, bounded-drain, then-teardown discipline `Server.Shutdown`
+  established for #202: store writes are already durable by the time Close
+  starts (they happen synchronously on the caller's own goroutine), the
+  sync loop is joined, observers are unsubscribed, and whatever is still
+  queued on the outbound lane is drained and counted into `Stats().Dropped`
+  rather than silently discarded. See [docs/CLIENT.md](docs/CLIENT.md).
+
+- **`mobile.SyncClient`: the `gomobile` binding for `provider/client` (#165).**
+  Makes the existing on-device editor (`mobile/`, v1.34.0) self-syncing:
+  `NewSyncClient(url, dbPath, token)` returns a client whose `Doc()` is
+  usable immediately and which dials, persists, and reconnects on its own,
+  off the platform UI thread. `SetOnStatus`/`SyncStatusObserver` mirrors
+  `client.Client.OnStatus` across the gomobile boundary with a pinned
+  `SyncState*` int64 mapping (independent of `provider/client.State`'s own
+  enum order, so it can never silently renumber); `SyncedOnce()` is the
+  poll-friendly mirror of `Synced()` for platform code that cannot receive
+  on a Go channel. See [mobile/README.md](mobile/README.md#self-syncing-syncclient).
+
 ## [1.47.1] — 2026-08-09
 
 ### Fixed

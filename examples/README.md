@@ -10,6 +10,7 @@ This directory contains self-contained examples that demonstrate the core featur
 | [http-sync](http-sync/) | Pull/push sync over HTTP using `provider/http` — good for offline-capable apps |
 | [collab-editor](collab-editor/) | Real-time collaborative text editor with a browser client over WebSocket |
 | [snapshot-history](snapshot-history/) | Document version history using snapshots — restore any past state |
+| [offline-client](offline-client/) | An embeddable offline-first sync client (`provider/client`) — local durability, reconnect with backoff, and offline edits carried by the next sync handshake |
 
 ---
 
@@ -114,6 +115,26 @@ data = db.Load("snapshots", revisionID)
 snap, _ = crdt.DecodeSnapshot(data)
 restored, _ = crdt.RestoreDocument(doc, snap)
 ```
+
+---
+
+## offline-client — Embeddable offline-first sync client
+
+**What it demonstrates:** `provider/client` wired to a running y-websocket server: a `*crdt.Doc` that is readable and editable before, during, and regardless of the network, backed by a local SQLite store, with a background dial loop that reconnects with jittered backoff and carries offline edits via the ordinary sync handshake — no separate offline-op queue.
+
+**Run:** start a server first, then point the client at it:
+```bash
+go run github.com/reearth/ygo/cmd/ygo-server -addr :1234
+go run ./examples/offline-client -url ws://localhost:1234/yjs/offline-demo -db /tmp/offline-demo.db
+```
+Stop the server (Ctrl-C) and watch the example keep editing and logging `StateDisconnected` with retries; start the server again and it reconnects and catches up on its own. Stop the example itself and rerun it against the same `-db` to see offline edits survive a process restart too.
+
+**Key concepts:**
+- `client.New(client.Options{URL, Doc, StorePath})` — hydrate-before-dial: the Doc is usable the instant `New` returns, before `Connect` is ever called
+- `client.Connect(ctx)` — blocks for the client's whole sync lifetime, dialing/handshaking/reconnecting on its own until `ctx` is cancelled or `Close` is called
+- `client.Client.OnStatus` / `client.Status` — connection-lifecycle notifications (`StateConnecting`/`StateConnected`/`StateSynced`/`StateDisconnected`)
+- `client.Client.Stats()` — `Coalesced`/`AwarenessSuperseded`/`HardDrops`/`Dropped` counters; see [docs/CLIENT.md](../docs/CLIENT.md#stats-and-alerting) for the exact `Dropped` rule
+- See [docs/CLIENT.md](../docs/CLIENT.md) for the full design, including why there is no offline-op queue and the auth-token caveat.
 
 ---
 

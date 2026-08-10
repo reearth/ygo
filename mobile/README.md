@@ -31,6 +31,11 @@ The bound surface is:
 - **`Awareness`** — `NewAwareness(int64)`, `ClientID`, `SetLocalState`,
   `ClearLocalState`, `LocalStateJSON`, `StatesJSON`, `EncodeAll`, `ApplyUpdate`,
   `Observe(AwarenessObserver)`, and `Close`.
+- **`SyncClient`** (#165) — `NewSyncClient(url, dbPath, token string)`, `Doc`,
+  `SetOnStatus(SyncStatusObserver)`, `Connect`, `SyncedOnce`, and `Close`. Makes
+  a `Doc` **self-syncing**: dials a y-websocket/Hocuspocus server, persists
+  locally, and reconnects on its own. See [Self-syncing: `SyncClient`](#self-syncing-syncclient)
+  below.
 - **Observing** — `Observe` returns a `*Subscription` (`Close()` detaches it);
   `DocObserver.OnChange(updateV1 []byte, local bool)` and
   `AwarenessObserver.OnChange(changesJSON []byte)` are the callback interfaces
@@ -233,6 +238,123 @@ a JS/Quill consumer or decode natively:
 
 (`GetText`, `GetMapJSON`, and `GetArrayJSON` return the plain text and the natural
 JSON of the map/array contents.)
+
+## Self-syncing: `SyncClient`
+
+`SyncClient` (#165) is a `gomobile`-safe wrapper around
+[`provider/client.Client`](../docs/CLIENT.md), ygo's embeddable offline-first
+sync client. It is what turns the on-device editor above from "an in-memory
+document you feed updates to by hand" into one that **dials a server,
+persists locally, and reconnects on its own** — off the platform UI thread,
+same as every other call in this package.
+
+- **`NewSyncClient(url, dbPath, token string) (*SyncClient, error)`** — `url`
+  is the y-websocket/Hocuspocus room address (its final path segment names the
+  room). `dbPath`, if non-empty, opens a SQLite-backed local store at that
+  path so the device's content survives a process restart while offline; `""`
+  means memory-only — the `Doc` is fully usable but starts empty on every
+  restart. `token`, if non-empty, is sent as ygo's Hocuspocus in-band auth
+  token — see [`docs/CLIENT.md`](../docs/CLIENT.md#auth-token-is-not-a-confidentiality-gate)
+  for what it does and does **not** protect (it is not a confidentiality
+  gate: the server serves a room's full content before it has read the
+  token). `NewSyncClient` does not touch the network.
+- **`Doc() *Doc`** — the document this `SyncClient` hydrates, edits, and
+  keeps in sync. Usable immediately, before `Connect` is ever called, and
+  remains usable after `Close` — closing a `SyncClient` stops syncing and
+  releases the network/store, it never closes the `Doc` itself.
+- **`SetOnStatus(SyncStatusObserver)`** — registers a listener for
+  connection-lifecycle notifications. `SyncStatusObserver.OnStatus(state
+  int64, errMsg string)` fires once per `provider/client.Status`; `state` is
+  one of the `SyncState*` constants below, and `errMsg` is non-empty only for
+  a failure-caused `SyncStateDisconnected`. Runs on a background goroutine —
+  never the UI thread — same rule as `DocObserver`/`AwarenessObserver` above.
+- **`Connect()`** — starts hydrating and syncing. Returns immediately (the
+  underlying blocking `Connect` call runs on its own goroutine); progress
+  comes through the status observer, not a return value. A second call is a
+  silent no-op.
+- **`SyncedOnce() bool`** — reports whether the `Doc` has reconciled with the
+  server at least once, on any connection so far. The poll-friendly mirror of
+  `provider/client.Client.Synced()`'s channel for platform code that cannot
+  receive on a Go channel across the binding boundary. Never flips back to
+  `false` once `true`.
+- **`Close()`** — stops syncing and releases network/store resources
+  (durability first, then a bounded best-effort network drain, then
+  teardown — see [`docs/CLIENT.md`](../docs/CLIENT.md#close-semantics)).
+  Idempotent; safe to call without ever having called `Connect`.
+
+**Connection states** (`SyncStatusObserver.OnStatus`'s `state` parameter) —
+pinned explicitly rather than inherited from `provider/client.State`'s own
+enum order, so a future reordering there can never silently renumber this
+public contract:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `SyncStateConnecting` | 0 | A dial or handshake attempt is in flight. |
+| `SyncStateConnected` | 1 | WebSocket is up; the sync handshake has not completed yet. |
+| `SyncStateSynced` | 2 | The sync handshake has completed at least once on this connection. |
+| `SyncStateDisconnected` | 3 | No live connection and no attempt in flight — between backoff attempts, or after `Close`. |
+
+**`SyncStateSynced` is not proof of a successful auth exchange** if `token`
+was set — see the auth caveat linked above; watch for the *absence* of a
+subsequent failure-caused `SyncStateDisconnected` instead.
+
+```kotlin
+// Kotlin (Android)
+val client: SyncClient
+try {
+    client = Mobile.newSyncClient(
+        "wss://example.com/yjs/my-room",
+        "${filesDir}/my-room.db", // dbPath: "" = memory-only
+        ""                         // token: "" = none
+    )
+} catch (e: Exception) {
+    Log.e("ygo", "newSyncClient failed", e) // bad URL, or local store open failure
+    return
+}
+
+val doc = client.doc() // usable immediately, before connect()
+client.setOnStatus(object : SyncStatusObserver {
+    override fun onStatus(state: Long, errMsg: String) {
+        when (state) {
+            Mobile.SyncStateSynced -> Log.i("ygo", "synced")
+            Mobile.SyncStateDisconnected -> if (errMsg.isNotEmpty()) Log.w("ygo", "disconnected: $errMsg")
+        }
+    }
+})
+client.connect() // returns immediately; dials and syncs in the background
+
+// ... e.g. ViewModel.onCleared() ...
+client.close() // stops syncing; doc stays usable
+```
+
+```swift
+// Swift (iOS)
+var error: NSError?
+let maybeClient = MobileNewSyncClient(
+    "wss://example.com/yjs/my-room",
+    dbPath, // "" = memory-only
+    "",     // token: "" = none
+    &error
+)
+guard let client = maybeClient, error == nil else {
+    print("newSyncClient failed: \(error!)") // bad URL, or local store open failure
+    return
+}
+
+let doc = client.doc() // usable immediately, before connect()
+client.setOnStatus(statusObserver) // your SyncStatusObserver implementation
+client.connect() // returns immediately; dials and syncs in the background
+
+// ... deinit ...
+client.close() // stops syncing; doc stays usable
+```
+
+See [`docs/CLIENT.md`](../docs/CLIENT.md) for the full design this wraps: why
+there is no separate offline-op queue (the sync handshake itself carries
+edits made while disconnected), the exact `Stats().Dropped` rule, and the
+reconnect/backoff/keepalive schedule — all of it applies unchanged under
+`SyncClient`, which is a thin translation layer, not a second
+implementation.
 
 ## Examples
 

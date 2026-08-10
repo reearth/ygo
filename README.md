@@ -26,7 +26,8 @@ Where ygo goes further than a port is on the server. It ships a [Hocuspocus](htt
 - [Installation](#installation) · [Quick Start](#quick-start) · [Examples](#examples)
 - [How ygo compares](#how-ygo-compares) · [Goals and non-goals](#goals-and-non-goals)
 - [WebSocket Server](#websocket-server) · [Server-side document injection](#server-side-document-injection)
-- [Attribution](#attribution) · [Persistence](#persistence) · [Subdocuments](#subdocuments) · [Mobile (iOS / Android)](#mobile-ios--android)
+- [Attribution](#attribution) · [Persistence](#persistence) · [Subdocuments](#subdocuments)
+- [Offline-First Client](#offline-first-client) · [Mobile (iOS / Android)](#mobile-ios--android)
 - [Running in production](#running-in-production) · [Performance](#performance) · [Architecture](#architecture)
 - [Compatibility](#compatibility) · [Versioning and API stability](#versioning-and-api-stability) · [Gotchas](#gotchas)
 - [Documentation](#documentation) · [Contributing](#contributing) · [Security](#security) · [License](#license)
@@ -39,6 +40,7 @@ ygo is a pure-Go CRDT library that interoperates with Yjs (JavaScript) and yrs (
 - Both update wire formats (V1 and V2, with V1↔V2 conversion)
 - The y-protocols sync handshake and awareness layer
 - WebSocket and HTTP transport bindings (the core is transport-agnostic)
+- An embeddable offline-first sync client (`provider/client`) with local durability and automatic reconnect
 - Native iOS/Android embedding via `gomobile` (the `mobile/` subpackage) — no JS runtime, no CGO
 - Snapshots, garbage collection, undo manager, persistence adapters
 
@@ -54,7 +56,8 @@ See [the latest release](https://github.com/reearth/ygo/releases/latest) for the
 - **Awareness** — presence, cursor sharing, ephemeral state.
 - **Snapshots** — point-in-time document history and restore.
 - **Transport-agnostic** — core logic has no transport dependency; WebSocket and HTTP handlers are addons.
-- **Mobile bindings** — embed natively in iOS/Android via `gomobile bind` (the [`mobile/`](mobile/) subpackage). Pure Go, no CGO; full on-device editing, sync, presence, and change-notification observers.
+- **Offline-first client** — [`provider/client`](docs/CLIENT.md) embeds a Yjs sync client with local durability and jittered-backoff reconnect in any Go process. No separate offline-op queue: the sync handshake itself carries edits made while disconnected.
+- **Mobile bindings** — embed natively in iOS/Android via `gomobile bind` (the [`mobile/`](mobile/) subpackage). Pure Go, no CGO; full on-device editing, sync, presence, and change-notification observers, plus `mobile.SyncClient` for self-syncing against a server.
 
 Post-v1.0 hardening:
 
@@ -89,6 +92,8 @@ Post-v1.0 hardening:
 - **Positional-access performance** (v1.39.0). `YText`/`YArray` positional operations (`Get`, `Slice`, positional insert/delete, `Format`, `ApplyDelta`) now route through a Yjs-style bidirectional, move-aware search-marker cache instead of the old forward-only position cache — internal only, no public API change. Measured on a 100k-node document: random-position insert ~101× faster, reverse insert ~916× faster (the old cache's O(n²) worst case), random `Get` ~114× faster. Also fixes a `YText.ApplyDelta` bug where an attribute-less `insert` could inherit a preceding retain's `attributes` (Yjs/Quill-aligned fix; behaviour change for callers relying on the old bleed-through) (#181).
 - **Room load off the global lock + idle-room residency** (v1.39.0). Concurrent connects to distinct rooms now load in parallel instead of serializing behind the server's single rooms lock (#182). New `Server.RoomIdleTimeout`/`Server.MaxResidentRooms` let a room stay warm in memory for a bounded time (and bounded count) after its last peer leaves so a quick reconnect reuses the live doc instead of reloading; both default to zero, preserving the previous eager-evict behaviour (#183).
 - **Per-room relay isolation + honest delivery guarantee** (v1.42.0). Inbound (`cluster/redis`) and outbound (`provider/websocket`) relay delivery are each isolated per room — one bounded lane and worker per room, in both directions — so one room's slow `Sink.Inject` call (inbound) or slow publish (outbound) can no longer block delivery for every other room on the node (#187). This is `cluster/redis`-specific, not a property of `cluster.Relay` in general: the interface now permits any relay to deliver rooms concurrently, but the in-process reference `MemRelay` still delivers every room from one goroutine per node and does not (yet) get this isolation. A saturated lane coalesces its queued `KindSync` backlog via `crdt.MergeUpdatesV1` instead of dropping it (a saturated awareness slot instead replaces the queued blob with the newest one — `AwarenessSuperseded`, not a drop); this trades a small, bounded, amortized merge cost for boundedness, so a wedged room's merge attempts can still delay *other* rooms briefly on the shared inbound subscriber goroutine (rare; the same condition that produces `HardDrops`). Also fixes a pre-existing bug, shipped since v1.20.0, where `Server.Apply`'s origin sentinel could alias the relay's echo-guard sentinel (Go's zero-size-allocation guarantee) — silently disabling relay publish for every `Apply` write, and separately letting a concurrent relay-injected update bleed into the delta `Apply` returns to its caller. Contract change: `cluster.Sink.Inject` (for a custom `Sink`) and `cluster.Relay.Publish` (for a custom `Relay`) may now each be called concurrently for distinct rooms; `Publish` additionally permits two concurrent calls for the SAME room during a room's eviction/reload handoff, with no per-room ordering guaranteed (`Inject` still serialises same-room calls). `*websocket.Server`, `MemRelay`, and `cluster/redis` are already safe for both; third-party `Sink`/`Relay` implementations must confirm they are too. Reality check, unchanged by this release: Redis pub/sub itself remains at-most-once by Redis's own definition — a subscriber that can't keep up loses the message for good, and persistence only heals that on the room's next reload, which a hot room never gets. Watch `cluster/redis.Relay.Stats()` / `websocket.Server.RelayStats()`: `Coalesced`/`AwarenessSuperseded` are routine on a busy room (alert on rate, not presence), inbound-only `RouterDrops` is routine under ordinary room churn (alert on rate), and `HardDrops`/`Dropped` should always be zero (alert on presence — they mean data was lost).
+
+- **Embeddable offline-first sync client** (v1.48.0). [`provider/client`](docs/CLIENT.md) is a new package: a `*crdt.Doc` that is immediately readable and editable — connected, disconnected, or never-yet-connected — hydrated from a local SQLite-backed store before any dial, and kept in sync with a `provider/websocket`-compatible server via the same wire protocol. There is deliberately no separate offline-op queue: the y-protocol sync handshake itself carries edits made while disconnected, on the next successful reconnect. Reconnect uses jittered exponential backoff reset only on a completed handshake (not merely a dial), plus WebSocket ping/pong keepalive so a half-open connection converts to a retry instead of hanging forever. `Stats().Dropped` is durability-based, not connection-based — a store-backed document update that could not be sent is not counted, since the store and the next handshake still deliver it. `mobile.SyncClient` is the `gomobile` binding, making the existing on-device editor (`mobile/`, v1.34.0) self-syncing on iOS/Android with no platform-side reconnect logic to write. Closes the "embeddable offline-first client" gap this project's own competitive comparison against Deln0r/ygo flagged (#165).
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release picture.
 
@@ -140,7 +145,7 @@ func main() {
 
 ## Examples
 
-The [`examples/`](examples/) directory contains four runnable programs with detailed inline comments:
+The [`examples/`](examples/) directory contains five runnable programs with detailed inline comments:
 
 | Example | What it shows |
 |---------|---------------|
@@ -148,6 +153,7 @@ The [`examples/`](examples/) directory contains four runnable programs with deta
 | [`examples/http-sync`](examples/http-sync/) | Pull/push sync over HTTP with incremental state-vector diffs |
 | [`examples/collab-editor`](examples/collab-editor/) | Real-time multi-tab collaborative editor with a browser client |
 | [`examples/snapshot-history`](examples/snapshot-history/) | Document versioning — capture, store, and restore past states |
+| [`examples/offline-client`](examples/offline-client/) | `provider/client` against a running server — local durability, reconnect, offline edits carried by the next handshake |
 
 Run any example from the repository root:
 
@@ -156,9 +162,13 @@ go run ./examples/peer-sync
 go run ./examples/http-sync
 go run ./examples/snapshot-history
 go run ./examples/collab-editor/server   # then open http://localhost:8080
+
+# offline-client needs a running server; start one, then point the client at it:
+go run github.com/reearth/ygo/cmd/ygo-server -addr :1234
+go run ./examples/offline-client -url ws://localhost:1234/yjs/offline-demo -db /tmp/offline-demo.db
 ```
 
-**New users**: start with `peer-sync` for the smallest end-to-end demonstration of two docs converging in-process. Jump to `collab-editor` when you want to wire the WebSocket server to a real browser client.
+**New users**: start with `peer-sync` for the smallest end-to-end demonstration of two docs converging in-process. Jump to `collab-editor` when you want to wire the WebSocket server to a real browser client, or to `offline-client` when you want a Go process (or, via `mobile.SyncClient`, a native app) that edits and reconnects on its own.
 
 ## How ygo compares
 
@@ -506,6 +516,44 @@ enumerating, and observing subdocuments on a single doc, matching Yjs's
 subdocument) is a separate, not-yet-implemented layer, tracked in
 [#142](https://github.com/reearth/ygo/issues/142).
 
+## Offline-First Client
+
+[`provider/client`](docs/CLIENT.md) is an embeddable sync client for a
+single `*crdt.Doc`: hydrate it from a local store, read and edit it at any
+time — connected, disconnected, or never-yet-connected — and let a
+background dial loop reconcile it with a `provider/websocket`-compatible
+server whenever one is reachable. It speaks the same wire protocol the
+server does, so it dials `ygo-server` or any y-websocket-compatible backend
+without modification.
+
+```go
+doc := crdt.New()
+c, err := client.New(client.Options{
+    URL:       "wss://example.com/yjs/my-room",
+    Doc:       doc,
+    StorePath: "my-room.db", // SQLite-backed local durability; "" = memory-only
+})
+if err != nil { /* ... */ }
+
+go c.Connect(context.Background()) // hydrates, then dials/handshakes/reconnects forever
+
+// doc is usable immediately — before, during, and regardless of Connect.
+```
+
+There is deliberately **no separate offline-op queue**: the y-protocol sync
+handshake itself carries edits made while disconnected, on the next
+successful reconnect. The local store exists only for the gap the handshake
+cannot cover — the process itself going away while still offline — and
+reconnect uses jittered exponential backoff (reset only on a completed
+handshake, not merely a dial) plus WebSocket keepalive so a half-open
+connection converts to a retry instead of hanging forever.
+
+See [`docs/CLIENT.md`](docs/CLIENT.md) for the full design (including the
+exact `Stats().Dropped` accounting and the auth-token caveat) and
+[`examples/offline-client`](examples/offline-client) for a runnable,
+flag-driven demo. `mobile.SyncClient` is the `gomobile` binding — see
+[Mobile (iOS / Android)](#mobile-ios--android) below.
+
 ## Mobile (iOS / Android)
 
 The [`mobile/`](mobile/) subpackage is a [`gomobile bind`](https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile)-able façade over `crdt` and `awareness`, so you can embed ygo natively in iOS and Android apps — **no JavaScript runtime and no CGO**. It is a **full on-device editor**: a Swift/Kotlin app can edit locally, sync, render, exchange presence, and subscribe to push change-notifications — not just receive and display.
@@ -516,6 +564,8 @@ gomobile bind -target=android -androidapi 21 ./mobile  # → mobile.aar
 ```
 
 `Doc` exposes sync (`ApplyUpdate`, `EncodeStateAsUpdate`, `EncodeStateVector`, `EncodeDiff`), read accessors (`GetText`, `GetTextJSON`, `GetMapJSON`, `GetArrayJSON`), on-device mutators (`InsertText`, `FormatText`, `DeleteText`, `InsertArray`, `DeleteArray`, `SetMap`, `DeleteMapKey`, …), and change observers (`Observe`); `Awareness` exposes presence (`SetLocalState`, `StatesJSON`, `EncodeAll`, `ApplyUpdate`) plus its own `Observe`. Every exported signature uses only gomobile-safe types (`string` / `int64` / `bool` / `[]byte` / `error`, plus the bound `*Doc` / `*Awareness` / `*Subscription` and observer interfaces), and `Close()` releases the native state. `gomobile` is a build-time tool, not a dependency — `go.mod` is unchanged. See [`mobile/README.md`](mobile/README.md) for the build matrix, threading and lifecycle guidance, binary size / ABI notes, and Kotlin / Swift snippets.
+
+`SyncClient` (v1.48.0, #165) makes that on-device `Doc` **self-syncing**: `NewSyncClient(url, dbPath, token)` returns one wired to a `provider/websocket`-compatible server, persisting locally and reconnecting on its own with no platform-side reconnect logic to write. See [Offline-First Client](#offline-first-client) above and [`mobile/README.md`](mobile/README.md#self-syncing-syncclient) for Kotlin/Swift call shapes.
 
 ## Running in production
 
@@ -734,6 +784,7 @@ See [CHANGELOG.md](CHANGELOG.md) for per-release detail and [docs/HISTORY.md](do
 | [docs/INTERNALS.md](docs/INTERNALS.md) | Implementation detail below the public API — item store, integration, encoding |
 | [docs/CLUSTERING.md](docs/CLUSTERING.md) | Running multiple server instances behind a load balancer via the cluster relay |
 | [docs/PERSISTENCE.md](docs/PERSISTENCE.md) | Persistence adapters, versioning, compaction, and durability guarantees |
+| [docs/CLIENT.md](docs/CLIENT.md) | The embeddable offline-first sync client — offline model, reconnect/backoff, `Stats`, auth caveat, mobile bindings |
 | [docs/comparison/ygo-vs-yrs.md](docs/comparison/ygo-vs-yrs.md) | Go-vs-Rust port comparison against yrs |
 | [docs/HISTORY.md](docs/HISTORY.md) | The design narrative across releases |
 | [CHANGELOG.md](CHANGELOG.md) | Per-release changes |
