@@ -97,6 +97,18 @@ func TestClient_Auth_CorrectTokenSyncs(t *testing.T) {
 // AND the server-side OnTokenAuth hook — which fires once per connection
 // attempt — is never invoked a second time, ruling out a retry that merely
 // happens to be slow rather than one that never starts.
+//
+// The count assertion below is what actually proves terminality, not a
+// wall-clock bound on how fast Connect returned. An earlier version of this
+// test also asserted elapsed < 300ms, on the theory that a terminal
+// rejection returns "on the first attempt" and so must be fast; that flaked
+// on a loaded GitHub Actions runner (elapsed observed at 358ms) even though
+// the client had genuinely never retried — a slow machine makes Connect
+// itself slower to return without that being evidence of a retry. The
+// authCalls count has no such failure mode: a slow machine only makes a
+// would-be retry LESS likely to land inside the wait window below, never
+// more, so the count staying at 1 is unambiguous positive proof that no
+// second attempt happened, regardless of how long the first one took.
 func TestClient_Auth_WrongTokenIsTerminal(t *testing.T) {
 	var authCalls atomic.Int32
 	_, ts := startServer(t, func(s *ygws.Server) {
@@ -114,10 +126,13 @@ func TestClient_Auth_WrongTokenIsTerminal(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	start := time.Now()
 	done := make(chan error, 1)
 	go func() { done <- c.Connect(context.Background()) }()
 
+	// This 5s bound's only job is to fail a genuine hang (Connect spinning
+	// forever inside runReconnectLoop's select instead of returning at all);
+	// it is deliberately generous rather than tight, unlike the wall-clock
+	// bound this test used to also assert — see this test's own doc above.
 	var connectErr error
 	select {
 	case connectErr = <-done:
@@ -125,23 +140,16 @@ func TestClient_Auth_WrongTokenIsTerminal(t *testing.T) {
 		t.Fatal("Connect did not return for a rejected token; it appears to be retrying forever " +
 			"instead of treating the rejection as terminal")
 	}
-	elapsed := time.Since(start)
 
 	require.ErrorIs(t, connectErr, ErrAuthRejected,
 		"Connect's returned error must satisfy errors.Is(err, ErrAuthRejected) so callers can branch on it")
 
-	// reconnectBackoffBase alone is 500ms; a correct implementation returns
-	// on the FIRST attempt, well under even one backoff cycle, let alone
-	// "several". A generous 300ms bound catches an implementation that fell
-	// through to the ordinary backoff-and-retry path instead of stopping.
-	require.Less(t, elapsed, 300*time.Millisecond,
-		"Connect took %v to return a rejected token; a terminal rejection must return on the "+
-			"first attempt, not after backing off and retrying", elapsed)
-
-	// Give a would-be retry loop a window several backoff cycles wide to
-	// prove conclusively that it does not exist, rather than merely that it
-	// hadn't gotten around to retrying yet by the time Connect returned.
-	time.Sleep(750 * time.Millisecond)
+	// reconnectBackoffBase alone is 500ms, so ~2s comfortably exceeds several
+	// backoff cycles' worth of waiting. If the reconnect loop had fed this
+	// rejection back into itself instead of stopping, it would have dialed
+	// and been rejected again well within this window. authCalls staying at
+	// exactly 1 is the positive proof that no such retry exists.
+	time.Sleep(2 * time.Second)
 	require.Equal(t, int32(1), authCalls.Load(),
 		"OnTokenAuth was invoked more than once: the reconnect loop retried a rejected token "+
 			"against the server instead of stopping after the first rejection")
