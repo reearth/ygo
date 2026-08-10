@@ -65,6 +65,25 @@ type Options struct {
 	// sentinel's doc. Left at its zero value (the default), nothing changes
 	// from the plain y-websocket flow: no Auth frame is ever sent. Use
 	// Header for HTTP-level credentials instead of, or in addition to, this.
+	//
+	// # NOT a confidentiality gate
+	//
+	// A wrong Token does not stop the room's content from reaching this
+	// Client first. ygo's own server pushes SyncStep1 + a full SyncStep2 +
+	// Awareness the moment a connection is accepted, before it has read
+	// anything the client sent — Token included (see
+	// provider/websocket.Server's OnTokenAuth doc, verbatim: "the initial
+	// sync is served before any PermissionDenied, so deployments that must
+	// withhold document contents from unauthenticated clients must reject
+	// them at the boundary via AuthFunc/Authorize"). Concretely: this
+	// Client's Doc can be fully populated with the room's real content, and
+	// Synced() can already be closed, before — or even without ever —
+	// learning that Token was rejected; see Synced's own doc for the
+	// consequence that has for a caller. If withholding document content
+	// from an unauthenticated caller matters for a deployment, Token is not
+	// what does that; reject the connection at the HTTP boundary instead,
+	// with provider/websocket.Server's AuthFunc or Authorize, before the
+	// upgrade ever completes.
 	Token string
 
 	// Header carries additional HTTP headers on the WebSocket upgrade
@@ -181,6 +200,16 @@ const (
 	// StateSynced means the sync handshake has completed at least once on
 	// the current connection: the client's Doc has reconciled with the
 	// server's state as of connect time.
+	//
+	// This is NOT the same claim as "and Options.Token, if set, was
+	// accepted." ygo's server serves a room's full content unconditionally,
+	// before it has even read a client's Token (see Options.Token's own doc,
+	// "NOT a confidentiality gate"), so StateSynced can fire — and Synced()
+	// can already be closed — on a connection whose token is later rejected.
+	// Do not treat this state, or a closed Synced() channel, as proof of a
+	// successful auth exchange; a rejection surfaces separately, either as
+	// this Client's next StateDisconnected{Err: ErrAuthRejected} or as
+	// Connect's return value.
 	StateSynced
 	// StateDisconnected means there is no live connection and no attempt is
 	// currently in flight (between backoff attempts, or after Close).
@@ -666,6 +695,23 @@ func (c *Client) hydrate() error {
 // Callers that want "block until this doc has whatever the server has, at
 // least once" should select on the returned channel rather than polling
 // OnStatus for StateSynced.
+//
+// # This channel closing is not proof Options.Token was accepted
+//
+// If Options.Token is set, do not treat a closed Synced() as "and therefore
+// authenticated". ygo's server serves a room's full SyncStep1/SyncStep2/
+// Awareness state unconditionally, before it has read the client's Token at
+// all (see Options.Token's "NOT a confidentiality gate" doc) — so this
+// channel can close, with the Doc already carrying the room's real content,
+// on a connection whose token is rejected moments later. A caller that needs
+// to know the token was actually accepted has to watch for the ABSENCE of a
+// subsequent StateDisconnected{Err: ErrAuthRejected} (via OnStatus) or for
+// Connect returning without ErrAuthRejected — Synced() alone does not carry
+// that information, by design (it answers "does the Doc have the server's
+// state", not "was this connection authorized"). A deployment that needs to
+// withhold content pending authorization should reject the connection at the
+// HTTP boundary instead (provider/websocket.Server's AuthFunc/Authorize),
+// before this Client ever gets far enough to sync anything.
 func (c *Client) Synced() <-chan struct{} {
 	return c.synced
 }
