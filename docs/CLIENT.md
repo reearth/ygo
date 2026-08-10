@@ -211,9 +211,15 @@ Mirrors `provider/websocket`'s `RelayStats` in shape and in alerting voice:
 - **`Coalesced`** and **`AwarenessSuperseded`** are **routine** — merged
   backlog batches and superseded presence announcements under ordinary
   load. Never evidence of loss. Watch their *rate*, not their presence.
-- **`HardDrops`** should always be zero in this package today (kept for
-  shape parity with `RelayStats`; nothing here retries, so nothing here
-  hard-drops).
+- **`HardDrops`** comes straight from the outbound lane
+  (`internal/relaylane`), not from retrying anything — nothing in this
+  package retries a wire send. It increments only as a last resort: when a
+  document-update backlog has grown past *twice* the lane's capacity (64 by
+  default) and the lane's own attempt to collapse that backlog into one
+  blob keeps failing, it drops the oldest queued update rather than growing
+  without bound. That needs a long offline burst piling up more local edits
+  than the lane can coalesce, so it should stay rare in practice — but it is
+  a real mechanism, not a permanent zero.
 - **`Dropped`** is the one to alert on — but its exact rule is
   **durability-based, not connection-based**, and getting this distinction
   backwards is the easiest way to over- or under-react to it:
@@ -291,6 +297,25 @@ then teardown** — never a silent discard.
    never closed here — the caller retains that handle.
 
 `Close` is idempotent and safe to call concurrently with `Connect`.
+
+### `OnStatus` and `Close`
+
+**Never call `Close` from inside an `OnStatus` callback.** Every status this
+`Client` ever emits is delivered synchronously from its sync-loop goroutine,
+and `Close`'s first step (above) joins that exact goroutine before it does
+anything else — a callback that calls `Close` is that goroutine waiting on
+itself, and deadlocks permanently rather than merely blocking. This matters
+in practice: "disconnect and give up" on `StateDisconnected` is an obvious
+thing for a subscriber to want to do.
+
+[`mobile.SyncClient`](#mobile-ios--android) does not have this hazard: it
+dispatches to `SyncStatusObserver` from a dedicated goroutine that is never
+the sync loop, specifically so platform code —
+`onStatus { state, _ -> if (fatal(state)) client.close() }` is an obvious
+Swift/Kotlin shape — can safely close from its own status handler. A caller
+embedding `provider/client` directly does not get that protection for free:
+hand the `Status` off to a channel or goroutine and call `Close` from there
+instead of from inside the callback.
 
 ---
 

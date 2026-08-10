@@ -34,14 +34,39 @@ const dialHandshakeTimeout = 10 * time.Second
 // drains).
 const writeTimeout = 10 * time.Second
 
-// flushWriteTimeout and closeDrainTimeout bound flushLane's two call sites
-// (see runLoop): the ordinary per-signal drain while a connection is live,
-// and the bounded best-effort drain flushLane performs when ctx is already
-// done (Close, or the caller's own ctx being cancelled) — see flushLane's
-// "Take-before-write" doc section for the #202-style accounting that
-// distinguishes them. closeDrainTimeout is deliberately SHORTER: an ordinary
-// send has a whole reconnect cycle to eventually succeed if it is merely
-// slow, but Close needs a real bound on how long it can take to return.
+// flushWriteTimeout and closeDrainTimeout bound EACH INDIVIDUAL WRITE
+// flushLane's two call sites make (see runLoop): the ordinary per-signal
+// drain while a connection is live, and the drain runLoop's ctx.Done() case
+// performs once ctx is already done (Close, or the caller's own ctx being
+// cancelled) — see flushLane's "Take-before-write" doc section for the
+// #202-style accounting that distinguishes them. closeDrainTimeout is
+// deliberately SHORTER: an ordinary send has a whole reconnect cycle to
+// eventually succeed if it is merely slow, but a write attempted this late,
+// with nothing left to retry it, should fail fast rather than sit on an
+// already-doomed socket.
+//
+// # A per-write bound, not a whole-drain deadline
+//
+// Neither var caps how long flushLane's OWN for loop can run for. That loop
+// keeps draining until BOTH TakeSync and TakeAwareness report the lane
+// empty (see flushLane's doc) — it does not stop after one write — and the
+// Doc/Awareness observers are still fully live for the entire span of the
+// ctx.Done() drain specifically: Close only unsubscribes them in its OWN
+// later step, which does not run until THIS drain's caller (runLoop, inside
+// Connect) has already returned (see Close's doc for the exact step
+// ordering). So an application that keeps editing its Doc from another
+// goroutine while Close is tearing down can, in principle, keep feeding
+// this exact drain new payloads for as long as it keeps editing —
+// closeDrainTimeout bounds how long any ONE of those writes gets, never how
+// long the drain as a whole takes to finish draining an actively-fed lane.
+// (#165 final whole-branch review, Important H: an earlier version of this
+// doc, and of flushLane's own, described this as if it were a whole-drain
+// deadline — "Close needs a real bound on how long it can take to return" —
+// which is not what either var actually enforces.) In practice this
+// terminates promptly anyway, because each write is fast (or fails fast)
+// relative to any realistic caller's edit rate, and giveUp (see flushLane)
+// stops attempting further writes the moment one fails while ctx is
+// already done — not because either timeout caps the loop itself.
 //
 // Both are vars, not consts — unlike writeTimeout above, a test DOES need to
 // shrink closeDrainTimeout independently of the handshake-path writeTimeout:
@@ -267,6 +292,13 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	// for why this call is safe to make again later from the read pump
 	// goroutine while the loop goroutine is concurrently writing.
 	if err := conn.SetReadDeadline(time.Now().Add(readDeadline)); err != nil {
+		// The teardown defer that closes conn isn't installed until further
+		// down (after the read pump starts) — this return happens strictly
+		// before that, so without an explicit Close here this path would
+		// leak the fd on every reconnect attempt that reaches a dialed
+		// connection but then fails this call (#165 final whole-branch
+		// review, Important F).
+		_ = conn.Close()
 		return fmt.Errorf("client: set initial read deadline: %w", err)
 	}
 	// A pong is the one case that does NOT show up as a ReadMessage return —
@@ -411,14 +443,20 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	for {
 		select {
 		case <-ctx.Done():
-			// #165 Task 10 / #202: give whatever is still queued on the
-			// lane a bounded, best-effort chance to actually reach the
-			// wire before this connection's socket goes away for good, and
-			// COUNT (per countUndeliverable's rule) what does not make it.
-			// The error is intentionally ignored: flushLane never returns
-			// non-nil when ctx is already done at every failure it can hit
-			// (that is the whole point of the ctx-aware giveUp branch), so
-			// there is nothing left to report — see its doc.
+			// #165 Task 10 / #202: give whatever is queued on the lane a
+			// best-effort chance to actually reach the wire before this
+			// connection's socket goes away for good, and COUNT (per
+			// countUndeliverable's rule) what does not make it. Each write
+			// this performs is bounded by closeDrainTimeout — see that
+			// var's own doc for why that is a per-write bound, not a cap
+			// on how long this whole step can take: a Doc/Awareness
+			// observer still live and firing (see Close's own doc for why
+			// that is deliberate here) can keep this loop fed for as long
+			// as it keeps producing new payloads. The error is
+			// intentionally ignored: flushLane never returns non-nil when
+			// ctx is already done at every failure it can hit (that is the
+			// whole point of the ctx-aware giveUp branch), so there is
+			// nothing left to report — see its doc.
 			//
 			// closeDrainHook fires first (a no-op outside a test) — see its
 			// own doc for why a test needs this exact point, rather than the
@@ -887,11 +925,13 @@ func (s *session) handleFrame(frame []byte) error {
 // matters ("will SOMETHING durable still deliver this?").
 //
 // deadline is the caller's choice specifically so the two call sites in
-// runLoop can apply different budgets: the ordinary case (flushWriteTimeout,
-// ctx still live) gets the same generous budget writes always had, while the
-// ctx-already-done case (closeDrainTimeout) gets a short one, since nothing
-// is waiting to retry and Close needs a real bound on how long it can take
-// to return.
+// runLoop can apply different PER-WRITE budgets: the ordinary case
+// (flushWriteTimeout, ctx still live) gets the same generous budget writes
+// always had, while the ctx-already-done case (closeDrainTimeout) gets a
+// short one, since nothing is waiting to retry a write that fails this late
+// and it should fail fast rather than sit on an already-doomed socket. This
+// bounds each write, not the loop below as a whole — see closeDrainTimeout's
+// own doc for why that distinction matters and is not merely academic.
 //
 // giveUp — set once a write fails while ctx is already done, and left set for
 // the rest of this call — is purely a MECHANICAL optimisation, not an

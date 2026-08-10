@@ -506,3 +506,59 @@ func TestClient_Awareness_DropsRemoteStateOnDisconnect_WithoutLeakingTombstones(
 		t.Fatal("second connection never completed its read window")
 	}
 }
+
+// TestClient_Awareness_CallerDrivenExpiryDoesNotRebroadcastOtherPeers is the
+// final whole-branch review's Important C: Client.Awareness's own godoc
+// (see its "propagates to the server" paragraph) says local state set on the
+// returned *awareness.Awareness propagates via onAwarenessUpdate regardless
+// of whether Connect has been called — which is true, but onAwarenessUpdate
+// used to forward EVERY clientID in ANY non-remoteOrigin UpdateEvent, not
+// just this Client's own. awareness.Awareness.RemoveExpired (and, by the
+// same mechanism, StartAutoExpiry, which the awareness package's own doc
+// recommends a caller wire up) fires with a nil Origin — never
+// c.remoteOrigin — and its Removed set is always some OTHER peer's
+// clientID (RemoveExpired never self-expires the local client; see its own
+// doc). So a caller driving expiry on Client.Awareness() the documented way
+// made this Client encode and queue a null entry for a peer it does not
+// own, which a real server would broadcast room-wide, evicting a peer that
+// may still be perfectly present — the same interop hazard an earlier round
+// fixed for queryAwareness (see loop.go's wireMsgQueryAwareness case),
+// reached through a different door.
+//
+// This is deliberately network-free: nothing here calls Connect, so the
+// lane is never drained by anything else, and c.lane.Empty() after
+// RemoveExpired is an unambiguous, race-free proof of whether a push
+// happened — an end-to-end version through a live connection would have to
+// race the loop's own flushLane call to observe the same thing.
+func TestClient_Awareness_CallerDrivenExpiryDoesNotRebroadcastOtherPeers(t *testing.T) {
+	doc := crdt.New()
+	c, err := New(Options{URL: "ws://127.0.0.1:1/room", Doc: doc})
+	require.NoError(t, err)
+
+	// Simulate a remote peer's presence having already arrived over the
+	// network — applied under c.remoteOrigin, exactly as handleFrame's
+	// wireMsgAwareness case does for a real inbound frame.
+	remoteID := c.awareness.ClientID() + 1
+	remoteJoin := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(1)
+		enc.WriteVarUint(remoteID)
+		enc.WriteVarUint(uint64(1))
+		enc.WriteVarString(`{"name":"peer"}`)
+	})
+	require.NoError(t, c.awareness.ApplyUpdate(remoteJoin, c.remoteOrigin))
+	require.True(t, c.lane.Empty(),
+		"the remote peer's own arrival must not have queued anything (it is neither this Client's "+
+			"own state nor a self-correction) — precondition for the assertion below")
+
+	// Caller-driven expiry directly on this Client's own Awareness — the
+	// exact pattern Awareness.RemoveExpired's doc recommends (StartAutoExpiry
+	// automates the same call). timeout=0 expires the remote peer
+	// immediately; RemoveExpired never self-expires the local clientID, so
+	// remoteID is the only entry that can possibly be removed here.
+	c.awareness.RemoveExpired(0)
+
+	require.True(t, c.lane.Empty(),
+		"RemoveExpired removing an OTHER peer's presence must not queue an outbound announcement — "+
+			"this Client does not own that peer's state, and re-broadcasting its removal would let a "+
+			"real server evict a peer that is still present everywhere else (#165 final review, Important C)")
+}

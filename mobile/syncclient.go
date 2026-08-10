@@ -20,8 +20,104 @@ import (
 // mobile/observe.go's DocObserver and AwarenessObserver already document.
 // Marshal to the main thread before touching UI state, exactly as those two
 // observers require.
+//
+// # Safe to call SyncClient.Close from inside OnStatus
+//
+// Unlike the underlying provider/client.Client.OnStatus (whose callbacks run
+// synchronously on that Client's own sync-loop goroutine — see that method's
+// "fn must never call Close" doc, and Close's own doc for why calling Close
+// from inside one deadlocks permanently), this delivery runs on a dedicated
+// drain goroutine (see handleStatus/statusDrain) that is never the loop
+// goroutine SyncClient.Close ultimately joins. So the obvious Swift/Kotlin
+// shape — `onStatus { state, _ -> if (fatal(state)) client.close() }` — is
+// safe here specifically because SyncClient interposes that goroutine
+// between provider/client's callback and the platform observer; it would
+// NOT be safe against the raw Go Client type (#165 final whole-branch
+// review, Important B; see TestSyncClient_CloseFromOnStatusDoesNotDeadlock).
 type SyncStatusObserver interface {
 	OnStatus(state int64, errMsg string)
+}
+
+// statusPending is the mailbox between provider/client.Client's OnStatus
+// callback (handleStatus, invoked synchronously on that Client's own loop
+// goroutine — see emitStatus's doc) and statusDrain, the goroutine that
+// actually calls the platform SyncStatusObserver. Unlike mobile/observe.go's
+// docPending/awarenessPending, entries here are never merged or coalesced:
+// every Status transition is individually meaningful to a platform observer
+// (StateConnecting, StateConnected and StateSynced are all distinct signals,
+// not supersede-able the way a document update or a presence batch is), so
+// this is a plain, unbounded FIFO queue instead — bounded in practice only by
+// how far behind a slow or blocked observer falls, which for a lifecycle
+// signal firing at most a few times per connection attempt is not a
+// realistic concern.
+type statusPending struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	queue   []client.Status
+	stopped bool
+}
+
+func newStatusPending() *statusPending {
+	p := &statusPending{}
+	p.cond = sync.NewCond(&p.mu)
+	return p
+}
+
+// push enqueues st for delivery by statusDrain. Called synchronously from
+// provider/client.Client.emitStatus, on that Client's own loop goroutine (see
+// handleStatus) — it must therefore be cheap and non-blocking, exactly like
+// mobile/observe.go's Doc/Awareness bridge callbacks; it never calls the
+// platform observer itself.
+func (p *statusPending) push(st client.Status) {
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return
+	}
+	p.queue = append(p.queue, st)
+	p.cond.Signal()
+	p.mu.Unlock()
+}
+
+// stop signals statusDrain to exit once it next wakes, abandoning any
+// still-queued statuses. It does NOT join statusDrain — see that function's
+// own doc for why, mirroring mobile/observe.go's Subscription.Close.
+func (p *statusPending) stop() {
+	p.mu.Lock()
+	p.stopped = true
+	p.cond.Broadcast()
+	p.mu.Unlock()
+}
+
+// statusDrain delivers queued Status values to s's currently-registered
+// SyncStatusObserver, one at a time, in the order provider/client.Client
+// produced them, on a goroutine that is NEVER that Client's own loop
+// goroutine — see handleStatus's and SyncStatusObserver's own doc for why
+// that separation is the entire point of this indirection. It exits once
+// p.stopped is observed, abandoning any still-queued statuses; a status
+// already dequeued before that point is still delivered. Not joined by
+// SyncClient.Close, for the same reason mobile/observe.go's docDrain/
+// awarenessDrain are not joined by Subscription.Close: this goroutine may
+// currently be inside the observer's OnStatus call, which is free to call
+// back into this SyncClient (including Close itself — see
+// SyncStatusObserver's doc), so waiting for it here could deadlock against
+// exactly the call this indirection exists to make safe.
+func statusDrain(p *statusPending, s *SyncClient) {
+	for {
+		p.mu.Lock()
+		for len(p.queue) == 0 && !p.stopped {
+			p.cond.Wait()
+		}
+		if p.stopped {
+			p.mu.Unlock()
+			return
+		}
+		st := p.queue[0]
+		p.queue[0] = client.Status{}
+		p.queue = p.queue[1:]
+		p.mu.Unlock()
+		s.deliverStatus(st) // off all locks
+	}
 }
 
 // SyncClient connection states delivered to SyncStatusObserver.OnStatus.
@@ -98,9 +194,17 @@ type SyncClient struct {
 	// statusMu guards observer. It is DISTINCT from mu for the same reason
 	// mobile/doc.go's Doc keeps subsMu separate from mu: dispatching a
 	// callback must never happen while any lifecycle lock is held (see
-	// handleStatus).
+	// deliverStatus).
 	statusMu sync.Mutex
 	observer SyncStatusObserver
+
+	// statusPend is the mailbox statusDrain's goroutine reads from and
+	// handleStatus writes to — see statusPending's own doc for why this
+	// indirection exists (#165 final whole-branch review, Important B:
+	// without it, a platform SyncStatusObserver.OnStatus that calls Close
+	// deadlocks permanently). Never nil after NewSyncClient; stopped, not
+	// joined, by Close.
+	statusPend *statusPending
 }
 
 // NewSyncClient constructs a SyncClient for the y-websocket/Hocuspocus room
@@ -132,10 +236,12 @@ func NewSyncClient(url, dbPath, token string) (*SyncClient, error) {
 		return nil, err
 	}
 	s := &SyncClient{
-		doc: &Doc{d: rawDoc},
-		c:   c,
+		doc:        &Doc{d: rawDoc},
+		c:          c,
+		statusPend: newStatusPending(),
 	}
 	c.OnStatus(s.handleStatus)
+	go statusDrain(s.statusPend, s)
 	return s, nil
 }
 
@@ -166,16 +272,36 @@ func (s *SyncClient) SetOnStatus(o SyncStatusObserver) {
 }
 
 // handleStatus is the single provider/client.Client.OnStatus subscriber this
-// SyncClient registers, in NewSyncClient. It translates a client.Status into
-// the (int64, string) shape SyncStatusObserver.OnStatus can cross the
-// gomobile boundary with, and — critically — reads the currently-registered
-// observer under statusMu and RELEASES that lock before invoking it. #119's
-// established rule (see mobile/observe.go's docDrain/awarenessDrain) is that
-// no callback ever runs while this package holds a lock: a platform-side
-// OnStatus implementation that calls back into this SyncClient (e.g.
-// SetOnStatus to replace itself, or reading Doc()) must not be able to
-// deadlock against the very lock that looked it up.
+// SyncClient registers, in NewSyncClient. It runs synchronously on
+// provider/client.Client's own loop goroutine (see that method's own
+// "fn must never call Close" doc) — exactly why it must do nothing here but
+// enqueue: it hands st to statusPend and returns immediately, never calling
+// the platform observer itself. statusDrain, running on its own goroutine,
+// is what actually calls SyncStatusObserver.OnStatus (via deliverStatus)
+// — see statusPending's doc for why this indirection exists (#165 final
+// whole-branch review, Important B) and SyncStatusObserver's doc for the
+// guarantee it buys a platform implementation: safe to call SyncClient.Close
+// from inside OnStatus, unlike the raw provider/client.Client this method
+// wraps.
 func (s *SyncClient) handleStatus(st client.Status) {
+	s.statusPend.push(st)
+}
+
+// deliverStatus translates one client.Status into the (int64, string) shape
+// SyncStatusObserver.OnStatus can cross the gomobile boundary with, and —
+// critically — reads the currently-registered observer under statusMu and
+// RELEASES that lock before invoking it. #119's established rule (see
+// mobile/observe.go's docDrain/awarenessDrain) is that no callback ever runs
+// while this package holds a lock: a platform-side OnStatus implementation
+// that calls back into this SyncClient (e.g. SetOnStatus to replace itself,
+// reading Doc(), or — per SyncStatusObserver's doc — Close) must not be able
+// to deadlock against the very lock that looked it up.
+//
+// Called only from statusDrain, on that dedicated goroutine — never from
+// handleStatus directly, and therefore never from provider/client.Client's
+// own loop goroutine (see handleStatus's doc for why that separation is the
+// entire point).
+func (s *SyncClient) deliverStatus(st client.Status) {
 	msg := ""
 	if st.Err != nil {
 		msg = st.Err.Error()
@@ -256,8 +382,23 @@ func (s *SyncClient) SyncedOnce() bool {
 // unsubscribe observers, drain-and-count whatever the lane could not
 // deliver, then close the store IF this SyncClient's Connect call opened one
 // via dbPath). It is idempotent and safe to call without ever having called
-// Connect. It does NOT close Doc() — see Doc's own doc for why the document
-// must remain usable after Close.
+// Connect, and — per SyncStatusObserver's own doc — safe to call from inside
+// a SyncStatusObserver.OnStatus callback.
+//
+// By the time s.c.Close() returns, every Status that Client will ever emit
+// has already been pushed to statusPend (see client.Client.Close's own doc:
+// it joins the loop goroutine before returning, and every status is emitted
+// from inside that goroutine's own call stack). statusPend.stop() is called
+// AFTER that, so no legitimately-emitted status is lost to the stop
+// racing ahead of its own push — but stop does not JOIN statusDrain, for the
+// same reason mobile/observe.go's Subscription.Close does not join
+// docDrain/awarenessDrain: that goroutine may currently be inside the
+// observer's OnStatus call (possibly this very call, if Close was invoked
+// from inside one), and waiting for it here would defeat the whole point of
+// dispatching off provider/client's own loop goroutine in the first place.
+//
+// It does NOT close Doc() — see Doc's own doc for why the document must
+// remain usable after Close.
 func (s *SyncClient) Close() {
 	s.mu.Lock()
 	if s.closed {
@@ -267,4 +408,5 @@ func (s *SyncClient) Close() {
 	s.closed = true
 	s.mu.Unlock()
 	_ = s.c.Close()
+	s.statusPend.stop()
 }

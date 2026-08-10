@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -282,6 +283,64 @@ func TestSyncClient_StorePathPersistsAcrossRestart(t *testing.T) {
 	if sc2.SyncedOnce() {
 		t.Fatal("SyncedOnce() reported true against an unreachable server; " +
 			"the content must have come from the local store, not a sync that should be impossible here")
+	}
+}
+
+// closingObserver is a SyncStatusObserver whose OnStatus calls
+// SyncClient.Close() the first time it is invoked — the obvious
+// Swift/Kotlin shape (`onStatus { state, _ -> if (fatal(state)) client.close() }`)
+// a platform app would reach for, and exactly the shape #165's final
+// whole-branch review (Important B) found deadlocks permanently against the
+// unfixed handleStatus.
+type closingObserver struct {
+	sc    *SyncClient
+	once  sync.Once
+	fired chan struct{}
+}
+
+func (o *closingObserver) OnStatus(int64, string) {
+	o.once.Do(func() {
+		o.sc.Close()
+		close(o.fired)
+	})
+}
+
+// TestSyncClient_CloseFromOnStatusDoesNotDeadlock is #165's final
+// whole-branch review, Important B: provider/client.Client.OnStatus
+// callbacks run synchronously on that Client's own loop goroutine, and
+// Close's first step joins exactly that goroutine (connectWG.Wait) — so a
+// callback that calls Close is that goroutine waiting on itself, a
+// permanent deadlock, not merely a slow one. mobile/observe.go's
+// Doc/Awareness bridges already solve the analogous problem with a
+// dedicated per-subscription drain goroutine (see docDrain/awarenessDrain's
+// own doc: "joining while a lock is held would deadlock"); handleStatus
+// used to skip that indirection and call the platform observer directly
+// from provider/client's own callback, so this exact scenario hung
+// permanently before the fix.
+//
+// This cannot be proven without risking an actual hang if the fix
+// regresses, so the wait below is BOUNDED: if closingObserver.fired never
+// closes within the deadline, that is reported as a test failure (a
+// leaked, permanently-blocked goroutine), not an indefinitely hanging test
+// run — go test's own process-level timeout is the only thing that would
+// otherwise need to catch a real regression here, which is a much worse
+// failure mode to debug than a clean, prompt t.Fatal.
+func TestSyncClient_CloseFromOnStatusDoesNotDeadlock(t *testing.T) {
+	_, ts := startTestServer(t)
+	sc, err := NewSyncClient(wsTestURL(ts, "close-from-status"), "", "")
+	if err != nil {
+		t.Fatalf("NewSyncClient: %v", err)
+	}
+
+	obs := &closingObserver{sc: sc, fired: make(chan struct{})}
+	sc.SetOnStatus(obs)
+	sc.Connect()
+
+	select {
+	case <-obs.fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SyncStatusObserver.OnStatus calling SyncClient.Close() deadlocked " +
+			"(#165 final whole-branch review, Important B)")
 	}
 }
 

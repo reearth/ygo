@@ -142,7 +142,11 @@ func TestClient_CompactionTrigger_DeletesAfterThreshold(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "Compact was never invoked after crossing CompactEvery")
 
 	ctx := context.Background()
-	rows, err := sqliteStore.Store().ListVersions(ctx, room)
+	// sqliteStore.store (unexported: same package) rather than a public
+	// Store() accessor — see SQLiteStore's own doc for why this package no
+	// longer promotes the wrapped VersionedPersistence publicly (#165 final
+	// whole-branch review, Important E).
+	rows, err := sqliteStore.store.ListVersions(ctx, room)
 	require.NoError(t, err)
 	require.Less(t, int64(len(rows)), store.storeCalls.Load(),
 		"stored update rows after compaction = %d, total StoreUpdate calls = %d: "+
@@ -716,6 +720,79 @@ func TestClient_Close_DropsQueuedSyncWhenNoStoreConfigured(t *testing.T) {
 	require.True(t, c.lane.Empty(), "Close must have drained the lane")
 	require.Equal(t, uint64(1), c.Stats().Dropped,
 		"a queued KindSync payload with NO Store configured must be counted when nothing ever flushes it")
+}
+
+// failingLoadDocStore is a LocalStore whose LoadDoc always fails, so a test
+// can drive Connect's hydrate-failure branch deterministically, without any
+// network or real corruption involved.
+type failingLoadDocStore struct{ err error }
+
+func (s *failingLoadDocStore) LoadDoc(string) ([]byte, error)   { return nil, s.err }
+func (s *failingLoadDocStore) StoreUpdate(string, []byte) error { return nil }
+
+// TestClient_Connect_HydrateFailureKeepsCloseWaitingForStatus is the final
+// whole-branch review's Important A: Connect's hydrate-failure branch used
+// to reset connectStarted to false BEFORE calling emitStatus, so a Close
+// running concurrently on another goroutine could read connectStarted as
+// already false — under connectMu, the same lock Connect's own reset takes —
+// and skip connectWG.Wait() entirely. That let Close return while the
+// hydrate-failure OnStatus callback was still running, which is exactly the
+// guarantee Connect's own doc (and #165 Task 11's review, which this
+// mirrors for the ordinary path) claims: "before Close's connectWG.Wait()
+// can possibly return, exactly like every other status this Client ever
+// emits."
+//
+// This drives the race deterministically rather than depending on winning
+// it: an OnStatus callback for the hydrate-failure status blocks on a
+// channel the test controls, so the callback's in-flight window is exactly
+// as long as the test wants it to be. A Close spawned while that callback
+// is deliberately still blocked must not return until the test releases it.
+func TestClient_Connect_HydrateFailureKeepsCloseWaitingForStatus(t *testing.T) {
+	store := &failingLoadDocStore{err: errors.New("simulated disk read failure")}
+	doc := crdt.New()
+	c, err := New(Options{URL: "ws://127.0.0.1:1/room", Doc: doc, Store: store})
+	require.NoError(t, err)
+
+	callbackStarted := make(chan struct{})
+	release := make(chan struct{})
+	var calledOnce atomic.Bool
+	c.OnStatus(func(st Status) {
+		if st.State == StateDisconnected && st.Err != nil && calledOnce.CompareAndSwap(false, true) {
+			close(callbackStarted)
+			<-release // held open until the test says otherwise
+		}
+	})
+
+	connectDone := make(chan error, 1)
+	go func() { connectDone <- c.Connect(context.Background()) }()
+
+	select {
+	case <-callbackStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hydrate-failure OnStatus callback never started")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- c.Close() }()
+
+	// The callback is deliberately still blocked in <-release right now.
+	// Close must not have returned yet — give it a generous window to
+	// (incorrectly) do so before declaring the invariant held.
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned while the hydrate-failure OnStatus callback was still running — " +
+			"connectStarted must not be released before emitStatus completes (#165 final review, Important A)")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release) // let the callback finish
+
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close never returned after the hydrate-failure callback finished")
+	}
+	<-connectDone
 }
 
 // TestClient_Close_Idempotent checks Close's documented "safe to call more

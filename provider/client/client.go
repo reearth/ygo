@@ -284,10 +284,19 @@ type Stats struct {
 	// AwarenessSuperseded counts locally-set awareness states that were
 	// superseded by a newer local SetLocalState call before ever being sent.
 	AwarenessSuperseded uint64
-	// HardDrops counts updates the client gave up retrying and discarded
-	// outright (e.g. exceeding a retry/staleness bound). Should always be
-	// zero in this package today (nothing here retries), kept for shape
-	// parity with RelayStats.
+	// HardDrops is read straight off this Client's single outbound lane
+	// (internal/relaylane) — it is NOT about retrying anything, and nothing
+	// in this package retries a wire send (an earlier version of this doc
+	// claimed the opposite; #165 final whole-branch review, Important G).
+	// The lane increments it only as a last resort: when a KindSync backlog
+	// has grown past TWICE the lane's capacity (relaylane.DefaultCap, 64)
+	// and crdt.MergeUpdatesV1 keeps failing to collapse the backlog into one
+	// blob, the lane drops the oldest queued update rather than growing
+	// without bound (see relaylane.Lane.collapseLocked's doc). That needs a
+	// long enough offline burst to pile up more local edits than the lane
+	// can coalesce, AND a merge failure — itself unexpected for well-formed
+	// V1 updates — so this should stay rare in practice, but it is a real,
+	// reachable mechanism, not a permanent zero.
 	HardDrops uint64
 	// Dropped counts updates actually lost — a failed local store write, a
 	// KindAwareness payload that never reached the wire, or a KindSync
@@ -619,12 +628,16 @@ func (c *Client) onDocUpdate(update []byte, origin any) {
 // forever, the awareness analogue of the doc-side echo storm
 // TestClient_SuppressesEchoAfterConvergence (offline_test.go) guards against.
 //
-// Only the affected client IDs are re-encoded and pushed, not the Client's
-// entire known state (EncodeUpdate(nil)) — SetLocalState and Heartbeat only
-// ever touch the local clientID, so evt's Added/Updated/Removed already is
-// that one ID in every real call; encoding just those IDs keeps the wire
-// message from also re-broadcasting every remote entry's unchanged state on
-// every local presence tick.
+// Only THIS Client's own clientID is ever re-encoded and pushed here, never
+// the Client's entire known state (EncodeUpdate(nil)) and never any OTHER id
+// evt happens to carry (see the filtering below and its own doc for why that
+// is a hard rule, not merely "every real call this package makes only
+// touches one id" — an earlier version of this comment claimed exactly that,
+// and #165's final whole-branch review found it false: a caller is entitled
+// to drive c.Awareness() directly, per that method's own doc, and
+// Awareness.RemoveExpired/StartAutoExpiry do so with a nil Origin — never
+// c.remoteOrigin — and a Removed set that is always some OTHER peer's
+// clientID, never this one's).
 //
 // # One narrow exception to "never re-send a remoteOrigin event"
 //
@@ -661,15 +674,22 @@ func (c *Client) onAwarenessUpdate(evt awareness.UpdateEvent) {
 		c.lane.Push(cluster.KindAwareness, c.awareness.EncodeUpdate([]uint64{c.awareness.ClientID()}))
 		return
 	}
-	n := len(evt.Added) + len(evt.Updated) + len(evt.Removed)
-	if n == 0 {
+	// Filter to THIS Client's own clientID — see this method's doc for why
+	// that is a hard rule now, not an incidental fact about the only calls
+	// this package itself makes. A no-op for SetLocalState/Heartbeat (they
+	// only ever touch the local id, so it is always present when anything
+	// else is); load-bearing for a caller driving c.Awareness() directly,
+	// e.g. RemoveExpired/StartAutoExpiry, whose Removed set is always some
+	// OTHER peer's clientID and must never reach the wire from here (#165
+	// final whole-branch review, Important C — see
+	// TestClient_Awareness_CallerDrivenExpiryDoesNotRebroadcastOtherPeers).
+	localID := c.awareness.ClientID()
+	if !containsClientID(evt.Added, localID) &&
+		!containsClientID(evt.Updated, localID) &&
+		!containsClientID(evt.Removed, localID) {
 		return
 	}
-	ids := make([]uint64, 0, n)
-	ids = append(ids, evt.Added...)
-	ids = append(ids, evt.Updated...)
-	ids = append(ids, evt.Removed...)
-	c.lane.Push(cluster.KindAwareness, c.awareness.EncodeUpdate(ids))
+	c.lane.Push(cluster.KindAwareness, c.awareness.EncodeUpdate([]uint64{localID}))
 }
 
 // containsClientID reports whether ids contains target. A small linear
@@ -761,23 +781,45 @@ func (c *Client) Connect(ctx context.Context) error {
 	defer c.connectWG.Done()
 
 	if err := c.hydrate(); err != nil {
+		// Emitted HERE, before releasing the guard below, and therefore
+		// still inside the window connectWG.Add(1) (above) / Done (deferred)
+		// covers — i.e. before Close's connectWG.Wait() can possibly return,
+		// exactly like every other status this Client ever emits. #165 Task
+		// 11's review caught an earlier mobile-binding workaround that
+		// emitted this same information from OUTSIDE that window (after
+		// Connect had already returned to its caller's goroutine), which
+		// could let Close's Wait return before the caller's status handler
+		// ever ran. Emitting from the one place this error actually occurs
+		// removes that whole class of ordering bug rather than requiring
+		// every caller to route around it themselves.
+		//
+		// The ORDER of this call relative to the connectStarted reset just
+		// below is itself load-bearing, not incidental — this is precisely
+		// what the final whole-branch review's Important A finding was
+		// about. Close decides whether to wait on connectWG by reading
+		// connectStarted under connectMu (see Close's doc); it does not
+		// wait unconditionally. Resetting connectStarted to false BEFORE
+		// this emitStatus call would let a Close running concurrently on
+		// another goroutine observe "not started" — under the very same
+		// lock — and skip connectWG.Wait() entirely, which would let Close
+		// return while this emitStatus call (and therefore whatever a
+		// subscriber's callback is doing) is still running: exactly the
+		// violation the previous paragraph's "before Close's
+		// connectWG.Wait() can possibly return" claim was supposed to rule
+		// out, and didn't, because the guard had already been released one
+		// statement too early. Emitting first closes that window: a
+		// concurrent Close reading connectStarted at ANY point before this
+		// call returns is guaranteed to still see true, and will therefore
+		// wait — see TestClient_Connect_HydrateFailureKeepsCloseWaitingForStatus
+		// for the deterministic proof (a callback held open by the test,
+		// with a concurrent Close asserted not to return while it is).
+		c.emitStatus(Status{State: StateDisconnected, Err: err})
 		// Nothing has been started, so release the guard: unlike every later
 		// failure, this one leaves the Client exactly as New returned it.
+		// Safe to do only NOW, after the emission above has fully returned.
 		c.connectMu.Lock()
 		c.connectStarted = false
 		c.connectMu.Unlock()
-		// Emitted HERE, before returning, and therefore still inside the
-		// window connectWG.Add(1) (above) / Done (deferred) covers — i.e.
-		// before Close's connectWG.Wait() can possibly return, exactly like
-		// every other status this Client ever emits. #165 Task 11's review
-		// caught an earlier mobile-binding workaround that emitted this same
-		// information from OUTSIDE that window (after Connect had already
-		// returned to its caller's goroutine), which could let Close's Wait
-		// return before the caller's status handler ever ran. Emitting from
-		// the one place this error actually occurs removes that whole class
-		// of ordering bug rather than requiring every caller to route around
-		// it themselves.
-		c.emitStatus(Status{State: StateDisconnected, Err: err})
 		return err
 	}
 
@@ -901,6 +943,26 @@ func (c *Client) Synced() <-chan struct{} {
 // can freely subscribe or unsubscribe without deadlocking against the lock
 // emitStatus itself needs. This mirrors the no-lock-held-during-callbacks
 // rule crdt.Doc.OnUpdate and provider/websocket's observers already follow.
+//
+// # fn must never call Close
+//
+// Freedom from statusMu (above) does not extend to this Client's OTHER
+// locks. Every Status is delivered synchronously, on the loop goroutine
+// Connect owns (see emitStatus's own doc: "every call site is on the loop
+// goroutine or on Connect's own goroutine around it"), and Close's very
+// first step is to join exactly that goroutine (connectWG.Wait — see
+// Close's doc) before it does anything else. A fn that calls Close is
+// therefore that same goroutine waiting on itself: a permanent deadlock,
+// not merely a slow callback that stalls this Client's sync the way
+// emitStatus's doc already warns a blocking fn does. This is a real
+// hazard, not a theoretical one — "disconnect and give up" is an obvious
+// thing for an OnStatus subscriber watching for StateDisconnected to want
+// to do. A caller embedding this package directly and needing that pattern
+// must hand the Status off (e.g. to a channel, and call Close from a
+// different goroutine reading it) rather than calling Close from inside fn.
+// See mobile.SyncClient's SyncStatusObserver for a worked example of that
+// hand-off — it exists specifically because a platform OnStatus
+// implementation cannot be expected to know about this rule at all.
 func (c *Client) OnStatus(fn func(Status)) (unsub func()) {
 	c.statusMu.Lock()
 	c.statusSubIDGen++
@@ -957,6 +1019,21 @@ func (c *Client) emitStatus(st Status) {
 // re-announces it at a bumped clock, so a quiet client is not reaped by a
 // server's AwarenessExpiry sweep (see runLoop's ping ticker case and its
 // sync-step-2 completion branch).
+//
+// # Driving expiry on the returned instance is safe, but never re-broadcasts anyone else
+//
+// A caller is entitled to call RemoveExpired or StartAutoExpiry directly on
+// the returned *awareness.Awareness — that is the pattern the awareness
+// package's own doc recommends, and this Client does not require it to be
+// driven any particular way. Doing so only ever prunes THIS Client's local
+// view of other peers; onAwarenessUpdate (registered by New) never forwards
+// a resulting removal for anyone but this Client's own clientID onto the
+// wire, no matter whose ids RemoveExpired's UpdateEvent actually names (#165
+// final whole-branch review, Important C — RemoveExpired never self-expires
+// the local client, so its Removed set is always some OTHER peer's id, and
+// re-broadcasting that would let a real server evict a peer that is still
+// perfectly present). Concretely: calling RemoveExpired/StartAutoExpiry here
+// affects only what GetStates returns locally, never what this Client sends.
 func (c *Client) Awareness() *awareness.Awareness {
 	return c.awareness
 }
@@ -1037,6 +1114,17 @@ func (c *Client) dropRemoteAwareness() {
 // network flush that COUNTS what it could not deliver rather than silently
 // discarding it, then teardown. It is safe to call more than once (only the
 // first call has any effect) and safe to call concurrently with Connect.
+//
+// # Never call this from inside an OnStatus callback
+//
+// See OnStatus's own "fn must never call Close" doc for the full argument.
+// In short: step 1 below joins the loop goroutine that every OnStatus
+// callback runs on, so a callback that calls Close is that goroutine
+// waiting on itself — a permanent deadlock, not a slow or merely-blocked
+// Close. mobile.SyncClient's SyncStatusObserver is built specifically to
+// let platform code close from its own status handler safely; embedding
+// this package directly does not get that protection and must not call
+// Close from fn.
 //
 // # Ordering, and why
 //

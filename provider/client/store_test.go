@@ -140,7 +140,11 @@ func TestSQLiteStore_CompactActuallyDeletesRows(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	before, err := s.Store().ListVersions(ctx, "room")
+	// s.store (unexported: same package), not a public Store() accessor —
+	// see SQLiteStore's own doc for why this package no longer promotes the
+	// wrapped VersionedPersistence publicly (#165 final whole-branch
+	// review, Important E).
+	before, err := s.store.ListVersions(ctx, "room")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +160,7 @@ func TestSQLiteStore_CompactActuallyDeletesRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	after, err := s.Store().ListVersions(ctx, "room")
+	after, err := s.store.ListVersions(ctx, "room")
 	if err != nil {
 		t.Fatal(err)
 	}
