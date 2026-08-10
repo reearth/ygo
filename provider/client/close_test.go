@@ -170,10 +170,46 @@ func TestClient_CompactionTrigger_DeletesAfterThreshold(t *testing.T) {
 // "loop goroutine exited" half: Close must not return until Connect's own
 // goroutine — which owns runReconnectLoop/runLoop, and is therefore the
 // sole writer of this Client's socket (see loop.go's single-writer
-// invariant) — has actually finished. This is checked directly rather than
-// via a generous timeout: if Close returned early, connectReturned would
-// simply not be closed yet by the time the non-blocking select below runs
-// immediately afterward.
+// invariant) — has actually finished.
+//
+// # What this asserts, and why (fixed after a CI flake under -race)
+//
+// An earlier version of this test closed a channel from a statement placed
+// immediately AFTER the `go func() { c.Connect(ctx) }()` call's own body —
+// i.e. on the goroutine the test itself spawned, not on anything Connect or
+// Close controls — and then checked that channel with a non-blocking
+// select run from the main goroutine right after Close returned. That
+// reasoning has a gap: sync.WaitGroup.Done (which Connect calls via defer,
+// and which is exactly what Close's connectWG.Wait() blocks on — see
+// Close's doc, step 1) unblocks the WAITER the instant the count reaches
+// zero; it does not wait for the goroutine that called Done to take even
+// one more step. So there is a real window, between Connect's defer firing
+// and that same goroutine being rescheduled to reach the next statement,
+// during which the main goroutine can legitimately finish Close() and run
+// the following select before the spawned goroutine's own close() has
+// executed. That is scheduling latency on a goroutine the test doesn't
+// control, not a broken invariant — and it is exactly the kind of gap the
+// race detector's altered scheduling is prone to widening enough to hit,
+// which is what made this flake CI-visible on both Go 1.23 and 1.26 while
+// passing reliably without -race.
+//
+// The fix is to assert on a signal Connect's own goroutine produces WHILE
+// still inside the window connectWG.Wait() blocks on, rather than on a
+// further statement that only runs AFTER Connect has already returned to
+// its caller. Connect's own doc establishes exactly such a signal: the
+// clean StateDisconnected{Err: nil} bookend it emits via c.emitStatus is
+// called strictly before Connect returns and therefore strictly before its
+// deferred connectWG.Done() fires (see Connect's doc, and the ordering
+// finding — final whole-branch review, Important A — that pinned this down
+// after a prior bug let a similar emission slip outside that window). A
+// subscriber registered before Connect starts (so it cannot miss the
+// emission — OnStatus does not replay, see statusWaiter's doc for the same
+// concern) is therefore guaranteed to have already observed that status by
+// the time Close's connectWG.Wait() can possibly return, which is itself a
+// precondition for Close returning at all (Close's doc, step 1). Observing
+// it after Close returns is production-controlled proof that Connect's own
+// goroutine had already finished running — not a race against unrelated
+// scheduling.
 func TestClient_Close_JoinsLoopBeforeReturning(t *testing.T) {
 	_, ts := startServer(t)
 	const room = "close-join"
@@ -183,22 +219,29 @@ func TestClient_Close_JoinsLoopBeforeReturning(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	connectReturned := make(chan struct{})
-	go func() {
-		_ = c.Connect(ctx)
-		close(connectReturned)
-	}()
+
+	// Subscribed BEFORE Connect is ever started, so it cannot miss the
+	// clean bookend emission described above, however early it happens to
+	// land relative to this goroutine being scheduled.
+	var cleanDisconnect atomic.Bool
+	unsub := c.OnStatus(func(s Status) {
+		if s.State == StateDisconnected && s.Err == nil {
+			cleanDisconnect.Store(true)
+		}
+	})
+	defer unsub()
+
+	go func() { _ = c.Connect(ctx) }()
 
 	waitSynced := statusWaiter(t, c, StateSynced)
 	waitSynced()
 
 	require.NoError(t, c.Close())
 
-	select {
-	case <-connectReturned:
-	default:
-		t.Fatal("Close returned before Connect's own loop goroutine exited")
-	}
+	require.True(t, cleanDisconnect.Load(),
+		"Close returned before Connect's clean StateDisconnected bookend was observed — Connect's own "+
+			"goroutine (and therefore runReconnectLoop/runLoop, and the read pump it joins) cannot yet "+
+			"have finished running")
 }
 
 // TestClient_Close_StopsFurtherStoreWritesAndStatsStable is #165 Task 10's
