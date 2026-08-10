@@ -5,16 +5,27 @@ ygo is a pure-Go implementation of the [Yjs](https://github.com/yjs/yjs) CRDT al
 ## Package dependency graph
 
 ```
-provider/{websocket,http}
-         │
-        sync/ ── awareness/
-         │
-        crdt/
-         │
-      encoding/
+provider/webhook                                        mobile/
+       │                                                    │
+       ▼                                                    ▼
+provider/websocket ────────────────────────────────── provider/client        provider/http
+       │                                                    │                       │
+       ├──────────────────┬───────────────┬─────────────────┤                       │
+       ▼                  ▼               ▼                 ▼                       │
+     sync/            cluster/       persistence/                                   │
+       │                  │                │                                        │
+       │                  ▼                │                                        │
+       │             awareness/            │                                        │
+       │                                    │                                        │
+       └────────────────────────┬───────────┘                                        │
+                                 ▼                                                    │
+                               crdt/ ◄──────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+                             encoding/
 ```
 
-**Rule:** no upward imports. `encoding/` has zero runtime dependencies. `crdt/` depends only on `encoding/`. `sync/` and `awareness/` depend on `crdt/` and `encoding/`. Providers depend on `sync/` and `awareness/`.
+**Rule:** no upward imports. `encoding/` has zero runtime dependencies. `crdt/` depends only on `encoding/`. `sync/` depends on `crdt/` and `encoding/`; `persistence/` depends only on `crdt/`; `cluster/` depends on `awareness/` and `crdt/`. `awareness/` is the one exception to the otherwise-neat layering: it depends only on `encoding/`, not `crdt/`, despite sitting next to packages that do. `provider/websocket` and `provider/client` both import `sync/`, `awareness/`, `cluster/`, and `persistence/` directly; `provider/http` skips that whole tier and depends on `crdt/` directly. `provider/webhook` and `mobile/` sit one layer up, wrapping `provider/websocket` and `provider/client` respectively — but each also imports lower tiers directly for its own use: `provider/webhook` imports `crdt/`, and `mobile/` imports both `awareness/` and `crdt/`.
 
 > **Note**: Since v1.0, the library has added several mechanisms not detailed here — the pending-structs queue for out-of-order delivery, structured logging via `slog`, per-peer broadcast queues, and context-aware methods. See [CHANGELOG.md](../CHANGELOG.md) for the per-release picture.
 
@@ -171,6 +182,18 @@ Separate from document updates. Stores `map[ClientID]AwarenessState{Clock uint64
 
 ---
 
+## `persistence/` — versioned storage layer
+
+Depends only on `crdt/`. Layers an **append-only, versioned** store on top of the provider's `LoadDoc`/`StoreUpdate` primitive: every incremental update becomes a numbered `Version`, `MaterializeAt(v)` rebuilds the document at any past version via `crdt.MergeUpdatesV1`, and named snapshots plus crash-safe pruning/compaction round out the log.
+
+Ships two reference implementations — `NewMemoryPersistence()` (in-process maps) and `NewFilePersistence(dir)` (atomic temp+rename writes to one directory per store) — plus `persistence/sqlite`, a pure-Go (CGo-free) SQLite backend. `LegacyAdapter` bridges a `VersionedPersistence` back to the provider's `PersistenceAdapter` shape without either package importing the other, avoiding a cycle. See [PERSISTENCE.md](PERSISTENCE.md) for the full interface and a conformance suite external adapters can run against.
+
+## `cluster/` — cross-node relay
+
+Depends on `awareness/` and `crdt/`. Defines the `Relay`/`Sink` abstraction that fans document updates **and** awareness out across multiple `provider/websocket` (or `provider/client`) processes sharing rooms, superseding the older persistence-adapter-as-pub/sub pattern. `MemRelay` is the in-process reference implementation, used by tests and single-process multi-server simulations; production deployments plug in `cluster/redis` or an equivalent backend. See [CLUSTERING.md](CLUSTERING.md).
+
+---
+
 ## `provider/` — transport handlers
 
 ### `provider/websocket/`
@@ -184,7 +207,7 @@ type PersistenceAdapter interface {
     StoreUpdate(room string, update []byte) error
 }
 ```
-Pass an implementation to `NewServerWithPersistence(p)`. The built-in `MemoryPersistence` (returned by `NewMemoryPersistence()`) merges updates in memory and is suitable for single-process deployments.
+Pass an implementation to `NewServerWithPersistence(p)`. The built-in `MemoryPersistence` (returned by `NewMemoryPersistence()`) appends updates in memory and periodically folds a room's backlog (`CompactEvery`, default 500) rather than re-merging on every write; suitable for single-process deployments.
 
 ### `provider/http/`
 
@@ -192,6 +215,20 @@ Pass an implementation to `NewServerWithPersistence(p)`. The built-in `MemoryPer
 |--------|------|-----------|
 | `GET` | `/doc/{room}?sv=<base64>` | Return binary update diff |
 | `POST` | `/doc/{room}` | Apply binary update from request body |
+
+### `provider/webhook/`
+
+Wraps a `provider/websocket` server with outbound HTTP callbacks — HMAC-SHA256-signed, debounced/coalesced, retried with backoff on transient failure — fired on room lifecycle and document-update events, so an external service can react to changes without holding a live connection.
+
+### `provider/client/`
+
+The embeddable, offline-first counterpart to `provider/websocket`: a Go peer (not a server) that hydrates a `*crdt.Doc` from local storage, lets the caller edit it immediately regardless of connectivity, and runs a background dial loop that reconciles with a `provider/websocket`-served (or Hocuspocus-compatible) endpoint whenever one is reachable. Speaks the same wire protocol `provider/websocket` serves. See [CLIENT.md](CLIENT.md).
+
+---
+
+## `mobile/` — Go Mobile bindings
+
+A `gomobile bind`-safe façade over `crdt/`, `awareness/`, and `provider/client`, for embedding ygo natively in iOS/Android apps with no JavaScript runtime and no CGo. Because `gomobile bind` only supports a restricted set of cross-language types, every exported method uses only `string`, `int64`, `bool`, `[]byte`, `error`, and the bound pointer types `*Doc`/`*Awareness`/`*SyncClient`; the package translates ygo's internal `uint64` IDs and maps at the boundary. `SyncClient` is the mobile-facing wrapper around `provider/client`'s dial/sync loop.
 
 ---
 

@@ -52,12 +52,52 @@ http.Handle("/yjs/{room}", srv)
 
 ## Built-in: MemoryPersistence
 
-`MemoryPersistence` merges all incremental updates into a single V1 snapshot
-per room and stores it in process memory.  It is useful for tests and
-single-process deployments where durability across restarts is not required.
+`MemoryPersistence` stores room state in process memory. It **appends** each
+incremental update — an O(update) write — rather than re-merging the whole
+document on every call, which used to cost O(document) per write and
+O(document²) over a session (#186).
+
+It bounds that append log itself: once a room accumulates `CompactEvery`
+writes (default 500, matching `provider/client`'s own compaction default) it
+folds the room's backlog into a single blob. `LoadDoc` also folds first, so a
+load always returns a coherent V1 snapshot regardless of where the room sits
+in its append cycle.
+
+Measured per-write cost, old merge-on-write vs. append-then-compact, at three
+room sizes:
+
+| Updates already in room | Before | After | Improvement |
+|---|---|---|---|
+| 100 | 13,975 ns/op | 1,457 ns/op | 9.6× |
+| 1,000 | 132,871 ns/op | 1,710 ns/op | 77.7× |
+| 10,000 | 1,676,329 ns/op | 4,653 ns/op | 360× |
+
+The growth constant is divided by `CompactEvery`, **not eliminated**: per-write
+cost is still `append + O(document)/CompactEvery`, so it keeps growing with
+document size, just ~500× more slowly. Flat, constant-time writes are not
+achievable for this storage model — see the trade below.
+
+The trade this makes explicit: `LoadDoc` is no longer O(1). It folds whatever
+records the room still holds — bounded by `CompactEvery` — and persists that
+fold, so subsequent loads are cheap again until the log builds back up.
+Writes are continuous and loads happen once per room residency, so the
+direction is right, but folding is inherently O(document) — there is no way
+to keep returning one V1 blob from `LoadDoc` without periodically paying for
+it. This is still primarily for tests and single-process deployments; a
+multi-process deployment wants `persistence/sqlite` or another
+`VersionedPersistence`.
 
 ```go
 srv := websocket.NewServerWithPersistence(websocket.NewMemoryPersistence())
+```
+
+To change the compaction threshold, set `CompactEvery` on the adapter before
+serving:
+
+```go
+adapter := websocket.NewMemoryPersistence()
+adapter.CompactEvery = 2000 // fold less often; more memory, fewer folds
+srv := websocket.NewServerWithPersistence(adapter)
 ```
 
 ---
