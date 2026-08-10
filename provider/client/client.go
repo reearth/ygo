@@ -254,19 +254,28 @@ type Status struct {
 // payload BEFORE it was ever handed to a socket. Dropped is this Client's
 // own counter (see statsDropped) and covers everything relaylane cannot see
 // — loss that happens after a payload leaves the lane, or before it is even
-// a Doc update at all:
+// a Doc update at all. The exact rule (#165 Task 10, refined by that task's
+// own review — see countUndeliverable for the full rationale, including the
+// two-symptoms-one-cause bug that motivated stating it this precisely):
 //
-//   - a local Store.StoreUpdate call that returned an error (#165 Task 10
-//     finding 2 — see onDocUpdate: the edit stays in memory and in the Doc,
-//     but is no longer durable across a restart, which is exactly the kind
-//     of loss this repo counts rather than silently drops; also logged, for
-//     the operator-facing detail a bare counter can't carry);
-//   - an outbound payload still queued when Close ran out of time to
-//     deliver it (see Close's #202-style drain in loop.go's flushLane) —
-//     reconnecting mid-session does NOT count here (an unsent lane payload
-//     is superseded by the next connection's full handshake resync, per
-//     flushLane's own doc), only a payload that had no future connection
-//     left to be superseded BY.
+//   - a local Store.StoreUpdate call that returned an error (finding 2 — see
+//     onDocUpdate: the edit stays in memory and in the Doc, but is no longer
+//     durable across a restart, which is exactly the kind of loss this repo
+//     counts rather than silently drops; also logged, for the
+//     operator-facing detail a bare counter can't carry) is ALWAYS counted;
+//   - a KindSync payload (a Doc update) that leaves the outbound lane
+//     without reaching the wire is counted ONLY when Options.Store is nil.
+//     With a Store configured, it is NEVER counted, at ANY point in this
+//     Client's lifecycle including inside Close's own drain — the Store
+//     already durably holds it (onDocUpdate writes there before ever
+//     queueing), and the package's central design claim is that the next
+//     hydrate+handshake delivers it from there, whether that is this
+//     Client's own next reconnect or an entirely new Client after a process
+//     restart. This is not evidence of loss, so it must not look like it;
+//   - a KindAwareness payload that leaves the outbound lane without reaching
+//     the wire is ALWAYS counted, Store or no Store — there is no store
+//     equivalent for awareness state, and the sync handshake never conveys
+//     it (see flushLane's "Take-before-write" doc section).
 type Stats struct {
 	// Coalesced counts local updates that were merged into a pending batch
 	// rather than sent as a separate wire message, mirroring
@@ -280,11 +289,14 @@ type Stats struct {
 	// zero in this package today (nothing here retries), kept for shape
 	// parity with RelayStats.
 	HardDrops uint64
-	// Dropped counts updates actually lost — a failed local store write, or
-	// an outbound payload Close could not deliver before giving up (see this
-	// type's own doc for the exact two cases). Should always be zero in a
-	// healthy deployment; alert on it going non-zero the same way an
-	// operator would alert on RelayStats.Dropped.
+	// Dropped counts updates actually lost — a failed local store write, a
+	// KindAwareness payload that never reached the wire, or a KindSync
+	// payload that never reached the wire AND had no Store to fall back on
+	// (see this type's own doc for the exact rule, and countUndeliverable
+	// for why it is framed this way rather than around connection state).
+	// Should always be zero in a healthy deployment with a Store configured;
+	// alert on it going non-zero the same way an operator would alert on
+	// RelayStats.Dropped.
 	Dropped uint64
 }
 
@@ -1025,23 +1037,34 @@ func (c *Client) dropRemoteAwareness() {
 //     asynchronous or buffered the way provider/websocket's persistence
 //     worker is, so there is no separate flush step to wait for beyond "no
 //     goroutine that could still call onDocUpdate is running."
-//  2. Catch-all: count whatever is STILL on the outbound lane as Dropped
+//  2. Unsubscribe the Doc and Awareness observers, so a Doc/Awareness pair
+//     that outlives this Client stops writing to the Store and stops
+//     queueing anything onto a lane nothing will ever drain again. Placed
+//     AFTER the join (so that any server-received update the loop was still
+//     applying in its very last moments is still stored — see onDocUpdate's
+//     table: a remoteOrigin update must be persisted, and removing the
+//     observer before the join would have silently skipped that for
+//     whatever arrived in the final frame(s) of the last connection) but
+//     BEFORE the catch-all drain in step 3 (#165 Task 10 review, Important
+//     2 — this was the other way around originally, and the two orderings
+//     are not each other's mirror image the way that might suggest: draining
+//     before unsubscribing leaves a real window where an application
+//     goroutine's own doc.Transact or Awareness().SetLocalState call — nothing
+//     stops an app from editing its own Doc while Close is tearing down —
+//     lands a payload on the lane via the still-live observer, strictly
+//     AFTER the one and only drain this method ever performs, meaning
+//     nothing is left to ever collect it: permanently stuck, uncounted, and
+//     silently unreachable once Close returns. Unsubscribing first closes
+//     that window structurally: nothing can land on the lane through the
+//     observer path anymore by the time step 3 runs, so whatever step 3
+//     finds is everything there will ever be to find).
+//  3. Catch-all: count whatever is STILL on the outbound lane as Dropped
 //     (see dropLaneRemainder). This is a no-op in the ordinary case — the
 //     loop's own teardown (step 1) already drained or counted everything —
 //     and only does real work for the "no loop ever ran to drain anything"
 //     case: Connect was never called, or every attempt failed during
 //     hydration (see Connect's "does not latch" doc), so nothing else in
 //     this Client will ever get a chance to touch the lane again.
-//  3. Unsubscribe the Doc and Awareness observers, so a Doc/Awareness pair
-//     that outlives this Client stops writing to the Store and stops
-//     queueing anything onto a lane nothing will ever drain again. Placed
-//     AFTER the join (not before, despite unsubscribing being the very
-//     first code that ran here in earlier versions of this method) so that
-//     any server-received update the loop was still applying in its very
-//     last moments is still stored — see onDocUpdate's table: a
-//     remoteOrigin update must be persisted, and removing the observer
-//     early would have silently skipped that for whatever arrived in the
-//     final frame(s) of the last connection.
 //  4. Close the store, but ONLY if this Client opened it itself (Options.
 //     StorePath, tracked via ownedStore — see Options.StorePath's doc and
 //     ownedStore's own). A Store supplied directly via Options.Store
@@ -1075,9 +1098,25 @@ func (c *Client) Close() error {
 		if started {
 			c.connectWG.Wait()
 		}
-		c.dropLaneRemainder()
 		c.unsubObserver()
 		c.unsubAwareness()
+		// closePreDrainHook is a test-only seam (see close_test.go's
+		// withClosePreDrainHook) fired at exactly the point step 2's doc
+		// above describes: observers already gone, catch-all drain not yet
+		// run. Nil (a no-op) outside a test. It exists because the ordering
+		// bug this seam guards against (Important 2 above) has no other
+		// deterministic way to prove fixed: a real race between an
+		// application goroutine and Close would need to land inside a
+		// window measured in nanoseconds to reproduce on demand, so a test
+		// that actually depends on winning that race would be exactly the
+		// kind of flake this package already has a documented history of
+		// (see close_test.go's own doc). Fires unconditionally, not just
+		// under a build tag, mirroring flushWriteTimeout/closeDrainTimeout's
+		// own "package-level indirection purely for test determinism"
+		// precedent — the cost of one no-op function call on every Close is
+		// negligible next to what it buys in test determinism.
+		closePreDrainHook()
+		c.dropLaneRemainder()
 		if c.ownedStore != nil {
 			closeErr = c.ownedStore.Close()
 		}
@@ -1085,35 +1124,60 @@ func (c *Client) Close() error {
 	return closeErr
 }
 
-// isClosing reports whether Close has begun (c.closed has been closed),
-// checked directly and without blocking rather than by proxy through
-// whatever context a caller happens to be holding.
+// closePreDrainHook is Close's test-only synchronisation seam; see its one
+// call site's doc for what it is for and why it exists. Always nil (a no-op)
+// in production.
+var closePreDrainHook = func() {}
+
+// countUndeliverable increments Stats().Dropped for a payload that has just
+// left the outbound lane without ever reaching the wire — UNLESS something
+// durable will still deliver it regardless of what this Client does next.
+// See Stats' own doc for the full rationale; the rule itself, applied
+// exactly as stated wherever a payload leaves the lane unwritten (flushLane's
+// failed write and its give-up drain, and dropLaneRemainder):
 //
-// This exists specifically for flushLane's ordinary in-session call site
-// (see its doc's use of this method): loopCtx's cancellation on a Close is
-// relayed through Connect's own watcher goroutine (`case <-c.closed:
-// cancel()`), which is a real goroutine hop with its own scheduling latency,
-// not an instantaneous consequence of close(c.closed). Checking c.closed
-// here instead removes that hop from the "is there a future connection
-// coming" determination: c.closed closes as the very first statement inside
-// Close (see its doc), synchronously, before anything else Close does — so
-// this is the earliest and most direct signal available that no further
-// connection will ever be attempted, strictly earlier than loopCtx.Err()
-// can be relied on to reflect the same fact.
-func (c *Client) isClosing() bool {
-	select {
-	case <-c.closed:
-		return true
-	default:
-		return false
+//   - a KindSync payload (isSync) with Options.Store configured is NEVER
+//     counted. onDocUpdate already wrote it there, synchronously, before it
+//     was ever queued (see onDocUpdate) — the package's central design claim
+//     is that the next hydrate+handshake, whether this Client's own next
+//     reconnect or an entirely new Client after a process restart, delivers
+//     it from the Store, so this is not a loss, only a delay.
+//   - a KindSync payload with Options.Store nil IS counted. Nothing durable
+//     backs it once it leaves the lane; the in-memory Doc alone survives
+//     reconnects WITHIN this process but not the process exiting, and is not
+//     a guarantee this method can rely on regardless.
+//   - a KindAwareness payload IS counted, Store or no Store: there is no
+//     store equivalent for awareness state, and the sync handshake never
+//     conveys it (see flushLane's own "Take-before-write" doc section).
+//
+// This is deliberately a STATIC rule — evaluated purely from (isSync,
+// whether Options.Store is non-nil), never from ctx or from whether Close
+// has begun. An earlier version of this accounting (#165 Task 10's original
+// review) decided "is this lost?" from connection/ctx state instead, trying
+// to predict whether a future connection would still arrive in time to
+// redeliver a payload. That framing produced two symptoms from one root
+// cause: it under-counted a KindSync payload whose write failed while ctx
+// was still technically live but Close ended up intervening before any
+// reconnect actually completed (a real, reproducible race — the failure and
+// Close's own teardown could interleave in either order), and it
+// over-counted a Store-backed KindSync payload purely because it happened to
+// still be queued when a loop stopped running, even though the Store already
+// held it durably and nothing was actually at risk. Neither symptom is
+// possible once the decision depends only on facts knowable immediately, at
+// the moment a payload leaves the lane, instead of on what happens next.
+func (c *Client) countUndeliverable(isSync bool) {
+	if isSync && c.opts.Store != nil {
+		return
 	}
+	c.statsDropped.Add(1)
 }
 
 // dropLaneRemainder takes every payload still queued on the outbound lane
-// and counts it in Stats().Dropped, discarding it — never leaving it queued
-// (nothing will ever drain it again once this runs) and never letting it
-// vanish uncounted, which is the #202 invariant this whole task exists to
-// enforce.
+// and, per countUndeliverable's rule, counts whichever of them are actually
+// lost in Stats().Dropped — discarding all of them either way, never
+// leaving one queued (nothing will ever drain it again once this runs) and
+// never letting a genuinely lost one vanish uncounted, which is the #202
+// invariant this whole task exists to enforce.
 //
 // Safe to call when the lane is already empty (the ordinary case: whatever
 // loop ran already drained or counted everything on its own way out — see
@@ -1122,15 +1186,17 @@ func (c *Client) isClosing() bool {
 // session to drain onto). Every call site runs on a goroutine that cannot be
 // racing another Take on this same lane: Close's call happens only after
 // connectWG.Wait() has confirmed no Connect-owned goroutine is still
-// running, and the loop.go call sites all run ON that one goroutine.
+// running AND after the observers have been unsubscribed (see Close's own
+// doc, Important 2), and the loop.go call sites all run ON that one
+// goroutine.
 func (c *Client) dropLaneRemainder() {
 	for {
 		if _, ok := c.lane.TakeSync(); ok {
-			c.statsDropped.Add(1)
+			c.countUndeliverable(true)
 			continue
 		}
 		if _, ok := c.lane.TakeAwareness(); ok {
-			c.statsDropped.Add(1)
+			c.countUndeliverable(false)
 			continue
 		}
 		return

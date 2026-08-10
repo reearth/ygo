@@ -43,19 +43,43 @@ const writeTimeout = 10 * time.Second
 // send has a whole reconnect cycle to eventually succeed if it is merely
 // slow, but Close needs a real bound on how long it can take to return.
 //
-// Both are vars, not consts — unlike writeTimeout above, tests DO need to
-// shrink these independently of each other and of the handshake-path
-// writeTimeout: see close_test.go's withFlushWriteTimeout/
-// withCloseDrainTimeout, which make TestClient_Close_CountsUndeliveredOutboundAsDropped's
-// wedged-connection scenario fail deterministically (a deadline already in
-// the past) rather than depend on this machine's socket buffer sizes,
-// exactly the same "package-level indirection purely for test determinism"
-// pattern backoff.go's randFloat already establishes. Production code never
-// touches these directly except through flushLane's deadline parameter.
+// Both are vars, not consts — unlike writeTimeout above, a test DOES need to
+// shrink closeDrainTimeout independently of the handshake-path writeTimeout:
+// see close_test.go's withCloseDrainTimeout, which makes
+// TestClient_Close_CountsUndeliveredOutboundAsDropped's wedged-connection
+// scenario fail deterministically (a deadline already in the past) rather
+// than depend on this machine's socket buffer sizes, exactly the same
+// "package-level indirection purely for test determinism" pattern
+// backoff.go's randFloat already establishes. flushWriteTimeout has no
+// equivalent test override: a test that needs an ordinary-path write to fail
+// deterministically calls session.flushLane directly with its own deadline
+// argument instead (see TestFlushLane_OrdinaryFailureCountsStorelessSyncImmediately).
+// Production code never touches either var directly except through
+// flushLane's deadline parameter.
 var (
 	flushWriteTimeout = 10 * time.Second
 	closeDrainTimeout = 2 * time.Second
 )
+
+// closeDrainHook, if non-nil, is invoked by runLoop's ctx.Done() case
+// immediately BEFORE it performs its bounded close-time drain (flushLane
+// with closeDrainTimeout) — a test-only synchronisation seam, the same
+// "package-level indirection purely for test determinism" pattern as
+// flushWriteTimeout/closeDrainTimeout above (see their own doc).
+//
+// It exists so a test can deterministically exercise THIS specific drain
+// path — the one runLoop's own ctx.Done() case runs, as opposed to the
+// ordinary <-c.lane.Signal() case the same select also watches — by queueing
+// its payload from inside the hook, at the one moment guaranteed to run
+// strictly after ctx.Done() has already been selected. Without it, a test
+// that wants to reach this exact drain deterministically has no way to do so
+// other than racing the ordinary case (which the same select statement is
+// equally free to choose instead, on any given run) — see
+// close_test.go's withCloseDrainHook and
+// TestClient_Close_CountsUndeliveredOutboundAsDropped's own doc for the
+// history of relying on that race instead. Always nil (a no-op call site
+// below simply does nothing) in production.
+var closeDrainHook = func() {}
 
 // reconnectBackoffBase is the Full Jitter base duration runReconnectLoop
 // constructs its backoff with. Unlike MaxBackoff, this is not an Options
@@ -390,13 +414,17 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 			// #165 Task 10 / #202: give whatever is still queued on the
 			// lane a bounded, best-effort chance to actually reach the
 			// wire before this connection's socket goes away for good, and
-			// COUNT what does not make it — see flushLane's "Take-before-
-			// write" doc section for exactly why this counts here but an
-			// ordinary mid-session send failure does not. The error is
-			// intentionally ignored: flushLane never returns non-nil when
-			// ctx is already done at every failure it can hit (that is the
-			// whole point of the ctx-aware branch), so there is nothing
-			// left to report — see its doc.
+			// COUNT (per countUndeliverable's rule) what does not make it.
+			// The error is intentionally ignored: flushLane never returns
+			// non-nil when ctx is already done at every failure it can hit
+			// (that is the whole point of the ctx-aware giveUp branch), so
+			// there is nothing left to report — see its doc.
+			//
+			// closeDrainHook fires first (a no-op outside a test) — see its
+			// own doc for why a test needs this exact point, rather than the
+			// ordinary <-c.lane.Signal() case above, to be reachable
+			// deterministically.
+			closeDrainHook()
 			_ = s.flushLane(ctx, closeDrainTimeout)
 			return nil
 		case err := <-readErr:
@@ -774,21 +802,31 @@ func (s *session) handleFrame(frame []byte) error {
 // nothing else in this package retains a copy of it. In isolation that is a
 // dropped update.
 //
-// For a KindSync payload (the TakeSync branch), this is NOT a lost update in
-// practice, and the reason is load-bearing enough to say plainly rather than
-// leave implicit: runReconnectLoop re-runs the full y-protocol handshake on
-// every reconnect (see its doc), and that handshake's SyncStep2 is derived
-// from the Doc's CURRENT state, not from the lane. The update this call just
-// lost from the lane is still sitting in the Doc — Transact already applied
-// it before onDocUpdate ever pushed it onto the lane — so the next
-// successful connection's handshake sends it again, merged into whatever
-// else changed meanwhile, with no special-casing required anywhere. This is
-// precisely #165's central design point (there is no separate offline-op
-// queue) applied to failure recovery as well as to planned disconnection: DO
-// NOT "fix" the KindSync case by putting the payload back on a failed
-// write, or by adding a retry queue here — that would be solving an
-// already-solved problem, at the cost of a second source of truth for
-// pending writes that could disagree with the Doc.
+// For a KindSync payload (the TakeSync branch), the REST of the lane being
+// left queued when this returns early (the ordinary, ctx-still-live failure
+// path below) is NOT a lost opportunity in practice, and the reason is
+// load-bearing enough to say plainly rather than leave implicit:
+// runReconnectLoop re-runs the full y-protocol handshake on every reconnect
+// (see its doc), and that handshake's SyncStep2 is derived from the Doc's
+// CURRENT state, not from the lane. Whatever this call did not get to before
+// returning is still sitting in the Doc — Transact already applied it before
+// onDocUpdate ever pushed it onto the lane — so the next successful
+// connection's handshake sends it again, merged into whatever else changed
+// meanwhile, with no special-casing required anywhere. This is precisely
+// #165's central design point (there is no separate offline-op queue)
+// applied to failure recovery as well as to planned disconnection: DO NOT
+// "fix" the KindSync case by putting a failed payload back on the lane, or
+// by adding a retry queue here — that would be solving an already-solved
+// problem, at the cost of a second source of truth for pending writes that
+// could disagree with the Doc.
+//
+// That argument is about the REST of the lane surviving to a future
+// connection attempt — a purely structural fact about what this function
+// leaves untouched. It says nothing about whether THIS ONE payload, the one
+// whose write just failed, should be counted as lost; see countUndeliverable
+// for that separate question, and for why it is answered from whether
+// Options.Store is configured rather than from whether a future connection
+// happens to arrive in time.
 //
 // For a TakeAwareness payload, the same argument does NOT hold: awareness
 // state is not doc state, so it is not part of what SyncStep1/SyncStep2
@@ -830,19 +868,23 @@ func (s *session) handleFrame(frame []byte) error {
 //     paragraph above gives: a retry queue here would be a second, competing
 //     source of truth for pending sends.
 //
-// # #165 Task 10 addendum: counting a loss that has no future to be superseded in
+// # #165 Task 10: counting what leaves the lane unwritten
 //
-// Everything above assumes a failed write is recoverable by SOMETHING else —
-// the Doc for KindSync, a later Heartbeat for awareness. That assumption
-// holds only because there IS a later attempt: a reconnect, or a subsequent
-// ping tick, on a Client that keeps running. It stops holding the moment ctx
-// is already done when the write fails — Close (or the caller's own ctx
-// being cancelled) — because then there is no "next connection" left to
-// resend a KindSync payload's underlying edit via a fresh handshake, and no
-// "next ping tick" left to re-announce awareness. That failure is real,
-// permanent loss from THIS Client's point of view, and #202's discipline
-// (see provider/websocket's RelayStats.Dropped doc) is unambiguous about
-// what to do with real loss: count it, never let it vanish silently.
+// Whatever the reasoning above says about the REST of the lane surviving a
+// failure, the ONE payload whose write just failed here needs an honest
+// answer to "was that lost?" — and that answer comes from
+// Client.countUndeliverable, called for every such payload (both on an
+// ordinary failed write, and on every payload drained without an attempt
+// once giveUp triggers below), not from ctx or from how long is left before
+// Close returns. See countUndeliverable's own doc for the exact rule and for
+// why an earlier, ctx-based version of this decision is what #165 Task 10's
+// review found broken in two different directions at once (a real
+// under-count when Close intervened before a hoped-for reconnect completed,
+// and a real over-count of a Store-backed payload that was never actually at
+// risk) — both symptoms of asking the wrong question ("will a future
+// connection arrive in time?") when a knowable-right-now fact
+// (Options.Store's presence) already answers the question that actually
+// matters ("will SOMETHING durable still deliver this?").
 //
 // deadline is the caller's choice specifically so the two call sites in
 // runLoop can apply different budgets: the ordinary case (flushWriteTimeout,
@@ -851,18 +893,16 @@ func (s *session) handleFrame(frame []byte) error {
 // is waiting to retry and Close needs a real bound on how long it can take
 // to return.
 //
-// Checking ctx.Err() AT THE MOMENT OF FAILURE — not at the top of this call —
-// is what makes this correct regardless of exactly when Close happens to run
-// relative to an in-flight write: a write that started while ctx was still
-// live but blocked long enough for ctx to become done before it finally
-// fails is counted (correctly — by the time it fails, nothing will retry it
-// either), while a write that SUCCEEDS despite ctx becoming done partway
-// through is correctly NOT counted (the payload really did reach the
-// socket). Once one write has failed with ctx already done, every remaining
-// queued payload is counted without another write attempt — the socket has
-// already shown itself to be failing, so there is nothing to gain from
-// trying each one in turn, only more time for Close to spend finding that
-// out the same way.
+// giveUp — set once a write fails while ctx is already done, and left set for
+// the rest of this call — is purely a MECHANICAL optimisation, not an
+// accounting decision: once ctx is done and a write has already failed, this
+// connection's socket is not going to start working again inside Close's
+// remaining budget, so there is nothing to gain from attempting the rest of
+// the queued payloads one by one, only more time for Close to spend finding
+// that out the same way. Every payload drained under giveUp is still passed
+// through countUndeliverable individually, exactly like the write that
+// triggered it — giveUp decides whether to ATTEMPT a write, never whether to
+// COUNT one.
 func (s *session) flushLane(ctx context.Context, deadline time.Duration) error {
 	giveUp := false
 	for {
@@ -878,9 +918,10 @@ func (s *session) flushLane(ctx context.Context, deadline time.Duration) error {
 
 		if giveUp {
 			// The socket already failed once above with ctx done; see this
-			// method's doc addendum. Count without attempting — a further
-			// write attempt here would only cost time, not information.
-			s.c.statsDropped.Add(1)
+			// method's doc. Count (per countUndeliverable's rule) without
+			// attempting — a further write attempt here would only cost
+			// time, not information.
+			s.c.countUndeliverable(isSync)
 			continue
 		}
 
@@ -900,34 +941,15 @@ func (s *session) flushLane(ctx context.Context, deadline time.Duration) error {
 		}
 
 		if err := s.writeWithDeadline(frame, deadline); err != nil {
-			if ctx.Err() != nil || s.c.isClosing() {
-				// See this method's doc addendum: no future attempt is
-				// coming, so this is real loss — count it, then keep
-				// draining (without writing) so nothing after it goes
-				// uncounted either.
-				//
-				// s.c.isClosing() is checked ALONGSIDE ctx.Err(), not
-				// instead of it, and the distinction is load-bearing: for
-				// the ordinary in-session call site (runLoop's
-				// <-c.lane.Signal() case), ctx here is loopCtx, whose
-				// cancellation on a Close is relayed through Connect's own
-				// watcher goroutine (`case <-c.closed: cancel()`) — a real
-				// goroutine hop with its own scheduling latency, not an
-				// instantaneous side effect of close(c.closed). Close's
-				// very first act is closing c.closed directly (see Close's
-				// doc), with no intermediary goroutine of its own, so
-				// checking it here closes a genuine window where a write
-				// fails (because the peer is gone or, in a test, because a
-				// deliberately-elapsed deadline forces it) a few
-				// scheduler-ticks before the watcher has gotten around to
-				// calling cancel() — ctx.Err() would still read nil in that
-				// window even though Close has already unconditionally
-				// committed to there being no future connection to resend
-				// this payload on. Observed directly: without this check,
-				// TestClient_Close_CountsUndeliveredOutboundAsDropped's
-				// deliberately-wedged-connection scenario flaked (Dropped
-				// read 0) roughly 1 run in 100–300 under `-count`.
-				s.c.statsDropped.Add(1)
+			// Count per countUndeliverable's rule REGARDLESS of ctx state —
+			// see this method's doc for why the decision no longer depends
+			// on it. ctx.Err() below still decides whether to keep draining
+			// the rest of the lane without further write attempts (giveUp)
+			// or to return immediately and leave the rest queued for a
+			// future connection's own flushLane call — a purely mechanical
+			// choice, unrelated to counting.
+			s.c.countUndeliverable(isSync)
+			if ctx.Err() != nil {
 				giveUp = true
 				continue
 			}
