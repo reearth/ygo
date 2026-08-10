@@ -1,3 +1,92 @@
+## v1.49.0
+
+**Who is affected:** callers who explicitly construct
+`websocket.MemoryPersistence` (`websocket.NewMemoryPersistence()`) — **not**
+every deployment. A fresh `websocket.NewServer()` has no persistence adapter
+at all, and nothing under `provider/`, `cmd/`, or `examples/` constructs
+`MemoryPersistence` outside its own tests; you have to opt into it via
+`NewServerWithPersistence`. If that's not you, this release changes nothing
+you use. **What you must do:** nothing — this is a drop-in fix, same
+constructor, same behaviour from the outside, just cheaper.
+
+### Fixed: `MemoryPersistence` re-merged the whole document on every write (#186)
+
+**The bug.** `MemoryPersistence.StoreUpdate` ran
+`crdt.MergeUpdatesV1(existing, update)` against the room's **entire**
+accumulated state on every incremental write — an O(document) cost per write,
+so a session of N updates cost O(document²) overall. `PersistenceAdapter`'s
+own doc warns adapters not to do exactly this; the built-in adapter was doing
+it.
+
+**The fix.** `MemoryPersistence` now delegates to `persistence.MemoryPersistence`
++ `persistence.LegacyAdapter` (`KeepVersions = 1`) instead of re-merging by
+hand: each write **appends** the update — O(update), not O(document) — and
+the room folds its own backlog into one blob every `CompactEvery` writes
+(new field, default 500, matching `provider/client`'s own compaction
+default). The O(document) fold still happens, but only once per
+`CompactEvery` writes instead of on every single one.
+
+**Measured**, old merge-on-write vs. new append-then-compact, timing a single
+`StoreUpdate` against a room already holding N updates:
+
+| Updates already in room | Before | After | Improvement |
+|---|---|---|---|
+| 100 | 13,975 ns/op | 1,457 ns/op | 9.6× |
+| 1,000 | 132,871 ns/op | 1,710 ns/op | 77.7× |
+| 10,000 | 1,676,329 ns/op | 4,653 ns/op | 360× |
+
+**Read the acceptance bar honestly, not generously.** #186 asked for "flush
+cost no longer grows with doc size." Taken literally, that is **not fully
+met**: per-write cost is now `append + O(document)/CompactEvery`, so it still
+grows with document size — the growth constant is divided by `CompactEvery`
+(500 by default), not eliminated. It *is* met in the sense that actually
+matters day to day: cost no longer grows **per write** in proportion to the
+document, because most writes are a cheap append and only one in
+`CompactEvery` pays the fold. Flat, constant-time writes aren't achievable
+for this storage model at all — `LoadDoc` has to keep returning the whole
+room as one V1 blob, so any bounded-record scheme must periodically fold the
+full document, and that fold is inherently O(document). See
+[docs/PERSISTENCE.md](docs/PERSISTENCE.md) for the same framing in the
+adapter's own docs.
+
+**The trade, stated plainly:** `LoadDoc` is no longer O(1). It now folds
+whatever records the room still holds — bounded by `CompactEvery` — and
+persists that fold, so subsequent loads are cheap again until the log builds
+back up. Writes are continuous and loads happen once per room residency, so
+this is the right direction to trade in, but it is not free.
+
+**Two corrections to the issue, verified against the code, worth knowing if
+you read #186 directly:**
+
+1. It calls `MemoryPersistence` "the default adapter." It is not.
+   `websocket.NewServer()` is documented as shipping with no persistence at
+   all, and the type is opt-in via `NewServerWithPersistence`.
+2. Its acceptance criterion points at a benchmark
+   (`BenchmarkMemoryPersistence_FlushVsDocSize` in `persistence/`) that
+   measures a **different type** (`persistence.MemoryPersistence`) on a
+   **different path** (`LoadDoc`, not `StoreUpdate`) than the one this issue
+   is actually about. This release adds
+   `BenchmarkWSMemoryPersistence_StoreUpdateVsDocSize` in
+   `provider/websocket`, which measures the type and path #186 is actually
+   about — the numbers above come from it.
+
+### Added: `Compact`, `StoreUpdateContext`, `CompactEvery` (#186)
+
+New exported surface on `MemoryPersistence`, which is why this ships MINOR
+rather than PATCH even though it's a bug fix — nothing existing changes
+behaviour or signature.
+
+- **`Compact(ctx, room) error`** folds a room's appended records into one
+  now, on demand. It also satisfies the optional `CompactableAdapter`
+  interface, so `Server.CompactEvery` and the server's on-unload compaction
+  work against `MemoryPersistence` too, additively on top of its own
+  threshold.
+- **`StoreUpdateContext(ctx, room, update) error`** is the context-aware
+  `PersistenceAdapterContext` variant, forwarded to the wrapped adapter so
+  `Server.Shutdown` can abort an in-flight write rather than block on it.
+- **`CompactEvery int`** (field) sets the self-compaction threshold; 0 or
+  less means the default of 500.
+
 ## v1.48.0
 
 **Who is affected:** anyone building a Go client — or, via `mobile.SyncClient`,

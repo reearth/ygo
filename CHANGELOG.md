@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.49.0] — 2026-08-10
+
+### Added
+
+- **`provider/websocket`: `MemoryPersistence.Compact`, `StoreUpdateContext`,
+  and a `CompactEvery` field.** `Compact(ctx, room)` folds a room's appended
+  update log into one blob on demand, satisfying the optional
+  `CompactableAdapter` interface so `Server.CompactEvery` and on-unload
+  compaction apply to this adapter too — additively, on top of the threshold
+  below. `StoreUpdateContext` is the context-aware `PersistenceAdapterContext`
+  variant, forwarded to the wrapped adapter so `Server.Shutdown` can abort an
+  in-flight write instead of blocking on it. `CompactEvery int` bounds how
+  many appended updates a room accumulates before `MemoryPersistence` folds
+  itself, independent of whether the caller ever sets `Server.CompactEvery`;
+  0 or less means the default of 500, matching `provider/client`'s own
+  compaction default (#186).
+
+### Fixed
+
+- **`provider/websocket`: `MemoryPersistence.StoreUpdate` re-merged the whole
+  document on every write.** Each call ran
+  `crdt.MergeUpdatesV1(existing, update)` against the room's full accumulated
+  state, so one incremental write cost O(document) and a session of N writes
+  cost O(document²) overall — exactly the shape `PersistenceAdapter`'s own doc
+  warns adapters against. `MemoryPersistence` now delegates to
+  `persistence.MemoryPersistence` + `persistence.LegacyAdapter`
+  (`KeepVersions = 1`): each write **appends** the update (O(update)), and the
+  room folds its own backlog into one blob every `CompactEvery` writes, so the
+  O(document) cost is paid once per `CompactEvery` writes rather than on every
+  one. Measured per-write cost, old merge-on-write vs. new
+  append-then-compact: ~9.6× faster at 100 updates already in the room
+  (13,975ns → 1,457ns), ~77.7× at 1,000 (132,871ns → 1,710ns), ~360× at 10,000
+  (1,676,329ns → 4,653ns). Read literally, #186's acceptance criterion ("flush
+  cost no longer grows with doc size") is **not fully met**: the growth
+  constant is divided by `CompactEvery` (500 by default), not eliminated —
+  per-write cost is still `append + O(document)/CompactEvery`, so it keeps
+  growing with document size, just far more slowly. Flat, constant-time
+  writes are not achievable for this storage model, since `LoadDoc` must
+  still return the room as one V1 blob. The trade this makes explicit:
+  `LoadDoc` is no longer O(1) — it now folds whatever records the room still
+  holds (bounded by `CompactEvery`) and persists that fold, so subsequent
+  loads are cheap again (#186).
+
 ## [1.48.0] — 2026-08-10
 
 ### Added
