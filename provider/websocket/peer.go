@@ -564,7 +564,36 @@ func (p *peer) handleDisconnect() {
 }
 
 // encodeAwarenessRemoval builds a raw awareness update that marks the given
-// client IDs as removed (null state, clock incremented by 1).
+// client IDs as removed (null state), at each client's CURRENT clock as the
+// room's shared Awareness sees it — deliberately NOT incremented (#226).
+//
+// An earlier version bumped by one, on the (wrong) assumption that a
+// removal needs a fresh clock to be admitted. It does not: Awareness.
+// ApplyUpdate's equal-clock rule already accepts a null entry at the SAME
+// clock as an existing active one ("equal clock + null + currently-active
+// -> accept" — see that method's doc and its #73 vector C2 comment) — every
+// id reaching this function came from aw.GetStates(), which only returns
+// active entries, so that gate is satisfied as-is. Bumping past it instead
+// created a real bug: a disconnecting client's rejoin heartbeat (Awareness.
+// Heartbeat) ALSO bumps by exactly one, from that client's own last-known
+// clock — which, absent any intervening update, is the identical base this
+// function reads from aw.GetStates(). The removal and the rejoin then
+// landed on the SAME clock, and at an equal clock ApplyUpdate always favors
+// the null side over an active one no matter which arrives first at a
+// given peer — so a client that disconnected and immediately rejoined had
+// its genuine reappearance silently suppressed everywhere else in the room.
+// Leaving the clock unbumped removes the tie entirely: the rejoin's own
+// bump is now strictly newer than the removal in every case, and
+// ApplyUpdate's ordinary newer-clock path (not the equal-clock one) admits
+// it unconditionally, regardless of arrival order. See
+// TestUnit_EncodeAwarenessRemoval_UnbumpedSurvivesRejoinTie.
+//
+// This also matches y-protocols' removeAwarenessStates: it bumps the clock
+// only when the removed client IS the awareness instance's own local
+// client (a self-transition, mirrored here by Awareness.ApplyUpdate's
+// separate self-state-protection path); for every other client — exactly
+// this function's case, synthesising a removal on ANOTHER client's behalf —
+// it just deletes the entry and leaves the clock alone.
 func encodeAwarenessRemoval(aw *awareness.Awareness, clientIDs []uint64) []byte {
 	states := aw.GetStates()
 	var toRemove []struct {
@@ -586,7 +615,7 @@ func encodeAwarenessRemoval(aw *awareness.Awareness, clientIDs []uint64) []byte 
 		enc.WriteVarUint(uint64(len(toRemove)))
 		for _, item := range toRemove {
 			enc.WriteVarUint(item.id)
-			enc.WriteVarUint(item.clock + 1)
+			enc.WriteVarUint(item.clock)
 			enc.WriteVarString("null")
 		}
 	})

@@ -1,0 +1,39 @@
+{
+  "fixtures": [
+    {
+      "name": "sync_step1",
+      "direction": "client->server",
+      "msgType": 0,
+      "innerHex": "0003010105",
+      "hex": "000003010105"
+    },
+    {
+      "name": "sync_step2",
+      "direction": "server->client",
+      "msgType": 0,
+      "innerHex": "011a01020200040101740568656c6c6f080101610277017877017900",
+      "hex": "00011a01020200040101740568656c6c6f080101610277017877017900"
+    },
+    {
+      "name": "sync_update",
+      "direction": "client->server",
+      "msgType": 0,
+      "innerHex": "02100101030008010161037d017d027d0300",
+      "hex": "0002100101030008010161037d017d027d0300"
+    },
+    {
+      "name": "awareness_update",
+      "direction": "client->server",
+      "msgType": 1,
+      "innerHex": "2d012a01297b2275736572223a7b226e616d65223a22616e61222c22636f6c6f72223a2223666630303030227d7d",
+      "hex": "012d012a01297b2275736572223a7b226e616d65223a22616e61222c22636f6c6f72223a2223666630303030227d7d"
+    },
+    {
+      "name": "query_awareness",
+      "direction": "client->server",
+      "msgType": 3,
+      "innerHex": "",
+      "hex": "03"
+    }
+  ]
+}

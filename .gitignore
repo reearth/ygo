@@ -22,6 +22,11 @@ testdata/fuzz/
 # nothing else ignores it — a 16MB artifact one `git add -A` away from being
 # committed.
 /ygo-server
+# Same problem, `go build ./examples/offline-client/` (#165): the binary
+# lands in the repo root, and its default `-db offline-client.db` flag value
+# (see examples/offline-client/main.go) does too when run from there.
+/offline-client
+*.db
 
 # Go workspace
 go.work

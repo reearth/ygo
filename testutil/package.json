@@ -1,6 +1,7 @@
 {
   "dependencies": {
     "yjs": "13.6.30",
-    "yjs14": "npm:yjs@14.0.0-16"
+    "yjs14": "npm:yjs@14.0.0-16",
+    "y-protocols": "1.0.7"
   }
 }

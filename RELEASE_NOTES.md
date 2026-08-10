@@ -1,3 +1,147 @@
+## v1.48.0
+
+**Who is affected:** anyone building a Go client — or, via `mobile.SyncClient`,
+a native iOS/Android app — that needs a Yjs document synced to a
+`provider/websocket`-compatible server. Nothing existing changes: this
+release only adds packages.
+
+### Added: `provider/client`, an embeddable offline-first sync client (#165)
+
+Until now, ygo's networked sync story was server-only: `provider/websocket`
+answers peers, but embedding a *client* that dials it meant hand-rolling the
+WebSocket connection, the sync handshake, reconnect-with-backoff, and local
+durability yourself. `provider/client` closes that gap — this is the same
+project's own competitive comparison against Deln0r/ygo naming
+"embeddable offline-first client" as a gap the rival covered and we didn't;
+it no longer is.
+
+**The offline model, concretely — because "offline-first" gets read as
+vaguer than it is.** There is no offline-op queue anywhere in this package,
+and that's deliberate, not a missing feature. The y-protocol handshake
+already is one: SyncStep1 is a peer's state vector ("here's what I have"),
+SyncStep2 is the answer ("here's what you're missing"). An edit made while
+disconnected just sits in the `*crdt.Doc` — Yjs updates are ordinary
+document state — until the next connection's handshake runs, and that
+handshake doesn't care how long the edit has been waiting. A client that
+reconnects successfully converges with no replay mechanism required.
+
+That leaves exactly one gap the protocol can't cover: the *process* itself
+going away while still offline — killed, reaped, the device sleeps mid-edit.
+Nothing about the sync protocol writes a `*crdt.Doc` to disk, so without a
+local store, a restart during an offline stretch loses every edit made since
+the last successful sync. `provider/client`'s local store
+(`Options.Store`/`StorePath`, a CGo-free SQLite adapter by default) exists
+for exactly that: every update — the caller's own edits **and** everything
+ever received from the server — is persisted as it happens, and hydrated
+back into a fresh `Doc` *before* the app can touch it or a dial is even
+attempted (`client.New` → `client.Connect`). Call `New`, start editing
+immediately, and get back everything from last time even with the server
+unreachable or down — hydration never waits on the network.
+
+**Reconnect and keepalive.** `Connect` never gives up on a connection
+failure (except one case below); it reports it via `OnStatus` and retries
+with jittered exponential backoff (`Options.MaxBackoff`, default 30s), reset
+only when a handshake actually *completes* — not merely when a dial
+succeeds, so a server that accepts and immediately drops a connection
+doesn't turn into a half-second retry storm. A WebSocket ping every
+`Options.PingInterval` (default 30s, matching `provider/websocket`'s own
+default) plus a 2×-interval silence deadline converts a half-open
+connection — the peer vanished without a clean close — into an ordinary
+retryable error instead of a socket that blocks forever.
+
+**Auth, and the one caveat worth reading before you wire it up.**
+`Options.Token` sends ygo's Hocuspocus in-band auth token
+(`provider/websocket`'s `OnTokenAuth` counterpart); a rejection is terminal
+(`ErrAuthRejected`), not retried. But it is **not a confidentiality gate**:
+ygo's own server pushes the room's full SyncStep1/SyncStep2/Awareness state
+before it has read the client's token at all, so `Synced()` can close — with
+real document content already in the `Doc` — on a connection whose token is
+rejected moments later. If withholding content from an unauthenticated
+caller matters, that has to happen at the HTTP boundary
+(`provider/websocket.Server`'s `AuthFunc`/`Authorize`), not at this in-band
+exchange.
+
+**`Stats().Dropped` is durability-based, not connection-based** — this was
+deliberately gotten exact, not just plausible: a document update backed by
+a configured `Store` is never counted, because the store already has it and
+the next hydrate+handshake (this client's own reconnect, or a brand-new
+`Client` after a restart) still delivers it — that's a delay, not a loss.
+A storeless document update, or any awareness (presence) update — Store or
+no Store, since presence isn't document state and the handshake never
+carries it — *is* counted. Alert on `Dropped` going non-zero with a `Store`
+configured exactly as you would `RelayStats.Dropped` server-side.
+
+`Client.Close` mirrors the durability-first / bounded-drain / then-teardown
+discipline `Server.Shutdown` established for #202: store writes are already
+durable by the time `Close` starts (they happen synchronously, on the
+caller's own goroutine, not on a buffered worker), the sync loop is joined,
+observers are unsubscribed, and whatever is still queued outbound is drained
+and counted rather than silently discarded.
+
+See [docs/CLIENT.md](docs/CLIENT.md) for the full design and
+[examples/offline-client](examples/offline-client) for a runnable,
+flag-driven demo.
+
+### Added: `mobile.SyncClient`, the `gomobile` binding (#165)
+
+`mobile/` has shipped a full on-device Yjs editor since v1.34.0 — text,
+array, map mutation, observers, presence — but making it talk to a server
+meant writing the dial/reconnect/persistence logic again on the platform
+side, in Swift or Kotlin, by hand. `SyncClient` wraps `provider/client` in
+the same gomobile-safe surface the rest of `mobile/` uses:
+`NewSyncClient(url, dbPath, token)` returns a client whose `Doc()` is usable
+immediately, and `Connect()` returns right away — the blocking sync loop
+runs on its own goroutine, off the platform UI thread, with progress
+delivered through a `SyncStatusObserver` instead of a return value.
+`SyncedOnce()` gives platform code a poll-friendly boolean where
+`client.Client.Synced()`'s channel can't cross the binding boundary. Every
+behaviour above — the offline model, the auth caveat, `Stats`-style
+accounting, reconnect/backoff — applies unchanged; this is a thin
+translation layer over `provider/client`, not a second implementation. See
+[mobile/README.md](mobile/README.md#self-syncing-syncclient).
+
+No API changes to anything existing. Both additions are new exported
+symbols in new packages, which is why this ships as a MINOR release under
+this project's semver-by-API-surface convention even though nothing already
+shipped changes behaviour.
+
+### Fixed: a disconnect-triggered awareness removal could suppress a rejoining client's presence (#226)
+
+**Who is affected:** anyone running `provider/websocket` with awareness
+enabled — this is a **server-side behaviour change** affecting existing
+deployments, not just new code from this release. Any room where clients
+disconnect and quickly reconnect (a page refresh, a flaky connection, a
+`provider/client` reconnect) was exposed.
+
+**The bug.** When a peer disconnected, `peer.go`'s `encodeAwarenessRemoval`
+synthesised that peer's removal at its current awareness clock **plus
+one**. A client that reconnects and re-announces its presence calls
+`Awareness.Heartbeat`, which *also* bumps by exactly one from that same base
+clock — so a prompt reconnect computed the identical clock as the server's
+removal. `Awareness.ApplyUpdate`'s equal-clock rule always resolves a tie in
+favor of the null (removed) side over an active one, no matter which a
+given peer receives first, so every other peer in the room could end up
+believing the rejoining client had left — even though it was back and
+correctly announcing itself. In the worst case (a half-open connection that
+`AwarenessExpiry` exists to catch), the server could synthesise the removal
+well after the client had already reconnected, at a clock *higher* than the
+rejoin, which no client-side workaround could fully cover.
+
+**The fix.** `encodeAwarenessRemoval` no longer bumps the clock: it encodes
+the removal at exactly the clock the room's shared `Awareness` currently
+holds for that client. The existing equal-clock rule already admits an
+unbumped removal, and leaving it unbumped means any subsequent genuine
+heartbeat from the rejoining client is strictly newer than the removal, so
+the tie class this bug depended on no longer arises. This also brings ygo
+in line with y-protocols' `removeAwarenessStates`, which bumps the clock
+only when the removed client is the awareness instance's own local client —
+never when synthesising a removal on another client's behalf, which is
+exactly this function's case. `provider/client`'s existing double-heartbeat
+margin on reconnect (added for #165) is unaffected and remains in place —
+it now exists purely as defense-in-depth against third-party servers
+(Hocuspocus, y-websocket, or any other implementation of this wire
+protocol) that may still compute removal clocks the old way.
+
 ## v1.47.1
 
 **Who is affected:** anyone building nested documents with the prelim

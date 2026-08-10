@@ -1,7 +1,7 @@
-// Package websocket - internal test for encodeAuthMessage's UTF-8 coercion
-// (#209). This lives in the internal (package websocket) test set because
-// encodeAuthMessage is unexported and not reachable from package
-// websocket_test.
+// Package websocket - internal tests for encodeAuthMessage's UTF-8 coercion
+// (#209) and encodeAwarenessRemoval's clock behavior (#226). Both live in the
+// internal (package websocket) test set because the functions under test are
+// unexported and not reachable from package websocket_test.
 package websocket
 
 import (
@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/encoding"
 )
 
@@ -62,4 +63,76 @@ func TestUnit_EncodeAuthMessage_CoercesInvalidUTF8(t *testing.T) {
 			require.NotContains(t, s, string([]byte{0xff}))
 		})
 	}
+}
+
+// TestUnit_EncodeAwarenessRemoval_UnbumpedSurvivesRejoinTie guards #226.
+//
+// encodeAwarenessRemoval used to synthesise a removal at the room's current
+// clock for that client PLUS ONE. Awareness.Heartbeat, called by a rejoining
+// client re-announcing itself, ALSO bumps by exactly one from the same base
+// clock (the client's own last-known clock, which — absent any intervening
+// update — is identical to what the room last saw). So a disconnect and a
+// same-client rejoin computed from that shared base landed on the SAME
+// clock. At an equal clock, Awareness.ApplyUpdate's tie-break rule always
+// favors the null (removal) side over an active state, regardless of which
+// one a given peer happens to receive first — see the two subtests below,
+// which apply the pair in both orders. A third, uninvolved peer receiving
+// both therefore always ended up with the rejoining client marked removed:
+// a genuine reappearance silently suppressed.
+//
+// The fix leaves the removal clock unbumped, matching the room's live view
+// exactly. That makes the rejoin heartbeat's own bump strictly newer than
+// the removal in every case, so the tie — and the suppression it caused —
+// no longer arises, regardless of arrival order.
+func TestUnit_EncodeAwarenessRemoval_UnbumpedSurvivesRejoinTie(t *testing.T) {
+	const rejoiningClient = uint64(42)
+
+	// buildScenario re-creates, from scratch each time, a disconnect and a
+	// same-client rejoin computed from the identical base clock: the room's
+	// shared Awareness and the rejoining client's own Awareness both start
+	// out having just seen the client announce itself once (clock 1).
+	buildScenario := func(t *testing.T) (removal, rejoinHeartbeat []byte, peerC *awareness.Awareness) {
+		t.Helper()
+
+		client := awareness.New(rejoiningClient)
+		client.SetLocalState(map[string]any{"cursor": float64(1)})
+		announce := client.EncodeUpdate(nil)
+
+		// The room's shared Awareness (server-side) and a third, uninvolved
+		// peer both learn of the client's announcement at clock 1.
+		room := awareness.New(999)
+		require.NoError(t, room.ApplyUpdate(announce, nil))
+
+		peerC = awareness.New(3)
+		require.NoError(t, peerC.ApplyUpdate(announce, nil))
+
+		// Disconnect: the server synthesises a removal from the room's
+		// CURRENT view of the client — clock 1, same base as below.
+		removal = encodeAwarenessRemoval(room, []uint64{rejoiningClient})
+		require.NotNil(t, removal)
+
+		// Rejoin: the SAME client heartbeats from that SAME base clock (1).
+		client.Heartbeat()
+		rejoinHeartbeat = client.EncodeUpdate(nil)
+
+		return removal, rejoinHeartbeat, peerC
+	}
+
+	t.Run("removal arrives before rejoin heartbeat", func(t *testing.T) {
+		removal, rejoin, peerC := buildScenario(t)
+		require.NoError(t, peerC.ApplyUpdate(removal, nil))
+		require.NoError(t, peerC.ApplyUpdate(rejoin, nil))
+
+		_, present := peerC.GetStates()[rejoiningClient]
+		require.True(t, present, "rejoining client's presence must survive the tie")
+	})
+
+	t.Run("rejoin heartbeat arrives before removal", func(t *testing.T) {
+		removal, rejoin, peerC := buildScenario(t)
+		require.NoError(t, peerC.ApplyUpdate(rejoin, nil))
+		require.NoError(t, peerC.ApplyUpdate(removal, nil))
+
+		_, present := peerC.GetStates()[rejoiningClient]
+		require.True(t, present, "rejoining client's presence must survive the tie")
+	})
 }
