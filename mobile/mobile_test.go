@@ -37,11 +37,13 @@ func isMobileSafe(t reflect.Type) bool {
 	case reflect.Slice:
 		return t.Elem().Kind() == reflect.Uint8 // []byte
 	case reflect.Pointer:
-		return t == reflect.TypeOf((*Doc)(nil)) || t == reflect.TypeOf((*Awareness)(nil)) || t == reflect.TypeOf((*Subscription)(nil))
+		return t == reflect.TypeOf((*Doc)(nil)) || t == reflect.TypeOf((*Awareness)(nil)) ||
+			t == reflect.TypeOf((*Subscription)(nil)) || t == reflect.TypeOf((*SyncClient)(nil))
 	case reflect.Interface:
 		return t == reflect.TypeOf((*error)(nil)).Elem() ||
 			t == reflect.TypeOf((*DocObserver)(nil)).Elem() ||
-			t == reflect.TypeOf((*AwarenessObserver)(nil)).Elem()
+			t == reflect.TypeOf((*AwarenessObserver)(nil)).Elem() ||
+			t == reflect.TypeOf((*SyncStatusObserver)(nil)).Elem()
 	default:
 		return false
 	}
@@ -67,7 +69,7 @@ func checkFuncSafe(t *testing.T, label string, fn reflect.Type, skipReceiver boo
 
 func TestExportedAPIIsMobileSafe(t *testing.T) {
 	// Exported methods of the bound types.
-	for _, ptr := range []any{(*Doc)(nil), (*Awareness)(nil), (*Subscription)(nil)} {
+	for _, ptr := range []any{(*Doc)(nil), (*Awareness)(nil), (*Subscription)(nil), (*SyncClient)(nil)} {
 		rt := reflect.TypeOf(ptr)
 		for i := 0; i < rt.NumMethod(); i++ {
 			mth := rt.Method(i)
@@ -84,6 +86,7 @@ func TestExportedAPIIsMobileSafe(t *testing.T) {
 		"NewDoc":             NewDoc,
 		"NewDocWithClientID": NewDocWithClientID,
 		"NewAwareness":       NewAwareness,
+		"NewSyncClient":      NewSyncClient,
 	}
 	for name, fn := range ctors {
 		checkFuncSafe(t, name, reflect.TypeOf(fn), false)
@@ -94,6 +97,7 @@ func TestExportedAPIIsMobileSafe(t *testing.T) {
 	for _, iface := range []reflect.Type{
 		reflect.TypeOf((*DocObserver)(nil)).Elem(),
 		reflect.TypeOf((*AwarenessObserver)(nil)).Elem(),
+		reflect.TypeOf((*SyncStatusObserver)(nil)).Elem(),
 	} {
 		for i := 0; i < iface.NumMethod(); i++ {
 			mth := iface.Method(i)
