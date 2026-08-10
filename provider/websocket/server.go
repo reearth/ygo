@@ -23,6 +23,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/internal/relaylane"
 	"github.com/reearth/ygo/internal/roomname"
+	"github.com/reearth/ygo/persistence"
 	ygsync "github.com/reearth/ygo/sync"
 )
 
@@ -258,42 +259,124 @@ type VersionableAdapter interface {
 // be told apart from versions a user explicitly named.
 const AutoVersionLabel = "auto"
 
-// MemoryPersistence is a thread-safe in-memory PersistenceAdapter that merges
-// all updates into a single V1 snapshot per room. It is the default adapter
-// used when no external persistence is configured and is primarily useful in
-// tests and single-process deployments.
+// defaultMemoryCompactEvery is how many appended updates a room accumulates
+// before MemoryPersistence folds them back into one blob. It matches
+// provider/client's own compaction default so the two in-memory-ish stores
+// behave alike.
+const defaultMemoryCompactEvery = 500
+
+// MemoryPersistence is a thread-safe in-memory PersistenceAdapter. It APPENDS
+// each incremental update and periodically folds a room's backlog into a
+// single blob, rather than re-merging the whole document on every write.
+//
+// The distinction is the point of #186: merging on every write costs
+// O(document) per flush and O(document²) over a session, which is exactly what
+// PersistenceAdapter's own doc warns adapters not to do. Appending costs
+// O(update); the O(document) fold is paid once per CompactEvery writes, so the
+// amortised per-write cost no longer grows with the document.
+//
+// It compacts ITSELF rather than waiting for Server.CompactEvery, which is off
+// by default (see that field's doc) — an adapter that only appended and waited
+// to be told would grow without bound for anyone who had not opted in.
+//
+// Trade, stated plainly: LoadDoc is no longer O(1). It folds whatever records a
+// room still holds — bounded by CompactEvery — and persists that fold, so
+// subsequent loads are cheap again. Writes are continuous and loads are once
+// per room residency, so this is the right direction, but it is not free.
+//
+// Still primarily for tests and single-process deployments; a multi-process
+// deployment wants persistence/sqlite or another VersionedPersistence.
 type MemoryPersistence struct {
-	mu   sync.RWMutex
-	docs map[string][]byte // room → merged V1 update
+	adapter *persistence.LegacyAdapter
+
+	// CompactEvery bounds how many appended updates a room accumulates before
+	// this adapter folds them into one. 0 or less means the default (500).
+	// Set before serving; read without synchronisation.
+	CompactEvery int
+
+	mu      sync.Mutex
+	pending map[string]int // room → writes since that room last compacted
 }
 
 // NewMemoryPersistence returns an empty MemoryPersistence.
 func NewMemoryPersistence() *MemoryPersistence {
-	return &MemoryPersistence{docs: make(map[string][]byte)}
+	ad := persistence.NewLegacyAdapter(persistence.NewMemoryPersistence())
+	// MUST be explicit: KeepVersions defaults to 0, which means "keep all
+	// history" and makes Compact a silent no-op (persistence/adapter.go). 1
+	// folds a room down to a single record, preserving the one-blob-per-room
+	// memory shape this type has always had.
+	ad.KeepVersions = 1
+	return &MemoryPersistence{adapter: ad, pending: make(map[string]int)}
 }
 
-// LoadDoc returns the merged V1 update for room, or nil if none exists.
-func (m *MemoryPersistence) LoadDoc(room string) ([]byte, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.docs[room], nil
-}
-
-// StoreUpdate merges update into the stored snapshot for room.
-func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	existing := m.docs[room]
-	if len(existing) == 0 {
-		m.docs[room] = update
-		return nil
+func (m *MemoryPersistence) compactEvery() int {
+	if m.CompactEvery > 0 {
+		return m.CompactEvery
 	}
-	merged, err := crdt.MergeUpdatesV1(existing, update)
+	return defaultMemoryCompactEvery
+}
+
+// LoadDoc returns the room's state as one V1 update, folding any outstanding
+// appended records first so later loads are cheap again. Compaction failure is
+// not fatal here: the fold is an optimisation, and the adapter can still
+// materialise the room from its records.
+func (m *MemoryPersistence) LoadDoc(room string) ([]byte, error) {
+	_ = m.Compact(context.Background(), room)
+	return m.adapter.LoadDoc(room)
+}
+
+// StoreUpdate appends update, then folds the room once it has accumulated
+// CompactEvery writes.
+//
+// It returns ONLY the append error. A failed fold is swallowed deliberately:
+// the write itself succeeded, the server reports StoreUpdate errors as
+// persistence failures, and returning a compaction error would misreport a
+// successful write. This mirrors CompactableAdapter's own best-effort
+// contract. Callers who need the error can call Compact directly.
+func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
+	return m.storeThenMaybeCompact(context.Background(), room, update, false)
+}
+
+// StoreUpdateContext is the context-aware variant (PersistenceAdapterContext),
+// forwarded to the wrapped adapter so Shutdown can abort an in-flight write.
+func (m *MemoryPersistence) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
+	return m.storeThenMaybeCompact(ctx, room, update, true)
+}
+
+func (m *MemoryPersistence) storeThenMaybeCompact(ctx context.Context, room string, update []byte, withCtx bool) error {
+	var err error
+	if withCtx {
+		err = m.adapter.StoreUpdateContext(ctx, room, update)
+	} else {
+		err = m.adapter.StoreUpdate(room, update)
+	}
 	if err != nil {
 		return err
 	}
-	m.docs[room] = merged
+
+	// Decide under the lock, compact outside it: MergeUpdatesV1 on a large
+	// room must never block another room's counter update.
+	m.mu.Lock()
+	m.pending[room]++
+	due := m.pending[room] >= m.compactEvery()
+	m.mu.Unlock()
+	if due {
+		_ = m.Compact(ctx, room) // best-effort; see this method's doc
+	}
 	return nil
+}
+
+// Compact folds the room's appended records into one, satisfying the optional
+// CompactableAdapter interface so the server's on-unload and CompactEvery
+// compaction work too (both are additive to this type's own threshold).
+func (m *MemoryPersistence) Compact(ctx context.Context, room string) error {
+	err := m.adapter.Compact(ctx, room)
+	// Delete rather than zero: rooms come and go (idle eviction), and a map
+	// keyed by room name that is only ever zeroed grows with churn.
+	m.mu.Lock()
+	delete(m.pending, room)
+	m.mu.Unlock()
+	return err
 }
 
 // room holds the shared document and awareness state for one named room.
