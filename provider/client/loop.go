@@ -13,18 +13,48 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 )
 
-// Timeouts the dial loop applies per connection. Both mirror
-// provider/websocket's server-side equivalents (its writeTimeout const and
-// handshakeTimeout default) so a client and ygo's own server give up on a
-// stuck peer on the same timescale rather than one side hanging on an
-// already-abandoned socket.
+// dialHandshakeTimeout bounds the WebSocket dial/upgrade itself, mirroring
+// provider/websocket's server-side handshakeTimeout default so a client and
+// ygo's own server give up on a stuck peer on the same timescale rather than
+// one side hanging on an already-abandoned socket.
 //
-// These are deliberately NOT Options fields: nothing in #165 needs them
-// tunable, and every knob added to Options is one more thing an embedder can
-// get wrong. Promote them only when a real deployment needs it.
-const (
-	dialHandshakeTimeout = 10 * time.Second
-	writeTimeout         = 10 * time.Second
+// Deliberately NOT an Options field: nothing in #165 needs it tunable, and
+// every knob added to Options is one more thing an embedder can get wrong.
+// Promote it only when a real deployment needs it.
+const dialHandshakeTimeout = 10 * time.Second
+
+// writeTimeout bounds a single control/handshake-path write (session.write:
+// SyncStep1, the Hocuspocus auth token, a SyncStep1 reply, a query-awareness
+// reply — see handleFrame), mirroring provider/websocket's own writeTimeout
+// const. These frames are always small and sent at most once or twice per
+// connection, so this deliberately stays a plain, unexported const rather
+// than a var: nothing needs to tune it independently of
+// flushWriteTimeout/closeDrainTimeout below, which cover the payloads that
+// actually vary in size and frequency (flushLane's ordinary and close-time
+// drains).
+const writeTimeout = 10 * time.Second
+
+// flushWriteTimeout and closeDrainTimeout bound flushLane's two call sites
+// (see runLoop): the ordinary per-signal drain while a connection is live,
+// and the bounded best-effort drain flushLane performs when ctx is already
+// done (Close, or the caller's own ctx being cancelled) — see flushLane's
+// "Take-before-write" doc section for the #202-style accounting that
+// distinguishes them. closeDrainTimeout is deliberately SHORTER: an ordinary
+// send has a whole reconnect cycle to eventually succeed if it is merely
+// slow, but Close needs a real bound on how long it can take to return.
+//
+// Both are vars, not consts — unlike writeTimeout above, tests DO need to
+// shrink these independently of each other and of the handshake-path
+// writeTimeout: see close_test.go's withFlushWriteTimeout/
+// withCloseDrainTimeout, which make TestClient_Close_CountsUndeliveredOutboundAsDropped's
+// wedged-connection scenario fail deterministically (a deadline already in
+// the past) rather than depend on this machine's socket buffer sizes,
+// exactly the same "package-level indirection purely for test determinism"
+// pattern backoff.go's randFloat already establishes. Production code never
+// touches these directly except through flushLane's deadline parameter.
+var (
+	flushWriteTimeout = 10 * time.Second
+	closeDrainTimeout = 2 * time.Second
 )
 
 // reconnectBackoffBase is the Full Jitter base duration runReconnectLoop
@@ -357,6 +387,17 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// #165 Task 10 / #202: give whatever is still queued on the
+			// lane a bounded, best-effort chance to actually reach the
+			// wire before this connection's socket goes away for good, and
+			// COUNT what does not make it — see flushLane's "Take-before-
+			// write" doc section for exactly why this counts here but an
+			// ordinary mid-session send failure does not. The error is
+			// intentionally ignored: flushLane never returns non-nil when
+			// ctx is already done at every failure it can hit (that is the
+			// whole point of the ctx-aware branch), so there is nothing
+			// left to report — see its doc.
+			_ = s.flushLane(ctx, closeDrainTimeout)
 			return nil
 		case err := <-readErr:
 			return fmt.Errorf("client: read from %q: %w", c.opts.URL, err)
@@ -365,7 +406,7 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 				return err
 			}
 		case <-c.lane.Signal():
-			if err := s.flushLane(); err != nil {
+			if err := s.flushLane(ctx, flushWriteTimeout); err != nil {
 				return err
 			}
 		case <-pingTicker.C:
@@ -386,6 +427,12 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 				return fmt.Errorf("client: send ping: %w", err)
 			}
 		}
+		// #165 Task 10: checked once per processed message ("between
+		// messages", not concurrently with one — see maybeCompact's own
+		// doc), after every select case above except the two that already
+		// return. A brief pause here is acceptable for the same reason
+		// maybeCompact's doc gives: this Client serves exactly one room.
+		c.maybeCompact(ctx)
 	}
 }
 
@@ -455,6 +502,18 @@ func (c *Client) runReconnectLoop(ctx context.Context) error {
 			// ever changes — a race where ctx happened to be cancelled at
 			// almost the same moment a real failure occurred. Either way,
 			// a deliberate stop is not something to report as a failure.
+			//
+			// #165 Task 10 / #202: a catch-all, not the primary drain path.
+			// The ordinary case is runLoop's OWN ctx.Done() case already
+			// having drained (or Dropped-counted) everything via
+			// flushLane — this is a no-op then. It does real work for the
+			// belt-and-suspenders race just described, AND for the case
+			// runLoop returned an error (e.g. dial failed) that happened to
+			// coincide with ctx already being done, so its OWN drain never
+			// ran at all: nothing else will ever get another chance at
+			// whatever is still queued, so count it now rather than let it
+			// sit forever uncounted.
+			c.dropLaneRemainder()
 			return nil
 		}
 
@@ -474,16 +533,33 @@ func (c *Client) runReconnectLoop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			// #165 Task 10 / #202: closing (or the caller's ctx being
+			// cancelled) while between connections, with no live session to
+			// drain onto at all — count whatever is queued rather than let
+			// it sit forever, for the same reason as the other call site
+			// above.
+			c.dropLaneRemainder()
 			return nil
 		case <-timer.C:
 		}
 	}
 }
 
-// write emits one already-framed message. Only ever called from the loop
-// goroutine (see session's doc): this is the single-writer choke point.
+// write emits one already-framed control/handshake-path message (SyncStep1,
+// the auth token, a SyncStep1 reply, a query-awareness reply) using the
+// fixed writeTimeout const. Only ever called from the loop goroutine (see
+// session's doc): this is the single-writer choke point.
 func (s *session) write(frame []byte) error {
-	if err := s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+	return s.writeWithDeadline(frame, writeTimeout)
+}
+
+// writeWithDeadline is write's parameterised core, letting flushLane apply
+// its own (variable, test-overridable) deadline instead of the fixed
+// writeTimeout above — see flushWriteTimeout/closeDrainTimeout's doc. Still
+// only ever called from the loop goroutine; the single-writer invariant
+// session's doc describes binds this exactly as it does write.
+func (s *session) writeWithDeadline(frame []byte, deadline time.Duration) error {
+	if err := s.conn.SetWriteDeadline(time.Now().Add(deadline)); err != nil {
 		return err
 	}
 	return s.conn.WriteMessage(gws.BinaryMessage, frame)
@@ -753,27 +829,110 @@ func (s *session) handleFrame(frame []byte) error {
 //     retries the removal write itself, for the same reason the KindSync
 //     paragraph above gives: a retry queue here would be a second, competing
 //     source of truth for pending sends.
-func (s *session) flushLane() error {
+//
+// # #165 Task 10 addendum: counting a loss that has no future to be superseded in
+//
+// Everything above assumes a failed write is recoverable by SOMETHING else —
+// the Doc for KindSync, a later Heartbeat for awareness. That assumption
+// holds only because there IS a later attempt: a reconnect, or a subsequent
+// ping tick, on a Client that keeps running. It stops holding the moment ctx
+// is already done when the write fails — Close (or the caller's own ctx
+// being cancelled) — because then there is no "next connection" left to
+// resend a KindSync payload's underlying edit via a fresh handshake, and no
+// "next ping tick" left to re-announce awareness. That failure is real,
+// permanent loss from THIS Client's point of view, and #202's discipline
+// (see provider/websocket's RelayStats.Dropped doc) is unambiguous about
+// what to do with real loss: count it, never let it vanish silently.
+//
+// deadline is the caller's choice specifically so the two call sites in
+// runLoop can apply different budgets: the ordinary case (flushWriteTimeout,
+// ctx still live) gets the same generous budget writes always had, while the
+// ctx-already-done case (closeDrainTimeout) gets a short one, since nothing
+// is waiting to retry and Close needs a real bound on how long it can take
+// to return.
+//
+// Checking ctx.Err() AT THE MOMENT OF FAILURE — not at the top of this call —
+// is what makes this correct regardless of exactly when Close happens to run
+// relative to an in-flight write: a write that started while ctx was still
+// live but blocked long enough for ctx to become done before it finally
+// fails is counted (correctly — by the time it fails, nothing will retry it
+// either), while a write that SUCCEEDS despite ctx becoming done partway
+// through is correctly NOT counted (the payload really did reach the
+// socket). Once one write has failed with ctx already done, every remaining
+// queued payload is counted without another write attempt — the socket has
+// already shown itself to be failing, so there is nothing to gain from
+// trying each one in turn, only more time for Close to spend finding that
+// out the same way.
+func (s *session) flushLane(ctx context.Context, deadline time.Duration) error {
+	giveUp := false
 	for {
-		if update, ok := s.c.lane.TakeSync(); ok {
-			if err := s.write(encodeEnvelope(wireMsgSync, ygsync.EncodeUpdate(update))); err != nil {
-				return fmt.Errorf("client: send update: %w", err)
-			}
+		update, isSync := s.c.lane.TakeSync()
+		var aw []byte
+		var isAwareness bool
+		if !isSync {
+			aw, isAwareness = s.c.lane.TakeAwareness()
+		}
+		if !isSync && !isAwareness {
+			return nil
+		}
+
+		if giveUp {
+			// The socket already failed once above with ctx done; see this
+			// method's doc addendum. Count without attempting — a further
+			// write attempt here would only cost time, not information.
+			s.c.statsDropped.Add(1)
 			continue
 		}
-		if aw, ok := s.c.lane.TakeAwareness(); ok {
+
+		var frame []byte
+		var what string
+		if isSync {
+			frame = encodeEnvelope(wireMsgSync, ygsync.EncodeUpdate(update))
+			what = "send update"
+		} else {
 			// Awareness payloads ARE VarBytes-wrapped on the wire, unlike
 			// sync payloads; encodeEnvelope appends whatever it is given
 			// verbatim, so the wrapping is applied here.
-			frame := encodeEnvelope(wireMsgAwareness, encoding.EncodeBytes(func(enc *encoding.Encoder) {
+			frame = encodeEnvelope(wireMsgAwareness, encoding.EncodeBytes(func(enc *encoding.Encoder) {
 				enc.WriteVarBytes(aw)
 			}))
-			if err := s.write(frame); err != nil {
-				return fmt.Errorf("client: send awareness: %w", err)
-			}
-			continue
+			what = "send awareness"
 		}
-		return nil
+
+		if err := s.writeWithDeadline(frame, deadline); err != nil {
+			if ctx.Err() != nil || s.c.isClosing() {
+				// See this method's doc addendum: no future attempt is
+				// coming, so this is real loss — count it, then keep
+				// draining (without writing) so nothing after it goes
+				// uncounted either.
+				//
+				// s.c.isClosing() is checked ALONGSIDE ctx.Err(), not
+				// instead of it, and the distinction is load-bearing: for
+				// the ordinary in-session call site (runLoop's
+				// <-c.lane.Signal() case), ctx here is loopCtx, whose
+				// cancellation on a Close is relayed through Connect's own
+				// watcher goroutine (`case <-c.closed: cancel()`) — a real
+				// goroutine hop with its own scheduling latency, not an
+				// instantaneous side effect of close(c.closed). Close's
+				// very first act is closing c.closed directly (see Close's
+				// doc), with no intermediary goroutine of its own, so
+				// checking it here closes a genuine window where a write
+				// fails (because the peer is gone or, in a test, because a
+				// deliberately-elapsed deadline forces it) a few
+				// scheduler-ticks before the watcher has gotten around to
+				// calling cancel() — ctx.Err() would still read nil in that
+				// window even though Close has already unconditionally
+				// committed to there being no future connection to resend
+				// this payload on. Observed directly: without this check,
+				// TestClient_Close_CountsUndeliveredOutboundAsDropped's
+				// deliberately-wedged-connection scenario flaked (Dropped
+				// read 0) roughly 1 run in 100–300 under `-count`.
+				s.c.statsDropped.Add(1)
+				giveUp = true
+				continue
+			}
+			return fmt.Errorf("client: %s: %w", what, err)
+		}
 	}
 }
 

@@ -45,6 +45,35 @@ type CompactableStore interface {
 	Compact(ctx context.Context, room string) error
 }
 
+// defaultKeepVersions is the non-zero retention OpenSQLiteStore applies to
+// the LegacyAdapter it constructs (see SQLiteStore.KeepVersions, embedded).
+//
+// LegacyAdapter.KeepVersions defaults to 0 ("keep all history") when built
+// directly via persistence.NewLegacyAdapter, which is the right default for
+// the SERVER side (provider/websocket): an operator opts into retention
+// explicitly via CompactEvery + KeepVersions, because the raw update log
+// there doubles as a room's audit/version history, and trimming it by
+// default would be a worse surprise than the disk growth it saves. A
+// client's SQLiteStore has no such use for that history — this package
+// never exposes ListVersions/MaterializeAt to a caller — so inheriting the
+// SAME zero default here would make every Compact call this package ever
+// makes (see Client.maybeCompact) a permanent, silent no-op: exactly the gap
+// #165's Task 1 review flagged (TestSQLiteStore_CompactPreservesState passed
+// trivially because nothing was ever actually deleted; see
+// TestSQLiteStore_CompactActuallyDeletesRows for the corrected assertion).
+//
+// The value mirrors defaultCompactEvery deliberately, not coincidentally:
+// with the client's own default compaction trigger (fire after 500 stored
+// updates), retaining the newest 500 keeps this store's steady-state row
+// count sawtoothing between roughly 500 and 1000 rather than growing without
+// bound for the lifetime of a long-running device. KeepVersions is an
+// exported field on the embedded *persistence.LegacyAdapter precisely so a
+// caller with different needs — more retained history, or explicit
+// keep-everything via 0 — can override this starting point on the returned
+// *SQLiteStore; OpenSQLiteStore's choice here is a default, not a policy
+// this package enforces.
+const defaultKeepVersions = defaultCompactEvery
+
 // SQLiteStore is the default LocalStore: a persistence.LegacyAdapter (the
 // same context-free LoadDoc/StoreUpdate/Compact shape the server exposes)
 // wrapping a persistence/sqlite.Store, so the client gets a durable,
@@ -57,14 +86,24 @@ type SQLiteStore struct {
 
 // OpenSQLiteStore opens (creating if necessary) a SQLite-backed LocalStore at
 // path. The returned *SQLiteStore satisfies CompactableStore and must be
-// closed with Close when the client is done with it.
+// closed with Close when the client is done with it (Options.StorePath does
+// this automatically for a store the Client itself opened; see its doc and
+// Close's ownership rule).
+//
+// The returned store's KeepVersions is pre-set to defaultKeepVersions rather
+// than left at LegacyAdapter's own 0 ("keep all") default — see
+// defaultKeepVersions' doc for why 0 would be wrong here specifically.
+// Override it on the returned value before first use if a different
+// retention policy is wanted.
 func OpenSQLiteStore(path string) (*SQLiteStore, error) {
 	store, err := sqlite.Open(path)
 	if err != nil {
 		return nil, err
 	}
+	adapter := persistence.NewLegacyAdapter(store)
+	adapter.KeepVersions = defaultKeepVersions
 	return &SQLiteStore{
-		LegacyAdapter: persistence.NewLegacyAdapter(store),
+		LegacyAdapter: adapter,
 		store:         store,
 	}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -54,6 +55,23 @@ type Options struct {
 	// empty on every restart and holds nothing once Close returns, exactly
 	// like using a *crdt.Doc directly without this package.
 	Store LocalStore
+
+	// StorePath, if set, tells New to open its OWN SQLite-backed LocalStore
+	// at this path (via OpenSQLiteStore) and take ownership of it: Close
+	// closes the store it opened, unlike a Store supplied directly (see
+	// Store's own doc — a caller-supplied Store is never closed by Close,
+	// because the caller retains the handle and may want to reuse it).
+	// Mutually exclusive with Store; New rejects setting both, since there
+	// would be no single answer for which one Close should own.
+	//
+	// This exists so an embedder that has no reason to hold onto the
+	// *SQLiteStore handle itself (the common case: open a local database,
+	// hand it to a Client, forget about it) gets correct Close-time cleanup
+	// for free instead of having to track that ownership itself. It also
+	// gives later #165 work (the gomobile binding) a one-field way to say
+	// "just open a local database for me at this path" without duplicating
+	// this ownership bookkeeping at that layer too.
+	StorePath string
 
 	// Token is the Hocuspocus in-band auth token (mirrors
 	// provider/websocket's OnTokenAuth, #104). When set, the dial loop sends
@@ -226,13 +244,29 @@ type Status struct {
 
 // Stats are cumulative counters a caller can poll to understand what the
 // client's sync loop has been doing without wiring a full OnStatus
-// subscription. Coalesced, AwarenessSuperseded and HardDrops come from the
-// outbound lane (see internal/relaylane) and are live; Dropped is reserved
-// for the send-failure accounting a later #165 task (Stats/Close hardening)
-// adds, and is always zero today — reconnecting (see runReconnectLoop) does
-// not by itself lose anything a Dropped counter would need to report: a
-// failed connection's unsent lane contents are superseded by the next
-// connection's full handshake resync (see flushLane's doc), not discarded.
+// subscription, mirroring provider/websocket's RelayStats both in shape and
+// in doc voice: Coalesced and AwarenessSuperseded are ROUTINE — expected
+// under ordinary load, never evidence of loss — while Dropped and HardDrops
+// going non-zero means something was actually lost and is worth alerting on.
+//
+// Coalesced, AwarenessSuperseded and HardDrops are read straight off the
+// outbound lane (see internal/relaylane) and describe what happened to a
+// payload BEFORE it was ever handed to a socket. Dropped is this Client's
+// own counter (see statsDropped) and covers everything relaylane cannot see
+// — loss that happens after a payload leaves the lane, or before it is even
+// a Doc update at all:
+//
+//   - a local Store.StoreUpdate call that returned an error (#165 Task 10
+//     finding 2 — see onDocUpdate: the edit stays in memory and in the Doc,
+//     but is no longer durable across a restart, which is exactly the kind
+//     of loss this repo counts rather than silently drops; also logged, for
+//     the operator-facing detail a bare counter can't carry);
+//   - an outbound payload still queued when Close ran out of time to
+//     deliver it (see Close's #202-style drain in loop.go's flushLane) —
+//     reconnecting mid-session does NOT count here (an unsent lane payload
+//     is superseded by the next connection's full handshake resync, per
+//     flushLane's own doc), only a payload that had no future connection
+//     left to be superseded BY.
 type Stats struct {
 	// Coalesced counts local updates that were merged into a pending batch
 	// rather than sent as a separate wire message, mirroring
@@ -242,10 +276,15 @@ type Stats struct {
 	// superseded by a newer local SetLocalState call before ever being sent.
 	AwarenessSuperseded uint64
 	// HardDrops counts updates the client gave up retrying and discarded
-	// outright (e.g. exceeding a retry/staleness bound).
+	// outright (e.g. exceeding a retry/staleness bound). Should always be
+	// zero in this package today (nothing here retries), kept for shape
+	// parity with RelayStats.
 	HardDrops uint64
-	// Dropped counts updates lost for any other reason, including transient
-	// send failures superseded by a subsequent successful send.
+	// Dropped counts updates actually lost — a failed local store write, or
+	// an outbound payload Close could not deliver before giving up (see this
+	// type's own doc for the exact two cases). Should always be zero in a
+	// healthy deployment; alert on it going non-zero the same way an
+	// operator would alert on RelayStats.Dropped.
 	Dropped uint64
 }
 
@@ -282,10 +321,35 @@ type Client struct {
 	// needed" reasoning as unsubObserver above.
 	unsubAwareness func()
 
+	// connectMu guards connectStarted and pairs it with connectWG.Add so the
+	// two change together atomically from Connect's point of view — see
+	// Connect and Close's "join the loop goroutine" doc for why that pairing
+	// matters: Close reads connectStarted and decides whether to wait on
+	// connectWG under the SAME lock, which is what closes the otherwise-real
+	// race of Close reading "not started" a moment before Connect's own
+	// Add(1) would have made that answer stale (a bare atomic.Bool plus a
+	// separately-incremented WaitGroup cannot make this same guarantee: see
+	// sync.WaitGroup's own doc — "note that calls with a positive delta that
+	// start when the counter is zero must happen before a Wait").
+	connectMu sync.Mutex
 	// connectStarted latches when a Connect call is accepted, so a second one
 	// is refused rather than starting a rival dial loop and a rival observer
-	// on the same Doc. See Connect and ErrAlreadyConnected.
-	connectStarted atomic.Bool
+	// on the same Doc. See Connect and ErrAlreadyConnected. Guarded by
+	// connectMu (see its doc), NOT an atomic — the two need to change
+	// together with connectWG.Add under one critical section.
+	connectStarted bool
+	// connectWG is held at 1 for exactly the span of an accepted Connect
+	// call (Add right after connectMu grants it, Done via defer just before
+	// Connect returns for any reason) — which, since Connect calls
+	// runReconnectLoop/runLoop synchronously on its own goroutine, is
+	// precisely the lifetime of "the loop goroutine". Close's Wait on this
+	// (see Close) is what makes "join the loop goroutine before returning" a
+	// real guarantee rather than a best-effort signal: no send this Client
+	// makes can outlive Close once Close has returned. A retried Connect
+	// after a hydration failure (see Connect's "does not latch" doc) reuses
+	// the same WaitGroup safely — Add/Done pairs never overlap, since
+	// connectMu allows only one accepted call to be in flight at a time.
+	connectWG sync.WaitGroup
 
 	// lane is the hand-off between the Doc observer (which runs on whichever
 	// goroutine called Transact) and the loop goroutine (the socket's only
@@ -295,6 +359,28 @@ type Client struct {
 	// while offline queue up for the next connection instead of needing a
 	// separate holding pen.
 	lane *relaylane.Lane
+
+	// compactor is o.Store re-asserted to CompactableStore once, in New,
+	// rather than on every maybeCompact call — nil (the common case, e.g. a
+	// nil Store or a LocalStore that doesn't implement it) makes maybeCompact
+	// a single nil-check away from a full no-op. See maybeCompact.
+	compactor CompactableStore
+	// storeWrites counts successful Store.StoreUpdate calls since the last
+	// compaction attempt (successful or not — see maybeCompact), incremented
+	// from onDocUpdate on whichever goroutine that runs on (the caller's own
+	// Transact goroutine for a local edit, or the loop goroutine for a
+	// server-received one — see #165 Task 10 finding 3) and read/reset only
+	// from the loop goroutine inside maybeCompact. The atomic is what makes
+	// that increment-from-either-side, reset-from-one-side split safe
+	// without a lock.
+	storeWrites atomic.Uint64
+
+	// ownedStore is non-nil exactly when Options.StorePath was used: the
+	// *SQLiteStore New opened on this Client's behalf, and therefore the one
+	// Store this Client's Close is responsible for closing. A Store supplied
+	// directly via Options.Store is never tracked here and is never closed
+	// by Close — see Options.StorePath's doc and Close's ownership rule.
+	ownedStore *SQLiteStore
 
 	statusMu       sync.Mutex
 	statusSubs     []statusSub
@@ -352,6 +438,14 @@ func New(o Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	if o.Store != nil && o.StorePath != "" {
+		// See Options.StorePath's doc: closing the store is Close's job, and
+		// there is no single correct answer for which one to close (or
+		// whether to close both — a caller-supplied Store must never be
+		// closed by this package, full stop) if both are set, so this is
+		// rejected outright rather than silently preferring one.
+		return nil, errors.New("client: Options.Store and Options.StorePath are mutually exclusive")
+	}
 
 	if o.MaxBackoff <= 0 {
 		o.MaxBackoff = defaultMaxBackoff
@@ -370,6 +464,23 @@ func New(o Options) (*Client, error) {
 	// dialer wants anyway.
 	o.Header = o.Header.Clone()
 
+	// See Options.StorePath's doc: opened here (construction time, not
+	// Connect) so a failure to open it is reported synchronously from New,
+	// exactly like every other Options validation above, rather than
+	// surfacing later from inside Connect's hydrate step.
+	var owned *SQLiteStore
+	if o.StorePath != "" {
+		ss, err := OpenSQLiteStore(o.StorePath)
+		if err != nil {
+			return nil, fmt.Errorf("client: open store at %q: %w", o.StorePath, err)
+		}
+		o.Store = ss
+		owned = ss
+	}
+	// Asserted once, here, rather than on every maybeCompact call — see
+	// Client.compactor's own doc.
+	compactor, _ := o.Store.(CompactableStore)
+
 	c := &Client{
 		opts:          o,
 		room:          room,
@@ -377,6 +488,8 @@ func New(o Options) (*Client, error) {
 		hydrateOrigin: &hydrateOrigin{},
 		awareness:     awareness.New(uint64(o.Doc.ClientID())),
 		lane:          relaylane.New(0), // 0 = relaylane.DefaultCap
+		compactor:     compactor,
+		ownedStore:    owned,
 		synced:        make(chan struct{}),
 		closed:        make(chan struct{}),
 	}
@@ -445,10 +558,27 @@ func (c *Client) onDocUpdate(update []byte, origin any) {
 		return
 	}
 	if c.opts.Store != nil {
-		// Best-effort: there is no failure channel for a store write yet (no
-		// Stats field or Status shape fits it), so an error here is dropped.
-		// A later #165 task that adds real failure reporting should revisit.
-		_ = c.opts.Store.StoreUpdate(c.room, update)
+		// #165 Task 10 finding 2: a failed local write used to be dropped
+		// silently (no Stats field or Status shape fit it at the time). That
+		// is exactly the class of loss RelayStats.Dropped's doc says this
+		// repo counts rather than logs-and-forgets: the edit survives only
+		// in memory now, not across a restart, until some later write to
+		// the same room happens to succeed. Both halves matter here, not
+		// just one — Stats().Dropped is what a caller with no log access
+		// (e.g. the mobile binding) can act on programmatically, and the log
+		// line is what an operator watching this process's logs sees with
+		// the room name and the actual error attached, mirroring
+		// provider/websocket's own store closure in persistence.go (log,
+		// never fatal, no retry).
+		if err := c.opts.Store.StoreUpdate(c.room, update); err != nil {
+			log.Printf("ygo/client: StoreUpdate for room %q: %v", c.room, err)
+			c.statsDropped.Add(1)
+		} else {
+			// Feeds Client.maybeCompact's threshold — see storeWrites' own
+			// doc for why only a SUCCESSFUL write counts: a failed
+			// StoreUpdate did not add a row for Compact to ever trim.
+			c.storeWrites.Add(1)
+		}
 	}
 	if origin == c.remoteOrigin {
 		return
@@ -596,13 +726,26 @@ func containsClientID(ids []uint64, target uint64) bool {
 // so it does not latch, and the call may be retried once whatever the Store
 // was unhappy about is resolved.
 func (c *Client) Connect(ctx context.Context) error {
-	if !c.connectStarted.CompareAndSwap(false, true) {
+	c.connectMu.Lock()
+	if c.connectStarted {
+		c.connectMu.Unlock()
 		return ErrAlreadyConnected
 	}
+	c.connectStarted = true
+	// Add happens in the SAME critical section as the latch flip — see
+	// connectWG's doc for why that pairing, not just the Add itself, is what
+	// makes Close's Wait race-free against a Connect call that has only just
+	// been accepted.
+	c.connectWG.Add(1)
+	c.connectMu.Unlock()
+	defer c.connectWG.Done()
+
 	if err := c.hydrate(); err != nil {
 		// Nothing has been started, so release the guard: unlike every later
 		// failure, this one leaves the Client exactly as New returned it.
-		c.connectStarted.Store(false)
+		c.connectMu.Lock()
+		c.connectStarted = false
+		c.connectMu.Unlock()
 		return err
 	}
 
@@ -855,29 +998,186 @@ func (c *Client) dropRemoteAwareness() {
 	_ = c.awareness.ApplyUpdate(enc.Bytes(), c.remoteOrigin)
 }
 
-// Close signals Connect to tear down its connection and return. It is safe to
-// call more than once (only the first call has any effect) and safe to call
-// concurrently with Connect.
+// Close signals Connect to tear down its connection and return, then blocks
+// until that has genuinely finished, following the same discipline #202
+// (provider/websocket's Shutdown, see cluster.go) established for exactly
+// this shape of problem: durability first, then a bounded best-effort
+// network flush that COUNTS what it could not deliver rather than silently
+// discarding it, then teardown. It is safe to call more than once (only the
+// first call has any effect) and safe to call concurrently with Connect.
 //
-// It also unregisters the Doc observer AND the Awareness observer New
-// installed, so a Doc/Awareness pair that outlives its Client stops writing
-// to the Store, stops queueing doc sends, and stops queueing awareness
-// re-announcements that nothing will ever drain. Both unsub functions are
-// written once, in New, before the Client is reachable by any other
-// goroutine, and read only here under closeOnce — so this needs no lock and
-// cannot race Connect.
+// # Ordering, and why
 //
-// Close does not close Store: the Store is constructed and owned by the
-// caller (e.g. via OpenSQLiteStore), which may want to reuse it — for
-// another Client, or simply to keep it open past this Client's lifetime —
-// so closing it here would take that choice away from the caller.
+//  1. Signal (close c.closed) and wait for the current Connect call, if any,
+//     to fully return — see connectWG's doc. Since Connect calls
+//     runReconnectLoop/runLoop synchronously on its own goroutine, this IS
+//     "join the loop goroutine": by the time this wait returns, no goroutine
+//     this Client owns can still be reading frames, still be inside
+//     runLoop's select, or still hold the socket open. Whatever draining
+//     that loop could do on its way out (see loop.go's ctx.Done() case and
+//     runReconnectLoop's own two "give up" points) has already happened —
+//     this call does not additionally drain a socket itself, because doing
+//     so from a second goroutine while the loop goroutine might still be
+//     mid-write would violate the single-writer invariant loop.go documents
+//     on session. This is also why store writes are "done" by the time this
+//     returns: every store write this Client ever makes happens inside
+//     onDocUpdate, called synchronously from Transact — nothing here is
+//     asynchronous or buffered the way provider/websocket's persistence
+//     worker is, so there is no separate flush step to wait for beyond "no
+//     goroutine that could still call onDocUpdate is running."
+//  2. Catch-all: count whatever is STILL on the outbound lane as Dropped
+//     (see dropLaneRemainder). This is a no-op in the ordinary case — the
+//     loop's own teardown (step 1) already drained or counted everything —
+//     and only does real work for the "no loop ever ran to drain anything"
+//     case: Connect was never called, or every attempt failed during
+//     hydration (see Connect's "does not latch" doc), so nothing else in
+//     this Client will ever get a chance to touch the lane again.
+//  3. Unsubscribe the Doc and Awareness observers, so a Doc/Awareness pair
+//     that outlives this Client stops writing to the Store and stops
+//     queueing anything onto a lane nothing will ever drain again. Placed
+//     AFTER the join (not before, despite unsubscribing being the very
+//     first code that ran here in earlier versions of this method) so that
+//     any server-received update the loop was still applying in its very
+//     last moments is still stored — see onDocUpdate's table: a
+//     remoteOrigin update must be persisted, and removing the observer
+//     early would have silently skipped that for whatever arrived in the
+//     final frame(s) of the last connection.
+//  4. Close the store, but ONLY if this Client opened it itself (Options.
+//     StorePath, tracked via ownedStore — see Options.StorePath's doc and
+//     ownedStore's own). A Store supplied directly via Options.Store
+//     belongs to the caller, which may want to reuse it for another Client
+//     or simply keep it open past this one's lifetime; closing it here
+//     would take that choice away.
+//
+// Close's own return value surfaces ownedStore.Close's error, if any;
+// Connect's return value (observed separately, via whatever channel the
+// caller used to receive it) is unaffected by this method.
 func (c *Client) Close() error {
+	var closeErr error
 	c.closeOnce.Do(func() {
 		close(c.closed)
+		// Read connectStarted under connectMu — the SAME lock Connect's
+		// Add(1) is taken under — rather than calling connectWG.Wait()
+		// unconditionally. This is not an optimisation: sync.WaitGroup's own
+		// doc is explicit that "calls with a positive delta that start when
+		// the counter is zero must happen before a Wait" — i.e. Wait needs
+		// an actual synchronisation edge to the matching Add, not merely an
+		// Add that has, in physical time, already happened. Acquiring (and
+		// releasing) connectMu here is what supplies that edge: Connect's
+		// Unlock after Add(1) synchronises-with this Lock, so if
+		// connectStarted reads true here, this goroutine is guaranteed to
+		// observe that Add — a bare, lockless Wait() had no such guarantee
+		// and raced under -race even though the accepted call in this
+		// package's own tests always sequenced correctly in practice.
+		c.connectMu.Lock()
+		started := c.connectStarted
+		c.connectMu.Unlock()
+		if started {
+			c.connectWG.Wait()
+		}
+		c.dropLaneRemainder()
 		c.unsubObserver()
 		c.unsubAwareness()
+		if c.ownedStore != nil {
+			closeErr = c.ownedStore.Close()
+		}
 	})
-	return nil
+	return closeErr
+}
+
+// isClosing reports whether Close has begun (c.closed has been closed),
+// checked directly and without blocking rather than by proxy through
+// whatever context a caller happens to be holding.
+//
+// This exists specifically for flushLane's ordinary in-session call site
+// (see its doc's use of this method): loopCtx's cancellation on a Close is
+// relayed through Connect's own watcher goroutine (`case <-c.closed:
+// cancel()`), which is a real goroutine hop with its own scheduling latency,
+// not an instantaneous consequence of close(c.closed). Checking c.closed
+// here instead removes that hop from the "is there a future connection
+// coming" determination: c.closed closes as the very first statement inside
+// Close (see its doc), synchronously, before anything else Close does — so
+// this is the earliest and most direct signal available that no further
+// connection will ever be attempted, strictly earlier than loopCtx.Err()
+// can be relied on to reflect the same fact.
+func (c *Client) isClosing() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+// dropLaneRemainder takes every payload still queued on the outbound lane
+// and counts it in Stats().Dropped, discarding it — never leaving it queued
+// (nothing will ever drain it again once this runs) and never letting it
+// vanish uncounted, which is the #202 invariant this whole task exists to
+// enforce.
+//
+// Safe to call when the lane is already empty (the ordinary case: whatever
+// loop ran already drained or counted everything on its own way out — see
+// loop.go's ctx.Done() case and runReconnectLoop's two "give up" points,
+// both of which call this too for exactly the runs that never reach a live
+// session to drain onto). Every call site runs on a goroutine that cannot be
+// racing another Take on this same lane: Close's call happens only after
+// connectWG.Wait() has confirmed no Connect-owned goroutine is still
+// running, and the loop.go call sites all run ON that one goroutine.
+func (c *Client) dropLaneRemainder() {
+	for {
+		if _, ok := c.lane.TakeSync(); ok {
+			c.statsDropped.Add(1)
+			continue
+		}
+		if _, ok := c.lane.TakeAwareness(); ok {
+			c.statsDropped.Add(1)
+			continue
+		}
+		return
+	}
+}
+
+// maybeCompact asks c.compactor to collapse this Client's room's stored
+// update log once c.storeWrites has accumulated past Options.CompactEvery
+// since the last attempt, then resets the counter — mirroring
+// provider/websocket's startPersistenceWorker.onFlushed/maybeCompact
+// (persistence.go): contained by recover, an error is logged and never
+// fatal, and the counter resets REGARDLESS of the outcome, so a store that
+// fails compaction once is retried after another CompactEvery writes rather
+// than wedging this Client's sync loop retrying the same failure forever.
+//
+// A no-op when c.compactor is nil (Store is nil, or does not implement
+// CompactableStore — see CompactableStore's own doc) or the threshold has
+// not been reached, which keeps this cheap to call unconditionally.
+//
+// Called from runLoop's own select loop, between messages (see runLoop):
+// this Client serves exactly one room, unlike provider/websocket's
+// per-room worker goroutines, so a brief pause here cannot head-of-line
+// block any OTHER room the way it would server-side — there is no other
+// room. One consequence worth stating plainly: compaction only ever runs
+// while a connection is live and cycling through its select loop. A device
+// that stays offline for its entire lifetime accumulates an uncompacted log
+// for as long as that lasts; this is an accepted simplification (#165 Task
+// 10 YAGNI), not an oversight — the alternative (a free-standing ticker
+// unrelated to the loop) would need its own goroutine and its own
+// coordination with Close for a case this package's design does not
+// otherwise need to solve.
+func (c *Client) maybeCompact(ctx context.Context) {
+	if c.compactor == nil {
+		return
+	}
+	if c.storeWrites.Load() < uint64(c.opts.CompactEvery) {
+		return
+	}
+	c.storeWrites.Store(0)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("ygo/client: Compact panic for room %q: %v", c.room, r)
+		}
+	}()
+	if err := c.compactor.Compact(ctx, c.room); err != nil {
+		log.Printf("ygo/client: Compact for room %q: %v", c.room, err)
+	}
 }
 
 // Stats returns a snapshot of this Client's cumulative counters. See Stats
