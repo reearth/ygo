@@ -159,6 +159,44 @@ type failingLoadStore struct{ err error }
 func (s *failingLoadStore) LoadDoc(string) ([]byte, error)   { return nil, s.err }
 func (s *failingLoadStore) StoreUpdate(string, []byte) error { return nil }
 
+// TestClient_Connect_HydrationFailureEmitsStatus is the mobile-binding
+// review's Important 1 (#165 Task 11 review): every OTHER way Connect can
+// stop — the terminal ErrAuthRejected path, and the ordinary "stopped on
+// purpose" bookend — reports itself via OnStatus before Connect returns (see
+// Connect's own doc). The hydration-failure path was the one silent
+// exception: it returned the error without ever calling emitStatus, so a
+// caller driving UI purely from OnStatus (the mobile SyncClient binding is
+// exactly such a caller) saw nothing at all on a corrupt local store.
+//
+// This asserts EXACTLY one emission, not merely "at least one" — the fix
+// belongs at this single call site, immediately before the early return, so
+// a regression that emits twice (e.g. from a careless retry-path change) or
+// zero times (the original bug) both show up here.
+func TestClient_Connect_HydrationFailureEmitsStatus(t *testing.T) {
+	store := &failingLoadStore{err: errors.New("disk gone")}
+	c, err := New(Options{URL: "ws://127.0.0.1:1/room", Doc: crdt.New(), Store: store})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	var got []Status
+	c.OnStatus(func(s Status) { got = append(got, s) })
+
+	if err := c.Connect(context.Background()); !errors.Is(err, store.err) {
+		t.Fatalf("Connect returned %v, want the store's load error", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("got %d OnStatus emissions for a hydration failure, want exactly 1: %+v", len(got), got)
+	}
+	if got[0].State != StateDisconnected {
+		t.Fatalf("emitted State = %v, want StateDisconnected", got[0].State)
+	}
+	if !errors.Is(got[0].Err, store.err) {
+		t.Fatalf("emitted Err = %v, want it to wrap %v", got[0].Err, store.err)
+	}
+}
+
 // TestNew_Validation exercises the guard clauses New must apply before it
 // will hand back a usable *Client: a nil Doc would panic the first time
 // anything touched it, and a URL with no room segment gives the (later)

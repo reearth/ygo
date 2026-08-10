@@ -736,7 +736,15 @@ func containsClientID(ids []uint64, target uint64) bool {
 //
 // A Connect that fails during hydration is the exception: it started nothing,
 // so it does not latch, and the call may be retried once whatever the Store
-// was unhappy about is resolved.
+// was unhappy about is resolved. It is NOT an exception to the OnStatus
+// contract, though: like every other way Connect can end (the terminal
+// ErrAuthRejected path, and the ordinary "stopped on purpose" bookend), a
+// hydration failure reports itself via OnStatus — StateDisconnected carrying
+// the error — before Connect returns it. This was a real gap until #165
+// Task 11's review caught it (a caller driving UI purely from OnStatus, such
+// as the mobile SyncClient binding, saw nothing at all on a corrupt local
+// store); see the emitStatus call at the top of the hydrate-failure branch
+// below.
 func (c *Client) Connect(ctx context.Context) error {
 	c.connectMu.Lock()
 	if c.connectStarted {
@@ -758,6 +766,18 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.connectMu.Lock()
 		c.connectStarted = false
 		c.connectMu.Unlock()
+		// Emitted HERE, before returning, and therefore still inside the
+		// window connectWG.Add(1) (above) / Done (deferred) covers — i.e.
+		// before Close's connectWG.Wait() can possibly return, exactly like
+		// every other status this Client ever emits. #165 Task 11's review
+		// caught an earlier mobile-binding workaround that emitted this same
+		// information from OUTSIDE that window (after Connect had already
+		// returned to its caller's goroutine), which could let Close's Wait
+		// return before the caller's status handler ever ran. Emitting from
+		// the one place this error actually occurs removes that whole class
+		// of ordering bug rather than requiring every caller to route around
+		// it themselves.
+		c.emitStatus(Status{State: StateDisconnected, Err: err})
 		return err
 	}
 

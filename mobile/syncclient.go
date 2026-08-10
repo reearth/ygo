@@ -210,15 +210,19 @@ func (s *SyncClient) handleStatus(st client.Status) {
 // contract — see its doc — covers the remaining sliver of a race where both
 // happen at once).
 //
-// A hydration failure (client.Client.Connect's one error path that returns
-// WITHOUT ever reporting anything via OnStatus — see that method's own doc)
-// is the one client.Client outcome this wrapper does not merely relay: it is
-// reported here as a synthetic SyncStateDisconnected status, so an app
-// watching only SetOnStatus is never left with no explanation for why
-// nothing happened after Connect. Every other outcome (including the
-// terminal ErrAuthRejected case) is already reported by client.Client itself
-// before Connect returns; this only adds the one case that would otherwise be
-// silent.
+// Every way client.Client.Connect can end — including a hydration failure —
+// is reported via OnStatus before Connect returns (see that method's own
+// doc), so this goroutine's return value needs no separate handling here:
+// handleStatus has, by construction, already run for it. #165 Task 11's
+// review caught an earlier version of this method that relayed the
+// hydration-failure case itself, calling handleStatus AFTER s.c.Connect
+// returned — i.e. after connectWG.Done() had already fired inside it — which
+// could let a concurrent Close's connectWG.Wait() return before that
+// synthetic status was ever delivered, breaking client.Client's own
+// guarantee that every status it emits completes before Close returns. The
+// fix belongs at the source: client.Client.Connect now emits it itself, from
+// inside the hydrate-failure branch, still inside the window connectWG
+// covers.
 func (s *SyncClient) Connect() {
 	s.mu.Lock()
 	if s.closed || s.connectStarted {
@@ -228,11 +232,7 @@ func (s *SyncClient) Connect() {
 	s.connectStarted = true
 	s.mu.Unlock()
 
-	go func() {
-		if err := s.c.Connect(context.Background()); err != nil {
-			s.handleStatus(client.Status{State: client.StateDisconnected, Err: err})
-		}
-	}()
+	go func() { _ = s.c.Connect(context.Background()) }()
 }
 
 // SyncedOnce reports whether this SyncClient's Doc has reconciled with the

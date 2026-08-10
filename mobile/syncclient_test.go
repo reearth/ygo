@@ -3,6 +3,7 @@ package mobile
 import (
 	"context"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -229,4 +230,79 @@ func TestSyncClient_Close(t *testing.T) {
 	}
 	sc.Close()
 	sc.Close() // idempotent
+}
+
+// TestSyncClient_StorePathPersistsAcrossRestart is the mobile-binding
+// review's Important 2 (#165 Task 11 review): every prior test used
+// dbPath == "" (memory-only), so none of them ever reached the branch of
+// NewSyncClient that can fail, and nothing proved the binding actually
+// persists across a restart — the headline premise of SyncClient's own
+// godoc ("the device's content survives a process restart").
+//
+// This proves it end to end: sc1 syncs against a real server and picks up
+// its content; sc1.Close(); a SECOND SyncClient opens the SAME dbPath but
+// points at a server that is not listening at all (ws://127.0.0.1:1 — a
+// reserved port nothing binds to), so any content it ends up with can only
+// have come from the local store, never from a sync. SyncedOnce() staying
+// false on sc2 is the other half of that proof: it rules out a false
+// positive where the assertion happened to pass because sc2 quietly
+// connected to something.
+func TestSyncClient_StorePathPersistsAcrossRestart(t *testing.T) {
+	srv, ts := startTestServer(t)
+	const room = "restart"
+	dbPath := filepath.Join(t.TempDir(), "sync.db")
+
+	if err := srv.Apply(context.Background(), room,
+		func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := doc.GetText("t")
+			transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "server", nil) })
+		}); err != nil {
+		t.Fatalf("seed server doc: %v", err)
+	}
+
+	sc1, err := NewSyncClient(wsTestURL(ts, room), dbPath, "")
+	if err != nil {
+		t.Fatalf("NewSyncClient (first): %v", err)
+	}
+	sc1.Connect()
+	waitFor(t, 5*time.Second, sc1.SyncedOnce)
+	if got := sc1.Doc().GetText("t"); got != "server" {
+		t.Fatalf("first SyncClient Doc().GetText(\"t\") = %q, want %q", got, "server")
+	}
+	sc1.Close() // must release the owned SQLite file so sc2 below can reopen it
+
+	sc2, err := NewSyncClient("ws://127.0.0.1:1/"+room, dbPath, "")
+	if err != nil {
+		t.Fatalf("NewSyncClient (restart): %v", err)
+	}
+	t.Cleanup(sc2.Close)
+	sc2.Connect() // hydrates from dbPath immediately; dialing the unreachable URL fails and retries forever in the background
+
+	waitFor(t, 5*time.Second, func() bool { return sc2.Doc().GetText("t") == "server" })
+	if sc2.SyncedOnce() {
+		t.Fatal("SyncedOnce() reported true against an unreachable server; " +
+			"the content must have come from the local store, not a sync that should be impossible here")
+	}
+}
+
+// TestSyncClient_BadDBPath_ReturnsError proves the other half of Important
+// 2's coverage gap: a dbPath NewSyncClient cannot actually open as a local
+// SQLite database must fail construction outright — via NewSyncClient's own
+// error return — rather than handing back a SyncClient that only discovers
+// the problem later, silently, on some background goroutine.
+//
+// A directory is used as the "bad path": persistence/sqlite.Open runs its
+// schema migration (CREATE TABLE IF NOT EXISTS ...) eagerly, synchronously,
+// inside Open itself, so opening a directory as if it were a database file
+// fails immediately and unconditionally, with no test-environment-specific
+// setup (permissions, disk state) required.
+func TestSyncClient_BadDBPath_ReturnsError(t *testing.T) {
+	dir := t.TempDir() // a directory, not a file: cannot be opened as a SQLite database
+	sc, err := NewSyncClient("ws://127.0.0.1:1/room", dir, "")
+	if err == nil {
+		t.Fatal("NewSyncClient with a directory as dbPath should have failed to open the local store")
+	}
+	if sc != nil {
+		t.Fatal("NewSyncClient returned a non-nil *SyncClient alongside an error")
+	}
 }
