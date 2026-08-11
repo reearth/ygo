@@ -1,13 +1,21 @@
 ## v1.49.0
 
-**Who is affected:** callers who explicitly construct
-`websocket.MemoryPersistence` (`websocket.NewMemoryPersistence()`) — **not**
-every deployment. A fresh `websocket.NewServer()` has no persistence adapter
-at all, and nothing under `provider/`, `cmd/`, or `examples/` constructs
-`MemoryPersistence` outside its own tests; you have to opt into it via
-`NewServerWithPersistence`. If that's not you, this release changes nothing
-you use. **What you must do:** nothing — this is a drop-in fix, same
-constructor — cheaper on the write path, see the trade below.
+**Who is affected:** two separate audiences, so read the one that is you.
+
+- **The `MemoryPersistence` performance fix (#186)** affects only callers who
+  explicitly construct `websocket.MemoryPersistence`
+  (`websocket.NewMemoryPersistence()`) — **not** every deployment. A fresh
+  `websocket.NewServer()` has no persistence adapter at all, and nothing under
+  `provider/`, `cmd/`, or `examples/` constructs `MemoryPersistence` outside
+  its own tests; you have to opt into it via `NewServerWithPersistence`.
+- **The shutdown durability fix (#229)** affects **anyone running
+  `provider/websocket` with any persistence adapter at all**, in the default
+  configuration. If you call `Server.Shutdown` on a server that has peers
+  connected, you were losing committed transactions.
+
+**What you must do:** nothing — both are drop-in fixes with unchanged
+constructors and signatures. The write path gets cheaper (see the trade
+below), and `Shutdown` gets more honest.
 
 ### Fixed: `MemoryPersistence` re-merged the whole document on every write (#186)
 
@@ -99,10 +107,80 @@ That figure is **not** a claim that removing it makes such a `Shutdown` race
 lossless. A separate, pre-existing gap in the coalescing-disabled shutdown
 drain — it drains its queue exactly once and exits, whatever the adapter —
 drops writes under this same repro shape regardless of which
-`PersistenceAdapter` is behind it, and remains open (filed separately, not
-part of this release). What this removal fixes is specifically the extra,
-compounding loss this method caused on top of that; it does not fix the
-pre-existing drain gap itself.
+`PersistenceAdapter` is behind it. What this removal fixes is specifically the
+extra, compounding loss this method caused on top of that. The underlying gap
+was filed as #229 and is fixed separately in this same release — next.
+
+### Fixed: transactions committed during `Shutdown` were silently dropped (#229)
+
+**This one affects everybody with persistence configured, in the default
+configuration**, and is unrelated to `MemoryPersistence`. It was found during
+the whole-branch review of #186 and verified as pre-existing against v1.48.0.
+
+**The bug.** Each room's persistence worker exited on `Server.Shutdown` by
+draining its 256-slot queue **once** and returning. Its producer — the
+`doc.OnUpdate` observer — watched only the room-teardown signal, never the
+server's shutdown signal. And `Shutdown` closes the shutdown signal as its
+*first* act but the peer connections much later, so peer read loops keep
+committing for the entire close-connections-and-join window. Every
+transaction committed after that one-shot sweep went into a buffer nobody was
+reading, and disappeared — no error, no counter, not even a log line. The
+package's own doc comment promised the opposite: *"draining any buffered
+updates before returning so that no committed transaction is silently lost."*
+
+This is the same shape as the relay-side [#202](https://github.com/reearth/ygo/issues/202)
+fixed in v1.46.0: `Shutdown` winding a consumer down while producers were
+still producing.
+
+**The fix — and why it is not the obvious one.** The tempting shape is to
+quiesce the producers first and let the worker exit once they are provably
+gone. We deliberately did not do that. Producers here are peer read loops with
+no join point, `ServeHTTP` handlers that can register mid-shutdown, and any
+caller holding a `*crdt.Doc`; "provably gone" is not provable, and a wrong
+guess there turns silent data loss into a **hung `Shutdown`** — a strictly
+worse failure. `Shutdown`'s ordering is therefore completely unchanged.
+
+Instead the handoff itself was made race-free. The worker now closes a new
+per-room retirement latch as the **first** act of every exit path — before its
+final drain, not after — which leaves the producer exactly two cases and no
+third:
+
+1. the send completed while the latch was open, so `close(latch)` and
+   therefore the final drain that follows it both happen after the send: the
+   drain is guaranteed to pick the update up;
+2. the latch is already closed, which a `select` on a closed channel always
+   observes with certainty: the committing goroutine performs the write
+   itself.
+
+The producer's escape hatch (needed so a full buffer can't wedge a committing
+transaction once the worker is gone) still exists — it now has a durable
+destination instead of the floor.
+
+**Also fixed, the second half of #229:** the coalescing-disabled path passed
+the worker's **cancellable** context — the one a sibling goroutine cancels on
+shutdown — to its final drain, so every `PersistenceAdapterContext`
+implementation (`persistence/sqlite` via `NewLegacyAdapterContext`, and any
+adapter that honours `ctx`) returned `ctx.Err()` and discarded the write.
+Measured at 51-151 of 200 concurrent writes dropped per trial. Both paths'
+final flushes now use `context.Background()`, and a store aborted by
+cancellation is **retained** and re-stored on the exit path rather than
+dropped — the same retain-and-re-flush rule the coalescing path already
+applied to an unflushed batch. Cancellation still aborts an in-flight write so
+a slow adapter cannot wedge `Shutdown`; it no longer decides which committed
+transactions count.
+
+**What this costs you.** A straggler write is synchronous for the goroutine
+that committed it and bypasses coalescing, auto-versioning, and compaction. It
+happens only during and after room retirement. An adapter must tolerate a
+`StoreUpdate` arriving late in, or just after, `Shutdown` — which the previous
+behaviour hid from you by throwing the data away.
+
+**Tested both directions**, because the failure mode of a bad fix here is a
+hang rather than a loss: a sequenced (not raced) regression test commits while
+the worker is parked immediately past its final drain and asserts the update
+reaches the adapter, with coalescing enabled *and* disabled; a second asserts
+`Shutdown` still returns promptly for rooms with no peers at all —
+idle-resident and `Apply`-created — where no producer will ever appear.
 
 ## v1.48.0
 

@@ -102,12 +102,13 @@ func TestUnit_MemoryPersistence_SatisfiesExpectedInterfaces(t *testing.T) {
 	require.True(t, isAdapter)
 	require.False(t, isCtx,
 		"deliberately NOT a PersistenceAdapterContext: this adapter's append has "+
-			"nothing to abort, so implementing it would only cost writes — it would "+
-			"switch the server onto the cancellable-ctx path, and on the "+
-			"coalescing-disabled path the final shutdown drain reuses a ctx a "+
-			"separate goroutine cancels concurrently, discarding a still-queued "+
-			"committed write with only a log line (measured: 51-151/200 dropped "+
-			"across trials, #186)")
+			"nothing to abort, so implementing it would switch the server onto the "+
+			"cancellable-ctx path purely to gain a cancellation it can only act on "+
+			"by discarding the write (persistence.MemoryPersistence.AppendUpdate "+
+			"returns ctx.Err() at entry). #229 has since made the worker side of "+
+			"that safe — final flushes use a background ctx and a cancelled store "+
+			"is retained and re-stored — so this is no longer a loss hazard, just "+
+			"a pointless code path (#186)")
 	require.True(t, isCompactable)
 	require.False(t, isVersionable,
 		"deliberately NOT a VersionableAdapter: auto-versioning an in-memory test adapter is scope creep (#186)")
@@ -121,26 +122,28 @@ func TestUnit_MemoryPersistence_SatisfiesExpectedInterfaces(t *testing.T) {
 // well-formed, committed update the instant ctx is already cancelled — with
 // no partial write, no retry, nothing but the returned error. This is why
 // giving websocket.MemoryPersistence a StoreUpdateContext was the wrong move:
-// the server's persistence worker cancels its ctx the moment shutdown begins
-// (startPersistenceWorker's doc, persistence.go) with no ordering guarantee
-// against "drain and store what's still queued," so any context-aware adapter
-// with nothing to actually abort just loses writes for free.
+// an adapter with nothing to actually abort gains nothing from cancellation
+// and can only respond to it by throwing the write away.
 //
 // An end-to-end Server.Shutdown-races-concurrent-Apply test was attempted
-// first, per this hazard's own writeup, and abandoned: it reproduces write
-// loss on BOTH current and pre-#186 code (verified against the pre-#186
-// commit directly, with and without -race), because provider/websocket's
-// strict-path shutdown drain has its own separate, pre-existing gap — it
-// drains persistCh exactly once and returns, so an update landing in the
-// channel microseconds after that one-shot drain is never persisted,
-// regardless of which PersistenceAdapter is behind it. That gap predates
-// #186, is not specific to MemoryPersistence, and is out of scope for this
-// fix wave (flagged separately). Any test built on that end-to-end race would
-// fail unpredictably even on a correctly-fixed #186, which would misreport
-// this hazard as unresolved. This test isolates the ACTUAL mechanism #186
-// introduced instead: no goroutines, no sleeps, no scheduling luck — it calls
-// the exact vulnerable method with an already-cancelled ctx and asserts the
-// write is gone.
+// first, per this hazard's own writeup, and abandoned at the time: it
+// reproduced write loss on BOTH current and pre-#186 code (verified against
+// the pre-#186 commit directly, with and without -race), because
+// provider/websocket's shutdown drain had its own separate, pre-existing gap —
+// it drained persistCh exactly once and returned, so an update landing in the
+// channel after that one-shot drain was never persisted, regardless of which
+// PersistenceAdapter was behind it. A test built on that race would have
+// failed unpredictably even on a correctly-fixed #186 and misreported this
+// hazard as unresolved.
+//
+// That gap is #229, and it is fixed on this branch — see
+// persistence_shutdown_test.go, which now DOES assert the end-to-end property
+// (a commit during Shutdown reaches the adapter) deterministically, by parking
+// the worker rather than racing it. This test is still worth keeping as the
+// narrow, isolated statement of the mechanism: no goroutines, no sleeps, no
+// scheduling luck — it calls the exact method with an already-cancelled ctx
+// and asserts the write is gone, which is why the server must never hand a
+// cancelled ctx to a final flush.
 func TestUnit_PersistenceLegacyAdapterStoreUpdateContext_DiscardsOnCancelledCtx(t *testing.T) {
 	store := persistence.NewMemoryPersistence()
 	adapter := persistence.NewLegacyAdapter(store)

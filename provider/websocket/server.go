@@ -352,21 +352,20 @@ func (m *MemoryPersistence) LoadDoc(room string) ([]byte, error) {
 //
 // This type deliberately does NOT implement PersistenceAdapterContext. An
 // in-memory append has nothing to abort, so a StoreUpdateContext forwarding to
-// the wrapped adapter would only cost writes: it would newly satisfy
+// the wrapped adapter would buy nothing and would newly satisfy
 // PersistenceAdapterContext, switching the server's persistence worker onto
-// the ctx-aware path, and on the coalescing-disabled path the final shutdown
-// drain (see startPersistenceWorker's doc, persistence.go) reuses a ctx a
-// separate goroutine cancels concurrently with that same drain — no ordering
-// guarantee places "drain and store" before "cancel". A committed update still
-// sitting in the queue when that race goes the wrong way would be discarded
-// with only a log line, because persistence.MemoryPersistence.AppendUpdate
-// returns ctx.Err() at entry. Measured impact of having implemented it: 51-151
-// of 200 concurrent writes dropped across trials during a concurrent Shutdown,
-// attributable to this method (#186). This is not a claim that omitting it
-// makes such a Shutdown race lossless: a separate, pre-existing gap in the
-// coalescing-disabled shutdown drain (it drains its queue once and exits,
-// regardless of adapter) drops writes under the same repro shape and remains
-// open, filed separately.
+// its ctx-aware path purely to gain a cancellation this adapter cannot act on
+// — persistence.MemoryPersistence.AppendUpdate simply returns ctx.Err() at
+// entry, discarding the write.
+//
+// When this was briefly implemented during #186, that cost 51-151 of 200
+// concurrent writes across trials during a concurrent Shutdown, because the
+// shutdown drain then reused a ctx a separate goroutine cancels concurrently.
+// #229 has since fixed the worker side of that — every final flush now uses a
+// background ctx, and a store aborted by cancellation is retained and
+// re-stored rather than dropped, so a ctx-aware adapter no longer loses the
+// tail. The reason to stay off that path is now the plain one: cancellation
+// is a lever for adapters with something to abort, and this one has nothing.
 func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
 	if m.adapter == nil {
 		return errMemoryPersistenceNotConstructed
@@ -439,6 +438,31 @@ type room struct {
 	persistCh   chan []byte   // buffered channel for serialised writes
 	persistStop chan struct{} // closed to signal goroutine to drain and exit
 	persistDone chan struct{} // closed when persistence goroutine exits
+
+	// persistRetire is closed by the persistence worker ITSELF as the first act
+	// of every exit path — before its final drain of persistCh, whatever
+	// triggered the exit (persistStop, or the server-wide shutdownCh). That
+	// ordering is the whole point, and it is what makes the handoff in
+	// loadRoom's doc.OnUpdate observer race-free (#229):
+	//
+	//	if a producer's send into persistCh completed while persistRetire was
+	//	still open, the worker's final drain — which strictly follows
+	//	close(persistRetire) — is guaranteed to see the buffered element;
+	//	otherwise the producer sees persistRetire closed and takes over the
+	//	write itself via persistStranded.
+	//
+	// Before #229 the worker exited on shutdownCh with no such latch, so every
+	// transaction committed after the one-shot drain landed in the 256-slot
+	// buffer with no reader and was lost without a trace — the exact opposite
+	// of the guarantee the package documents.
+	persistRetire chan struct{}
+
+	// persistFallbackMu serialises the post-retirement direct writes performed
+	// by persistStranded. doc.OnUpdate observers fire OUTSIDE the doc lock
+	// (crdt.buildPhase2), so two committing goroutines can be inside the
+	// observer at once; the adapter contract only promises serialised calls per
+	// room, so the fallback must provide that serialisation itself.
+	persistFallbackMu sync.Mutex
 
 	// flushReq requests an on-demand durable flush of the pending batch without
 	// stopping the worker. The worker drains persistCh, flushes with a
@@ -1470,12 +1494,40 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 		r.persistCh = make(chan []byte, 256)
 		r.persistStop = make(chan struct{})
 		r.persistDone = make(chan struct{})
+		r.persistRetire = make(chan struct{})
 		r.flushReq = make(chan chan bool)
 		s.startPersistenceWorker(r, name)
 		r.doc.OnUpdate(func(update []byte, _ any) {
+			// #229 — handing the update to persistCh is only safe while the
+			// worker is still reading it. The worker publishes its retirement
+			// by closing persistRetire BEFORE its final drain, which gives this
+			// observer two airtight cases and no third one:
+			//
+			//   1. persistRetire is still open when the send completes. Then
+			//      close(persistRetire) — and therefore the final drain that
+			//      follows it — happens after the send, so the buffered element
+			//      is still there to be drained. Nothing to do.
+			//   2. persistRetire is already closed. A select whose case is a
+			//      closed channel is always ready, so the check below sees it
+			//      with certainty (no scheduling window), and this goroutine
+			//      takes over the write itself.
+			//
+			// The escape hatch must stay: without it a producer would block
+			// forever on a full 256-slot buffer once the worker has gone. What
+			// #229 changes is that the escape hatch now has a durable
+			// destination instead of dropping the update on the floor.
 			select {
 			case r.persistCh <- update:
-			case <-r.persistStop:
+				// Case 1 unless retirement began in between; re-check, since
+				// select picks uniformly among ready cases and may have taken
+				// the send even with persistRetire already closed.
+				select {
+				case <-r.persistRetire:
+					s.persistStranded(r, name, nil)
+				default:
+				}
+			case <-r.persistRetire:
+				s.persistStranded(r, name, update)
 			}
 		})
 	}

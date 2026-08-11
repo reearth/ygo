@@ -25,10 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   goroutine cancels concurrently, discarding a still-queued committed write
   with only a log line. Measured: 51-151 of 200 concurrent writes dropped
   across trials when this was tried during development, attributable to this
-  method. (A separate, pre-existing gap in the coalescing-disabled shutdown
+  method. (The separate, pre-existing gap in the coalescing-disabled shutdown
   drain — it drains its queue once and exits, regardless of adapter — also
-  drops writes under this same repro shape and was filed separately; it is
-  not what this method's removal fixes.)
+  drops writes under this same repro shape. It was filed as #229 and is fixed
+  in this same release, below; it is not what this method's removal fixes.)
 
 ### Fixed
 
@@ -55,6 +55,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LoadDoc` is no longer O(1) — it now folds whatever records the room still
   holds (bounded by `CompactEvery`) and persists that fold, so subsequent
   loads are cheap again (#186).
+- **`provider/websocket`: transactions committed during `Shutdown` were
+  silently dropped by the persistence worker.** The worker's shutdown exit
+  drained `r.persistCh` **once** and returned, but its producer —
+  `doc.OnUpdate` — watched only the room-teardown signal, never
+  `shutdownCh`. `Shutdown` closes `shutdownCh` as its first act and the peer
+  connections much later, so peer read loops kept committing for the whole
+  close-and-join window; everything they committed after that one-shot sweep
+  landed in the 256-slot buffer with no reader and was lost without even a
+  log line — while the package documented the opposite guarantee. Affected
+  the **default** configuration and every adapter. Same class as the
+  relay-side #202. The worker now publishes its retirement (a new
+  `room.persistRetire` latch) **before** its final drain, which gives the
+  producer two airtight cases and no third one: a send that completed while
+  the latch was open is necessarily seen by the final drain, and otherwise
+  the committing goroutine performs the write itself. The escape hatch that
+  used to drop the update now has a durable destination. `Shutdown` ordering
+  is deliberately unchanged, so this cannot introduce the opposite failure —
+  a shutdown that hangs waiting for a producer that never appears (#229).
+- **`provider/websocket`: context-aware adapters lost the shutdown tail on
+  the coalescing-disabled path.** That path handed the worker's
+  **cancellable** ctx — the one a sibling goroutine cancels on `shutdownCh` —
+  to its final drain, so any `PersistenceAdapterContext` implementation
+  (including `persistence/sqlite` via `NewLegacyAdapterContext`) returned
+  `ctx.Err()` and the write was discarded; measured at 51-151 of 200
+  concurrent writes dropped per trial. Both paths' final flushes now use
+  `context.Background()`, and a store aborted by cancellation is **retained**
+  and re-stored on the exit path rather than dropped — the same
+  retain-and-re-flush rule the coalescing path already applied to an
+  unflushed batch. Cancellation still unwedges a slow adapter mid-write; it
+  just no longer decides which committed transactions count (#229).
 
 ## [1.48.0] — 2026-08-10
 

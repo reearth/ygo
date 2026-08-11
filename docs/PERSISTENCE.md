@@ -609,5 +609,30 @@ func (p *PostgresAdapter) storeUpdate(ctx context.Context, room string, update [
 
 During `Server.Shutdown`, the in-flight `ExecContext` call sees the context cancellation and returns early instead of waiting for the database driver's default timeout.
 
+### Cancellation never costs you a committed transaction (v1.49.0+)
+
+Cancellation exists to unwedge a slow adapter, not to decide which writes
+count. Since v1.49.0 (#229) that separation is enforced:
+
+- **Every final flush uses `context.Background()`**, on both the coalescing and
+  the per-update path, so the last write is never aborted by the very signal
+  that triggered it. Before v1.49.0 the per-update path passed the cancellable
+  context to its shutdown drain, and a ctx-aware adapter discarded the whole
+  tail.
+- **A store aborted by cancellation is retained, not dropped.** The update is
+  re-stored on the exit path under a background context — the same
+  retain-and-re-flush rule that already applied to a coalesced batch.
+- **A transaction committed while `Shutdown` is running still reaches the
+  adapter.** Peer read loops keep committing for the whole
+  close-connections-and-join window, so the room's persistence worker publishes
+  its retirement before its final drain; a commit that arrives too late for
+  that drain is written by the committing goroutine itself rather than being
+  parked in an unread buffer. Such a write is synchronous for that caller and
+  bypasses coalescing, auto-versioning, and compaction — it is a straggler
+  being made durable, not a new steady state.
+
+An adapter must therefore still tolerate a `StoreUpdate` call arriving late in,
+or immediately after, `Shutdown`.
+
 This pattern mirrors `io.WriterTo`, `http.CloseNotifier`, and `database/sql/driver.QueryerContext` in the standard library — extension interfaces that callers can opt into without breaking older implementations.
 ```
