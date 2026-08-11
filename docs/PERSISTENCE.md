@@ -609,7 +609,11 @@ func (p *PostgresAdapter) storeUpdate(ctx context.Context, room string, update [
 
 During `Server.Shutdown`, the in-flight `ExecContext` call sees the context cancellation and returns early instead of waiting for the database driver's default timeout.
 
-### Cancellation never costs you a committed transaction (v1.49.0+)
+This pattern mirrors `io.WriterTo`, `http.CloseNotifier`, and `database/sql/driver.QueryerContext` in the standard library — extension interfaces that callers can opt into without breaking older implementations.
+
+---
+
+## Shutdown durability, and what it does not promise (v1.49.0+)
 
 Cancellation exists to unwedge a slow adapter, not to decide which writes
 count. Since v1.49.0 (#229) that separation is enforced:
@@ -626,13 +630,46 @@ count. Since v1.49.0 (#229) that separation is enforced:
   adapter.** Peer read loops keep committing for the whole
   close-connections-and-join window, so the room's persistence worker publishes
   its retirement before its final drain; a commit that arrives too late for
-  that drain is written by the committing goroutine itself rather than being
-  parked in an unread buffer. Such a write is synchronous for that caller and
-  bypasses coalescing, auto-versioning, and compaction — it is a straggler
-  being made durable, not a new steady state.
+  that drain is written by the committing goroutine itself.
+- **`Shutdown` joins those writes** (bounded by the caller's context) before
+  returning, so `srv.Shutdown(ctx)` followed by exiting the process does not
+  kill a write in flight.
 
-An adapter must therefore still tolerate a `StoreUpdate` call arriving late in,
-or immediately after, `Shutdown`.
+### The guarantee, stated exactly
 
-This pattern mirrors `io.WriterTo`, `http.CloseNotifier`, and `database/sql/driver.QueryerContext` in the standard library — extension interfaces that callers can opt into without breaking older implementations.
-```
+> Any commit whose `Transact` returned before `Shutdown` returned is durable.
+
+That is the whole of it. **`Shutdown` is not lossless and cannot be made so.** A
+transaction that *begins* committing after `Shutdown` has observed its last
+in-flight write is not covered: the producers are peer read loops and any code
+holding a `*crdt.Doc`, none of which the server can join, and inventing a join
+would risk a `Shutdown` that never returns — a worse failure than the one being
+fixed. Stop your traffic before calling `Shutdown` if you need more than the
+guarantee above.
+
+### What adapters must now tolerate
+
+- **A `StoreUpdate` arriving late in, or just after, `Shutdown`.**
+- **A blocking `StoreUpdate` costing the caller its deadline.** Because the
+  final flush runs under `context.Background()`, an adapter that never returns
+  wedges that room's worker at exit and `Shutdown` returns
+  `context.DeadlineExceeded` where it previously returned `nil` — by discarding
+  your data. The honest error replaces a silent lie, but it is a behaviour
+  change if you have a `Shutdown` deadline.
+- **Writes for a room the server already considers gone.** Nothing calls
+  `doc.Destroy` on teardown, so a caller that retains the `*crdt.Doc` (from
+  `GetDoc`, or from an `OnLoadDocument` hook) keeps its persistence observer
+  alive and its later commits are written directly — indefinitely. Before
+  v1.49.0 those commits were silently dropped.
+- **`Compact` overlapping a `StoreUpdate` for the same room NAME.** The
+  provider serialises `Compact` with `StoreUpdate` per room *instance*, not per
+  name, and the point above widens that window. If your `Compact` mutates state
+  keyed by name, serialise inside the adapter. Every store this repo ships
+  behind `LegacyAdapter` already does, each with one mutex over all operations:
+  `persistence.MemoryPersistence`, `persistence.FilePersistence`, and
+  `persistence/sqlite`.
+
+Straggler writes also bypass coalescing, auto-versioning and compaction, and
+delay that update's relay fan-out (the persistence observer runs before the
+relay observers). All of this is scoped to room retirement — except the
+retained-`*crdt.Doc` case, which is not.

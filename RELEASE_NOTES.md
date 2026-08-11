@@ -165,22 +165,52 @@ Measured at 51-151 of 200 concurrent writes dropped per trial. Both paths'
 final flushes now use `context.Background()`, and a store aborted by
 cancellation is **retained** and re-stored on the exit path rather than
 dropped — the same retain-and-re-flush rule the coalescing path already
-applied to an unflushed batch. Cancellation still aborts an in-flight write so
-a slow adapter cannot wedge `Shutdown`; it no longer decides which committed
+applied to an unflushed batch. Cancellation still aborts a write already in
+flight when shutdown begins, so it no longer decides which committed
 transactions count.
+
+**Read that last point precisely — it is a trade, not a free win.** Because the
+final flush and the retained re-stores now run under `context.Background()`, a
+`StoreUpdate` that never returns wedges that room's worker at exit where it
+used to be cancelled out of the way. `Shutdown` does not hang on it — every
+wait is bounded by the caller's context — but it now returns `ctx.Err()` in a
+case that previously returned `nil` by discarding your data. If you have a
+`Shutdown` deadline and an adapter that can block indefinitely, you may start
+seeing `context.DeadlineExceeded` where you saw success before. That is the
+honest signal replacing a silent lie.
+
+**`Shutdown` now joins the writes it can see.** A transaction committed during
+`Shutdown` may arrive too late for its room's worker, in which case the
+committing goroutine performs the adapter write itself. `Shutdown` waits for
+those to finish (bounded by your ctx) before returning — otherwise the fix
+would only narrow the loss window, since the usual `srv.Shutdown(ctx)` followed
+by returning from `main` would kill the process mid-write.
+
+**The residual, stated plainly: this does not make `Shutdown` lossless, and
+cannot.** A transaction that *begins* committing after `Shutdown` has observed
+its last in-flight write is not covered. The producers are peer read loops and
+any code holding a `*crdt.Doc`; the server has no way to join them, and
+inventing one would risk a `Shutdown` that never returns — a worse failure than
+the one being fixed. What is now guaranteed is narrower and checkable: **any
+commit whose `Transact` returned before `Shutdown` returned is durable.**
 
 **What this costs you.** A straggler write is synchronous for the goroutine
 that committed it and bypasses coalescing, auto-versioning, and compaction. It
-happens only during and after room retirement. An adapter must tolerate a
-`StoreUpdate` arriving late in, or just after, `Shutdown` — which the previous
-behaviour hid from you by throwing the data away.
+also delays that update's relay fan-out, since the persistence observer runs
+before the relay observers. And it writes for a room the server may already
+consider gone — including, if you retain a `*crdt.Doc` past teardown,
+indefinitely; before #229 those commits were silently dropped instead. Adapters
+whose `Compact` mutates state keyed by room name should serialise by name; see
+`CompactableAdapter`'s godoc and [docs/PERSISTENCE.md](docs/PERSISTENCE.md).
 
 **Tested both directions**, because the failure mode of a bad fix here is a
-hang rather than a loss: a sequenced (not raced) regression test commits while
-the worker is parked immediately past its final drain and asserts the update
-reaches the adapter, with coalescing enabled *and* disabled; a second asserts
-`Shutdown` still returns promptly for rooms with no peers at all —
-idle-resident and `Apply`-created — where no producer will ever appear.
+hang rather than a loss. Sequenced (not raced) regression tests commit while
+the worker is parked immediately past its final drain and assert the update
+reaches the adapter, with coalescing enabled *and* disabled; a second pair
+parks the adapter inside the stranded write itself and asserts `Shutdown` has
+not returned, then that a wedged one still surfaces as the caller's deadline.
+Against them: `Shutdown` must still return promptly for rooms with no peers at
+all — idle-resident and `Apply`-created — where no producer will ever appear.
 
 ## v1.48.0
 

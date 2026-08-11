@@ -10,6 +10,54 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
+// strandedEnter registers a committing goroutine as a potential stranded
+// writer. It MUST be called before the observer inspects r.persistRetire: the
+// whole point is to be visible to Shutdown from before the decision to write is
+// taken, not from after it (#229). Cheap enough to sit on every commit — one
+// atomic add.
+func (s *Server) strandedEnter() { s.strandedInFlight.Add(1) }
+
+// strandedLeave balances strandedEnter and wakes a waiting Shutdown. The
+// non-blocking send is correct even when it drops: a waiter parked on the
+// channel leaves the buffer empty, so a later decrement's send lands.
+func (s *Server) strandedLeave() {
+	s.strandedInFlight.Add(-1)
+	if s.strandedWake == nil {
+		return
+	}
+	select {
+	case s.strandedWake <- struct{}{}:
+	default:
+	}
+}
+
+// waitStranded blocks until no committing goroutine is in the stranded-write
+// path, or ctx expires. Called by Shutdown after the persistence workers have
+// been joined — a stranded writer is by construction waiting on a worker that
+// has already exited, so this is the only remaining hop between a committed
+// transaction and the adapter.
+//
+// This is a bound, not a guarantee of losslessness. It cannot cover a
+// transaction that begins committing AFTER the counter is observed at zero:
+// the producers are peer read loops and any holder of a *crdt.Doc, none of
+// which the server can join. What it does guarantee is that Shutdown never
+// returns while a write it can see is still in flight.
+func (s *Server) waitStranded(ctx context.Context) {
+	if s.strandedWake == nil {
+		return
+	}
+	for s.strandedInFlight.Load() > 0 {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-s.strandedWake:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 // persistStranded is the durable destination for updates a room's persistence
 // worker can no longer take (#229). It is called from the doc.OnUpdate observer
 // registered in loadRoom, on the two paths where the worker has begun retiring:
@@ -23,16 +71,32 @@ import (
 // never waits on a producer, and Shutdown/eviction wait on persistDone too, not
 // on this function.
 //
-// Anything still stranded in persistCh is stored FIRST, then extra, so the
-// adapter sees the room's updates in commit order. Errors are logged, not
-// returned: the observer has no caller to report to. Auto-versioning and
-// compaction are deliberately NOT re-run here — the worker already performed
-// its final maybeVersion/maybeCompact, and a stranded update is by definition a
-// late straggler, not a new steady state.
+// Anything still stranded in persistCh is stored FIRST, then extra, so a single
+// stranded call writes in commit order. That is best-effort ordering WITHIN one
+// call only: two committing goroutines can be in the observer at once (see
+// room.persistFallbackMu), so across concurrent stranded calls the adapter may
+// see the room's updates out of commit order. Harmless for a CRDT log — updates
+// merge order-independently — but do not read it as a stronger promise than it
+// is. Errors are logged, not returned: the observer has no caller to report to.
+// Auto-versioning and compaction are deliberately NOT re-run here — the worker
+// already performed its final maybeVersion/maybeCompact, and a stranded update
+// is by definition a late straggler, not a new steady state.
 //
 // Callers pay for this synchronously, on the committing goroutine. That is the
 // intended trade: it happens only during and after room retirement, and the
-// alternative — the pre-#229 behaviour — was silent data loss.
+// alternative — the pre-#229 behaviour — was silent data loss. Two consequences
+// worth stating rather than discovering:
+//
+//   - crdt.buildPhase2 fires OnUpdate observers in registration order and
+//     loadRoom registers persistence BEFORE the relay observers, so a stranded
+//     write delays that update's cluster fan-out for as long as the adapter
+//     takes. Bounded to room retirement, and a publish onto an already-retired
+//     lane is counted in RelayStats().Dropped rather than lost silently — but
+//     it does stretch the "no blocking I/O on the commit path" convention
+//     further than the rest of the package does.
+//   - It writes for a room name the server may already consider gone, and can
+//     do so indefinitely if a caller retains the *crdt.Doc. See
+//     CompactableAdapter's godoc for what that means for adapters.
 func (s *Server) persistStranded(r *room, name string, extra []byte) {
 	<-r.persistDone
 

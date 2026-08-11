@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,6 +70,239 @@ func (a *gateAdapter) text(t *testing.T, key string) string {
 		require.NoError(t, crdt.ApplyUpdateV1(d, u, nil))
 	}
 	return d.GetText(key).ToString()
+}
+
+// strandedGateAdapter parks in Compact (like gateAdapter) and then parks again
+// in the FIRST StoreUpdate that arrives after Compact was released — which, by
+// construction, is a stranded write performed by a committing goroutine rather
+// than by the worker. That second park is what lets a test ask the question
+// that matters to a caller: is Server.Shutdown still running while that write
+// is in flight, or has it already returned?
+type strandedGateAdapter struct {
+	mu      sync.Mutex
+	updates [][]byte
+
+	compactEntered chan struct{}
+	releaseCompact chan struct{}
+	compactOnce    sync.Once
+
+	armed        atomic.Bool
+	storeEntered chan struct{}
+	releaseStore chan struct{}
+	storeOnce    sync.Once
+}
+
+func newStrandedGateAdapter() *strandedGateAdapter {
+	return &strandedGateAdapter{
+		compactEntered: make(chan struct{}),
+		releaseCompact: make(chan struct{}),
+		storeEntered:   make(chan struct{}),
+		releaseStore:   make(chan struct{}),
+	}
+}
+
+func (a *strandedGateAdapter) LoadDoc(string) ([]byte, error) { return nil, nil }
+
+func (a *strandedGateAdapter) StoreUpdate(_ string, update []byte) error {
+	if a.armed.Load() {
+		a.storeOnce.Do(func() {
+			close(a.storeEntered)
+			<-a.releaseStore
+		})
+	}
+	cp := append([]byte(nil), update...)
+	a.mu.Lock()
+	a.updates = append(a.updates, cp)
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *strandedGateAdapter) Compact(context.Context, string) error {
+	a.compactOnce.Do(func() {
+		close(a.compactEntered)
+		<-a.releaseCompact
+		a.armed.Store(true)
+	})
+	return nil
+}
+
+func (a *strandedGateAdapter) text(t *testing.T, key string) string {
+	t.Helper()
+	a.mu.Lock()
+	all := make([][]byte, len(a.updates))
+	copy(all, a.updates)
+	a.mu.Unlock()
+
+	d := crdt.New()
+	for _, u := range all {
+		require.NoError(t, crdt.ApplyUpdateV1(d, u, nil))
+	}
+	return d.GetText(key).ToString()
+}
+
+// awaitStrandedWriter blocks until at least one committing goroutine has
+// registered in the stranded-write path. Tests use it to order a commit ahead
+// of the worker's exit so they assert against Shutdown's join rather than
+// against the residual window the join cannot cover.
+func awaitStrandedWriter(t *testing.T, s *ygws.Server) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if ygws.StrandedWritesInFlight(s) > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("no committing goroutine ever registered as a stranded writer")
+}
+
+// TestPersistenceShutdown_JoinsStrandedWrites asserts the property a caller can
+// actually rely on, which is stronger than "the write eventually happens":
+// Server.Shutdown must not return while a transaction committed during that
+// same Shutdown is still being written to the adapter.
+//
+// This distinction is not academic. The real producers are peer read loops,
+// which have no join point at all — nobody can wait for them on the caller's
+// behalf. The standard deployment shape is `srv.Shutdown(ctx)` and then return
+// from main; if Shutdown returns with a write in flight, the process exits and
+// the transaction is lost exactly as before, just through a narrower window.
+//
+// Deterministic in the GREEN direction: Shutdown provably cannot return while
+// the adapter is parked inside the stranded StoreUpdate. The RED direction uses
+// a bounded observation window — a Shutdown that does not join has nothing left
+// to do and returns immediately (with no relay attached it performs no further
+// work at all), so the window only has to be long enough to schedule it.
+func TestPersistenceShutdown_JoinsStrandedWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		coalesce time.Duration
+	}{
+		{"coalescing enabled (default)", 0},
+		{"coalescing disabled", -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newStrandedGateAdapter()
+			s := ygws.NewServerWithPersistence(a)
+			s.PersistCoalesceWindow = tc.coalesce
+
+			ctx := context.Background()
+			require.NoError(t, s.Apply(ctx, "room", func(_ *crdt.Doc, transact func(func(*crdt.Transaction))) {
+				transact(func(txn *crdt.Transaction) {
+					txn.GetText("t").Insert(txn, 0, "before", nil)
+				})
+			}))
+
+			doc := s.GetDoc("room")
+			require.NotNil(t, doc)
+
+			shutdownDone := make(chan error, 1)
+			go func() {
+				sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				shutdownDone <- s.Shutdown(sctx)
+			}()
+
+			<-a.compactEntered // worker is past its final drain
+
+			committed := make(chan struct{})
+			go func() {
+				defer close(committed)
+				doc.Transact(func(txn *crdt.Transaction) {
+					txt := txn.GetText("t")
+					txt.Insert(txn, txt.Len(), "-during", nil)
+				})
+			}()
+
+			// Sequence the commit ahead of the worker's exit. Without this the
+			// test would be measuring the acknowledged residual (a commit that
+			// starts after Shutdown reads the counter) instead of the join.
+			// Deterministic once observed: the committer registers before it
+			// can even read the retirement latch, and it then parks on a
+			// persistDone that cannot close until Compact is released below.
+			awaitStrandedWriter(t, s)
+
+			close(a.releaseCompact) // worker exits; the commit strands
+
+			select {
+			case <-a.storeEntered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the stranded write never reached the adapter")
+			}
+
+			// THE assertion: Shutdown is still running. Deliberately does NOT
+			// join the committing goroutine first — joining it would only prove
+			// the write happens eventually, which no caller can observe.
+			select {
+			case err := <-shutdownDone:
+				t.Fatalf("Shutdown returned (%v) while a transaction committed during "+
+					"that Shutdown was still in flight to the adapter (#229)", err)
+			case <-time.After(500 * time.Millisecond):
+			}
+
+			close(a.releaseStore)
+
+			select {
+			case err := <-shutdownDone:
+				require.NoError(t, err)
+			case <-time.After(30 * time.Second):
+				t.Fatal("Shutdown did not return after the stranded write completed")
+			}
+			<-committed
+
+			require.Equal(t, "before-during", a.text(t, "t"))
+		})
+	}
+}
+
+// TestPersistenceShutdown_StrandedWaitIsBoundedByCtx is the anti-hang half of
+// the join above, and the case with a producer actually present: a stranded
+// write that never completes must cost the caller its deadline and nothing
+// more — Shutdown reports ctx.Err() rather than blocking forever.
+func TestPersistenceShutdown_StrandedWaitIsBoundedByCtx(t *testing.T) {
+	a := newStrandedGateAdapter()
+	s := ygws.NewServerWithPersistence(a)
+
+	ctx := context.Background()
+	require.NoError(t, s.Apply(ctx, "room", func(_ *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		transact(func(txn *crdt.Transaction) {
+			txn.GetText("t").Insert(txn, 0, "before", nil)
+		})
+	}))
+	doc := s.GetDoc("room")
+	require.NotNil(t, doc)
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		shutdownDone <- s.Shutdown(sctx)
+	}()
+
+	<-a.compactEntered
+	go func() {
+		doc.Transact(func(txn *crdt.Transaction) {
+			txt := txn.GetText("t")
+			txt.Insert(txn, txt.Len(), "-during", nil)
+		})
+	}()
+	awaitStrandedWriter(t, s)
+	close(a.releaseCompact)
+
+	select {
+	case <-a.storeEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stranded write never reached the adapter")
+	}
+
+	// The adapter is wedged. Shutdown must still come back on its deadline.
+	select {
+	case err := <-shutdownDone:
+		require.ErrorIs(t, err, context.DeadlineExceeded,
+			"a wedged stranded write must surface as the caller's deadline, not as a lie")
+	case <-time.After(20 * time.Second):
+		t.Fatal("Shutdown hung on a stranded write that never completes (#229)")
+	}
+	close(a.releaseStore)
 }
 
 // TestPersistenceShutdown_CommitDuringShutdownIsNotLost is the #229 regression
@@ -336,11 +570,29 @@ func TestPersistenceShutdown_ReturnsPromptlyWithoutProducers(t *testing.T) {
 }
 
 // TestPersistenceShutdown_ConcurrentCommitsRaceShutdown is the unsequenced
-// counterpart of the deterministic gate above: many goroutines commit while
-// Shutdown runs. It cannot prove the absence of loss on its own (which is why
-// the deterministic test exists), but under -race it exercises the producer /
-// worker handoff for interleavings a scripted test cannot reach, and it
-// asserts Shutdown still terminates.
+// counterpart of the deterministic gates above: eight goroutines commit,
+// genuinely concurrently, while Shutdown runs. Under -race it exercises the
+// producer/worker handoff — and the contention on the fallback's own lock —
+// for interleavings a scripted test cannot reach.
+//
+// The producers are deliberately NOT serialised by a test-side mutex.
+// crdt.Doc.Transact is internally locked and the OnUpdate observers fire
+// outside that lock, so concurrent committers really are inside the observer
+// at once, which is the only way the post-retirement fallback's own
+// serialisation gets exercised at all.
+//
+// It asserts a property that IS sound under this race, rather than "something
+// was stored": every commit whose Transact had RETURNED before Shutdown
+// returned must be in the adapter. That follows from the design — by the time
+// the observer returns, the update has either been buffered while the
+// retirement latch was open (so the worker's final drain, which precedes
+// persistDone, which precedes Shutdown's own waits, takes it) or been written
+// synchronously by the committer. Commits still in flight when Shutdown
+// returns are excluded on purpose: that is the acknowledged residual, and a
+// test must not assert away a limit the code really has.
+//
+// Each commit sets a unique YMap key so persisted commits are individually
+// identifiable, which a shared YText cannot give.
 func TestPersistenceShutdown_ConcurrentCommitsRaceShutdown(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -357,16 +609,21 @@ func TestPersistenceShutdown_ConcurrentCommitsRaceShutdown(t *testing.T) {
 			ctx := context.Background()
 			require.NoError(t, s.Apply(ctx, "room", func(_ *crdt.Doc, transact func(func(*crdt.Transaction))) {
 				transact(func(txn *crdt.Transaction) {
-					txn.GetText("t").Insert(txn, 0, "x", nil)
+					txn.GetMap("m").Set(txn, "seed", "1")
 				})
 			}))
 			doc := s.GetDoc("room")
 			require.NotNil(t, doc)
 
+			// committed records keys whose Transact has already returned. It is
+			// appended to AFTER Transact returns, so a key present in a snapshot
+			// of it definitely finished committing before that snapshot.
+			var recMu sync.Mutex
+			committed := map[string]bool{"seed": true}
+
 			const writers = 8
 			const perWriter = 25
 			var wg sync.WaitGroup
-			var mu sync.Mutex
 			start := make(chan struct{})
 			for w := 0; w < writers; w++ {
 				wg.Add(1)
@@ -374,26 +631,105 @@ func TestPersistenceShutdown_ConcurrentCommitsRaceShutdown(t *testing.T) {
 					defer wg.Done()
 					<-start
 					for i := 0; i < perWriter; i++ {
-						mu.Lock()
+						key := fmt.Sprintf("w%d-%d", w, i)
 						doc.Transact(func(txn *crdt.Transaction) {
-							txt := txn.GetText("t")
-							txt.Insert(txn, txt.Len(), "y", nil)
+							txn.GetMap("m").Set(txn, key, "1")
 						})
-						mu.Unlock()
+						recMu.Lock()
+						committed[key] = true
+						recMu.Unlock()
 					}
 				}()
 			}
 
 			close(start)
-			sctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			require.NoError(t, s.Shutdown(sctx))
+
+			// Snapshot the instant Shutdown returns: everything in here had
+			// already finished committing, so all of it must be durable.
+			recMu.Lock()
+			mustBeDurable := make([]string, 0, len(committed))
+			for k := range committed {
+				mustBeDurable = append(mustBeDurable, k)
+			}
+			recMu.Unlock()
+
 			wg.Wait()
 
 			a.mu.Lock()
-			stored := len(a.updates)
+			all := make([][]byte, len(a.updates))
+			copy(all, a.updates)
 			a.mu.Unlock()
-			require.NotZero(t, stored)
+
+			d := crdt.New()
+			for _, u := range all {
+				require.NoError(t, crdt.ApplyUpdateV1(d, u, nil))
+			}
+			persisted := make(map[string]bool, len(d.GetMap("m").Keys()))
+			for _, k := range d.GetMap("m").Keys() {
+				persisted[k] = true
+			}
+			for _, k := range mustBeDurable {
+				require.True(t, persisted[k],
+					"commit %q returned before Shutdown returned but never reached the adapter (#229)", k)
+			}
+			require.NotEmpty(t, mustBeDurable)
+		})
+	}
+}
+
+// TestPersistence_PostTeardownCommitStillPersists characterises a real
+// behaviour change #229 makes, so it is not discovered by surprise.
+//
+// Before #229 the observer's escape hatch was `case <-r.persistStop:`, which
+// DROPPED the update; a room that had been torn down therefore never wrote
+// again. Nothing calls doc.Destroy on teardown, so a caller that retained the
+// *crdt.Doc (from GetDoc, or from an OnLoadDocument hook) keeps the observer
+// alive, and its later commits now reach the adapter instead of vanishing.
+//
+// That is the right behaviour — a committed transaction being silently
+// discarded is the bug this issue is about — but it widens the window in which
+// StoreUpdate can be called for a room name the server considers gone. See
+// CompactableAdapter's godoc for what that means for adapters.
+func TestPersistence_PostTeardownCommitStillPersists(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		coalesce time.Duration
+	}{
+		{"coalescing enabled (default)", 0},
+		{"coalescing disabled", -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &ctxAdapter{}
+			s := ygws.NewServerWithPersistence(a)
+			s.PersistCoalesceWindow = tc.coalesce
+
+			ctx := context.Background()
+			require.NoError(t, s.Apply(ctx, "room", func(_ *crdt.Doc, transact func(func(*crdt.Transaction))) {
+				transact(func(txn *crdt.Transaction) {
+					txn.GetText("t").Insert(txn, 0, "before", nil)
+				})
+			}))
+
+			doc := s.GetDoc("room")
+			require.NotNil(t, doc)
+
+			require.NoError(t, s.CloseRoom("room", false))
+			require.Nil(t, s.GetDoc("room"), "the room is gone as far as the server is concerned")
+
+			doc.Transact(func(txn *crdt.Transaction) {
+				txt := txn.GetText("t")
+				txt.Insert(txn, txt.Len(), "-after", nil)
+			})
+
+			require.Equal(t, "before-after", a.text(t, "t"),
+				"a commit on a retained doc after teardown must be persisted, not dropped (#229)")
+
+			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			require.NoError(t, s.Shutdown(sctx))
 		})
 	}
 }

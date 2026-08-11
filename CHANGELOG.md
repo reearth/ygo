@@ -70,9 +70,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   producer two airtight cases and no third one: a send that completed while
   the latch was open is necessarily seen by the final drain, and otherwise
   the committing goroutine performs the write itself. The escape hatch that
-  used to drop the update now has a durable destination. `Shutdown` ordering
-  is deliberately unchanged, so this cannot introduce the opposite failure —
-  a shutdown that hangs waiting for a producer that never appears (#229).
+  used to drop the update now has a durable destination. `Shutdown` then joins
+  those committer-performed writes — bounded by the caller's ctx, placed after
+  the persistence join and before the relay wind-down so #202's ordering is
+  untouched — because otherwise the usual `srv.Shutdown(ctx)`-then-exit shape
+  would kill the process mid-write, narrowing the loss window rather than
+  closing it. The worker's exit triggers are unchanged, so this cannot
+  introduce the opposite failure — a shutdown that hangs waiting for a producer
+  that never appears. **The guarantee is exactly: any commit whose `Transact`
+  returned before `Shutdown` returned is durable.** A commit that *begins*
+  after `Shutdown` observes its last in-flight write is not covered and cannot
+  be — peer read loops and `*crdt.Doc` holders are producers the server has no
+  way to join. Three consequences worth knowing rather than discovering: a
+  straggler write is synchronous for its committer and delays that update's
+  relay fan-out (the persistence observer is registered before the relay ones);
+  a caller that retains a `*crdt.Doc` past teardown now keeps writing for a
+  room the server considers gone, where those commits were previously dropped
+  silently; and both widen the window in which `Compact` can overlap a
+  `StoreUpdate` for the same room NAME, which `CompactableAdapter`'s godoc now
+  scopes explicitly (#229).
 - **`provider/websocket`: context-aware adapters lost the shutdown tail on
   the coalescing-disabled path.** That path handed the worker's
   **cancellable** ctx — the one a sibling goroutine cancels on `shutdownCh` —
@@ -83,8 +99,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `context.Background()`, and a store aborted by cancellation is **retained**
   and re-stored on the exit path rather than dropped — the same
   retain-and-re-flush rule the coalescing path already applied to an
-  unflushed batch. Cancellation still unwedges a slow adapter mid-write; it
-  just no longer decides which committed transactions count (#229).
+  unflushed batch. Cancellation still aborts a write already in flight when
+  shutdown begins; it just no longer decides which committed transactions
+  count. Note the trade: because the final flush and the retained re-stores
+  run under `context.Background()`, an adapter that blocks indefinitely now
+  wedges that room's worker at exit, so `Shutdown` can return
+  `context.DeadlineExceeded` where it previously returned `nil` by discarding
+  the data (#229).
 
 ## [1.48.0] — 2026-08-10
 

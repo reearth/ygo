@@ -210,10 +210,30 @@ type PersistenceAdapterContext interface {
 // Server.CompactEvery > 0, after every N persistence flushes.
 //
 // Compact is invoked from the room's persistence worker goroutine, serialised
-// with StoreUpdate for that room, so implementations need no extra locking
-// against concurrent writes to the same room. It is best-effort: a returned
+// with StoreUpdate for that room INSTANCE, so implementations need no extra
+// locking against that worker's own writes. It is best-effort: a returned
 // error (or panic) is logged and does not abort persistence. Retention policy
 // (how much history to keep) is the adapter's concern.
+//
+// That serialisation is per room INSTANCE, not per room NAME — read this if
+// your Compact mutates shared state keyed by name. Two sources of overlap:
+//
+//   - Teardown followed by re-creation. A room's worker can still be in its
+//     exit-path Compact while a client reconnects and a brand-new room of the
+//     same name starts writing. This window predates #229 (see
+//     handleDisconnect's flush-then-evict sequence in peer.go).
+//   - A retained *crdt.Doc. Nothing calls doc.Destroy on teardown, so a caller
+//     holding the doc — from GetDoc, or from an OnLoadDocument hook — keeps its
+//     persistence observer alive, and every later commit is written directly by
+//     the committing goroutine (#229; before #229 those commits were silently
+//     dropped instead). Those writes are serialised among themselves, but not
+//     against a successor room of the same name, and they are unbounded in time.
+//
+// If your adapter's Compact is not safe against a concurrent StoreUpdate for
+// the same room name, serialise inside the adapter. Every store this repo ships
+// behind persistence.LegacyAdapter already does, each with a single mutex
+// covering all of its operations: persistence.MemoryPersistence,
+// persistence.FilePersistence, and persistence/sqlite.
 //
 // On room unload, Compact runs synchronously in the worker's exit path.
 // Compact is invoked with context.Background() (it is not cancelled by
@@ -610,6 +630,31 @@ type Server struct {
 
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{} // closed by Shutdown
+
+	// strandedInFlight counts committing goroutines that are inside — or about
+	// to enter — the retirement branch of loadRoom's doc.OnUpdate observer,
+	// i.e. writes the room's persistence worker can no longer take and the
+	// committer must perform itself (#229). Shutdown waits for it to reach zero
+	// so it does not return while such a write is still on its way to the
+	// adapter; without that wait the fix would only NARROW the loss window,
+	// since the standard `srv.Shutdown(ctx); return` shape would let the process
+	// exit mid-write.
+	//
+	// It is incremented BEFORE the observer's outer select, not after the
+	// retirement branch is chosen. That ordering is required: an increment
+	// placed after the branch leaves a gap in which Shutdown could observe zero
+	// and return while a committer has already decided to write. The cost is
+	// two atomic adds on every committed transaction, which is deliberate —
+	// correctness of the shutdown join over a few nanoseconds on a path that
+	// already encodes an update and takes a channel.
+	//
+	// strandedWake (buffered, cap 1) wakes the waiter on each decrement. A
+	// dropped send is harmless: a waiter that is genuinely parked on the channel
+	// has by definition left the buffer empty, so the next decrement's send
+	// succeeds. A plain sync.WaitGroup is unusable here — producers appear at
+	// arbitrary times, so Add would race Wait.
+	strandedInFlight atomic.Int64
+	strandedWake     chan struct{}
 
 	// AuthFunc, if non-nil, is called before upgrading each incoming WebSocket
 	// connection. Return false to reject the connection; the server responds
@@ -1112,9 +1157,10 @@ func (s *Server) newPeerLimiter() *rate.Limiter {
 // NewServer returns a new Server with an empty room store and no persistence.
 func NewServer() *Server {
 	s := &Server{
-		rooms:       make(map[string]*room),
-		shutdownCh:  make(chan struct{}),
-		sweeperDone: make(chan struct{}),
+		rooms:        make(map[string]*room),
+		shutdownCh:   make(chan struct{}),
+		sweeperDone:  make(chan struct{}),
+		strandedWake: make(chan struct{}, 1),
 	}
 	s.upgrader = gws.Upgrader{CheckOrigin: s.checkOrigin}
 	return s
@@ -1212,6 +1258,27 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	case <-done:
 	case <-ctx.Done():
 	}
+
+	// Join the stranded writers (#229). A transaction committed during this
+	// Shutdown — peer read loops keep committing right through the connection
+	// closes above — may have arrived too late for its room's worker, in which
+	// case the committing goroutine performs the adapter write itself. It
+	// blocks on the same persistDone the loop above just waited for, so without
+	// this join Shutdown would routinely return with that write still in
+	// flight, and the usual `srv.Shutdown(ctx); return` shape would kill the
+	// process mid-write — the original bug through a narrower window.
+	//
+	// Placed HERE deliberately: after the persistence join (a stranded writer
+	// cannot even start until its worker has exited) and before the relay steps
+	// below, so #202's retire→drain→join→cancel ordering is untouched. Bounded
+	// by ctx like every other wait in this function, so a wedged adapter costs
+	// the caller its deadline and shows up as ctx.Err() rather than as a hang.
+	//
+	// This bounds what Shutdown can see; it is not a claim of losslessness. A
+	// commit that begins after the counter reads zero is not covered, and
+	// cannot be: peer read loops and any holder of a *crdt.Doc are producers
+	// the server has no way to join.
+	s.waitStranded(ctx)
 
 	// Wind down outbound relay delivery (#202), in three ordered steps. The
 	// peers are gone and the persistence drain is over, so nothing can feed
@@ -1516,6 +1583,16 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 			// forever on a full 256-slot buffer once the worker has gone. What
 			// #229 changes is that the escape hatch now has a durable
 			// destination instead of dropping the update on the floor.
+			//
+			// The enter/leave pair brackets the WHOLE observer, including the
+			// latch reads, so Shutdown can see this goroutine from before it
+			// decides whether it must write. Registering only inside the
+			// retirement branches would leave a gap in which Shutdown observes
+			// zero and returns while this goroutine is already committed to a
+			// write it has not started (see Server.strandedInFlight).
+			s.strandedEnter()
+			defer s.strandedLeave()
+
 			select {
 			case r.persistCh <- update:
 				// Case 1 unless retirement began in between; re-check, since
