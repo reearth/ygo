@@ -17,41 +17,67 @@ import (
 // atomic add.
 func (s *Server) strandedEnter() { s.strandedInFlight.Add(1) }
 
-// strandedLeave balances strandedEnter and wakes a waiting Shutdown. The
-// non-blocking send is correct even when it drops: a waiter parked on the
-// channel leaves the buffer empty, so a later decrement's send lands.
+// strandedLeave balances strandedEnter and releases any waiting Shutdown when
+// this was the last committer in flight.
 func (s *Server) strandedLeave() {
-	s.strandedInFlight.Add(-1)
-	if s.strandedWake == nil {
-		return
-	}
-	select {
-	case s.strandedWake <- struct{}{}:
-	default:
+	if s.strandedInFlight.Add(-1) == 0 {
+		s.strandedBroadcast()
 	}
 }
 
-// waitStranded blocks until no committing goroutine is in the stranded-write
-// path, or ctx expires. Called by Shutdown after the persistence workers have
-// been joined — a stranded writer is by construction waiting on a worker that
-// has already exited, so this is the only remaining hop between a committed
-// transaction and the adapter.
+// strandedBroadcast publishes a 1→0 transition by closing the current latch and
+// installing a fresh one. A close, not a token: Shutdown may be called
+// concurrently (shutdownOnce implies the API tolerates it), and a single wake
+// token would be consumed by whichever caller got there first, leaving the
+// others parked until their contexts expired. Closing wakes all of them.
 //
-// This is a bound, not a guarantee of losslessness. It cannot cover a
-// transaction that begins committing AFTER the counter is observed at zero:
-// the producers are peer read loops and any holder of a *crdt.Doc, none of
-// which the server can join. What it does guarantee is that Shutdown never
-// returns while a write it can see is still in flight.
-func (s *Server) waitStranded(ctx context.Context) {
-	if s.strandedWake == nil {
+// The mutex is taken only on this transition, never on the per-commit
+// increment/decrement, so the hot path stays lock-free.
+func (s *Server) strandedBroadcast() {
+	s.strandedZeroMu.Lock()
+	ch := s.strandedZero
+	if ch == nil { // zero-value Server; nothing waits on it
+		s.strandedZeroMu.Unlock()
 		return
 	}
-	for s.strandedInFlight.Load() > 0 {
-		if ctx.Err() != nil {
+	s.strandedZero = make(chan struct{})
+	s.strandedZeroMu.Unlock()
+	close(ch)
+}
+
+// waitStranded blocks until no committing goroutine is inside the persistence
+// observer, or ctx expires. Called by Shutdown after the persistence workers
+// have been joined — a stranded writer is by construction waiting on a worker
+// that has already exited, so this is the only remaining hop between a
+// committed transaction and the adapter.
+//
+// Latch-then-check is the order that makes this free of lost wakeups: the latch
+// is read BEFORE the counter, so any 1→0 transition that happens after the read
+// necessarily closes the very channel this goroutine is about to wait on, and
+// any transition before it is caught by the counter read. Safe for concurrent
+// waiters, since a close releases all of them.
+//
+// This is a bound, not a guarantee of losslessness. It cannot cover a
+// transaction that begins committing AFTER the counter is observed at zero: the
+// producers are peer read loops and any holder of a *crdt.Doc, none of which
+// the server can join. Nor does it cover a room Shutdown never enumerated —
+// one created, or finishing its load, after Shutdown snapshotted s.rooms; see
+// Shutdown's own comment. Conversely, because the counter covers every commit
+// rather than only the stranded ones, a sustained writer can hold this here
+// until ctx expires with nothing actually stuck.
+func (s *Server) waitStranded(ctx context.Context) {
+	for {
+		s.strandedZeroMu.Lock()
+		ch := s.strandedZero
+		s.strandedZeroMu.Unlock()
+		if ch == nil { // zero-value Server; no producer can have registered
+			return
+		}
+		if s.strandedInFlight.Load() == 0 {
 			return
 		}
 		select {
-		case <-s.strandedWake:
+		case <-ch:
 		case <-ctx.Done():
 			return
 		}

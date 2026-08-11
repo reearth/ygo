@@ -637,15 +637,32 @@ count. Since v1.49.0 (#229) that separation is enforced:
 
 ### The guarantee, stated exactly
 
-> Any commit whose `Transact` returned before `Shutdown` returned is durable.
+> **Precondition:** you have stopped accepting new WebSocket connections before
+> calling `Shutdown` (shut down your `http.Server`, or otherwise stop routing to
+> the handler).
+>
+> **Then:** for every room that was present in the server and had finished
+> loading when `Shutdown` began, any commit whose `Transact` returned before
+> `Shutdown` returned is durable.
 
-That is the whole of it. **`Shutdown` is not lossless and cannot be made so.** A
-transaction that *begins* committing after `Shutdown` has observed its last
-in-flight write is not covered: the producers are peer read loops and any code
-holding a `*crdt.Doc`, none of which the server can join, and inventing a join
-would risk a `Shutdown` that never returns — a worse failure than the one being
-fixed. Stop your traffic before calling `Shutdown` if you need more than the
-guarantee above.
+Both halves are load-bearing.
+
+**Why the precondition.** `Shutdown` snapshots the room set once, and skips any
+room still mid-load at that instant. `ServeHTTP` has no shutdown gate, so a
+connection accepted while `Shutdown` is running can create a room, or finish
+loading one, *after* that snapshot. `Shutdown` never waits on such a room's
+persistence worker, so a commit into it can return from `Transact` with the
+update merely buffered — and the usual `Shutdown(ctx); return` shape then kills
+the drain. This is not new in v1.49.0; what is new is that the rest of this
+section would otherwise read as promising against it. Stop accepting
+connections first and the room set cannot grow underneath `Shutdown`.
+
+**Why the second half is still not losslessness.** **`Shutdown` is not lossless
+and cannot be made so.** A transaction that *begins* committing after `Shutdown`
+has observed its last in-flight write is not covered: the producers are peer
+read loops and any code holding a `*crdt.Doc`, none of which the server can
+join, and inventing a join would risk a `Shutdown` that never returns — a worse
+failure than the one being fixed.
 
 ### What adapters must now tolerate
 
@@ -656,6 +673,13 @@ guarantee above.
   `context.DeadlineExceeded` where it previously returned `nil` — by discarding
   your data. The honest error replaces a silent lie, but it is a behaviour
   change if you have a `Shutdown` deadline.
+- **A second, unrelated cause of that same `DeadlineExceeded`:** a *sustained*
+  producer. `Shutdown` waits for the in-flight commit count to reach zero, and
+  that count covers every committing goroutine, not only the ones performing a
+  write themselves. Code that holds a retained `*crdt.Doc` and commits in a
+  tight loop can keep it above zero for as long as it runs, so `Shutdown` burns
+  its whole deadline with no wedged adapter anywhere. Stop your writers, not
+  just your connections, if you want `Shutdown` to return early.
 - **Writes for a room the server already considers gone.** Nothing calls
   `doc.Destroy` on teardown, so a caller that retains the `*crdt.Doc` (from
   `GetDoc`, or from an `OnLoadDocument` hook) keeps its persistence observer

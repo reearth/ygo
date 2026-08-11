@@ -631,30 +631,40 @@ type Server struct {
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{} // closed by Shutdown
 
-	// strandedInFlight counts committing goroutines that are inside — or about
-	// to enter — the retirement branch of loadRoom's doc.OnUpdate observer,
-	// i.e. writes the room's persistence worker can no longer take and the
-	// committer must perform itself (#229). Shutdown waits for it to reach zero
-	// so it does not return while such a write is still on its way to the
-	// adapter; without that wait the fix would only NARROW the loss window,
-	// since the standard `srv.Shutdown(ctx); return` shape would let the process
-	// exit mid-write.
+	// strandedInFlight counts committing goroutines that are anywhere inside
+	// loadRoom's doc.OnUpdate observer — EVERY commit, not only the ones that
+	// end up on the retirement branch and perform the adapter write themselves
+	// (#229). Shutdown waits for it to reach zero so it does not return while
+	// such a write is still on its way to the adapter; without that wait the fix
+	// would only NARROW the loss window, since the standard
+	// `srv.Shutdown(ctx); return` shape would let the process exit mid-write.
 	//
-	// It is incremented BEFORE the observer's outer select, not after the
-	// retirement branch is chosen. That ordering is required: an increment
-	// placed after the branch leaves a gap in which Shutdown could observe zero
-	// and return while a committer has already decided to write. The cost is
-	// two atomic adds on every committed transaction, which is deliberate —
-	// correctness of the shutdown join over a few nanoseconds on a path that
-	// already encodes an update and takes a channel.
+	// Counting every commit is not laziness, it is the requirement: the
+	// increment must happen BEFORE the observer's outer select, because an
+	// increment placed after the retirement branch is chosen leaves a gap in
+	// which Shutdown observes zero and returns while a committer has already
+	// decided to write. The cost is two atomic adds on every committed
+	// transaction, which is deliberate — correctness of the shutdown join over a
+	// few nanoseconds on a path that already encodes an update and takes a
+	// channel.
 	//
-	// strandedWake (buffered, cap 1) wakes the waiter on each decrement. A
-	// dropped send is harmless: a waiter that is genuinely parked on the channel
-	// has by definition left the buffer empty, so the next decrement's send
-	// succeeds. A plain sync.WaitGroup is unusable here — producers appear at
-	// arbitrary times, so Add would race Wait.
+	// The consequence of that breadth is worth stating, because it surfaces as a
+	// confusing error: a SUSTAINED producer — code holding a retained *crdt.Doc
+	// and committing in a loop — can keep this above zero indefinitely, so
+	// Shutdown burns its whole deadline and returns context.DeadlineExceeded
+	// with no wedged adapter anywhere. Callers who need Shutdown to return early
+	// must stop their writers, not only their connections.
+	//
+	// strandedZero is a broadcast latch, replaced-and-closed on each 1→0
+	// transition (see strandedBroadcast). A close rather than a token hand-off
+	// because Shutdown may legitimately be called concurrently — shutdownOnce
+	// implies as much — and a cap-1 wake token would be consumed by one caller,
+	// parking the others until their contexts expired. A plain sync.WaitGroup is
+	// unusable here for a different reason: producers appear at arbitrary times,
+	// so Add would race Wait.
 	strandedInFlight atomic.Int64
-	strandedWake     chan struct{}
+	strandedZeroMu   sync.Mutex
+	strandedZero     chan struct{}
 
 	// AuthFunc, if non-nil, is called before upgrading each incoming WebSocket
 	// connection. Return false to reject the connection; the server responds
@@ -1160,7 +1170,7 @@ func NewServer() *Server {
 		rooms:        make(map[string]*room),
 		shutdownCh:   make(chan struct{}),
 		sweeperDone:  make(chan struct{}),
-		strandedWake: make(chan struct{}, 1),
+		strandedZero: make(chan struct{}),
 	}
 	s.upgrader = gws.Upgrader{CheckOrigin: s.checkOrigin}
 	return s
@@ -1274,10 +1284,25 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// by ctx like every other wait in this function, so a wedged adapter costs
 	// the caller its deadline and shows up as ctx.Err() rather than as a hang.
 	//
-	// This bounds what Shutdown can see; it is not a claim of losslessness. A
-	// commit that begins after the counter reads zero is not covered, and
-	// cannot be: peer read loops and any holder of a *crdt.Doc are producers
-	// the server has no way to join.
+	// This bounds what Shutdown can see; it is not a claim of losslessness.
+	// Three limits, all real:
+	//
+	//   - A commit that begins after the counter reads zero is not covered, and
+	//     cannot be: peer read loops and any holder of a *crdt.Doc are producers
+	//     the server has no way to join.
+	//   - Neither is a room this function never enumerated. The snapshot above
+	//     is taken once and skips rooms still mid-load, and ServeHTTP has no
+	//     shutdownCh gate, so a connection accepted while Shutdown runs can
+	//     create a room — or finish loading one — afterwards. Nothing waits on
+	//     that room's persistDone, so a commit into it can return from Transact
+	//     with the update merely buffered. Callers who need the documented
+	//     guarantee must stop accepting connections BEFORE calling Shutdown
+	//     (see docs/PERSISTENCE.md). Pre-existing; recorded here because the
+	//     join above would otherwise read as covering it.
+	//   - Conversely the counter covers EVERY commit, not only the stranded
+	//     ones (that breadth is required — see Server.strandedInFlight), so a
+	//     sustained writer can hold this wait open until ctx expires even
+	//     though nothing is stuck.
 	s.waitStranded(ctx)
 
 	// Wind down outbound relay delivery (#202), in three ordered steps. The

@@ -179,6 +179,14 @@ case that previously returned `nil` by discarding your data. If you have a
 seeing `context.DeadlineExceeded` where you saw success before. That is the
 honest signal replacing a silent lie.
 
+There is a **second, unrelated cause** of that same error, so do not read it as
+"my adapter is wedged": `Shutdown`'s new wait counts *every* committing
+goroutine, not only the ones performing a write themselves. Code that holds a
+retained `*crdt.Doc` and commits in a tight loop keeps that count above zero for
+as long as it runs, so `Shutdown` burns its whole deadline with nothing stuck
+anywhere. Stop your writers, not just your connections, if you want `Shutdown`
+to return early.
+
 **`Shutdown` now joins the writes it can see.** A transaction committed during
 `Shutdown` may arrive too late for its room's worker, in which case the
 committing goroutine performs the adapter write itself. `Shutdown` waits for
@@ -191,8 +199,23 @@ cannot.** A transaction that *begins* committing after `Shutdown` has observed
 its last in-flight write is not covered. The producers are peer read loops and
 any code holding a `*crdt.Doc`; the server has no way to join them, and
 inventing one would risk a `Shutdown` that never returns — a worse failure than
-the one being fixed. What is now guaranteed is narrower and checkable: **any
-commit whose `Transact` returned before `Shutdown` returned is durable.**
+the one being fixed.
+
+What is guaranteed is narrower, and both of its qualifiers are real:
+
+> **Stop accepting new WebSocket connections before calling `Shutdown`.** Then,
+> for every room that was present and had finished loading when `Shutdown`
+> began, any commit whose `Transact` returned before `Shutdown` returned is
+> durable.
+
+The precondition is not decoration. `Shutdown` snapshots the room set once and
+skips any room still mid-load at that instant, and `ServeHTTP` has no shutdown
+gate — so a connection accepted while `Shutdown` runs can create a room, or
+finish loading one, after the snapshot, and `Shutdown` never waits on that
+room's persistence worker. A commit into it can return from `Transact` with the
+update merely buffered, and `Shutdown(ctx)`-then-exit kills the drain. That
+behaviour predates v1.49.0; it is called out here because everything above
+would otherwise read as promising against it.
 
 **What this costs you.** A straggler write is synchronous for the goroutine
 that committed it and bypasses coalescing, auto-versioning, and compaction. It

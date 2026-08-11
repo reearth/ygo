@@ -77,11 +77,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would kill the process mid-write, narrowing the loss window rather than
   closing it. The worker's exit triggers are unchanged, so this cannot
   introduce the opposite failure — a shutdown that hangs waiting for a producer
-  that never appears. **The guarantee is exactly: any commit whose `Transact`
-  returned before `Shutdown` returned is durable.** A commit that *begins*
-  after `Shutdown` observes its last in-flight write is not covered and cannot
-  be — peer read loops and `*crdt.Doc` holders are producers the server has no
-  way to join. Three consequences worth knowing rather than discovering: a
+  that never appears. **The guarantee is exactly: given that you stopped
+  accepting new connections first, then for every room that was present and had
+  finished loading when `Shutdown` began, any commit whose `Transact` returned
+  before `Shutdown` returned is durable.** Both qualifiers are real. `Shutdown`
+  snapshots the room set once and skips rooms still mid-load, and `ServeHTTP`
+  has no shutdown gate, so a connection accepted during `Shutdown` can create or
+  finish loading a room after that snapshot — one `Shutdown` never waits on
+  (pre-existing; called out here because the sentence would otherwise read as
+  promising against it). And a commit that *begins* after `Shutdown` observes
+  its last in-flight write is not covered and cannot be — peer read loops and
+  `*crdt.Doc` holders are producers the server has no way to join. Three
+  consequences worth knowing rather than discovering: a
   straggler write is synchronous for its committer and delays that update's
   relay fan-out (the persistence observer is registered before the relay ones);
   a caller that retains a `*crdt.Doc` past teardown now keeps writing for a
@@ -105,7 +112,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run under `context.Background()`, an adapter that blocks indefinitely now
   wedges that room's worker at exit, so `Shutdown` can return
   `context.DeadlineExceeded` where it previously returned `nil` by discarding
-  the data (#229).
+  the data. A second, unrelated cause of the same error: `Shutdown`'s wait
+  covers every committing goroutine, so a sustained writer on a retained
+  `*crdt.Doc` can hold it above zero until the deadline expires with no wedged
+  adapter anywhere (#229).
 
 ## [1.48.0] — 2026-08-10
 

@@ -305,6 +305,86 @@ func TestPersistenceShutdown_StrandedWaitIsBoundedByCtx(t *testing.T) {
 	close(a.releaseStore)
 }
 
+// TestPersistenceShutdown_ConcurrentShutdownCallersAllReturn covers the
+// stranded-write join under CONCURRENT Shutdown calls. shutdownOnce implies the
+// API tolerates them, and it does — but the join must release all of them, not
+// just whichever got there first. An earlier implementation woke waiters with a
+// single cap-1 token; the winner consumed it and every other caller sat until
+// its own context expired, turning a healthy shutdown into a spurious
+// DeadlineExceeded for all but one caller.
+//
+// Sequenced: the stranded write parks inside the adapter, which holds the
+// in-flight count above zero, so both callers are waiting on the same latch
+// before it is released.
+func TestPersistenceShutdown_ConcurrentShutdownCallersAllReturn(t *testing.T) {
+	const callers = 4
+
+	a := newStrandedGateAdapter()
+	s := ygws.NewServerWithPersistence(a)
+
+	ctx := context.Background()
+	require.NoError(t, s.Apply(ctx, "room", func(_ *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		transact(func(txn *crdt.Transaction) {
+			txn.GetText("t").Insert(txn, 0, "before", nil)
+		})
+	}))
+	doc := s.GetDoc("room")
+	require.NotNil(t, doc)
+
+	results := make(chan error, callers)
+	launch := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		go func() {
+			<-launch
+			// Deliberately generous relative to the parked write below: a
+			// caller that returns DeadlineExceeded here did so because it was
+			// never woken, not because the work was slow.
+			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			results <- s.Shutdown(sctx)
+		}()
+	}
+	close(launch)
+
+	<-a.compactEntered
+
+	committed := make(chan struct{})
+	go func() {
+		defer close(committed)
+		doc.Transact(func(txn *crdt.Transaction) {
+			txt := txn.GetText("t")
+			txt.Insert(txn, txt.Len(), "-during", nil)
+		})
+	}()
+	awaitStrandedWriter(t, s)
+
+	close(a.releaseCompact)
+
+	select {
+	case <-a.storeEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stranded write never reached the adapter")
+	}
+
+	// Every caller is now past the persistence join and parked on the
+	// stranded-write latch. Give the last of them time to get there, so the
+	// release below really does have to wake more than one.
+	time.Sleep(200 * time.Millisecond)
+	close(a.releaseStore)
+
+	for i := 0; i < callers; i++ {
+		select {
+		case err := <-results:
+			require.NoError(t, err,
+				"a concurrent Shutdown caller was never woken by the stranded-write join (#229)")
+		case <-time.After(15 * time.Second):
+			t.Fatal("a concurrent Shutdown caller never returned")
+		}
+	}
+	<-committed
+	require.Equal(t, "before-during", a.text(t, "t"))
+}
+
 // TestPersistenceShutdown_CommitDuringShutdownIsNotLost is the #229 regression
 // gate. A transaction committed while Shutdown is in flight — after the
 // persistence worker's final drain, before Shutdown returns — must reach the
