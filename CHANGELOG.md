@@ -24,8 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coalescing-disabled path's final shutdown drain reuses a ctx a separate
   goroutine cancels concurrently, discarding a still-queued committed write
   with only a log line. Measured: 51-151 of 200 concurrent writes dropped
-  across trials when this was tried during development; 0 dropped once it was
-  removed (#186).
+  across trials when this was tried during development, attributable to this
+  method. (A separate, pre-existing gap in the coalescing-disabled shutdown
+  drain — it drains its queue once and exits, regardless of adapter — also
+  drops writes under this same repro shape and was filed separately; it is
+  not what this method's removal fixes.)
 
 ### Fixed
 

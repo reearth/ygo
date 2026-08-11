@@ -92,8 +92,17 @@ the coalescing-disabled path's final shutdown drain reuses a ctx a separate
 goroutine cancels concurrently with that same drain. A committed update still
 sitting in the queue when that race goes the wrong way is discarded with only
 a log line. Measured while this was still in the branch: 51-151 of 200
-concurrent writes dropped across 20 trials during a concurrent `Shutdown`; 0
-dropped once it was removed.
+concurrent writes dropped across 20 trials during a concurrent `Shutdown`,
+attributable to this method.
+
+That figure is **not** a claim that removing it makes such a `Shutdown` race
+lossless. A separate, pre-existing gap in the coalescing-disabled shutdown
+drain — it drains its queue exactly once and exits, whatever the adapter —
+drops writes under this same repro shape regardless of which
+`PersistenceAdapter` is behind it, and remains open (filed separately, not
+part of this release). What this removal fixes is specifically the extra,
+compounding loss this method caused on top of that; it does not fix the
+pre-existing drain gap itself.
 
 ## v1.48.0
 

@@ -362,7 +362,11 @@ func (m *MemoryPersistence) LoadDoc(room string) ([]byte, error) {
 // with only a log line, because persistence.MemoryPersistence.AppendUpdate
 // returns ctx.Err() at entry. Measured impact of having implemented it: 51-151
 // of 200 concurrent writes dropped across trials during a concurrent Shutdown,
-// 0 dropped without it (#186).
+// attributable to this method (#186). This is not a claim that omitting it
+// makes such a Shutdown race lossless: a separate, pre-existing gap in the
+// coalescing-disabled shutdown drain (it drains its queue once and exits,
+// regardless of adapter) drops writes under the same repro shape and remains
+// open, filed separately.
 func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
 	if m.adapter == nil {
 		return errMemoryPersistenceNotConstructed

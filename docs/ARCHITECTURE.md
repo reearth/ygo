@@ -9,8 +9,8 @@ provider/webhook                                        mobile/
        │                                                    │
        ▼                                                    ▼
 provider/websocket ────────────────────────────────── provider/client        provider/http
-       │                                                                            │
-       ├──────────────────┬───────────────┤                                         │
+       │                                                    │                       │
+       ├──────────────────┬───────────────┬─────────────────┤                       │
        ▼                  ▼               ▼                                         │
      sync/            cluster/       persistence/                                   │
        │                  │               │                                         │
@@ -25,6 +25,11 @@ provider/websocket ────────────────────�
   │                              ▼
   └─────────────────────────►encoding/
 ```
+
+The bus (`├──┬──┬──┤`) is fed from both provider entry points — `provider/websocket`'s
+trunk on the left, `provider/client`'s on the right — and forks into exactly
+three arrows, one per label (`sync/`, `cluster/`, `persistence/`); the bus's
+own width just spans from one trunk to the other, it is not a fourth branch.
 
 **Rule:** no upward imports. `encoding/` has zero runtime dependencies. `crdt/` depends only on `encoding/`. `sync/` depends on `crdt/` and `encoding/`; `persistence/` depends only on `crdt/`; `cluster/` depends on `awareness/` and `crdt/`. `awareness/` is the one exception to the otherwise-neat layering: it depends only on `encoding/`, not `crdt/`, despite sitting next to packages that do. `provider/websocket` and `provider/client` both import `sync/`, `awareness/`, `cluster/`, and `persistence/` directly; `provider/http` skips that whole tier and depends on `crdt/` directly. `provider/webhook` and `mobile/` sit one layer up, wrapping `provider/websocket` and `provider/client` respectively — but each also imports lower tiers directly for its own use: `provider/webhook` imports `crdt/`, and `mobile/` imports both `awareness/` and `crdt/`.
 
