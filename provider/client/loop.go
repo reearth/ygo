@@ -120,8 +120,14 @@ const reconnectBackoffBase = 500 * time.Millisecond
 // either side) is not by itself fatal — the NEXT ping still has a full
 // interval to succeed before the deadline expires — while two consecutive
 // misses fires well before an embedding application would notice anything
-// wrong on its own. This mirrors y-websocket's own ping-every-30s,
-// terminate-at-2x convention (#165).
+// wrong on its own. The 30s/2x pairing is chosen to match the
+// WIDELY-DOCUMENTED y-websocket convention (ping every 30s, terminate after
+// 2 missed intervals) as a reasonable interoperability default (#165). This
+// repo does not vendor or otherwise check against y-websocket's actual JS
+// source, so read that as "chosen to be compatible with," not
+// "independently verified against," that implementation (#228: an earlier
+// version of this doc cited the convention as an established fact this repo
+// had confirmed, which it cannot).
 const readDeadlineMultiplier = 2
 
 // session is one connection's worth of loop state: the socket, and whatever
@@ -266,9 +272,21 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	conn, resp, err := dialer.DialContext(ctx, c.opts.URL, c.opts.Header)
 	if resp != nil && resp.Body != nil {
 		// gorilla hands back the HTTP response on a rejected upgrade (e.g. a
-		// 401 from provider/websocket's Authorize hook). Nothing here reads
-		// it, but leaving it open would leak the connection out of the
-		// transport's pool.
+		// 401 from provider/websocket's Authorize hook). By this point
+		// resp.Body is NOT a connection checked out of an http.Transport's
+		// pool — there is no net/http.Transport in a WebSocket dial at all;
+		// gorilla's Dialer opens and owns the raw net.Conn itself, and on
+		// any failed handshake it substitutes resp.Body with an in-memory
+		// io.NopCloser wrapping a short diagnostic read-ahead buffer, having
+		// already closed the real network connection in its own deferred
+		// cleanup before this line ever runs (see gorilla's client.go: the
+		// dial's own `defer` closes netConn unless the handshake fully
+		// succeeded). Closing it here is therefore just tidying up an
+		// already-inert NopCloser — harmless, and the idiomatic "always
+		// close what you were handed" habit — not a fix for an actual
+		// connection or socket leak (#228: an earlier version of this
+		// comment blamed "the transport's pool", which doesn't exist on
+		// this path).
 		_ = resp.Body.Close()
 	}
 	if err != nil {
@@ -357,13 +375,50 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 			}
 		}
 	}()
-	// Tear down in the order that actually unblocks the pump: cancel releases
-	// a pump parked on the frames send, Close releases one parked in
-	// ReadMessage, and only then is it safe to wait. Joining the goroutine
-	// (rather than letting it drift) is what keeps `go test -race` from
-	// attributing a later connection's activity to a leaked pump, and what
-	// makes "no goroutine outlives Connect" checkable.
+	// Tear down in the order that actually unblocks the pump: send a
+	// WebSocket-level close frame FIRST (#228), then cancel releases a pump
+	// parked on the frames send, Close releases one parked in ReadMessage,
+	// and only then is it safe to wait. Joining the goroutine (rather than
+	// letting it drift) is what keeps `go test -race` from attributing a
+	// later connection's activity to a leaked pump, and what makes "no
+	// goroutine outlives Connect" checkable.
+	//
+	// # Why the close frame (#228)
+	//
+	// Without it, every exit from this function — including the ordinary
+	// "Close was called" case — looked identical, from the PEER's side, to
+	// this connection simply vanishing: conn.Close() below only tears down
+	// the local TCP socket, it does not tell the other end anything.
+	// ygo's own server (and any other implementation of the ordinary
+	// WebSocket close handshake) logs that as an abnormal closure (code
+	// 1006) and has no way to distinguish it from a crash, a network
+	// partition, or a hung process — even though this client, on the
+	// ordinary Close path, knows perfectly well that it is leaving on
+	// purpose. Sending CloseNormalClosure here first — the same thing a
+	// graceful gorilla/websocket client is documented to do before dropping
+	// its connection — makes the peer's ReadMessage return a proper
+	// *websocket.CloseError instead of a bare I/O error, which is what lets
+	// its disconnect handling log (and act on) a clean close rather than an
+	// abnormal one. See TestClient_Close_SendsWebSocketCloseFrame (close_test.go)
+	// for the proof, observed server-side on a raw WebSocket peer rather
+	// than inferred from this comment.
+	//
+	// WriteControl, not writeWithDeadline/WriteMessage: this runs on the
+	// loop goroutine, the same one every DATA frame write already runs on
+	// (see session's single-writer doc), so nothing else could be mid-write
+	// here regardless — but WriteControl is what every other control frame
+	// this file sends (session.ping) already uses, and matching that
+	// convention costs nothing. The error is deliberately ignored: on every
+	// path that reaches this defer except the clean ctx-cancelled one, the
+	// connection is already failing or already gone, so a failed close
+	// write here reveals nothing conn.Close() below doesn't already make
+	// moot; on the clean path, a failure here just means the peer (or the
+	// network) tore the socket down first, which conn.Close() handles the
+	// same way regardless of why.
 	defer func() {
+		_ = conn.WriteControl(gws.CloseMessage,
+			gws.FormatCloseMessage(gws.CloseNormalClosure, ""),
+			time.Now().Add(writeTimeout))
 		connCancel()
 		_ = conn.Close()
 		<-readerDone
@@ -734,10 +789,19 @@ func (s *session) handleFrame(frame []byte) error {
 			// shared Awareness sees it at the moment handleDisconnect
 			// runs — unbumped. Against our own server, a SINGLE Heartbeat
 			// here already clears that removal unconditionally: Heartbeat's
-			// own +1 (from our pre-disconnect clock — this client's OWN
-			// local clock is untouched by a removal broadcast, since a
-			// disconnecting peer never receives its own removal notice)
-			// makes our re-announcement strictly NEWER than any removal our
+			// own +1 (from our pre-disconnect clock — under the ORDINARY
+			// interleaving this client's OWN local clock is untouched by a
+			// removal broadcast, because the disconnecting connection is
+			// already torn down by the time handleDisconnect's broadcast
+			// fires, so there is no live socket of ours left to receive it
+			// on. That is not a universal rule, though (#228: an earlier
+			// version of this comment stated it as one): that broadcast's
+			// excludeSelf is false — see peer.go's
+			// broadcastAwarenessFromRoom — so a peer that has already
+			// RECONNECTED under the SAME clientID before the broadcast
+			// fires, a genuine race rather than the ordinary case, IS a
+			// live recipient of its own removal notice) makes our
+			// re-announcement strictly NEWER than any removal our
 			// server could have synthesised from that same base, so
 			// Awareness.ApplyUpdate's ordinary newer-clock path — not the
 			// equal-clock one — admits it every time, regardless of

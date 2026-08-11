@@ -116,6 +116,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   covers every committing goroutine, so a sustained writer on a retained
   `*crdt.Doc` can hold it above zero until the deadline expires with no wedged
   adapter anywhere (#229).
+- **`provider/client`: three follow-ups from the #165 review rounds
+  (#228).** `Client.Close`, called a second time, always returned `nil`
+  regardless of what the owned store's `Close` actually returned on the
+  first call — `closeErr` was a variable local to `Close`, re-declared fresh
+  (and never touched, since `closeOnce.Do` is a no-op on a repeat call) on
+  every call after the first. It is now cached on the `Client` and returned
+  consistently by every call. `Client.maybeCompact` could lose a concurrent
+  `storeWrites` increment: it read the counter via `Load()` and then reset
+  it unconditionally via `Store(0)`, discarding any `Add(1)` that landed in
+  between (from a concurrent local edit's `onDocUpdate`, incrementing from
+  either the caller's own goroutine or the loop goroutine). It now consumes
+  exactly its threshold via `Add(-threshold)`, which cannot lose a
+  concurrent increment either side of it — impact was compaction cadence
+  drift, never lost data. And `Close`'s teardown closed the WebSocket
+  connection without ever sending a close frame, so the server logged an
+  abnormal closure (1006) for every ordinary, on-purpose disconnect; it now
+  sends `WriteControl(CloseMessage, CloseNormalClosure)` before
+  `conn.Close()`, mirroring every other control frame this package already
+  sends.
 
 ## [1.48.0] — 2026-08-10
 

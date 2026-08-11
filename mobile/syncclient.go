@@ -267,6 +267,25 @@ func NewSyncClient(url, dbPath, token string) (*SyncClient, error) {
 // Close too: Close stops syncing and releases the network/store, but never
 // closes the Doc itself, so previously-synced or offline-edited content is
 // never taken away by tearing down the connection.
+//
+// # Do not call Doc().Close() while this SyncClient is still connected
+//
+// Doc().Close() only tears down THIS wrapper: it nils this Doc's own d field
+// and detaches this Doc's own change-observer subscriptions (see Doc.Close's
+// own doc) — it has no way to reach, and does not touch, the underlying
+// provider/client.Client's sync loop, which was handed the exact same
+// *crdt.Doc pointer at construction (see NewSyncClient's rawDoc) and keeps
+// its own, entirely separate Doc.OnUpdate registration on it for as long as
+// this SyncClient stays connected. So calling Doc().Close() while connected
+// orphans the sync loop rather than stopping it: remote updates keep
+// arriving and getting applied and persisted (crdt.ApplyUpdateV1 runs
+// directly against the underlying *crdt.Doc from provider/client's own
+// handleFrame, never through this wrapper), local edits already queued keep
+// getting flushed, and awareness keeps being kept alive — none of it
+// reachable from the app anymore, because every mobile.Doc method now
+// returns ErrClosed or a zero value. The only way to actually stop that work
+// is SyncClient.Close, which is also the right call to make FIRST if an app
+// wants to shed both the sync loop and the Doc together (#228).
 func (s *SyncClient) Doc() *Doc {
 	return s.doc
 }
