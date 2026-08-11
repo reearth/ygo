@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 	ygws "github.com/reearth/ygo/provider/websocket"
 )
 
@@ -46,18 +47,6 @@ func TestUnit_MemoryPersistence_RoundTripsAcrossCompactionBoundaries(t *testing.
 	p.CompactEvery = 4
 	want := storeN(t, p, "room", 21) // crosses the boundary 5 times
 	require.Equal(t, want, docTextAfterReload(t, p, "room"))
-}
-
-// The context-aware write path must exist and behave like StoreUpdate: the
-// server prefers it, and the wrapped adapter already has it.
-func TestUnit_MemoryPersistence_StoreUpdateContextPersists(t *testing.T) {
-	p := ygws.NewMemoryPersistence()
-	doc := crdt.New()
-	txt := doc.GetText("t")
-	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "hi", nil) })
-	require.NoError(t, p.StoreUpdateContext(context.Background(),
-		"room", crdt.EncodeStateAsUpdateV1(doc, nil)))
-	require.Equal(t, "hi", docTextAfterReload(t, p, "room"))
 }
 
 // Explicit Compact must be safe on an unknown room and must not lose state on
@@ -102,7 +91,8 @@ func TestUnit_MemoryPersistence_ThresholdCompactsAndDropsBookkeeping(t *testing.
 }
 
 // Interface satisfaction is load-bearing: the server type-asserts for these at
-// runtime, so losing one silently disables a feature.
+// runtime, so gaining or losing one silently changes which persistence-worker
+// code path runs.
 func TestUnit_MemoryPersistence_SatisfiesExpectedInterfaces(t *testing.T) {
 	var p any = ygws.NewMemoryPersistence()
 	_, isAdapter := p.(ygws.PersistenceAdapter)
@@ -110,8 +100,91 @@ func TestUnit_MemoryPersistence_SatisfiesExpectedInterfaces(t *testing.T) {
 	_, isCompactable := p.(ygws.CompactableAdapter)
 	_, isVersionable := p.(ygws.VersionableAdapter)
 	require.True(t, isAdapter)
-	require.True(t, isCtx)
+	require.False(t, isCtx,
+		"deliberately NOT a PersistenceAdapterContext: this adapter's append has "+
+			"nothing to abort, so implementing it would only cost writes — it would "+
+			"switch the server onto the cancellable-ctx path, and on the "+
+			"coalescing-disabled path the final shutdown drain reuses a ctx a "+
+			"separate goroutine cancels concurrently, discarding a still-queued "+
+			"committed write with only a log line (measured: 51-151/200 dropped "+
+			"across trials, #186)")
 	require.True(t, isCompactable)
 	require.False(t, isVersionable,
 		"deliberately NOT a VersionableAdapter: auto-versioning an in-memory test adapter is scope creep (#186)")
+}
+
+// This is the deterministic, isolated reproduction of the ACTUAL mechanism the
+// reviewer identified: persistence.MemoryPersistence.AppendUpdate (reached via
+// persistence.LegacyAdapter.StoreUpdateContext, exactly the method
+// websocket.MemoryPersistence's removed StoreUpdateContext would have
+// forwarded to) checks ctx.Err() at entry and discards an otherwise
+// well-formed, committed update the instant ctx is already cancelled — with
+// no partial write, no retry, nothing but the returned error. This is why
+// giving websocket.MemoryPersistence a StoreUpdateContext was the wrong move:
+// the server's persistence worker cancels its ctx the moment shutdown begins
+// (startPersistenceWorker's doc, persistence.go) with no ordering guarantee
+// against "drain and store what's still queued," so any context-aware adapter
+// with nothing to actually abort just loses writes for free.
+//
+// An end-to-end Server.Shutdown-races-concurrent-Apply test was attempted
+// first, per this hazard's own writeup, and abandoned: it reproduces write
+// loss on BOTH current and pre-#186 code (verified against the pre-#186
+// commit directly, with and without -race), because provider/websocket's
+// strict-path shutdown drain has its own separate, pre-existing gap — it
+// drains persistCh exactly once and returns, so an update landing in the
+// channel microseconds after that one-shot drain is never persisted,
+// regardless of which PersistenceAdapter is behind it. That gap predates
+// #186, is not specific to MemoryPersistence, and is out of scope for this
+// fix wave (flagged separately). Any test built on that end-to-end race would
+// fail unpredictably even on a correctly-fixed #186, which would misreport
+// this hazard as unresolved. This test isolates the ACTUAL mechanism #186
+// introduced instead: no goroutines, no sleeps, no scheduling luck — it calls
+// the exact vulnerable method with an already-cancelled ctx and asserts the
+// write is gone.
+func TestUnit_PersistenceLegacyAdapterStoreUpdateContext_DiscardsOnCancelledCtx(t *testing.T) {
+	store := persistence.NewMemoryPersistence()
+	adapter := persistence.NewLegacyAdapter(store)
+	adapter.KeepVersions = 1 // matches websocket.NewMemoryPersistence's own setup
+
+	doc := crdt.New()
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "hi", nil) })
+	update := crdt.EncodeStateAsUpdateV1(doc, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate the shutdown drain observing an already-cancelled ctx
+
+	err := adapter.StoreUpdateContext(ctx, "room", update)
+	require.Error(t, err, "a context-aware store must refuse an already-cancelled ctx")
+	require.ErrorIs(t, err, context.Canceled)
+
+	blob, loadErr := adapter.LoadDoc("room")
+	require.NoError(t, loadErr)
+	require.Empty(t, blob,
+		"the update must NOT have been stored — this is the write-loss mechanism "+
+			"#186 measured (51-151/200 dropped over 20 trials) when "+
+			"websocket.MemoryPersistence exposed StoreUpdateContext; it now only "+
+			"implements the ctx-ignoring PersistenceAdapter, so the persistence "+
+			"worker never reaches this method for this adapter (see "+
+			"TestUnit_MemoryPersistence_SatisfiesExpectedInterfaces)")
+}
+
+// The zero value of MemoryPersistence (e.g. &MemoryPersistence{CompactEvery:
+// 2000}, natural now that CompactEvery is an exported field inviting a
+// composite literal) has a nil internal adapter. Every method must report
+// that clearly rather than nil-dereferencing — the server's persistence
+// worker recovers panics from StoreUpdate, so an unguarded nil deref would
+// present as total silent write loss with nothing but a log line, not a
+// crash that points at the real cause.
+func TestUnit_MemoryPersistence_ZeroValueReturnsErrorNotPanic(t *testing.T) {
+	p := &ygws.MemoryPersistence{CompactEvery: 2000}
+
+	_, err := p.LoadDoc("room")
+	require.Error(t, err, "LoadDoc on the zero value must error, not panic")
+
+	err = p.StoreUpdate("room", []byte("x"))
+	require.Error(t, err, "StoreUpdate on the zero value must error, not panic")
+
+	err = p.Compact(context.Background(), "room")
+	require.Error(t, err, "Compact on the zero value must error, not panic")
 }

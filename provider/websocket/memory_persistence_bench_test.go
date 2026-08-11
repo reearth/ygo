@@ -28,19 +28,26 @@ func buildSingleOpUpdates(tb testing.TB, n int) [][]byte {
 	return updates
 }
 
-// BenchmarkWSMemoryPersistence_StoreUpdateVsDocSize times a SINGLE
-// StoreUpdate against a room already holding N updates. MemoryPersistence
-// (provider/websocket/server.go) folds every write into one accumulated V1
-// snapshot via crdt.MergeUpdatesV1(existing, update) — merging against the
-// WHOLE document on every call. Under that merge-on-write design the
-// per-call cost grows with N (#186), so a session of N updates costs
-// O(N²) overall even though each update is O(1)-sized. Under a future
-// append-then-compact design the per-call cost must stay flat apart from
-// the amortised cost of periodic compaction.
+// BenchmarkWSMemoryPersistence_StoreUpdateVsDocSize times repeated
+// StoreUpdate calls against a room already holding N updates. MemoryPersistence
+// (provider/websocket/server.go) delegates to persistence.LegacyAdapter +
+// persistence.MemoryPersistence (KeepVersions = 1): each StoreUpdate call
+// APPENDS the update — O(update), not O(document) — and only folds the
+// room's backlog into one blob once every CompactEvery appends (default 500,
+// #186). That fold is still O(document); it is just paid once per
+// CompactEvery calls instead of on every one, so per-call cost keeps growing
+// with document size, only far more slowly (see this repo's godoc on
+// MemoryPersistence and RELEASE_NOTES.md for the honest framing).
 //
-// N is seeded and pre-merged OUTSIDE the timer (b.ResetTimer below); only the
-// single extra StoreUpdate call per b.N iteration is timed, isolating the
-// per-call flush cost as N grows.
+// b.N in a Go benchmark is normally far larger than CompactEvery, so the
+// reported ns/op here AVERAGES many cheap O(update) appends together with
+// the rare O(document) fold that lands roughly once every CompactEvery
+// iterations — that averaging is why the numbers below read as close to flat
+// across seed sizes; it is not evidence that any single call is cost-capped.
+//
+// N is seeded and APPENDED (not merged) OUTSIDE the timer (b.ResetTimer
+// below); only the StoreUpdate calls inside the b.N loop are timed,
+// isolating the per-call cost as N grows.
 func BenchmarkWSMemoryPersistence_StoreUpdateVsDocSize(b *testing.B) {
 	for _, n := range []int{100, 1_000, 10_000} {
 		n := n

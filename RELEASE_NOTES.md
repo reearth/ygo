@@ -7,7 +7,7 @@ at all, and nothing under `provider/`, `cmd/`, or `examples/` constructs
 `MemoryPersistence` outside its own tests; you have to opt into it via
 `NewServerWithPersistence`. If that's not you, this release changes nothing
 you use. **What you must do:** nothing — this is a drop-in fix, same
-constructor, same behaviour from the outside, just cheaper.
+constructor — cheaper on the write path, see the trade below.
 
 ### Fixed: `MemoryPersistence` re-merged the whole document on every write (#186)
 
@@ -70,7 +70,7 @@ you read #186 directly:**
    `provider/websocket`, which measures the type and path #186 is actually
    about — the numbers above come from it.
 
-### Added: `Compact`, `StoreUpdateContext`, `CompactEvery` (#186)
+### Added: `Compact`, `CompactEvery` (#186)
 
 New exported surface on `MemoryPersistence`, which is why this ships MINOR
 rather than PATCH even though it's a bug fix — nothing existing changes
@@ -81,11 +81,19 @@ behaviour or signature.
   interface, so `Server.CompactEvery` and the server's on-unload compaction
   work against `MemoryPersistence` too, additively on top of its own
   threshold.
-- **`StoreUpdateContext(ctx, room, update) error`** is the context-aware
-  `PersistenceAdapterContext` variant, forwarded to the wrapped adapter so
-  `Server.Shutdown` can abort an in-flight write rather than block on it.
 - **`CompactEvery int`** (field) sets the self-compaction threshold; 0 or
   less means the default of 500.
+
+**Deliberately not added:** `StoreUpdateContext`. An in-memory append has
+nothing to abort, so implementing the context-aware `PersistenceAdapterContext`
+variant would only cost writes — it would newly satisfy that interface and
+switch the server's persistence worker onto its cancellable-ctx path, where
+the coalescing-disabled path's final shutdown drain reuses a ctx a separate
+goroutine cancels concurrently with that same drain. A committed update still
+sitting in the queue when that race goes the wrong way is discarded with only
+a log line. Measured while this was still in the branch: 51-151 of 200
+concurrent writes dropped across 20 trials during a concurrent `Shutdown`; 0
+dropped once it was removed.
 
 ## v1.48.0
 

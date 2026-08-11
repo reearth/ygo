@@ -9,18 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`provider/websocket`: `MemoryPersistence.Compact`, `StoreUpdateContext`,
-  and a `CompactEvery` field.** `Compact(ctx, room)` folds a room's appended
-  update log into one blob on demand, satisfying the optional
-  `CompactableAdapter` interface so `Server.CompactEvery` and on-unload
-  compaction apply to this adapter too — additively, on top of the threshold
-  below. `StoreUpdateContext` is the context-aware `PersistenceAdapterContext`
-  variant, forwarded to the wrapped adapter so `Server.Shutdown` can abort an
-  in-flight write instead of blocking on it. `CompactEvery int` bounds how
+- **`provider/websocket`: `MemoryPersistence.Compact` and a `CompactEvery`
+  field.** `Compact(ctx, room)` folds a room's appended update log into one
+  blob on demand, satisfying the optional `CompactableAdapter` interface so
+  `Server.CompactEvery` and on-unload compaction apply to this adapter too —
+  additively, on top of the threshold below. `CompactEvery int` bounds how
   many appended updates a room accumulates before `MemoryPersistence` folds
   itself, independent of whether the caller ever sets `Server.CompactEvery`;
   0 or less means the default of 500, matching `provider/client`'s own
-  compaction default (#186).
+  compaction default. `MemoryPersistence` deliberately does **not** implement
+  `PersistenceAdapterContext`: an in-memory append has nothing to abort, and
+  implementing it anyway newly satisfies that interface, switching the
+  server's persistence worker onto its cancellable-ctx path — where the
+  coalescing-disabled path's final shutdown drain reuses a ctx a separate
+  goroutine cancels concurrently, discarding a still-queued committed write
+  with only a log line. Measured: 51-151 of 200 concurrent writes dropped
+  across trials when this was tried during development; 0 dropped once it was
+  removed (#186).
 
 ### Fixed
 

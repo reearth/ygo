@@ -59,9 +59,17 @@ O(document²) over a session (#186).
 
 It bounds that append log itself: once a room accumulates `CompactEvery`
 writes (default 500, matching `provider/client`'s own compaction default) it
-folds the room's backlog into a single blob. `LoadDoc` also folds first, so a
-load always returns a coherent V1 snapshot regardless of where the room sits
-in its append cycle.
+folds the room's backlog into a single blob. `LoadDoc` also folds first —
+materialising the room's records is what makes a load coherent regardless of
+where the room sits in its append cycle; the fold only makes the *next* load
+cheap again, since a load always merges whatever records are present whether
+or not it folds first.
+
+One behaviour change worth knowing if you handle `LoadDoc`'s error: it could
+previously never return an error, and now can — an unmergeable append log
+surfaces at load time rather than at write time. `StoreUpdate`/`AppendUpdate`
+validate each update as it is written, so there is no practical way to reach
+this in normal operation, but the failure mode has moved.
 
 Measured per-write cost, old merge-on-write vs. append-then-compact, at three
 room sizes:

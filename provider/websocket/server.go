@@ -272,8 +272,9 @@ const defaultMemoryCompactEvery = 500
 // The distinction is the point of #186: merging on every write costs
 // O(document) per flush and O(document²) over a session, which is exactly what
 // PersistenceAdapter's own doc warns adapters not to do. Appending costs
-// O(update); the O(document) fold is paid once per CompactEvery writes, so the
-// amortised per-write cost no longer grows with the document.
+// O(update); the O(document) fold is still paid, but only once per
+// CompactEvery writes rather than on every one — the O(document) cost is
+// divided by CompactEvery, not eliminated.
 //
 // It compacts ITSELF rather than waiting for Server.CompactEvery, which is off
 // by default (see that field's doc) — an adapter that only appended and waited
@@ -286,6 +287,10 @@ const defaultMemoryCompactEvery = 500
 //
 // Still primarily for tests and single-process deployments; a multi-process
 // deployment wants persistence/sqlite or another VersionedPersistence.
+//
+// Must be constructed with NewMemoryPersistence. The zero value has a nil
+// internal adapter; every method reports that with a plain error rather than
+// panicking, but there is no working zero value — always use the constructor.
 type MemoryPersistence struct {
 	adapter *persistence.LegacyAdapter
 
@@ -297,6 +302,15 @@ type MemoryPersistence struct {
 	mu      sync.Mutex
 	pending map[string]int // room → writes since that room last compacted
 }
+
+// errMemoryPersistenceNotConstructed is returned by every MemoryPersistence
+// method when called on the zero value (e.g. &MemoryPersistence{CompactEvery:
+// 2000}) instead of a value from NewMemoryPersistence. The zero value's
+// adapter field is nil; without this guard every method would nil-dereference,
+// and the persistence worker recovers panics from StoreUpdate, so an unguarded
+// panic here would present as total silent write loss with nothing but a log
+// line rather than an error that names the actual cause.
+var errMemoryPersistenceNotConstructed = errors.New("websocket: MemoryPersistence must be constructed with NewMemoryPersistence, not used as a zero value")
 
 // NewMemoryPersistence returns an empty MemoryPersistence.
 func NewMemoryPersistence() *MemoryPersistence {
@@ -318,9 +332,11 @@ func (m *MemoryPersistence) compactEvery() int {
 
 // LoadDoc returns the room's state as one V1 update, folding any outstanding
 // appended records first so later loads are cheap again. Compaction failure is
-// not fatal here: the fold is an optimisation, and the adapter can still
-// materialise the room from its records.
+// not fatal here: the adapter can still materialise the room from its records.
 func (m *MemoryPersistence) LoadDoc(room string) ([]byte, error) {
+	if m.adapter == nil {
+		return nil, errMemoryPersistenceNotConstructed
+	}
 	_ = m.Compact(context.Background(), room)
 	return m.adapter.LoadDoc(room)
 }
@@ -333,24 +349,25 @@ func (m *MemoryPersistence) LoadDoc(room string) ([]byte, error) {
 // persistence failures, and returning a compaction error would misreport a
 // successful write. This mirrors CompactableAdapter's own best-effort
 // contract. Callers who need the error can call Compact directly.
+//
+// This type deliberately does NOT implement PersistenceAdapterContext. An
+// in-memory append has nothing to abort, so a StoreUpdateContext forwarding to
+// the wrapped adapter would only cost writes: it would newly satisfy
+// PersistenceAdapterContext, switching the server's persistence worker onto
+// the ctx-aware path, and on the coalescing-disabled path the final shutdown
+// drain (see startPersistenceWorker's doc, persistence.go) reuses a ctx a
+// separate goroutine cancels concurrently with that same drain — no ordering
+// guarantee places "drain and store" before "cancel". A committed update still
+// sitting in the queue when that race goes the wrong way would be discarded
+// with only a log line, because persistence.MemoryPersistence.AppendUpdate
+// returns ctx.Err() at entry. Measured impact of having implemented it: 51-151
+// of 200 concurrent writes dropped across trials during a concurrent Shutdown,
+// 0 dropped without it (#186).
 func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
-	return m.storeThenMaybeCompact(context.Background(), room, update, false)
-}
-
-// StoreUpdateContext is the context-aware variant (PersistenceAdapterContext),
-// forwarded to the wrapped adapter so Shutdown can abort an in-flight write.
-func (m *MemoryPersistence) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
-	return m.storeThenMaybeCompact(ctx, room, update, true)
-}
-
-func (m *MemoryPersistence) storeThenMaybeCompact(ctx context.Context, room string, update []byte, withCtx bool) error {
-	var err error
-	if withCtx {
-		err = m.adapter.StoreUpdateContext(ctx, room, update)
-	} else {
-		err = m.adapter.StoreUpdate(room, update)
+	if m.adapter == nil {
+		return errMemoryPersistenceNotConstructed
 	}
-	if err != nil {
+	if err := m.adapter.StoreUpdate(room, update); err != nil {
 		return err
 	}
 
@@ -361,7 +378,7 @@ func (m *MemoryPersistence) storeThenMaybeCompact(ctx context.Context, room stri
 	due := m.pending[room] >= m.compactEvery()
 	m.mu.Unlock()
 	if due {
-		_ = m.Compact(ctx, room) // best-effort; see this method's doc
+		_ = m.Compact(context.Background(), room) // best-effort; see this method's doc
 	}
 	return nil
 }
@@ -370,12 +387,20 @@ func (m *MemoryPersistence) storeThenMaybeCompact(ctx context.Context, room stri
 // CompactableAdapter interface so the server's on-unload and CompactEvery
 // compaction work too (both are additive to this type's own threshold).
 func (m *MemoryPersistence) Compact(ctx context.Context, room string) error {
+	if m.adapter == nil {
+		return errMemoryPersistenceNotConstructed
+	}
 	err := m.adapter.Compact(ctx, room)
 	// Delete rather than zero: rooms come and go (idle eviction), and a map
-	// keyed by room name that is only ever zeroed grows with churn.
-	m.mu.Lock()
-	delete(m.pending, room)
-	m.mu.Unlock()
+	// keyed by room name that is only ever zeroed grows with churn. Only on
+	// success — deleting after a failed fold would reset the counter and let
+	// records grow while the threshold never re-fires for a persistently
+	// failing fold.
+	if err == nil {
+		m.mu.Lock()
+		delete(m.pending, room)
+		m.mu.Unlock()
+	}
 	return err
 }
 
