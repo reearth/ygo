@@ -207,7 +207,12 @@ type PersistenceAdapterContext interface {
 // adapter implements it, the server calls Compact to signal a good time to
 // collapse stored updates for a room into a compact form (e.g. merge the update
 // log into a snapshot, prune old versions) — on room unload, and, when
-// Server.CompactEvery > 0, after every N persistence flushes.
+// Server.CompactEvery > 0, after every N persistence flushes on the
+// coalescing path (see Server.CompactEvery's own field doc and
+// startPersistenceWorker's doc for why: onFlushed, the call site that counts
+// those N flushes, is only reachable from there — the strict
+// (coalescing-disabled) path never calls it, so those deployments get
+// on-unload compaction only).
 //
 // Compact is invoked from the room's persistence worker goroutine, serialised
 // with StoreUpdate for that room INSTANCE, so implementations need no extra
@@ -231,9 +236,14 @@ type PersistenceAdapterContext interface {
 //
 // If your adapter's Compact is not safe against a concurrent StoreUpdate for
 // the same room name, serialise inside the adapter. Every store this repo ships
-// behind persistence.LegacyAdapter already does, each with a single mutex
-// covering all of its operations: persistence.MemoryPersistence,
-// persistence.FilePersistence, and persistence/sqlite.
+// behind persistence.LegacyAdapter already does, each serialising its writers
+// under a single mutex: persistence.MemoryPersistence and
+// persistence.FilePersistence do so for every operation, reads included;
+// persistence/sqlite's reads (Load, ListVersions, GetUpdate, MaterializeAt)
+// are deliberately lock-free instead and consistent by other means (see that
+// package's methods.go) — but its Compact and AppendUpdate are both writers
+// serialised under its own mutex, which is the property this section
+// actually depends on.
 //
 // On room unload, Compact runs synchronously in the worker's exit path.
 // Compact is invoked with context.Background() (it is not cancelled by

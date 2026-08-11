@@ -689,9 +689,12 @@ failure than the one being fixed.
   provider serialises `Compact` with `StoreUpdate` per room *instance*, not per
   name, and the point above widens that window. If your `Compact` mutates state
   keyed by name, serialise inside the adapter. Every store this repo ships
-  behind `LegacyAdapter` already does, each with one mutex over all operations:
-  `persistence.MemoryPersistence`, `persistence.FilePersistence`, and
-  `persistence/sqlite`.
+  behind `LegacyAdapter` already does, each serialising its writers under a
+  single mutex: `persistence.MemoryPersistence` and `persistence.FilePersistence`
+  do so for every operation, reads included; `persistence/sqlite`'s reads are
+  deliberately lock-free instead and consistent by other means, but its
+  `Compact` and `AppendUpdate` are both writers serialised under its own
+  mutex — the property this section actually relies on.
 
 Straggler writes also bypass coalescing, auto-versioning and compaction, and
 delay that update's relay fan-out (the persistence observer runs before the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -105,6 +106,31 @@ var (
 // history of relying on that race instead. Always nil (a no-op call site
 // below simply does nothing) in production.
 var closeDrainHook = func() {}
+
+// dialNetDialContext, when non-nil, replaces gws.Dialer's own network-dial
+// function (see runLoop's dialer construction) for the calling test's
+// duration — the same "package-level indirection purely for test
+// determinism" pattern as closeDrainHook above. Nil in production, which
+// leaves gorilla's own default (plain net.Dial) untouched.
+//
+// It exists because #228/#229 final-review Important B needs a peer whose
+// writes deterministically block past a specific deadline, and this
+// package's own regression tests (see close_test.go's
+// blockingWriteConn/withDialNetDialContext) showed that trying to get there
+// by exhausting a REAL OS socket buffer is not a viable substitute: which of
+// two successive writes overflows first depends on this machine's buffer
+// sizing (observed to vary by roughly an order of magnitude — from
+// comfortably-succeeds to blocks-for-the-full-deadline within one machine's
+// own 640KB-to-800KB window during this package's own test development), and
+// gorilla/websocket caches the FIRST write failure on a connection
+// (writeFatal) and short-circuits every later write with that cached error
+// forever after — so whichever write happens to overflow first "uses up" the
+// only failure this connection will ever produce, making the SECOND write's
+// own deadline unobservable. A test-controlled net.Conn sidesteps both
+// problems: it blocks exactly the write it is told to, for exactly the
+// deadline that write's caller supplies, regardless of any real socket's
+// buffer state.
+var dialNetDialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 
 // reconnectBackoffBase is the Full Jitter base duration runReconnectLoop
 // constructs its backoff with. Unlike MaxBackoff, this is not an Options
@@ -266,6 +292,10 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	dialer := &gws.Dialer{
 		Proxy:            http.ProxyFromEnvironment,
 		HandshakeTimeout: dialHandshakeTimeout,
+		// Always nil in production (see dialNetDialContext's own doc), which
+		// is exactly gorilla's own "NetDialContext nil -> plain net.Dial"
+		// default — this field's mere presence changes nothing here.
+		NetDialContext: dialNetDialContext,
 	}
 	// c.opts.Header was defensively copied by New, so a caller mutating their
 	// own map after construction cannot change what this dial sends.
@@ -403,6 +433,17 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	// for the proof, observed server-side on a raw WebSocket peer rather
 	// than inferred from this comment.
 	//
+	// This defer fires on EVERY exit from runLoop, not only the deliberate
+	// Close one — a rejected-auth exit and a read-error exit send the exact
+	// same CloseNormalClosure code, because the alternative (threading a
+	// more accurate code through every return path above) buys little: the
+	// peer's read loop has usually already seen — or is about to see — its
+	// own error from whatever actually went wrong (a dropped connection, an
+	// unauthorized close code it sent itself), so CloseNormalClosure here is
+	// read as "this side is done writing," not as a claim about why. Treat
+	// the CODE this frame carries as exactly that and nothing more (#229/#228
+	// final whole-branch review, Important E).
+	//
 	// WriteControl, not writeWithDeadline/WriteMessage: this runs on the
 	// loop goroutine, the same one every DATA frame write already runs on
 	// (see session's single-writer doc), so nothing else could be mid-write
@@ -415,10 +456,20 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	// moot; on the clean path, a failure here just means the peer (or the
 	// network) tore the socket down first, which conn.Close() handles the
 	// same way regardless of why.
+	//
+	// closeDrainTimeout, not writeTimeout: this write runs strictly AFTER
+	// the ctx.Done() case's own flushLane(ctx, closeDrainTimeout) drain (see
+	// that var's doc for why 2s, not the 10s handshake-path writeTimeout,
+	// backs a write this late) — and Client.Close joins this goroutine
+	// before returning, so using writeTimeout here let a backpressured but
+	// still-alive peer add up to 10s to Close's return latency where the
+	// drain immediately above it was already bounded at 2s (#229/#228 final
+	// whole-branch review, Important B; see
+	// TestClient_Close_CloseFrameUsesCloseDrainTimeoutNotWriteTimeout).
 	defer func() {
 		_ = conn.WriteControl(gws.CloseMessage,
 			gws.FormatCloseMessage(gws.CloseNormalClosure, ""),
-			time.Now().Add(writeTimeout))
+			time.Now().Add(closeDrainTimeout))
 		connCancel()
 		_ = conn.Close()
 		<-readerDone

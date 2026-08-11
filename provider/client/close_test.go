@@ -3,10 +3,13 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1018,4 +1021,191 @@ func TestClient_Close_SendsWebSocketCloseFrame(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("server never observed the connection close")
 	}
+}
+
+// blockingWriteConn wraps a real net.Conn, passing every method through
+// unchanged (Read, Close, deadlines, ...) until Arm is called, after which
+// every subsequent Write blocks until the deadline most recently set via
+// SetWriteDeadline, then returns a timeout-shaped error — never touching the
+// real underlying socket for that write at all. See dialNetDialContext's own
+// doc (loop.go) for why this package's tests reproduce "the peer is alive
+// but never reads" this way instead of actually exhausting a real OS socket
+// buffer: doing it for real turned out to depend on this machine's buffer
+// sizing AND, once one write on a gorilla Conn times out, every later write
+// on that SAME Conn short-circuits with the cached failure regardless of
+// its own deadline (gorilla's writeFatal/writeErr) — so the real-buffer
+// approach can only ever time the FIRST write to overflow, never the
+// second. Arming with nothing yet written sidesteps both: the close frame
+// becomes the first (and only) write this Conn ever has to block on.
+//
+// WriteCount, read via a test's quiescence poll (see this test's own doc),
+// tells it when it is safe to Arm: the HTTP upgrade handshake itself writes
+// through this same Conn (dialNetDialContext hands gorilla's Dialer this
+// wrapper before the handshake even starts), and gorilla's client-mode
+// WriteMessage always issues that as one Write call, so "the handshake AND
+// SyncStep1 have both finished" is exactly "WriteCount stopped changing" —
+// counting writes rather than waiting for a single specific one, since which
+// write is "the last one before the main select loop" is otherwise an
+// internal detail of gorilla's Dialer this test has no business depending
+// on. Arming before that point is a real, observed flake (caught under
+// `go test -race`, which schedules slowly enough to lose the race
+// regularly): it makes one of THOSE writes the one that blocks instead of
+// the close frame, which has nothing to do with what this test targets and
+// would misreport as this bug even after it is fixed.
+type blockingWriteConn struct {
+	net.Conn
+	armed atomic.Bool
+
+	mu       sync.Mutex
+	deadline time.Time
+
+	writeCount atomic.Int64
+}
+
+func (b *blockingWriteConn) Arm() { b.armed.Store(true) }
+
+func (b *blockingWriteConn) WriteCount() int64 { return b.writeCount.Load() }
+
+func (b *blockingWriteConn) SetWriteDeadline(t time.Time) error {
+	b.mu.Lock()
+	b.deadline = t
+	b.mu.Unlock()
+	return b.Conn.SetWriteDeadline(t)
+}
+
+func (b *blockingWriteConn) Write(p []byte) (int, error) {
+	if !b.armed.Load() {
+		n, err := b.Conn.Write(p)
+		b.writeCount.Add(1)
+		return n, err
+	}
+	b.mu.Lock()
+	dl := b.deadline
+	b.mu.Unlock()
+	wait := time.Minute // no caller in this package ever writes with a zero deadline
+	if !dl.IsZero() {
+		wait = time.Until(dl)
+	}
+	if wait > 0 {
+		time.Sleep(wait)
+	}
+	return 0, fmt.Errorf("blockingWriteConn: simulated deadline exceeded")
+}
+
+// withDialNetDialContext installs fn as loop.go's package-level
+// dialNetDialContext for the duration of the calling test, restoring the nil
+// (production) default on cleanup — see that var's own doc.
+func withDialNetDialContext(t *testing.T, fn func(ctx context.Context, network, addr string) (net.Conn, error)) {
+	t.Helper()
+	orig := dialNetDialContext
+	dialNetDialContext = fn
+	t.Cleanup(func() { dialNetDialContext = orig })
+}
+
+// TestClient_Close_CloseFrameUsesCloseDrainTimeoutNotWriteTimeout is #229/#228
+// final-review Important B's regression test: runLoop's teardown defer wrote
+// the close frame with the 10s writeTimeout const instead of
+// closeDrainTimeout (2s), even though closeDrainTimeout's own doc states its
+// entire reason for existing is that "a write attempted this late, with
+// nothing left to retry it, should fail fast rather than sit on an
+// already-doomed socket" — and the close frame write runs strictly LATER
+// than the drain that reasoning was written for. Client.Close joins the loop
+// goroutine (see Close's own doc), so a backpressured-but-alive peer could
+// add up to 10s to Close's return latency where the design intent says 2s.
+//
+// TestClient_Close_CountsUndeliveredOutboundAsDropped's wedge does not catch
+// this, despite looking similar: it sets closeDrainTimeout to -1s (a
+// deadline already in the past), so every write on that path — including,
+// incidentally, the close frame's own — fails INSTANTLY regardless of which
+// const or var backs it. That test (and TestClient_Close_SendsWebSocketCloseFrame
+// above, whose peer reads immediately) both complete in well under a second
+// no matter which timeout the close frame uses, so neither can distinguish
+// the two — and see blockingWriteConn's own doc for why "just exhaust a real
+// OS socket buffer instead" was tried and rejected as a substitute.
+//
+// The connection is real — a genuine WebSocket handshake against a real
+// httptest server that accepts and then never reads, matching the peer this
+// bug actually needs — but the CLIENT's own outbound net.Conn is
+// blockingWriteConn, armed right before Close so the close frame is the
+// FIRST write this connection ever has to block on (flushLane's own
+// close-time drain finds nothing queued and returns immediately either
+// way, so it never contends for that "first write" slot).
+//
+// Bound chosen well below the bug's ~10s and comfortably above the fix's
+// near-0s (flushLane's empty drain) + ~2s (the close frame itself), so this
+// test fails RED against writeTimeout and passes GREEN against
+// closeDrainTimeout.
+func TestClient_Close_CloseFrameUsesCloseDrainTimeoutNotWriteTimeout(t *testing.T) {
+	upgrader := gws.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	accepted := make(chan struct{})
+	release := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		close(accepted)
+		// Alive, handshake complete, but never reads and never writes — the
+		// peer this bug needs, as opposed to the wedge tests above.
+		<-release
+		_ = conn.Close()
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(func() {
+		close(release)
+		ts.Close()
+	})
+
+	connCh := make(chan *blockingWriteConn, 1)
+	withDialNetDialContext(t, func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		w := &blockingWriteConn{Conn: raw}
+		connCh <- w
+		return w, nil
+	})
+
+	c, err := New(Options{
+		URL: "ws" + strings.TrimPrefix(ts.URL, "http") + "/wedged-alive",
+		Doc: crdt.New(),
+	})
+	require.NoError(t, err)
+
+	waitConnected := statusWaiter(t, c, StateConnected)
+	connect(t, c)
+	waitConnected()
+	<-accepted
+
+	var wrapped *blockingWriteConn
+	select {
+	case wrapped = <-connCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dialNetDialContext was never invoked — the client did not dial through our hook")
+	}
+	// Wait for the write count to go quiet — the HTTP upgrade handshake AND
+	// SyncStep1 both write through wrapped, and arming before they finish
+	// races runLoop's own goroutine (see WriteCount's own doc). Two
+	// consecutive equal, non-zero samples 50ms apart is comfortably longer
+	// than either write takes against a real, unarmed, tiny-payload conn.
+	var lastCount int64 = -1
+	require.Eventually(t, func() bool {
+		n := wrapped.WriteCount()
+		settled := n > 0 && n == lastCount
+		lastCount = n
+		return settled
+	}, 2*time.Second, 50*time.Millisecond,
+		"write count on the dial-hook conn never settled — handshake/SyncStep1 never finished")
+	wrapped.Arm()
+
+	start := time.Now()
+	require.NoError(t, c.Close())
+	elapsed := time.Since(start)
+
+	require.Less(t, elapsed, 6*time.Second,
+		"Close() took %s; the close frame write must be bounded by closeDrainTimeout (2s), not "+
+			"writeTimeout (10s) — a backpressured-but-alive peer must not add up to 10s to Close's "+
+			"return latency", elapsed)
 }

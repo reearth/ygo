@@ -1,6 +1,6 @@
 ## v1.49.0
 
-**Who is affected:** two separate audiences, so read the one that is you.
+**Who is affected:** three separate audiences, so read the one that is you.
 
 - **The `MemoryPersistence` performance fix (#186)** affects only callers who
   explicitly construct `websocket.MemoryPersistence`
@@ -12,10 +12,15 @@
   `provider/websocket` with any persistence adapter at all**, in the default
   configuration. If you call `Server.Shutdown` on a server that has peers
   connected, you were losing committed transactions.
+- **The `provider/client` follow-ups (#228)** affect anyone using
+  `provider/client`, the embeddable sync client shipped in v1.48.0. One of
+  the three is directly visible on the *server* side too: every graceful
+  client disconnect was logging as an abnormal closure (code 1006).
 
-**What you must do:** nothing — both are drop-in fixes with unchanged
+**What you must do:** nothing — all three are drop-in fixes with unchanged
 constructors and signatures. The write path gets cheaper (see the trade
-below), and `Shutdown` gets more honest.
+below), `Shutdown` gets more honest, and `provider/client` disconnects now
+look like what they are.
 
 ### Fixed: `MemoryPersistence` re-merged the whole document on every write (#186)
 
@@ -234,6 +239,50 @@ parks the adapter inside the stranded write itself and asserts `Shutdown` has
 not returned, then that a wedged one still surfaces as the caller's deadline.
 Against them: `Shutdown` must still return promptly for rooms with no peers at
 all — idle-resident and `Apply`-created — where no producer will ever appear.
+
+### Fixed: `provider/client` follow-ups from the #165 review rounds (#228)
+
+**Who is affected:** anyone using `provider/client` (v1.48.0's embeddable
+sync client). Three independent, previously-deferred fixes, none touching a
+public signature — the most visible one is server-side: every graceful
+`provider/client` disconnect was logging as an abnormal closure (code 1006)
+on any server it talked to, ygo's own included.
+
+**`Client.Close`, called a second time, always returned `nil`.** `closeErr`
+was a variable local to `Close`, re-declared fresh on every call — including
+repeat calls, where `closeOnce.Do` is a no-op that never touches it — so the
+first call's real result (whatever the owned store's `Close` actually
+returned) was silently replaced by a fresh, untouched `nil` on every call
+after the first. It is now cached on the `Client` itself and returned
+consistently, first call or fifth.
+
+**`Client.maybeCompact` could lose a concurrent write count.** It read
+`storeWrites` via `Load` and then reset it unconditionally via `Store(0)`,
+discarding any `Add(1)` from a concurrent `onDocUpdate` — a local edit
+landing in that window, from either the caller's own goroutine or the loop
+goroutine — that happened to arrive between the two calls. It now consumes
+exactly its threshold via `Add(-threshold)`, which cannot lose a concurrent
+increment on either side of it. The impact was compaction cadence drift — a
+few extra updates before the next fold — never lost data.
+
+**`Close`'s teardown never sent a WebSocket close frame.** Tearing down via
+a bare `conn.Close()` tells the peer nothing: from `ReadMessage`'s point of
+view, a deliberate disconnect is indistinguishable from a crash or a severed
+network path, and ygo's own server (like most implementations of the
+ordinary WebSocket close handshake) logs that as an abnormal closure — on
+every ordinary disconnect, not only real failures. `runLoop`'s teardown now
+sends `WriteControl(CloseMessage, CloseNormalClosure)` before `conn.Close()`,
+the same thing a graceful `gorilla/websocket` client is documented to do,
+so the peer's read loop sees a proper close instead of a bare I/O error.
+Two things worth knowing precisely, not generously: that frame goes out on
+**every** exit from `runLoop`, including a rejected-auth or read-error exit,
+always carrying the same `CloseNormalClosure` code — so read it as "this
+client is done writing," not as a claim that the disconnect was clean. And
+the frame's own write is bounded by `closeDrainTimeout` (2s), not the
+10s handshake-path timeout the first version of this fix used by mistake —
+a backpressured-but-alive peer could otherwise have added up to 10 seconds
+to `Close`'s return latency, right where the design intent for this
+teardown path was already 2 seconds.
 
 ## v1.48.0
 
