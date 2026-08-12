@@ -78,24 +78,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closing it. The worker's exit triggers are unchanged, so this cannot
   introduce the opposite failure — a shutdown that hangs waiting for a producer
   that never appears. **The guarantee is exactly: given that you stopped
-  accepting new connections first, then for every room that was present and had
-  finished loading when `Shutdown` began, any commit whose `Transact` returned
-  before `Shutdown` returned is durable.** Both qualifiers are real. `Shutdown`
-  snapshots the room set once and skips rooms still mid-load, and `ServeHTTP`
-  has no shutdown gate, so a connection accepted during `Shutdown` can create or
+  accepting new connections first, then — provided `Shutdown` returns
+  `nil` — for every room that was present and had finished loading when
+  `Shutdown` began, any commit whose `Transact` returned before `Shutdown`
+  returned has been handed to the adapter, and the adapter reported success.**
+  That is a completed, successful persistence attempt, not an unconditional
+  durability claim, and every qualifier in it is real. `Shutdown` snapshots
+  the room set once and skips rooms still mid-load, and `ServeHTTP` has no
+  shutdown gate, so a connection accepted during `Shutdown` can create or
   finish loading a room after that snapshot — one `Shutdown` never waits on
   (pre-existing; called out here because the sentence would otherwise read as
-  promising against it). And a commit that *begins* after `Shutdown` observes
-  its last in-flight write is not covered and cannot be — peer read loops and
-  `*crdt.Doc` holders are producers the server has no way to join. Three
-  consequences worth knowing rather than discovering: a
-  straggler write is synchronous for its committer and delays that update's
-  relay fan-out (the persistence observer is registered before the relay ones);
-  a caller that retains a `*crdt.Doc` past teardown now keeps writing for a
-  room the server considers gone, where those commits were previously dropped
-  silently; and both widen the window in which `Compact` can overlap a
-  `StoreUpdate` for the same room NAME, which `CompactableAdapter`'s godoc now
-  scopes explicitly (#229).
+  promising against it). A commit that *begins* after `Shutdown` observes its
+  last in-flight write is not covered and cannot be — peer read loops and
+  `*crdt.Doc` holders are producers the server has no way to join. Every wait
+  inside `Shutdown` is bounded by the caller's `ctx`, not by the work actually
+  finishing, so a non-nil return (e.g. `context.DeadlineExceeded`) means a
+  final flush or a stranded write may still have been in flight when the
+  deadline hit — it may still land, but `Shutdown` returning gives no way to
+  know. And even on a `nil` return, an adapter error or a recovered panic
+  while storing a commit is logged, not propagated through `Shutdown` — the
+  guarantee is only as strong as the adapter's own success report, not proof
+  that report was correct. Three consequences worth knowing rather than
+  discovering: a straggler write is synchronous for its committer and delays
+  that update's relay fan-out (the persistence observer is registered before
+  the relay ones); a caller that retains a `*crdt.Doc` past teardown now keeps
+  writing for a room the server considers gone, where those commits were
+  previously dropped silently; and both widen the window in which `Compact`
+  can overlap a `StoreUpdate` for the same room NAME, which
+  `CompactableAdapter`'s godoc now scopes explicitly (#229).
 - **`provider/websocket`: context-aware adapters lost the shutdown tail on
   the coalescing-disabled path.** That path handed the worker's
   **cancellable** ctx — the one a sibling goroutine cancels on `shutdownCh` —

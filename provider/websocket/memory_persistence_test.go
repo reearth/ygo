@@ -2,7 +2,9 @@ package websocket_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -88,6 +90,105 @@ func TestUnit_MemoryPersistence_ThresholdCompactsAndDropsBookkeeping(t *testing.
 		"reaching CompactEvery must trigger the fold")
 	require.Zero(t, ygws.MemoryPersistencePendingRooms(p),
 		"the pending entry must be deleted after compaction, not zeroed")
+}
+
+// blockingCompactStore wraps a real persistence.MemoryPersistence and parks
+// the FIRST call to Compact until released, immediately BEFORE the actual
+// fold runs. It is the seam that makes deterministic (non-flaky) the race
+// the PR #230 review flagged at server.go:435: a concurrent StoreUpdate can
+// append and increment websocket.MemoryPersistence's pending[room]
+// bookkeeping in the window between Compact snapshotting that count and the
+// fold it guards actually completing. Only Compact is overridden; every
+// other VersionedPersistence method (AppendUpdate included) delegates
+// straight to the embedded store, unblocked, so a concurrent StoreUpdate
+// proceeds while the fold is parked.
+//
+// A CAS flag, not sync.Once: Once.Do blocks a second concurrent caller until
+// the first call's f returns, which this type's only caller in this test
+// (websocket.MemoryPersistence.Compact, called at most once here) never
+// triggers — but a CAS costs nothing extra and is the correct primitive for
+// "block the first caller only" if a test is ever extended to call Compact
+// more than once concurrently.
+type blockingCompactStore struct {
+	*persistence.MemoryPersistence
+	entered chan struct{}
+	proceed chan struct{}
+	parked  atomic.Bool
+}
+
+func newBlockingCompactStore() *blockingCompactStore {
+	return &blockingCompactStore{
+		MemoryPersistence: persistence.NewMemoryPersistence(),
+		entered:           make(chan struct{}),
+		proceed:           make(chan struct{}),
+	}
+}
+
+func (b *blockingCompactStore) Compact(ctx context.Context, room string, keep int) (int, error) {
+	if b.parked.CompareAndSwap(false, true) {
+		close(b.entered)
+		<-b.proceed
+	}
+	return b.MemoryPersistence.Compact(ctx, room, keep)
+}
+
+// A write that lands while a fold is parked mid-flight must still count
+// toward the NEXT threshold: Compact must not delete the whole pending[room]
+// entry just because IT triggered the fold, only subtract what it
+// snapshotted before folding (PR #230 review, server.go:435). Deleting it —
+// the pre-fix behaviour — erases the concurrent write's contribution, so the
+// un-folded record count can exceed CompactEvery indefinitely once writes
+// stop.
+//
+// CompactEvery is set high so StoreUpdate's own threshold check never fires:
+// the fold below is driven by an explicit p.Compact call instead. That
+// matters here — the concurrent write's own pending++ would otherwise also
+// cross the (low) threshold and recurse into a second, nested Compact call
+// on the same room while the first is still parked, folding the concurrent
+// write itself and making this test assert on the wrong mechanism.
+func TestUnit_MemoryPersistence_CompactPreservesConcurrentPendingIncrement(t *testing.T) {
+	store := newBlockingCompactStore()
+	adapter := persistence.NewLegacyAdapter(store)
+	adapter.KeepVersions = 1 // matches websocket.NewMemoryPersistence's own setup
+	p := ygws.NewMemoryPersistenceForTest(adapter)
+	p.CompactEvery = 1_000_000 // never self-compact; drive the fold explicitly below
+
+	storeN(t, p, "room", 3) // pending["room"] == 3, no auto-compact at this threshold
+
+	compactDone := make(chan error, 1)
+	go func() { compactDone <- p.Compact(context.Background(), "room") }()
+
+	select {
+	case <-store.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the explicit Compact never reached the wrapped store")
+	}
+
+	// A concurrent write lands while that fold is parked — after Compact has
+	// snapshotted pending["room"] but before the fold it guards has run. It
+	// must be a well-formed V1 update (a fresh doc's own insert) so the fold
+	// that eventually runs can still succeed.
+	concurrentDoc := crdt.New()
+	concurrentTxt := concurrentDoc.GetText("t")
+	concurrentDoc.Transact(func(txn *crdt.Transaction) { concurrentTxt.Insert(txn, 0, "b", nil) })
+	require.NoError(t, p.StoreUpdate("room", crdt.EncodeStateAsUpdateV1(concurrentDoc, nil)))
+
+	close(store.proceed) // release the parked fold
+
+	select {
+	case err := <-compactDone:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the parked Compact never returned")
+	}
+
+	require.Equal(t, 1, ygws.MemoryPersistenceRecordCount(p, "room"),
+		"the fold must still succeed and collapse the room to one record")
+	require.Equal(t, 1, ygws.MemoryPersistencePendingCount(p, "room"),
+		"the concurrent write's increment must survive: Compact snapshots the "+
+			"pending count before folding and must subtract only that snapshot, "+
+			"not delete the entry outright, or this write stops contributing "+
+			"toward the next threshold (PR #230 review, server.go:435)")
 }
 
 // Interface satisfaction is load-bearing: the server type-asserts for these at

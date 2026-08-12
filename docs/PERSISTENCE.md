@@ -641,11 +641,18 @@ count. Since v1.49.0 (#229) that separation is enforced:
 > calling `Shutdown` (shut down your `http.Server`, or otherwise stop routing to
 > the handler).
 >
-> **Then:** for every room that was present in the server and had finished
-> loading when `Shutdown` began, any commit whose `Transact` returned before
-> `Shutdown` returned is durable.
+> **Then, provided `Shutdown` returns `nil`:** for every room that was present
+> in the server and had finished loading when `Shutdown` began, any commit
+> whose `Transact` returned before `Shutdown` returned has been handed to the
+> adapter, and the adapter reported success. That is a completed, successful
+> persistence attempt — not an unconditional durability claim: a non-nil
+> return (for example `context.DeadlineExceeded`) means a final flush may
+> still have been in flight when `Shutdown` gave up on waiting for it, and
+> even on a `nil` return, an adapter error or panic encountered while storing
+> a commit is logged, not propagated — `Shutdown` has no way to see it or
+> report it.
 
-Both halves are load-bearing.
+Every clause here is load-bearing.
 
 **Why the precondition.** `Shutdown` snapshots the room set once, and skips any
 room still mid-load at that instant. `ServeHTTP` has no shutdown gate, so a
@@ -657,7 +664,27 @@ the drain. This is not new in v1.49.0; what is new is that the rest of this
 section would otherwise read as promising against it. Stop accepting
 connections first and the room set cannot grow underneath `Shutdown`.
 
-**Why the second half is still not losslessness.** **`Shutdown` is not lossless
+**Why "provided `Shutdown` returns `nil`."** Every wait inside `Shutdown` —
+the persistence join, `waitStranded`, the relay-lane join — is bounded by the
+caller's `ctx`, not by the work actually finishing. A deadline that fires mid-
+drain makes `Shutdown` return `ctx.Err()` while a final flush or a stranded
+write is still in flight; that write may still land, but `Shutdown` returning
+gives you no way to know whether it did. Only a `nil` return means every wait
+actually resolved by the work completing rather than by the clock running out.
+See "What adapters must now tolerate" below for the two independent things
+that can produce that deadline error.
+
+**Why "the adapter reported success."** The observer that performs a commit's
+write — whether the room's normal persistence worker or, for a straggler, the
+committing goroutine itself via `persistStranded` — has no caller to report a
+failure to: an adapter error or a recovered panic is logged and the write is
+abandoned, not surfaced through `Shutdown`'s return value. A `nil` `Shutdown`
+therefore tells you every in-scope commit reached the adapter and the adapter
+did not report a problem; it cannot tell you the adapter's own report was
+correct, or that no adapter call failed silently underneath a logging call you
+weren't watching.
+
+**Why the guarantee is still not losslessness.** **`Shutdown` is not lossless
 and cannot be made so.** A transaction that *begins* committing after `Shutdown`
 has observed its last in-flight write is not covered: the producers are peer
 read loops and any code holding a `*crdt.Doc`, none of which the server can

@@ -419,22 +419,49 @@ func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
 // Compact folds the room's appended records into one, satisfying the optional
 // CompactableAdapter interface so the server's on-unload and CompactEvery
 // compaction work too (both are additive to this type's own threshold).
+//
+// The pending count folded is SNAPSHOTTED before the fold, and only that
+// snapshot is subtracted afterward — Compact never just deletes the entry.
+// MergeUpdatesV1 (invoked by the wrapped adapter, below) runs OUTSIDE m.mu, by
+// design: a large room's fold must never block another room's counter
+// update. That window is exactly what lets a concurrent StoreUpdate append
+// and increment pending[room] while this call is folding. That update was not
+// (or may not have been) included in the fold; deleting the entry regardless
+// — the pre-fix behaviour — erases its contribution, so the un-folded record
+// count can exceed CompactEvery indefinitely once writes stop (PR #230
+// review, reported against the line that used to read `delete(m.pending,
+// room)` unconditionally). Subtracting only the snapshot can occasionally
+// under-forgive the other way — a write that lands late enough to actually be
+// swept into this same fold still gets counted toward the next one — but that
+// is bounded (compacts at most one write early), never unbounded.
 func (m *MemoryPersistence) Compact(ctx context.Context, room string) error {
 	if m.adapter == nil {
 		return errMemoryPersistenceNotConstructed
 	}
+
+	m.mu.Lock()
+	snapshot := m.pending[room]
+	m.mu.Unlock()
+
 	err := m.adapter.Compact(ctx, room)
-	// Delete rather than zero: rooms come and go (idle eviction), and a map
-	// keyed by room name that is only ever zeroed grows with churn. Only on
-	// success — deleting after a failed fold would reset the counter and let
-	// records grow while the threshold never re-fires for a persistently
-	// failing fold.
-	if err == nil {
-		m.mu.Lock()
-		delete(m.pending, room)
-		m.mu.Unlock()
+	if err != nil {
+		// Best-effort per this type's own StoreUpdate doc: leave pending
+		// untouched on failure. Resetting it here would let records grow
+		// while the threshold never re-fires for a persistently failing fold.
+		return err
 	}
-	return err
+
+	m.mu.Lock()
+	// Delete rather than zero when nothing remains: rooms come and go (idle
+	// eviction), and a map keyed by room name that is only ever zeroed grows
+	// with churn.
+	if remaining := m.pending[room] - snapshot; remaining > 0 {
+		m.pending[room] = remaining
+	} else {
+		delete(m.pending, room)
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 // room holds the shared document and awareness state for one named room.

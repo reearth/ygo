@@ -1,6 +1,10 @@
 package websocket
 
-import "context"
+import (
+	"context"
+
+	"github.com/reearth/ygo/persistence"
+)
 
 // MemoryPersistenceRecordCount reports how many stored records a room holds.
 // Test-only: the record count is the only way to tell a real compaction from
@@ -27,4 +31,25 @@ func MemoryPersistencePendingRooms(m *MemoryPersistence) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.pending)
+}
+
+// MemoryPersistencePendingCount reports room's outstanding (un-folded) write
+// count, 0 if the room has no entry. Test-only: distinguishes "no un-folded
+// writes" from "the bookkeeping entry was erased while a write it did not
+// fold was in flight" (PR #230 review, server.go:435) — MemoryPersistencePendingRooms
+// only reports how many rooms have an entry, not what each one holds.
+func MemoryPersistencePendingCount(m *MemoryPersistence, room string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pending[room]
+}
+
+// NewMemoryPersistenceForTest builds a MemoryPersistence around an arbitrary
+// *persistence.LegacyAdapter, bypassing NewMemoryPersistence's fixed
+// persistence.NewMemoryPersistence() store. Test-only: lets a test park
+// inside the wrapped store's Compact via a custom persistence.VersionedPersistence,
+// making the window between MemoryPersistence.Compact's pending snapshot and
+// the fold completing deterministic to hit, without sleeps or timing luck.
+func NewMemoryPersistenceForTest(adapter *persistence.LegacyAdapter) *MemoryPersistence {
+	return &MemoryPersistence{adapter: adapter, pending: make(map[string]int)}
 }

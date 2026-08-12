@@ -206,12 +206,14 @@ any code holding a `*crdt.Doc`; the server has no way to join them, and
 inventing one would risk a `Shutdown` that never returns — a worse failure than
 the one being fixed.
 
-What is guaranteed is narrower, and both of its qualifiers are real:
+What is guaranteed is narrower, and every one of its qualifiers is real:
 
 > **Stop accepting new WebSocket connections before calling `Shutdown`.** Then,
-> for every room that was present and had finished loading when `Shutdown`
-> began, any commit whose `Transact` returned before `Shutdown` returned is
-> durable.
+> provided `Shutdown` returns `nil`: for every room that was present and had
+> finished loading when `Shutdown` began, any commit whose `Transact` returned
+> before `Shutdown` returned has been handed to the adapter, and the adapter
+> reported success. That is a completed, successful persistence attempt — not
+> an unconditional durability claim.
 
 The precondition is not decoration. `Shutdown` snapshots the room set once and
 skips any room still mid-load at that instant, and `ServeHTTP` has no shutdown
@@ -221,6 +223,18 @@ room's persistence worker. A commit into it can return from `Transact` with the
 update merely buffered, and `Shutdown(ctx)`-then-exit kills the drain. That
 behaviour predates v1.49.0; it is called out here because everything above
 would otherwise read as promising against it.
+
+Nor is "provided `Shutdown` returns `nil`" decoration. Every wait inside
+`Shutdown` is bounded by the caller's `ctx`, not by the work actually
+finishing — a deadline that fires mid-drain returns `ctx.Err()` while a final
+flush or a stranded write may still be in flight, landing or not with no way
+for the caller to tell. And "the adapter reported success" is exactly that,
+no more: an adapter error or a recovered panic while storing a commit is
+logged (see `persistStranded`'s and the persistence worker's own doc
+comments) and the write abandoned, not propagated through `Shutdown`'s return
+value. A `nil` `Shutdown` tells you every in-scope commit reached the adapter
+and the adapter did not report a problem — it cannot tell you the adapter's
+report was itself correct.
 
 **What this costs you.** A straggler write is synchronous for the goroutine
 that committed it and bypasses coalescing, auto-versioning, and compaction. It
