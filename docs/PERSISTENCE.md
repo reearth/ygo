@@ -644,13 +644,15 @@ count. Since v1.49.0 (#229) that separation is enforced:
 > **Then, provided `Shutdown` returns `nil`:** for every room that was present
 > in the server and had finished loading when `Shutdown` began, any commit
 > whose `Transact` returned before `Shutdown` returned has been handed to the
-> adapter, and the adapter reported success. That is a completed, successful
-> persistence attempt — not an unconditional durability claim: a non-nil
-> return (for example `context.DeadlineExceeded`) means a final flush may
-> still have been in flight when `Shutdown` gave up on waiting for it, and
-> even on a `nil` return, an adapter error or panic encountered while storing
-> a commit is logged, not propagated — `Shutdown` has no way to see it or
-> report it.
+> adapter — the write attempt completed and was not abandoned mid-flight.
+> Whether the adapter *accepted* that write is a separate question this
+> guarantee does not answer: adapter errors and panics are logged, not
+> propagated, so a `nil` return does not mean every one of those writes
+> succeeded at the adapter, only that none of them were left in flight when
+> `Shutdown` returned. A non-nil return (for example
+> `context.DeadlineExceeded`) means even that weaker claim does not hold — a
+> final flush may still have been in flight when `Shutdown` gave up on
+> waiting for it.
 
 Every clause here is load-bearing.
 
@@ -674,15 +676,18 @@ actually resolved by the work completing rather than by the clock running out.
 See "What adapters must now tolerate" below for the two independent things
 that can produce that deadline error.
 
-**Why "the adapter reported success."** The observer that performs a commit's
-write — whether the room's normal persistence worker or, for a straggler, the
-committing goroutine itself via `persistStranded` — has no caller to report a
-failure to: an adapter error or a recovered panic is logged and the write is
-abandoned, not surfaced through `Shutdown`'s return value. A `nil` `Shutdown`
-therefore tells you every in-scope commit reached the adapter and the adapter
-did not report a problem; it cannot tell you the adapter's own report was
-correct, or that no adapter call failed silently underneath a logging call you
-weren't watching.
+**Why "handed to the adapter," not "the adapter accepted it."** The observer
+that performs a commit's write — whether the room's normal persistence worker
+or, for a straggler, the committing goroutine itself via `persistStranded` —
+has no caller to report a failure to: an adapter error or a recovered panic is
+logged and the write is abandoned right there, never surfaced through
+`Shutdown`'s return value (see `persistStranded`'s own doc: "Errors are
+logged, not returned"). That is exactly why the guarantee cannot say
+"succeeded" — a `nil` `Shutdown` return tells you every in-scope commit's
+write attempt completed without being abandoned mid-flight, and nothing about
+whether the adapter itself accepted it. A caller who needs that stronger
+property has to get it from the adapter directly: its own error/logging
+surface, or a read-back via `LoadDoc`/`Compact`.
 
 **Why the guarantee is still not losslessness.** **`Shutdown` is not lossless
 and cannot be made so.** A transaction that *begins* committing after `Shutdown`

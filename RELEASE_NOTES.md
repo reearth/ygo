@@ -211,9 +211,11 @@ What is guaranteed is narrower, and every one of its qualifiers is real:
 > **Stop accepting new WebSocket connections before calling `Shutdown`.** Then,
 > provided `Shutdown` returns `nil`: for every room that was present and had
 > finished loading when `Shutdown` began, any commit whose `Transact` returned
-> before `Shutdown` returned has been handed to the adapter, and the adapter
-> reported success. That is a completed, successful persistence attempt — not
-> an unconditional durability claim.
+> before `Shutdown` returned has been handed to the adapter — the write
+> attempt completed and was not abandoned mid-flight. Whether the adapter
+> *accepted* it is a separate question this does not answer: adapter errors
+> and panics are logged, not propagated, so this is not an unconditional
+> durability claim.
 
 The precondition is not decoration. `Shutdown` snapshots the room set once and
 skips any room still mid-load at that instant, and `ServeHTTP` has no shutdown
@@ -228,13 +230,14 @@ Nor is "provided `Shutdown` returns `nil`" decoration. Every wait inside
 `Shutdown` is bounded by the caller's `ctx`, not by the work actually
 finishing — a deadline that fires mid-drain returns `ctx.Err()` while a final
 flush or a stranded write may still be in flight, landing or not with no way
-for the caller to tell. And "the adapter reported success" is exactly that,
-no more: an adapter error or a recovered panic while storing a commit is
-logged (see `persistStranded`'s and the persistence worker's own doc
-comments) and the write abandoned, not propagated through `Shutdown`'s return
-value. A `nil` `Shutdown` tells you every in-scope commit reached the adapter
-and the adapter did not report a problem — it cannot tell you the adapter's
-report was itself correct.
+for the caller to tell. And "handed to the adapter" is exactly that, no
+more: an adapter error or a recovered panic while storing a commit is logged
+(see `persistStranded`'s and the persistence worker's own doc comments) and
+the write abandoned right there, never propagated through `Shutdown`'s return
+value. A `nil` `Shutdown` tells you every in-scope commit's write attempt
+completed without being abandoned mid-flight — it cannot tell you the
+adapter accepted any of them. A caller who needs that stronger property has
+to get it from the adapter itself.
 
 **What this costs you.** A straggler write is synchronous for the goroutine
 that committed it and bypasses coalescing, auto-versioning, and compaction. It

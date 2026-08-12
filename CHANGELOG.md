@@ -81,24 +81,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepting new connections first, then — provided `Shutdown` returns
   `nil` — for every room that was present and had finished loading when
   `Shutdown` began, any commit whose `Transact` returned before `Shutdown`
-  returned has been handed to the adapter, and the adapter reported success.**
-  That is a completed, successful persistence attempt, not an unconditional
-  durability claim, and every qualifier in it is real. `Shutdown` snapshots
-  the room set once and skips rooms still mid-load, and `ServeHTTP` has no
-  shutdown gate, so a connection accepted during `Shutdown` can create or
-  finish loading a room after that snapshot — one `Shutdown` never waits on
-  (pre-existing; called out here because the sentence would otherwise read as
-  promising against it). A commit that *begins* after `Shutdown` observes its
-  last in-flight write is not covered and cannot be — peer read loops and
-  `*crdt.Doc` holders are producers the server has no way to join. Every wait
-  inside `Shutdown` is bounded by the caller's `ctx`, not by the work actually
-  finishing, so a non-nil return (e.g. `context.DeadlineExceeded`) means a
-  final flush or a stranded write may still have been in flight when the
-  deadline hit — it may still land, but `Shutdown` returning gives no way to
-  know. And even on a `nil` return, an adapter error or a recovered panic
-  while storing a commit is logged, not propagated through `Shutdown` — the
-  guarantee is only as strong as the adapter's own success report, not proof
-  that report was correct. Three consequences worth knowing rather than
+  returned has been handed to the adapter: the write attempt completed and
+  was not abandoned mid-flight.** Whether the adapter *accepted* that write
+  is a separate question this does not answer, and every qualifier here is
+  real. `Shutdown` snapshots the room set once and skips rooms still
+  mid-load, and `ServeHTTP` has no shutdown gate, so a connection accepted
+  during `Shutdown` can create or finish loading a room after that snapshot
+  — one `Shutdown` never waits on (pre-existing; called out here because the
+  sentence would otherwise read as promising against it). A commit that
+  *begins* after `Shutdown` observes its last in-flight write is not covered
+  and cannot be — peer read loops and `*crdt.Doc` holders are producers the
+  server has no way to join. Every wait inside `Shutdown` is bounded by the
+  caller's `ctx`, not by the work actually finishing, so a non-nil return
+  (e.g. `context.DeadlineExceeded`) means even the weaker "handed to the
+  adapter" claim does not hold — a final flush or a stranded write may still
+  have been in flight when the deadline hit. And even on a `nil` return, an
+  adapter error or a recovered panic while storing a commit is logged, not
+  propagated through `Shutdown` — so a `nil` return tells you the write
+  attempt completed without being abandoned, never that the adapter accepted
+  it; a caller who needs that stronger property has to get it from the
+  adapter itself. Three consequences worth knowing rather than
   discovering: a straggler write is synchronous for its committer and delays
   that update's relay fan-out (the persistence observer is registered before
   the relay ones); a caller that retains a `*crdt.Doc` past teardown now keeps
