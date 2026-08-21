@@ -409,7 +409,19 @@ type Client struct {
 	// Store this Client's Close is responsible for closing. A Store supplied
 	// directly via Options.Store is never tracked here and is never closed
 	// by Close — see Options.StorePath's doc and Close's ownership rule.
-	ownedStore *SQLiteStore
+	//
+	// Typed as the unexported closableStore interface, not the concrete
+	// *SQLiteStore New always assigns it in production, purely so
+	// close_test.go can substitute a store whose Close deterministically
+	// returns a chosen error (see TestClient_Close_SecondCallReturnsFirstCloseError,
+	// #228) — a REAL *SQLiteStore's Close forwards straight to
+	// database/sql.DB.Close(), which that package's own doc and source
+	// guarantee is idempotent (always nil after the first call), so there is
+	// no way to make an actual owned SQLite store's Close fail on demand from
+	// outside package sqlite. New still only ever assigns a genuine
+	// *SQLiteStore here in production; nothing about this interface changes
+	// what ownedStore holds when Options.StorePath was used.
+	ownedStore closableStore
 
 	statusMu       sync.Mutex
 	statusSubs     []statusSub
@@ -419,12 +431,39 @@ type Client struct {
 	syncedOnce sync.Once
 	closed     chan struct{}
 	closeOnce  sync.Once
+	// closeErr caches the result of ownedStore.Close() from the one call to
+	// Close that actually ran closeOnce.Do's body, so EVERY call to Close —
+	// not just the first — returns it (#228: an earlier version declared
+	// closeErr as a local variable inside Close itself, which a second call
+	// re-declares fresh and initialises to nil, then never touches because
+	// closeOnce.Do is a no-op on a repeat call — so a second Close always
+	// returned nil regardless of what the first one's owned-store Close
+	// actually returned). Written at most once, inside closeOnce.Do; read by
+	// every call to Close after Do returns. sync.Once.Do's own documented
+	// guarantee — a Do call that finds the work already done does not return
+	// until the FIRST call's function has itself returned — is what makes
+	// reading this field safe without its own lock: that guarantee is
+	// exactly the synchronisation edge a bare field read would otherwise
+	// need. See TestClient_Close_SecondCallReturnsFirstCloseError for the
+	// proof.
+	closeErr error
 
 	// statsDropped backs Stats.Dropped. The other three Stats fields are read
 	// straight off the lane (see Stats), which is the only place that
 	// accounting actually happens; duplicating them here would just be a
 	// second copy to keep in step.
 	statsDropped atomic.Uint64
+}
+
+// closableStore is the exact shape Close needs from an owned store:
+// LocalStore's LoadDoc/StoreUpdate (so the *SQLiteStore New opens for
+// Options.StorePath can still double as this Client's own LocalStore — see
+// New's o.Store = ss assignment) plus Close. See ownedStore's own doc for
+// why this is an interface rather than binding the field directly to
+// *SQLiteStore.
+type closableStore interface {
+	LocalStore
+	Close() error
 }
 
 // roomFromURL extracts the room/document name from a y-websocket URL: the
@@ -497,7 +536,19 @@ func New(o Options) (*Client, error) {
 	// Connect) so a failure to open it is reported synchronously from New,
 	// exactly like every other Options validation above, rather than
 	// surfacing later from inside Connect's hydrate step.
-	var owned *SQLiteStore
+	//
+	// owned is declared as closableStore (the interface, not *SQLiteStore)
+	// from the start, and assigned to only inside the StorePath branch below.
+	// That ordering matters: assigning a typed nil *SQLiteStore to an
+	// interface variable produces a NON-nil interface (it carries a type
+	// descriptor even though its value is nil — the classic Go "nil
+	// interface" trap), which would break ownedStore's "non-nil exactly when
+	// Options.StorePath was used" contract and Close's `if c.ownedStore !=
+	// nil` check the moment StorePath is empty. Leaving owned untouched in
+	// that case keeps it at the interface's genuine zero value instead —
+	// nil in every sense — because no conversion from *SQLiteStore to
+	// closableStore ever happens on that path.
+	var owned closableStore
 	if o.StorePath != "" {
 		ss, err := OpenSQLiteStore(o.StorePath)
 		if err != nil {
@@ -845,16 +896,34 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 	}()
 
-	// runReconnectLoop returns nil in the ordinary case — it only stops
-	// because loopCtx is done (see its own doc) — with every connection
-	// failure along the way already reported through OnStatus as it
-	// happened, so there is nothing left to inspect once it returns nil.
+	// runReconnectLoop returns nil whenever loopCtx is done (see its own
+	// doc's ctx.Err() != nil branch, loop.go) — but that covers two
+	// interleavings this comment must not conflate (#228: an earlier
+	// version claimed the stronger one unconditionally, which is false of
+	// the second):
+	//
+	//   - the ORDINARY case: nothing was in flight when loopCtx became
+	//     done, or the last attempt's own failure was reported via
+	//     OnStatus, with its real error, before runReconnectLoop returned.
+	//   - a RACE this package accepts rather than closes: the last
+	//     attempt's failure and loopCtx becoming done can land at almost
+	//     the same moment. runReconnectLoop's own ctx.Err() != nil branch
+	//     takes that failure and — by its own doc's words — treats it as
+	//     "a deliberate stop [that] is not something to report as a
+	//     failure": it drains the lane and returns nil WITHOUT ever
+	//     calling emitStatus for that error. In THIS interleaving the
+	//     failure is not "already reported with its real error"; it is
+	//     silently absorbed by the shutdown path.
+	//
 	// The final, unconditional emission below is the bookend
-	// StateDisconnected's own doc describes ("after Close") — it is
-	// deliberately Err: nil even if the very last attempt before the stop
-	// had failed, because THAT failure was already reported with its real
-	// error by runReconnectLoop; this one specifically means "and now the
-	// client is stopped, on purpose."
+	// StateDisconnected's own doc describes ("after Close") — Err: nil
+	// either way, because the ordinary case genuinely has nothing else to
+	// report, and the race case has already made its choice (fast,
+	// deterministic shutdown over surfacing a failure whose connection is
+	// gone regardless) one level down, in runReconnectLoop. A subscriber
+	// must not read a bare StateDisconnected{Err: nil} that follows Close
+	// as proof the very last attempt itself succeeded or ended cleanly —
+	// this bookend cannot, and does not try to, tell the two cases apart.
 	//
 	// A non-nil return is the one exception (#165 Task 9): a terminal
 	// failure — currently only ErrAuthRejected — that runReconnectLoop
@@ -1153,6 +1222,7 @@ func (c *Client) dropRemoteAwareness() {
 //     asynchronous or buffered the way provider/websocket's persistence
 //     worker is, so there is no separate flush step to wait for beyond "no
 //     goroutine that could still call onDocUpdate is running."
+//
 //  2. Unsubscribe the Doc and Awareness observers, so a Doc/Awareness pair
 //     that outlives this Client stops writing to the Store and stops
 //     queueing anything onto a lane nothing will ever drain again. Placed
@@ -1174,6 +1244,7 @@ func (c *Client) dropRemoteAwareness() {
 //     that window structurally: nothing can land on the lane through the
 //     observer path anymore by the time step 3 runs, so whatever step 3
 //     finds is everything there will ever be to find).
+//
 //  3. Catch-all: count whatever is STILL on the outbound lane as Dropped
 //     (see dropLaneRemainder). This is a no-op in the ordinary case — the
 //     loop's own teardown (step 1) already drained or counted everything —
@@ -1181,6 +1252,7 @@ func (c *Client) dropRemoteAwareness() {
 //     case: Connect was never called, or every attempt failed during
 //     hydration (see Connect's "does not latch" doc), so nothing else in
 //     this Client will ever get a chance to touch the lane again.
+//
 //  4. Close the store, but ONLY if this Client opened it itself (Options.
 //     StorePath, tracked via ownedStore — see Options.StorePath's doc and
 //     ownedStore's own). A Store supplied directly via Options.Store
@@ -1188,11 +1260,41 @@ func (c *Client) dropRemoteAwareness() {
 //     or simply keep it open past this one's lifetime; closing it here
 //     would take that choice away.
 //
-// Close's own return value surfaces ownedStore.Close's error, if any;
+//     # Not fenced against an in-flight onDocUpdate (#228, disclosed hazard)
+//
+//     Step 2's unsubscribe removes onDocUpdate from Doc's dispatch table, so
+//     no NEW Transact call will invoke it once unsubObserver returns — but
+//     it does not, and cannot without crdt.Doc itself exposing a join
+//     primitive it does not have (every observer type in this package works
+//     this same way: see OnStatus's own "no lock held during callbacks" doc
+//     for the pattern this mirrors), wait for a call to onDocUpdate that a
+//     concurrent Transact on some OTHER goroutine had ALREADY started before
+//     the unsubscribe took effect. Such a call can still be sitting inside
+//     c.opts.Store.StoreUpdate when this step closes the owned store out
+//     from under it. The realistic outcome is a "database is closed" (or
+//     equivalent) error from that StoreUpdate call — database/sql.DB is
+//     documented safe for concurrent use including a concurrent Close, so
+//     this is an ordinary error return, not a data race a test could catch
+//     under -race — which onDocUpdate's existing handling already logs and
+//     counts as Stats().Dropped, EXACTLY as it would a genuine disk failure
+//     (see onDocUpdate's own doc, finding 2). No update is lost silently:
+//     the same Doc.Transact call that produced the update already applied
+//     it in memory, and Dropped correctly reflects that this one write did
+//     not make it to disk. The gap is narrower than "may lose data": it is
+//     that this one straggler failure is indistinguishable, after the fact,
+//     from a real disk failure landing at the same unlucky moment — which is
+//     the honest, and only, thing to say about it without adding a
+//     join-observer-callbacks mechanism this package deliberately has
+//     nowhere else, for a window this narrow (unsubscribe removal is a
+//     single map/slice mutation under a lock; the store-close call that
+//     follows it is a handful of statements later with no I/O in between).
+//
+// Close's own return value surfaces ownedStore.Close's error, if any — and
+// does so consistently across repeat calls: see closeErr's own doc for why
+// that requires a Client field rather than a variable local to this method.
 // Connect's return value (observed separately, via whatever channel the
 // caller used to receive it) is unaffected by this method.
 func (c *Client) Close() error {
-	var closeErr error
 	c.closeOnce.Do(func() {
 		close(c.closed)
 		// Read connectStarted under connectMu — the SAME lock Connect's
@@ -1234,16 +1336,26 @@ func (c *Client) Close() error {
 		closePreDrainHook()
 		c.dropLaneRemainder()
 		if c.ownedStore != nil {
-			closeErr = c.ownedStore.Close()
+			c.closeErr = c.ownedStore.Close()
 		}
 	})
-	return closeErr
+	return c.closeErr
 }
 
 // closePreDrainHook is Close's test-only synchronisation seam; see its one
 // call site's doc for what it is for and why it exists. Always nil (a no-op)
 // in production.
 var closePreDrainHook = func() {}
+
+// maybeCompactConsumeHook is maybeCompact's test-only synchronisation seam
+// (#228), fired strictly between its threshold check (storeWrites.Load())
+// and its atomic consume of that threshold's worth of writes (storeWrites.
+// Add(-threshold)) — exactly the window a concurrent onDocUpdate's
+// storeWrites.Add(1) must land in to prove the consume step does not lose
+// it. Same "package-level indirection purely for test determinism" pattern
+// as closePreDrainHook above and loop.go's closeDrainHook/closeDrainTimeout.
+// Always nil (a no-op) in production.
+var maybeCompactConsumeHook = func() {}
 
 // countUndeliverable increments Stats().Dropped for a payload that has just
 // left the outbound lane without ever reaching the wire — UNLESS something
@@ -1348,10 +1460,32 @@ func (c *Client) maybeCompact(ctx context.Context) {
 	if c.compactor == nil {
 		return
 	}
-	if c.storeWrites.Load() < uint64(c.opts.CompactEvery) {
+	threshold := uint64(c.opts.CompactEvery)
+	if c.storeWrites.Load() < threshold {
 		return
 	}
-	c.storeWrites.Store(0)
+	maybeCompactConsumeHook()
+	// Subtract exactly threshold rather than resetting to 0 (#228). A
+	// storeWrites.Add(1) from a concurrent onDocUpdate call — any goroutine
+	// that called Transact, including the caller's own, since storeWrites is
+	// incremented from both sides (see its own doc) — can land in the window
+	// between the Load above and this line. An unconditional Store(0) here
+	// would discard such an Add(1) outright: whatever value the counter holds
+	// AT THE MOMENT Store(0) executes, including one that landed after our
+	// Load, is overwritten with 0 and gone. Add(-threshold) instead reads
+	// and writes atomically as one step, so it always subtracts threshold
+	// from whatever value is actually there when it runs — a concurrent
+	// Add(1) either happened before it (and is included in what gets
+	// decremented, ending up correctly reflected in the result) or after it
+	// (and is untouched, exactly as if the two operations had not
+	// overlapped). Either way nothing is lost. The impact of the old bug was
+	// compaction cadence drift, not lost data: storeWrites only gates WHEN
+	// Compact runs, never whether a StoreUpdate itself succeeded or was
+	// counted — see TestClient_MaybeCompact_ConcurrentIncrementSurvivesConsume
+	// for a deterministic proof, using maybeCompactConsumeHook to land the
+	// racing Add exactly in this window instead of trying to win a real
+	// scheduling race.
+	c.storeWrites.Add(-threshold)
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("ygo/client: Compact panic for room %q: %v", c.room, r)

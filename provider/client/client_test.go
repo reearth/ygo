@@ -145,10 +145,16 @@ func TestClient_Connect_HydrationFailureDoesNotLatch(t *testing.T) {
 	if err := c.Connect(context.Background()); !errors.Is(err, store.err) {
 		t.Fatalf("Connect returned %v, want the store's load error", err)
 	}
-	// The guard must have been released: a retry gets past it and fails on
-	// the store again, rather than being refused as already-connected.
-	if err := c.Connect(context.Background()); errors.Is(err, ErrAlreadyConnected) {
-		t.Fatal("Connect latched after a hydration failure; the failed call started nothing")
+	// The guard must have been released: a retry gets PAST it and re-runs
+	// hydration for real, failing on the store's actual error again — not
+	// merely "whatever error, as long as it isn't ErrAlreadyConnected" (#228:
+	// an earlier version of this assertion was errors.Is(err,
+	// ErrAlreadyConnected) inverted, which also passes for a nil err, or for
+	// any OTHER error entirely, none of which would prove the retry actually
+	// reached hydration rather than, say, short-circuiting somewhere else).
+	if err := c.Connect(context.Background()); !errors.Is(err, store.err) {
+		t.Fatalf("Connect after a released guard returned %v, want the store's load error again "+
+			"(proving the retry actually re-ran hydration, not merely that it avoided ErrAlreadyConnected)", err)
 	}
 }
 
@@ -373,7 +379,12 @@ func TestClient_HydratesBeforeDial(t *testing.T) {
 	}
 
 	// The hydrated update must not have been re-persisted: it carried the
-	// remote-origin sentinel, so the local-persist hook must have skipped it.
+	// hydrate-origin sentinel (NOT remoteOrigin — see onDocUpdate's origin
+	// table and hydrateOrigin's own doc for why hydration needs a sentinel
+	// of its own, distinct from a server-received update's remoteOrigin,
+	// which by contrast MUST be persisted), so the local-persist hook must
+	// have skipped it (#228: an earlier version of this comment named the
+	// wrong sentinel).
 	if got := store.count(); got != 1 {
 		t.Fatalf("store.count() after hydration = %d, want 1 (hydrated update must not be re-persisted)", got)
 	}

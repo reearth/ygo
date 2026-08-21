@@ -5,16 +5,36 @@ ygo is a pure-Go implementation of the [Yjs](https://github.com/yjs/yjs) CRDT al
 ## Package dependency graph
 
 ```
-provider/{websocket,http}
-         │
-        sync/ ── awareness/
-         │
-        crdt/
-         │
-      encoding/
+provider/webhook                                        mobile/
+       │                                                    │
+       ▼                                                    ▼
+provider/websocket ────────────────────────────────── provider/client        provider/http
+       │                                                    │                       │
+       ├──────────────────┬───────────────┬─────────────────┤                       │
+       ▼                  ▼               ▼                                         │
+     sync/            cluster/       persistence/                                   │
+       │                  │               │                                         │
+       │                  ▼               │                                         │
+       │             awareness/           │                                         │
+  ┌────┼──────────────────┘               │                                         │
+  │    │                                  │                                         │
+  │    └─────────────────────────┬────────┘                                         │
+  │                              ▼                                                  │
+  │                            crdt/ ◄──────────────────────────────────────────────┘
+  │                              │
+  │                              ▼
+  └─────────────────────────►encoding/
 ```
 
-**Rule:** no upward imports. `encoding/` has zero runtime dependencies. `crdt/` depends only on `encoding/`. `sync/` and `awareness/` depend on `crdt/` and `encoding/`. Providers depend on `sync/` and `awareness/`.
+The bus (`├──┬──┬──┤`) is fed from both provider entry points — `provider/websocket`'s
+trunk on the left, `provider/client`'s on the right — and forks into exactly
+three arrows, one per label (`sync/`, `cluster/`, `persistence/`); the bus's
+own width just spans from one trunk to the other, it is not a fourth branch.
+The `┼` below `sync/` is a **crossing, not a junction**: the line running left
+through it is `awareness/`'s edge to `encoding/`, passing over `sync/`'s column
+on its way to the left rail. `awareness/` does not depend on `crdt/`.
+
+**Rule:** no upward imports. `encoding/` has zero runtime dependencies. `crdt/` depends only on `encoding/`. `sync/` depends on `crdt/` and `encoding/`; `persistence/` depends only on `crdt/`; `cluster/` depends on `awareness/` and `crdt/`. `awareness/` is the one exception to the otherwise-neat layering: it depends only on `encoding/`, not `crdt/`, despite sitting next to packages that do. `provider/websocket` and `provider/client` both import `sync/`, `awareness/`, `cluster/`, and `persistence/` directly; `provider/http` skips that whole tier and depends on `crdt/` directly. `provider/webhook` and `mobile/` sit one layer up, wrapping `provider/websocket` and `provider/client` respectively — but each also imports lower tiers directly for its own use: `provider/webhook` imports `crdt/`, and `mobile/` imports both `awareness/` and `crdt/`.
 
 > **Note**: Since v1.0, the library has added several mechanisms not detailed here — the pending-structs queue for out-of-order delivery, structured logging via `slog`, per-peer broadcast queues, and context-aware methods. See [CHANGELOG.md](../CHANGELOG.md) for the per-release picture.
 
@@ -116,7 +136,7 @@ Lifecycle:
 
 ### Doc
 
-The root object. Holds the `StructStore`, named root types (`Share` map), `Subdocs` map, a `GC` flag, and observer subscriptions.
+The root object. Holds the `StructStore`, named root types (`Share` map), `Subdocs` map, an internal GC flag (set at construction with `crdt.WithGC`, not a settable field), and observer subscriptions.
 
 ---
 
@@ -171,6 +191,18 @@ Separate from document updates. Stores `map[ClientID]AwarenessState{Clock uint64
 
 ---
 
+## `persistence/` — versioned storage layer
+
+Depends only on `crdt/`. Layers an **append-only, versioned** store on top of the provider's `LoadDoc`/`StoreUpdate` primitive: every incremental update becomes a numbered `Version`, `MaterializeAt(v)` rebuilds the document at any past version via `crdt.MergeUpdatesV1`, and named snapshots plus crash-safe pruning/compaction round out the log.
+
+Ships two reference implementations — `NewMemoryPersistence()` (in-process maps) and `NewFilePersistence(dir)` (atomic temp+rename writes to one directory per store) — plus `persistence/sqlite`, a pure-Go (CGo-free) SQLite backend. `LegacyAdapter` bridges a `VersionedPersistence` back to the provider's `PersistenceAdapter` shape without either package importing the other, avoiding a cycle. See [PERSISTENCE.md](PERSISTENCE.md) for the full interface and a conformance suite external adapters can run against.
+
+## `cluster/` — cross-node relay
+
+Depends on `awareness/` and `crdt/`. Defines the `Relay`/`Sink` abstraction that fans document updates **and** awareness out across multiple `provider/websocket` (or `provider/client`) processes sharing rooms, superseding the older persistence-adapter-as-pub/sub pattern. `MemRelay` is the in-process reference implementation, used by tests and single-process multi-server simulations; production deployments plug in `cluster/redis` or an equivalent backend. See [CLUSTERING.md](CLUSTERING.md).
+
+---
+
 ## `provider/` — transport handlers
 
 ### `provider/websocket/`
@@ -184,7 +216,7 @@ type PersistenceAdapter interface {
     StoreUpdate(room string, update []byte) error
 }
 ```
-Pass an implementation to `NewServerWithPersistence(p)`. The built-in `MemoryPersistence` (returned by `NewMemoryPersistence()`) merges updates in memory and is suitable for single-process deployments.
+Pass an implementation to `NewServerWithPersistence(p)`. The built-in `MemoryPersistence` (returned by `NewMemoryPersistence()`) appends updates in memory and periodically folds a room's backlog (`CompactEvery`, default 500) rather than re-merging on every write; suitable for single-process deployments.
 
 ### `provider/http/`
 
@@ -192,6 +224,22 @@ Pass an implementation to `NewServerWithPersistence(p)`. The built-in `MemoryPer
 |--------|------|-----------|
 | `GET` | `/doc/{room}?sv=<base64>` | Return binary update diff |
 | `POST` | `/doc/{room}` | Apply binary update from request body |
+
+### `provider/webhook/`
+
+Wraps a `provider/websocket` server with outbound HTTP callbacks — HMAC-SHA256-signed, debounced/coalesced, retried with backoff on transient failure — fired on room lifecycle and document-update events, so an external service can react to changes without holding a live connection.
+
+### `provider/client/`
+
+The embeddable, offline-first counterpart to `provider/websocket`: a Go peer (not a server) that hydrates a `*crdt.Doc` from local storage, lets the caller edit it immediately regardless of connectivity, and runs a background dial loop that reconciles with a `provider/websocket`-served (or Hocuspocus-compatible) endpoint whenever one is reachable. Speaks the same wire protocol `provider/websocket` serves. See [CLIENT.md](CLIENT.md).
+
+---
+
+## `mobile/` — Go Mobile bindings
+
+A `gomobile bind`-safe façade over `crdt/`, `awareness/`, and `provider/client`, for embedding ygo natively in iOS/Android apps with no JavaScript runtime and no CGo. Because `gomobile bind` only supports a restricted set of cross-language types, every exported method uses only `string`, `int64`, `bool`, `[]byte`, `error`, and the bound pointer types `*Doc`/`*Awareness`/`*SyncClient`/`*Subscription`; the package translates ygo's internal `uint64` IDs and maps at the boundary. `SyncClient` is the mobile-facing wrapper around `provider/client`'s dial/sync loop.
+
+Callbacks cross the boundary as **interfaces** (`DocObserver`, `AwarenessObserver`, `SyncStatusObserver`) rather than as Go func values, which gomobile cannot bind in that direction — the platform implements the interface in Swift or Kotlin and passes it in. Each is delivered on a dedicated drain goroutine, never a lock-holding one and never the platform's UI thread, so observers must marshal to the main thread themselves; `SyncStatusObserver` exists specifically so a platform observer can call `SyncClient.Close` from inside a status callback, which is not safe against the raw `provider/client.Client`.
 
 ---
 
@@ -203,10 +251,29 @@ Pass an implementation to `NewServerWithPersistence(p)`. The built-in `MemoryPer
 
 ## Garbage collection
 
-When `doc.GC = true` (default), deleted item content is freed at the end of each transaction. Set `doc.GC = false` to preserve full history for snapshots and undo/redo.
+GC is on by default and is configured at construction — `crdt.New(crdt.WithGC(false))` preserves full history for snapshots and undo/redo. There is no settable `GC` field on `Doc`.
+
+**Automatic.** With GC enabled, each transaction frees the content of the items it deleted, at commit, after observer deltas have been computed and before the document lock is released — so no goroutine ever observes a partially collected state. Auto-GC is **suspended while any `UndoManager` is registered**: undoing a deletion re-inserts a copy of the deleted item's content, which requires that content still to be present. Yjs solves this with a per-item keep flag; ygo takes the conservative position of disabling automatic collection entirely for the lifetime of the undo manager.
+
+**Manual — tombstone reclamation.** `crdt.RunGC(doc)` is the explicit entry point, and remains available when auto-GC is suspended. It does two passes: it replaces deleted item content with lightweight `ContentDeleted` tombstones, then **merges adjacent tombstones from the same client into single nodes**, compacting the linked list so future origin lookups traverse fewer items. Both the structural position information CRDT correctness depends on and the tombstone lengths survive; only the content is discarded. `RunGC` is a no-op when GC is disabled.
+
+Reclamation is destructive with respect to history: after `RunGC`, `RestoreDocument` can no longer reconstruct states that predate the collected deletions. Take any snapshots you need first.
 
 ---
 
 ## Compatibility testing
 
-`testutil/gen_fixtures.js` generates canonical `.bin` files from the JS Yjs reference implementation. These are committed to `testutil/fixtures/` and loaded by `TestCompat_*` tests, which assert exact document state and — for encoding tests — byte-for-byte output equality.
+Two layers, answering different questions.
+
+**Fixtures — do we agree with Yjs on known cases?** `testutil/gen_fixtures.js` generates canonical `.bin` files from the JS Yjs reference implementation. These are committed to `testutil/fixtures/` and loaded by `TestCompat_*` tests, which assert exact document state and — for encoding tests — byte-for-byte output equality.
+
+**Fuzzing — do we agree on cases nobody wrote down?** `testutil/fuzz/` generates randomised multi-peer scenarios (insert/delete/push/map/xml, optionally moves, across 3–5 peers with random sync order) and replays them through several oracles in `crdt/fuzz_test.go`:
+
+| Test | Oracle | Needs node |
+|---|---|---|
+| `TestFuzzConvergence` | all peers converge to the same state (Go vs Go) | no |
+| `TestFuzzConvergenceMoves` | same, with `YArray.Move` enabled | no |
+| `TestFuzzCrossImpl` | each scenario replayed against real Yjs; ygo must match it logically and round-trip its encoded update | yes |
+| `TestFuzzCorpus` | every frozen minimized reproducer under `testutil/fuzz/corpus` still converges | no |
+
+Moves are an ygo wire extension Yjs cannot decode, which is why they are validated by Go-internal convergence rather than against Yjs — and `TestFuzzConvergenceMoves` is what caught the `YArray.Move` divergence fixed in v1.40.0. `TestFuzzCrossImpl` skips when node/yjs is unavailable; set `YGO_REQUIRE_NODE=1` to make that a hard failure instead. The two convergence sweeps default to 1000 seeds each and honour `FUZZ_ITER` for a soak run (`TestFuzzCrossImpl` is fixed at 200 seeds); any failure prints the `FUZZ_SEED` that replays it through `TestFuzzSeed`.

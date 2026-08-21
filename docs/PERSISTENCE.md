@@ -52,12 +52,60 @@ http.Handle("/yjs/{room}", srv)
 
 ## Built-in: MemoryPersistence
 
-`MemoryPersistence` merges all incremental updates into a single V1 snapshot
-per room and stores it in process memory.  It is useful for tests and
-single-process deployments where durability across restarts is not required.
+`MemoryPersistence` stores room state in process memory. It **appends** each
+incremental update — an O(update) write — rather than re-merging the whole
+document on every call, which used to cost O(document) per write and
+O(document²) over a session (#186).
+
+It bounds that append log itself: once a room accumulates `CompactEvery`
+writes (default 500, matching `provider/client`'s own compaction default) it
+folds the room's backlog into a single blob. `LoadDoc` also folds first —
+materialising the room's records is what makes a load coherent regardless of
+where the room sits in its append cycle; the fold only makes the *next* load
+cheap again, since a load always merges whatever records are present whether
+or not it folds first.
+
+One behaviour change worth knowing if you handle `LoadDoc`'s error: it could
+previously never return an error, and now can — an unmergeable append log
+surfaces at load time rather than at write time. `StoreUpdate`/`AppendUpdate`
+validate each update as it is written, so there is no practical way to reach
+this in normal operation, but the failure mode has moved.
+
+Measured per-write cost, old merge-on-write vs. append-then-compact, at three
+room sizes:
+
+| Updates already in room | Before | After | Improvement |
+|---|---|---|---|
+| 100 | 13,975 ns/op | 1,457 ns/op | 9.6× |
+| 1,000 | 132,871 ns/op | 1,710 ns/op | 77.7× |
+| 10,000 | 1,676,329 ns/op | 4,653 ns/op | 360× |
+
+The growth constant is divided by `CompactEvery`, **not eliminated**: per-write
+cost is still `append + O(document)/CompactEvery`, so it keeps growing with
+document size, just ~500× more slowly. Flat, constant-time writes are not
+achievable for this storage model — see the trade below.
+
+The trade this makes explicit: `LoadDoc` is no longer O(1). It folds whatever
+records the room still holds — bounded by `CompactEvery` — and persists that
+fold, so subsequent loads are cheap again until the log builds back up.
+Writes are continuous and loads happen once per room residency, so the
+direction is right, but folding is inherently O(document) — there is no way
+to keep returning one V1 blob from `LoadDoc` without periodically paying for
+it. This is still primarily for tests and single-process deployments; a
+multi-process deployment wants `persistence/sqlite` or another
+`VersionedPersistence`.
 
 ```go
 srv := websocket.NewServerWithPersistence(websocket.NewMemoryPersistence())
+```
+
+To change the compaction threshold, set `CompactEvery` on the adapter before
+serving:
+
+```go
+adapter := websocket.NewMemoryPersistence()
+adapter.CompactEvery = 2000 // fold less often; more memory, fewer folds
+srv := websocket.NewServerWithPersistence(adapter)
 ```
 
 ---
@@ -562,4 +610,125 @@ func (p *PostgresAdapter) storeUpdate(ctx context.Context, room string, update [
 During `Server.Shutdown`, the in-flight `ExecContext` call sees the context cancellation and returns early instead of waiting for the database driver's default timeout.
 
 This pattern mirrors `io.WriterTo`, `http.CloseNotifier`, and `database/sql/driver.QueryerContext` in the standard library — extension interfaces that callers can opt into without breaking older implementations.
-```
+
+---
+
+## Shutdown durability, and what it does not promise (v1.49.0+)
+
+Cancellation exists to unwedge a slow adapter, not to decide which writes
+count. Since v1.49.0 (#229) that separation is enforced:
+
+- **Every final flush uses `context.Background()`**, on both the coalescing and
+  the per-update path, so the last write is never aborted by the very signal
+  that triggered it. Before v1.49.0 the per-update path passed the cancellable
+  context to its shutdown drain, and a ctx-aware adapter discarded the whole
+  tail.
+- **A store aborted by cancellation is retained, not dropped.** The update is
+  re-stored on the exit path under a background context — the same
+  retain-and-re-flush rule that already applied to a coalesced batch.
+- **A transaction committed while `Shutdown` is running still reaches the
+  adapter.** Peer read loops keep committing for the whole
+  close-connections-and-join window, so the room's persistence worker publishes
+  its retirement before its final drain; a commit that arrives too late for
+  that drain is written by the committing goroutine itself.
+- **`Shutdown` joins those writes** (bounded by the caller's context) before
+  returning, so `srv.Shutdown(ctx)` followed by exiting the process does not
+  kill a write in flight.
+
+### The guarantee, stated exactly
+
+> **Precondition:** you have stopped accepting new WebSocket connections before
+> calling `Shutdown` (shut down your `http.Server`, or otherwise stop routing to
+> the handler).
+>
+> **Then, provided `Shutdown` returns `nil`:** for every room that was present
+> in the server and had finished loading when `Shutdown` began, any commit
+> whose `Transact` returned before `Shutdown` returned has been handed to the
+> adapter — the write attempt completed and was not abandoned mid-flight.
+> Whether the adapter *accepted* that write is a separate question this
+> guarantee does not answer: adapter errors and panics are logged, not
+> propagated, so a `nil` return does not mean every one of those writes
+> succeeded at the adapter, only that none of them were left in flight when
+> `Shutdown` returned. A non-nil return (for example
+> `context.DeadlineExceeded`) means even that weaker claim does not hold — a
+> final flush may still have been in flight when `Shutdown` gave up on
+> waiting for it.
+
+Every clause here is load-bearing.
+
+**Why the precondition.** `Shutdown` snapshots the room set once, and skips any
+room still mid-load at that instant. `ServeHTTP` has no shutdown gate, so a
+connection accepted while `Shutdown` is running can create a room, or finish
+loading one, *after* that snapshot. `Shutdown` never waits on such a room's
+persistence worker, so a commit into it can return from `Transact` with the
+update merely buffered — and the usual `Shutdown(ctx); return` shape then kills
+the drain. This is not new in v1.49.0; what is new is that the rest of this
+section would otherwise read as promising against it. Stop accepting
+connections first and the room set cannot grow underneath `Shutdown`.
+
+**Why "provided `Shutdown` returns `nil`."** Every wait inside `Shutdown` —
+the persistence join, `waitStranded`, the relay-lane join — is bounded by the
+caller's `ctx`, not by the work actually finishing. A deadline that fires mid-
+drain makes `Shutdown` return `ctx.Err()` while a final flush or a stranded
+write is still in flight; that write may still land, but `Shutdown` returning
+gives you no way to know whether it did. Only a `nil` return means every wait
+actually resolved by the work completing rather than by the clock running out.
+See "What adapters must now tolerate" below for the two independent things
+that can produce that deadline error.
+
+**Why "handed to the adapter," not "the adapter accepted it."** The observer
+that performs a commit's write — whether the room's normal persistence worker
+or, for a straggler, the committing goroutine itself via `persistStranded` —
+has no caller to report a failure to: an adapter error or a recovered panic is
+logged and the write is abandoned right there, never surfaced through
+`Shutdown`'s return value (see `persistStranded`'s own doc: "Errors are
+logged, not returned"). That is exactly why the guarantee cannot say
+"succeeded" — a `nil` `Shutdown` return tells you every in-scope commit's
+write attempt completed without being abandoned mid-flight, and nothing about
+whether the adapter itself accepted it. A caller who needs that stronger
+property has to get it from the adapter directly: its own error/logging
+surface, or a read-back via `LoadDoc`/`Compact`.
+
+**Why the guarantee is still not losslessness.** **`Shutdown` is not lossless
+and cannot be made so.** A transaction that *begins* committing after `Shutdown`
+has observed its last in-flight write is not covered: the producers are peer
+read loops and any code holding a `*crdt.Doc`, none of which the server can
+join, and inventing a join would risk a `Shutdown` that never returns — a worse
+failure than the one being fixed.
+
+### What adapters must now tolerate
+
+- **A `StoreUpdate` arriving late in, or just after, `Shutdown`.**
+- **A blocking `StoreUpdate` costing the caller its deadline.** Because the
+  final flush runs under `context.Background()`, an adapter that never returns
+  wedges that room's worker at exit and `Shutdown` returns
+  `context.DeadlineExceeded` where it previously returned `nil` — by discarding
+  your data. The honest error replaces a silent lie, but it is a behaviour
+  change if you have a `Shutdown` deadline.
+- **A second, unrelated cause of that same `DeadlineExceeded`:** a *sustained*
+  producer. `Shutdown` waits for the in-flight commit count to reach zero, and
+  that count covers every committing goroutine, not only the ones performing a
+  write themselves. Code that holds a retained `*crdt.Doc` and commits in a
+  tight loop can keep it above zero for as long as it runs, so `Shutdown` burns
+  its whole deadline with no wedged adapter anywhere. Stop your writers, not
+  just your connections, if you want `Shutdown` to return early.
+- **Writes for a room the server already considers gone.** Nothing calls
+  `doc.Destroy` on teardown, so a caller that retains the `*crdt.Doc` (from
+  `GetDoc`, or from an `OnLoadDocument` hook) keeps its persistence observer
+  alive and its later commits are written directly — indefinitely. Before
+  v1.49.0 those commits were silently dropped.
+- **`Compact` overlapping a `StoreUpdate` for the same room NAME.** The
+  provider serialises `Compact` with `StoreUpdate` per room *instance*, not per
+  name, and the point above widens that window. If your `Compact` mutates state
+  keyed by name, serialise inside the adapter. Every store this repo ships
+  behind `LegacyAdapter` already does, each serialising its writers under a
+  single mutex: `persistence.MemoryPersistence` and `persistence.FilePersistence`
+  do so for every operation, reads included; `persistence/sqlite`'s reads are
+  deliberately lock-free instead and consistent by other means, but its
+  `Compact` and `AppendUpdate` are both writers serialised under its own
+  mutex — the property this section actually relies on.
+
+Straggler writes also bypass coalescing, auto-versioning and compaction, and
+delay that update's relay fan-out (the persistence observer runs before the
+relay observers). All of this is scoped to room retirement — except the
+retained-`*crdt.Doc` case, which is not.

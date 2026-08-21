@@ -31,11 +31,19 @@ const maxBackoffShift = 32
 // spread grow with repeated failures, and no two clients following the same
 // schedule are likely to retry at the same instant.
 //
-// The zero value is directly usable — attempt starts at 0 as the zero int
-// already gives — but base and max must be set by the caller; there is no
-// sensible default for either baked in here (the reconnect loop's choice of
+// Only the attempt field has a meaningful zero value (0, meaning "the first
+// attempt hasn't happened yet"). base and max do NOT: a zero-value
+// backoff{} has max == 0, and next()'s limit can never exceed max, so every
+// call would return time.Duration(randFloat()*0) == 0 forever — exactly the
+// hot reconnect loop this type exists to prevent, not a usable default (#228:
+// an earlier version of this doc claimed "the zero value is directly
+// usable" and then immediately contradicted that very claim in its own next
+// clause, which said base and max still had to be set). base and max MUST be
+// set by the caller; there is no sensible
+// default for either baked in here (the reconnect loop's choice of
 // 500ms/Options.MaxBackoff belongs to loop.go, not to this general-purpose
-// type).
+// type — see runReconnectLoop's own construction, the only production call
+// site, which always sets both).
 //
 // backoff is not safe for concurrent use. It doesn't need to be: exactly one
 // goroutine (the reconnect loop in loop.go) ever owns one.

@@ -1,3 +1,346 @@
+## v1.49.0
+
+**Who is affected:** three separate audiences, so read the one that is you.
+
+- **The `MemoryPersistence` performance fix (#186)** affects only callers who
+  explicitly construct `websocket.MemoryPersistence`
+  (`websocket.NewMemoryPersistence()`) — **not** every deployment. A fresh
+  `websocket.NewServer()` has no persistence adapter at all, and nothing under
+  `provider/`, `cmd/`, or `examples/` constructs `MemoryPersistence` outside
+  its own tests; you have to opt into it via `NewServerWithPersistence`.
+- **The shutdown durability fix (#229)** affects **anyone running
+  `provider/websocket` with any persistence adapter at all**, in the default
+  configuration. If you call `Server.Shutdown` on a server that has peers
+  connected, you were losing committed transactions.
+- **The `provider/client` follow-ups (#228)** affect anyone using
+  `provider/client`, the embeddable sync client shipped in v1.48.0. One of
+  the three is directly visible on the *server* side too: every graceful
+  client disconnect was logging as an abnormal closure (code 1006).
+
+**What you must do:** nothing — all three are drop-in fixes with unchanged
+constructors and signatures. The write path gets cheaper (see the trade
+below), `Shutdown` gets more honest, and `provider/client` disconnects now
+look like what they are.
+
+### Fixed: `MemoryPersistence` re-merged the whole document on every write (#186)
+
+**The bug.** `MemoryPersistence.StoreUpdate` ran
+`crdt.MergeUpdatesV1(existing, update)` against the room's **entire**
+accumulated state on every incremental write — an O(document) cost per write,
+so a session of N updates cost O(document²) overall. `PersistenceAdapter`'s
+own doc warns adapters not to do exactly this; the built-in adapter was doing
+it.
+
+**The fix.** `MemoryPersistence` now delegates to `persistence.MemoryPersistence`
++ `persistence.LegacyAdapter` (`KeepVersions = 1`) instead of re-merging by
+hand: each write **appends** the update — O(update), not O(document) — and
+the room folds its own backlog into one blob every `CompactEvery` writes
+(new field, default 500, matching `provider/client`'s own compaction
+default). The O(document) fold still happens, but only once per
+`CompactEvery` writes instead of on every single one.
+
+**Measured**, old merge-on-write vs. new append-then-compact, timing a single
+`StoreUpdate` against a room already holding N updates:
+
+| Updates already in room | Before | After | Improvement |
+|---|---|---|---|
+| 100 | 13,975 ns/op | 1,457 ns/op | 9.6× |
+| 1,000 | 132,871 ns/op | 1,710 ns/op | 77.7× |
+| 10,000 | 1,676,329 ns/op | 4,653 ns/op | 360× |
+
+**Read the acceptance bar honestly, not generously.** #186 asked for "flush
+cost no longer grows with doc size." Taken literally, that is **not fully
+met**: per-write cost is now `append + O(document)/CompactEvery`, so it still
+grows with document size — the growth constant is divided by `CompactEvery`
+(500 by default), not eliminated. It *is* met in the sense that actually
+matters day to day: cost no longer grows **per write** in proportion to the
+document, because most writes are a cheap append and only one in
+`CompactEvery` pays the fold. Flat, constant-time writes aren't achievable
+for this storage model at all — `LoadDoc` has to keep returning the whole
+room as one V1 blob, so any bounded-record scheme must periodically fold the
+full document, and that fold is inherently O(document). See
+[docs/PERSISTENCE.md](docs/PERSISTENCE.md) for the same framing in the
+adapter's own docs.
+
+**The trade, stated plainly:** `LoadDoc` is no longer O(1). It now folds
+whatever records the room still holds — bounded by `CompactEvery` — and
+persists that fold, so subsequent loads are cheap again until the log builds
+back up. Writes are continuous and loads happen once per room residency, so
+this is the right direction to trade in, but it is not free.
+
+**Two corrections to the issue, verified against the code, worth knowing if
+you read #186 directly:**
+
+1. It calls `MemoryPersistence` "the default adapter." It is not.
+   `websocket.NewServer()` is documented as shipping with no persistence at
+   all, and the type is opt-in via `NewServerWithPersistence`.
+2. Its acceptance criterion points at a benchmark
+   (`BenchmarkMemoryPersistence_FlushVsDocSize` in `persistence/`) that
+   measures a **different type** (`persistence.MemoryPersistence`) on a
+   **different path** (`LoadDoc`, not `StoreUpdate`) than the one this issue
+   is actually about. This release adds
+   `BenchmarkWSMemoryPersistence_StoreUpdateVsDocSize` in
+   `provider/websocket`, which measures the type and path #186 is actually
+   about — the numbers above come from it.
+
+### Added: `Compact`, `CompactEvery` (#186)
+
+New exported surface on `MemoryPersistence`, which is why this ships MINOR
+rather than PATCH even though it's a bug fix — nothing existing changes
+behaviour or signature.
+
+- **`Compact(ctx, room) error`** folds a room's appended records into one
+  now, on demand. It also satisfies the optional `CompactableAdapter`
+  interface, so `Server.CompactEvery` and the server's on-unload compaction
+  work against `MemoryPersistence` too, additively on top of its own
+  threshold.
+- **`CompactEvery int`** (field) sets the self-compaction threshold; 0 or
+  less means the default of 500.
+
+**Deliberately not added:** `StoreUpdateContext`. An in-memory append has
+nothing to abort, so implementing the context-aware `PersistenceAdapterContext`
+variant would only cost writes — it would newly satisfy that interface and
+switch the server's persistence worker onto its cancellable-ctx path, where
+the coalescing-disabled path's final shutdown drain reuses a ctx a separate
+goroutine cancels concurrently with that same drain. A committed update still
+sitting in the queue when that race goes the wrong way is discarded with only
+a log line. Measured while this was still in the branch: 51-151 of 200
+concurrent writes dropped across 20 trials during a concurrent `Shutdown`,
+attributable to this method.
+
+That figure is **not** a claim that removing it makes such a `Shutdown` race
+lossless. A separate, pre-existing gap in the coalescing-disabled shutdown
+drain — it drains its queue exactly once and exits, whatever the adapter —
+drops writes under this same repro shape regardless of which
+`PersistenceAdapter` is behind it. What this removal fixes is specifically the
+extra, compounding loss this method caused on top of that. The underlying gap
+was filed as #229 and is fixed separately in this same release — next.
+
+### Fixed: transactions committed during `Shutdown` were silently dropped (#229)
+
+**This one affects everybody with persistence configured, in the default
+configuration**, and is unrelated to `MemoryPersistence`. It was found during
+the whole-branch review of #186 and verified as pre-existing against v1.48.0.
+
+**The bug.** Each room's persistence worker exited on `Server.Shutdown` by
+draining its 256-slot queue **once** and returning. Its producer — the
+`doc.OnUpdate` observer — watched only the room-teardown signal, never the
+server's shutdown signal. And `Shutdown` closes the shutdown signal as its
+*first* act but the peer connections much later, so peer read loops keep
+committing for the entire close-connections-and-join window. Every
+transaction committed after that one-shot sweep went into a buffer nobody was
+reading, and disappeared — no error, no counter, not even a log line. The
+package's own doc comment promised the opposite: *"draining any buffered
+updates before returning so that no committed transaction is silently lost."*
+
+This is the same shape as the relay-side [#202](https://github.com/reearth/ygo/issues/202)
+fixed in v1.46.0: `Shutdown` winding a consumer down while producers were
+still producing.
+
+**The fix — and why it is not the obvious one.** The tempting shape is to
+quiesce the producers first and let the worker exit once they are provably
+gone. We deliberately did not do that. Producers here are peer read loops with
+no join point, `ServeHTTP` handlers that can register mid-shutdown, and any
+caller holding a `*crdt.Doc`; "provably gone" is not provable, and a wrong
+guess there turns silent data loss into a **hung `Shutdown`** — a strictly
+worse failure. `Shutdown`'s ordering is therefore completely unchanged.
+
+Instead the handoff itself was made race-free. The worker now closes a new
+per-room retirement latch as the **first** act of every exit path — before its
+final drain, not after — which leaves the producer exactly two cases and no
+third:
+
+1. the send completed while the latch was open, so `close(latch)` and
+   therefore the final drain that follows it both happen after the send: the
+   drain is guaranteed to pick the update up;
+2. the latch is already closed, which a `select` on a closed channel always
+   observes with certainty: the committing goroutine performs the write
+   itself.
+
+The producer's escape hatch (needed so a full buffer can't wedge a committing
+transaction once the worker is gone) still exists — it now has a durable
+destination instead of the floor.
+
+**Also fixed, the second half of #229:** the coalescing-disabled path passed
+the worker's **cancellable** context — the one a sibling goroutine cancels on
+shutdown — to its final drain, so every `PersistenceAdapterContext`
+implementation (`persistence/sqlite` via `NewLegacyAdapterContext`, and any
+adapter that honours `ctx`) returned `ctx.Err()` and discarded the write.
+Measured at 51-151 of 200 concurrent writes dropped per trial. Both paths'
+final flushes now use `context.Background()`, and a store aborted by
+cancellation is **retained** and re-stored on the exit path rather than
+dropped — the same retain-and-re-flush rule the coalescing path already
+applied to an unflushed batch. Cancellation still aborts a write already in
+flight when shutdown begins, so it no longer decides which committed
+transactions count.
+
+**Read that last point precisely — it is a trade, not a free win.** Because the
+final flush and the retained re-stores now run under `context.Background()`, a
+`StoreUpdate` that never returns wedges that room's worker at exit where it
+used to be cancelled out of the way. `Shutdown` does not hang on it — every
+wait is bounded by the caller's context — but it now returns `ctx.Err()` in a
+case that previously returned `nil` by discarding your data. If you have a
+`Shutdown` deadline and an adapter that can block indefinitely, you may start
+seeing `context.DeadlineExceeded` where you saw success before. That is the
+honest signal replacing a silent lie.
+
+There is a **second, unrelated cause** of that same error, so do not read it as
+"my adapter is wedged": `Shutdown`'s new wait counts *every* committing
+goroutine, not only the ones performing a write themselves. Code that holds a
+retained `*crdt.Doc` and commits in a tight loop keeps that count above zero for
+as long as it runs, so `Shutdown` burns its whole deadline with nothing stuck
+anywhere. Stop your writers, not just your connections, if you want `Shutdown`
+to return early.
+
+**`Shutdown` now joins the writes it can see.** A transaction committed during
+`Shutdown` may arrive too late for its room's worker, in which case the
+committing goroutine performs the adapter write itself. `Shutdown` waits for
+those to finish (bounded by your ctx) before returning — otherwise the fix
+would only narrow the loss window, since the usual `srv.Shutdown(ctx)` followed
+by returning from `main` would kill the process mid-write.
+
+**The residual, stated plainly: this does not make `Shutdown` lossless, and
+cannot.** A transaction that *begins* committing after `Shutdown` has observed
+its last in-flight write is not covered. The producers are peer read loops and
+any code holding a `*crdt.Doc`; the server has no way to join them, and
+inventing one would risk a `Shutdown` that never returns — a worse failure than
+the one being fixed.
+
+What is guaranteed is narrower, and every one of its qualifiers is real:
+
+> **Stop accepting new WebSocket connections before calling `Shutdown`.** Then,
+> provided `Shutdown` returns `nil`: for every room that was present and had
+> finished loading when `Shutdown` began, any commit whose `Transact` returned
+> before `Shutdown` returned has been handed to the adapter — the write
+> attempt completed and was not abandoned mid-flight. Whether the adapter
+> *accepted* it is a separate question this does not answer: adapter errors
+> and panics are logged, not propagated, so this is not an unconditional
+> durability claim.
+
+The precondition is not decoration. `Shutdown` snapshots the room set once and
+skips any room still mid-load at that instant, and `ServeHTTP` has no shutdown
+gate — so a connection accepted while `Shutdown` runs can create a room, or
+finish loading one, after the snapshot, and `Shutdown` never waits on that
+room's persistence worker. A commit into it can return from `Transact` with the
+update merely buffered, and `Shutdown(ctx)`-then-exit kills the drain. That
+behaviour predates v1.49.0; it is called out here because everything above
+would otherwise read as promising against it.
+
+Nor is "provided `Shutdown` returns `nil`" decoration. Every wait inside
+`Shutdown` is bounded by the caller's `ctx`, not by the work actually
+finishing — a deadline that fires mid-drain returns `ctx.Err()` while a final
+flush or a stranded write may still be in flight, landing or not with no way
+for the caller to tell. And "handed to the adapter" is exactly that, no
+more: an adapter error or a recovered panic while storing a commit is logged
+(see `persistStranded`'s and the persistence worker's own doc comments) and
+the write abandoned right there, never propagated through `Shutdown`'s return
+value. A `nil` `Shutdown` tells you every in-scope commit's write attempt
+completed without being abandoned mid-flight — it cannot tell you the
+adapter accepted any of them. A caller who needs that stronger property has
+to get it from the adapter itself.
+
+**What this costs you.** A straggler write is synchronous for the goroutine
+that committed it and bypasses coalescing, auto-versioning, and compaction. It
+also delays that update's relay fan-out, since the persistence observer runs
+before the relay observers. And it writes for a room the server may already
+consider gone — including, if you retain a `*crdt.Doc` past teardown,
+indefinitely; before #229 those commits were silently dropped instead. Adapters
+whose `Compact` mutates state keyed by room name should serialise by name; see
+`CompactableAdapter`'s godoc and [docs/PERSISTENCE.md](docs/PERSISTENCE.md).
+
+**Tested both directions**, because the failure mode of a bad fix here is a
+hang rather than a loss. Sequenced (not raced) regression tests commit while
+the worker is parked immediately past its final drain and assert the update
+reaches the adapter, with coalescing enabled *and* disabled; a second pair
+parks the adapter inside the stranded write itself and asserts `Shutdown` has
+not returned, then that a wedged one still surfaces as the caller's deadline.
+Against them: `Shutdown` must still return promptly for rooms with no peers at
+all — idle-resident and `Apply`-created — where no producer will ever appear.
+
+### Fixed: `provider/client` follow-ups from the #165 review rounds (#228)
+
+**Who is affected:** anyone using `provider/client` (v1.48.0's embeddable
+sync client). Three independent, previously-deferred fixes, none touching a
+public signature — the most visible one is server-side: every graceful
+`provider/client` disconnect was logging as an abnormal closure (code 1006)
+on any server it talked to, ygo's own included.
+
+**`Client.Close`, called a second time, always returned `nil`.** `closeErr`
+was a variable local to `Close`, re-declared fresh on every call — including
+repeat calls, where `closeOnce.Do` is a no-op that never touches it — so the
+first call's real result (whatever the owned store's `Close` actually
+returned) was silently replaced by a fresh, untouched `nil` on every call
+after the first. It is now cached on the `Client` itself and returned
+consistently, first call or fifth.
+
+**`Client.maybeCompact` could lose a concurrent write count.** It read
+`storeWrites` via `Load` and then reset it unconditionally via `Store(0)`,
+discarding any `Add(1)` from a concurrent `onDocUpdate` — a local edit
+landing in that window, from either the caller's own goroutine or the loop
+goroutine — that happened to arrive between the two calls. It now consumes
+exactly its threshold via `Add(-threshold)`, which cannot lose a concurrent
+increment on either side of it. The impact was compaction cadence drift — a
+few extra updates before the next fold — never lost data.
+
+**`Close`'s teardown never sent a WebSocket close frame.** Tearing down via
+a bare `conn.Close()` tells the peer nothing: from `ReadMessage`'s point of
+view, a deliberate disconnect is indistinguishable from a crash or a severed
+network path, and ygo's own server (like most implementations of the
+ordinary WebSocket close handshake) logs that as an abnormal closure — on
+every ordinary disconnect, not only real failures. `runLoop`'s teardown now
+sends `WriteControl(CloseMessage, CloseNormalClosure)` before `conn.Close()`,
+the same thing a graceful `gorilla/websocket` client is documented to do,
+so the peer's read loop sees a proper close instead of a bare I/O error.
+Two things worth knowing precisely, not generously: that frame goes out on
+**every** exit from `runLoop`, including a rejected-auth or read-error exit,
+always carrying the same `CloseNormalClosure` code — so read it as "this
+client is done writing," not as a claim that the disconnect was clean. And
+the frame's own write is bounded by `closeDrainTimeout` (2s), not the
+10s handshake-path timeout the first version of this fix used by mistake —
+a backpressured-but-alive peer could otherwise have added up to 10 seconds
+to `Close`'s return latency, right where the design intent for this
+teardown path was already 2 seconds.
+
+### Documentation drift, fixed alongside
+
+`docs/ARCHITECTURE.md`'s package dependency graph had not been redrawn since
+v1.19: it showed only `provider/{websocket,http}` and omitted five packages
+shipped since — `persistence/`, `cluster/`, `mobile/`, `provider/webhook`,
+and `provider/client`. Every arrow in the replacement was verified against
+real imports with `go list` across 14 packages, which confirmed one arrow
+most readers would draw wrong: `awareness/` does **not** import `crdt/`.
+
+Three further drifts were found while auditing the rest of that file, and are
+fixed here rather than filed:
+
+- **"Garbage collection" documented an API that does not exist.** It told you
+  to write `doc.GC = true` / `doc.GC = false`. `Doc` has no exported `GC`
+  field — the flag is set at construction, `crdt.New(crdt.WithGC(false))`.
+  Code copied from that section would not have compiled.
+- **The same section described only half the behaviour.** Automatic
+  collection is **suspended for as long as any `UndoManager` is registered**
+  (undoing a deletion re-inserts a copy of the deleted content, so that
+  content has to still be there) — worth knowing, because it means a
+  long-lived undo manager keeps deleted content alive. And `crdt.RunGC` does
+  tombstone reclamation (#166): it replaces deleted content with
+  `ContentDeleted` tombstones and then merges adjacent tombstones from the
+  same client into single nodes. It stays available as the manual entry point
+  when auto-GC is suspended, and it is destructive with respect to
+  `RestoreDocument` — take snapshots first.
+- **"Compatibility testing" described only the Yjs fixture layer**, omitting
+  the randomised layer under `testutil/fuzz/` entirely — including
+  `TestFuzzConvergenceMoves`, the oracle that found the `YArray.Move`
+  divergence fixed in v1.40.0. All four oracles are now listed with what each
+  proves, which require node, and how to replay a failing seed.
+
+Finally, `mobile`'s package doc understated its own bound surface: it named
+only `*Doc` and `*Awareness`, omitting `*SyncClient` and `*Subscription`, and
+said the package never exposes callbacks. It exposes three observer
+*interfaces* (`DocObserver`, `AwarenessObserver`, `SyncStatusObserver`) —
+the only callback form `gomobile bind` supports in that direction. The claim
+now says what it meant (no Go **func values**) and points at the threading
+rules each observer imposes.
+
 ## v1.48.0
 
 **Who is affected:** anyone building a Go client — or, via `mobile.SyncClient`,

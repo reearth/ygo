@@ -12,6 +12,28 @@ import (
 // restores the real generator on cleanup. This is what makes the backoff
 // tests deterministic assertions on exact durations rather than statistical
 // claims about a real PRNG (see backoff.go's randFloat doc).
+//
+// # Correctness here rests on two facts, not one (#228)
+//
+// First, t.Cleanup's LIFO ordering — which IS documented ("Cleanup functions
+// will be called in last added, first called order", testing.T.Cleanup) —
+// is what makes NESTED calls in one test (e.g. two withFixedRand calls in
+// the same test body, as TestBackoff_NextSaturatesAtMax does) restore
+// correctly: each call captures whatever randFloat currently is as `orig`
+// before overwriting it, so the LAST call's cleanup must run FIRST to hand
+// back its immediate predecessor's value, chaining back to the real
+// generator only once every call's cleanup has run in reverse order. An
+// earlier version of this comment called that ordering "undocumented" — it
+// isn't; Go's own doc states it plainly.
+//
+// Second, and this is the part actually worth calling out: randFloat is
+// PACKAGE-LEVEL, mutable, shared state, and this helper's set/restore has no
+// locking of its own. That is safe today only because nothing in this test
+// package calls t.Parallel — every test that uses this helper runs to
+// completion (cleanup included) before the next one starts. Adding
+// t.Parallel to any test in this file, now or later, would let two tests'
+// set/restore pairs interleave on the same var: a genuine data race, not
+// merely a flaky assertion.
 func withFixedRand(t *testing.T, v float64) {
 	t.Helper()
 	orig := randFloat

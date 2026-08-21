@@ -23,6 +23,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/internal/relaylane"
 	"github.com/reearth/ygo/internal/roomname"
+	"github.com/reearth/ygo/persistence"
 	ygsync "github.com/reearth/ygo/sync"
 )
 
@@ -206,13 +207,43 @@ type PersistenceAdapterContext interface {
 // adapter implements it, the server calls Compact to signal a good time to
 // collapse stored updates for a room into a compact form (e.g. merge the update
 // log into a snapshot, prune old versions) — on room unload, and, when
-// Server.CompactEvery > 0, after every N persistence flushes.
+// Server.CompactEvery > 0, after every N persistence flushes on the
+// coalescing path (see Server.CompactEvery's own field doc and
+// startPersistenceWorker's doc for why: onFlushed, the call site that counts
+// those N flushes, is only reachable from there — the strict
+// (coalescing-disabled) path never calls it, so those deployments get
+// on-unload compaction only).
 //
 // Compact is invoked from the room's persistence worker goroutine, serialised
-// with StoreUpdate for that room, so implementations need no extra locking
-// against concurrent writes to the same room. It is best-effort: a returned
+// with StoreUpdate for that room INSTANCE, so implementations need no extra
+// locking against that worker's own writes. It is best-effort: a returned
 // error (or panic) is logged and does not abort persistence. Retention policy
 // (how much history to keep) is the adapter's concern.
+//
+// That serialisation is per room INSTANCE, not per room NAME — read this if
+// your Compact mutates shared state keyed by name. Two sources of overlap:
+//
+//   - Teardown followed by re-creation. A room's worker can still be in its
+//     exit-path Compact while a client reconnects and a brand-new room of the
+//     same name starts writing. This window predates #229 (see
+//     handleDisconnect's flush-then-evict sequence in peer.go).
+//   - A retained *crdt.Doc. Nothing calls doc.Destroy on teardown, so a caller
+//     holding the doc — from GetDoc, or from an OnLoadDocument hook — keeps its
+//     persistence observer alive, and every later commit is written directly by
+//     the committing goroutine (#229; before #229 those commits were silently
+//     dropped instead). Those writes are serialised among themselves, but not
+//     against a successor room of the same name, and they are unbounded in time.
+//
+// If your adapter's Compact is not safe against a concurrent StoreUpdate for
+// the same room name, serialise inside the adapter. Every store this repo ships
+// behind persistence.LegacyAdapter already does, each serialising its writers
+// under a single mutex: persistence.MemoryPersistence and
+// persistence.FilePersistence do so for every operation, reads included;
+// persistence/sqlite's reads (Load, ListVersions, GetUpdate, MaterializeAt)
+// are deliberately lock-free instead and consistent by other means (see that
+// package's methods.go) — but its Compact and AppendUpdate are both writers
+// serialised under its own mutex, which is the property this section
+// actually depends on.
 //
 // On room unload, Compact runs synchronously in the worker's exit path.
 // Compact is invoked with context.Background() (it is not cancelled by
@@ -258,42 +289,239 @@ type VersionableAdapter interface {
 // be told apart from versions a user explicitly named.
 const AutoVersionLabel = "auto"
 
-// MemoryPersistence is a thread-safe in-memory PersistenceAdapter that merges
-// all updates into a single V1 snapshot per room. It is the default adapter
-// used when no external persistence is configured and is primarily useful in
-// tests and single-process deployments.
+// defaultMemoryCompactEvery is how many appended updates a room accumulates
+// before MemoryPersistence folds them back into one blob. It matches
+// provider/client's own compaction default so the two in-memory-ish stores
+// behave alike.
+const defaultMemoryCompactEvery = 500
+
+// MemoryPersistence is a thread-safe in-memory PersistenceAdapter. It APPENDS
+// each incremental update and periodically folds a room's backlog into a
+// single blob, rather than re-merging the whole document on every write.
+//
+// The distinction is the point of #186: merging on every write costs
+// O(document) per flush and O(document²) over a session, which is exactly what
+// PersistenceAdapter's own doc warns adapters not to do. Appending costs
+// O(update); the O(document) fold is still paid, but only once per
+// CompactEvery writes rather than on every one — the O(document) cost is
+// divided by CompactEvery, not eliminated.
+//
+// It compacts ITSELF rather than waiting for Server.CompactEvery, which is off
+// by default (see that field's doc) — an adapter that only appended and waited
+// to be told would grow without bound for anyone who had not opted in.
+//
+// Trade, stated plainly: LoadDoc is no longer O(1). It folds whatever records a
+// room still holds — bounded by CompactEvery — and persists that fold, so
+// subsequent loads are cheap again. Writes are continuous and loads are once
+// per room residency, so this is the right direction, but it is not free.
+//
+// Still primarily for tests and single-process deployments; a multi-process
+// deployment wants persistence/sqlite or another VersionedPersistence.
+//
+// Must be constructed with NewMemoryPersistence. The zero value has a nil
+// internal adapter; every method reports that with a plain error rather than
+// panicking, but there is no working zero value — always use the constructor.
 type MemoryPersistence struct {
-	mu   sync.RWMutex
-	docs map[string][]byte // room → merged V1 update
+	adapter *persistence.LegacyAdapter
+
+	// CompactEvery bounds how many appended updates a room accumulates before
+	// this adapter folds them into one. 0 or less means the default (500).
+	// Set before serving; read without synchronisation.
+	CompactEvery int
+
+	mu    sync.Mutex
+	rooms map[string]*compactLedger // room → append/fold bookkeeping
 }
+
+// compactLedger is MemoryPersistence's per-room compaction bookkeeping. The
+// two counters are MONOTONE and are never reset in place, which is what makes
+// concurrent compactions safe: appended only ever rises, and folded only ever
+// rises to a mark that was read BEFORE the fold that reports it began. The
+// outstanding (un-folded) count is the difference.
+//
+// The obvious alternative — one "writes since last compaction" counter that
+// each Compact snapshots and then subtracts from — is not safe under
+// concurrent compaction, because a snapshot taken by one Compact can be
+// consumed by another after a write that neither fold included (PR #230
+// review, second round). Two Compact calls can overlap for one room even
+// inside a plain Server: LoadDoc compacts before materialising, and since
+// v1.39 room loading runs off the global room-map lock, so a load can overlap
+// the previous residency's on-unload compaction for the same room. Direct use
+// of this exported, documented-thread-safe type can overlap them freely.
+type compactLedger struct {
+	// appended counts every update ever appended for this room.
+	appended int64
+	// folded is the appended-count that the most recent successful fold is
+	// known to have included. It advances only forward (max), so a fold that
+	// finishes late can never retract a later fold's progress.
+	folded int64
+	// inflight counts Compact calls currently folding this room. The entry
+	// must not be dropped while any of them still holds a mark to apply —
+	// dropping it would reset appended to 0 under them, and their folded mark
+	// would then read as a huge outstanding debt.
+	inflight int
+}
+
+// outstanding reports the un-folded write count.
+func (l *compactLedger) outstanding() int64 { return l.appended - l.folded }
+
+// ledgerLocked returns room's ledger, creating it if absent. Caller holds m.mu.
+func (m *MemoryPersistence) ledgerLocked(room string) *compactLedger {
+	l := m.rooms[room]
+	if l == nil {
+		l = &compactLedger{}
+		m.rooms[room] = l
+	}
+	return l
+}
+
+// dropIfIdleLocked deletes room's ledger once nothing is outstanding and no
+// compaction is still in flight for it. Rooms come and go (idle eviction), so
+// a map keyed by room name that is only ever zeroed grows with churn.
+// Caller holds m.mu.
+func (m *MemoryPersistence) dropIfIdleLocked(room string, l *compactLedger) {
+	if l.inflight == 0 && l.outstanding() <= 0 {
+		delete(m.rooms, room)
+	}
+}
+
+// errMemoryPersistenceNotConstructed is returned by every MemoryPersistence
+// method when called on the zero value (e.g. &MemoryPersistence{CompactEvery:
+// 2000}) instead of a value from NewMemoryPersistence. The zero value's
+// adapter field is nil; without this guard every method would nil-dereference,
+// and the persistence worker recovers panics from StoreUpdate, so an unguarded
+// panic here would present as total silent write loss with nothing but a log
+// line rather than an error that names the actual cause.
+var errMemoryPersistenceNotConstructed = errors.New("websocket: MemoryPersistence must be constructed with NewMemoryPersistence, not used as a zero value")
 
 // NewMemoryPersistence returns an empty MemoryPersistence.
 func NewMemoryPersistence() *MemoryPersistence {
-	return &MemoryPersistence{docs: make(map[string][]byte)}
+	ad := persistence.NewLegacyAdapter(persistence.NewMemoryPersistence())
+	// MUST be explicit: KeepVersions defaults to 0, which means "keep all
+	// history" and makes Compact a silent no-op (persistence/adapter.go). 1
+	// folds a room down to a single record, preserving the one-blob-per-room
+	// memory shape this type has always had.
+	ad.KeepVersions = 1
+	return &MemoryPersistence{adapter: ad, rooms: make(map[string]*compactLedger)}
 }
 
-// LoadDoc returns the merged V1 update for room, or nil if none exists.
-func (m *MemoryPersistence) LoadDoc(room string) ([]byte, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.docs[room], nil
-}
-
-// StoreUpdate merges update into the stored snapshot for room.
-func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	existing := m.docs[room]
-	if len(existing) == 0 {
-		m.docs[room] = update
-		return nil
+func (m *MemoryPersistence) compactEvery() int {
+	if m.CompactEvery > 0 {
+		return m.CompactEvery
 	}
-	merged, err := crdt.MergeUpdatesV1(existing, update)
-	if err != nil {
+	return defaultMemoryCompactEvery
+}
+
+// LoadDoc returns the room's state as one V1 update, folding any outstanding
+// appended records first so later loads are cheap again. Compaction failure is
+// not fatal here: the adapter can still materialise the room from its records.
+func (m *MemoryPersistence) LoadDoc(room string) ([]byte, error) {
+	if m.adapter == nil {
+		return nil, errMemoryPersistenceNotConstructed
+	}
+	_ = m.Compact(context.Background(), room)
+	return m.adapter.LoadDoc(room)
+}
+
+// StoreUpdate appends update, then folds the room once it has accumulated
+// CompactEvery writes.
+//
+// It returns ONLY the append error. A failed fold is swallowed deliberately:
+// the write itself succeeded, the server reports StoreUpdate errors as
+// persistence failures, and returning a compaction error would misreport a
+// successful write. This mirrors CompactableAdapter's own best-effort
+// contract. Callers who need the error can call Compact directly.
+//
+// This type deliberately does NOT implement PersistenceAdapterContext. An
+// in-memory append has nothing to abort, so a StoreUpdateContext forwarding to
+// the wrapped adapter would buy nothing and would newly satisfy
+// PersistenceAdapterContext, switching the server's persistence worker onto
+// its ctx-aware path purely to gain a cancellation this adapter cannot act on
+// — persistence.MemoryPersistence.AppendUpdate simply returns ctx.Err() at
+// entry, discarding the write.
+//
+// When this was briefly implemented during #186, that cost 51-151 of 200
+// concurrent writes across trials during a concurrent Shutdown, because the
+// shutdown drain then reused a ctx a separate goroutine cancels concurrently.
+// #229 has since fixed the worker side of that — every final flush now uses a
+// background ctx, and a store aborted by cancellation is retained and
+// re-stored rather than dropped, so a ctx-aware adapter no longer loses the
+// tail. The reason to stay off that path is now the plain one: cancellation
+// is a lever for adapters with something to abort, and this one has nothing.
+func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
+	if m.adapter == nil {
+		return errMemoryPersistenceNotConstructed
+	}
+	if err := m.adapter.StoreUpdate(room, update); err != nil {
 		return err
 	}
-	m.docs[room] = merged
+
+	// Decide under the lock, compact outside it: MergeUpdatesV1 on a large
+	// room must never block another room's counter update.
+	m.mu.Lock()
+	l := m.ledgerLocked(room)
+	l.appended++
+	due := l.outstanding() >= int64(m.compactEvery())
+	m.mu.Unlock()
+	if due {
+		_ = m.Compact(context.Background(), room) // best-effort; see this method's doc
+	}
 	return nil
+}
+
+// Compact folds the room's appended records into one, satisfying the optional
+// CompactableAdapter interface so the server's on-unload and CompactEvery
+// compaction work too (both are additive to this type's own threshold).
+//
+// MergeUpdatesV1 (invoked by the wrapped adapter, below) runs OUTSIDE m.mu, by
+// design: a large room's fold must never block another room's counter update.
+// That window is what makes the bookkeeping delicate — a concurrent
+// StoreUpdate can append while this call is folding, and a concurrent Compact
+// can fold and report while this one is still in flight.
+//
+// The bookkeeping is therefore MONOTONE rather than snapshot-and-subtract.
+// This call reads the room's appended-count as its mark BEFORE folding, and on
+// success advances the room's folded-count to that mark only if it moves it
+// forward. Two properties follow, and both are needed:
+//
+//   - A write appended after this fold began is never forgiven by it, because
+//     the mark was read before it. Erasing such a write's contribution is what
+//     let the un-folded record count exceed CompactEvery indefinitely once
+//     writes stopped — the first round of this bug (PR #230 review), reported
+//     against a line that deleted the room's entry unconditionally.
+//   - A compaction that finishes late can never retract a later one's
+//     progress, because folded only moves forward. Subtracting a snapshot
+//     instead reintroduced the same erasure between two overlapping Compact
+//     calls — the second round of the same review.
+//
+// It can still under-forgive in the harmless direction: a write that lands
+// late enough to actually be swept into this fold is nonetheless counted
+// toward the next one, so the next compaction fires at most one write early.
+// That is bounded, and bounded-early is the correct way to be wrong here.
+//
+// On failure the ledger is left untouched, so the threshold re-fires rather
+// than letting records grow behind a persistently failing fold.
+func (m *MemoryPersistence) Compact(ctx context.Context, room string) error {
+	if m.adapter == nil {
+		return errMemoryPersistenceNotConstructed
+	}
+
+	m.mu.Lock()
+	l := m.ledgerLocked(room)
+	mark := l.appended
+	l.inflight++
+	m.mu.Unlock()
+
+	err := m.adapter.Compact(ctx, room)
+
+	m.mu.Lock()
+	l.inflight--
+	if err == nil && mark > l.folded {
+		l.folded = mark
+	}
+	m.dropIfIdleLocked(room, l)
+	m.mu.Unlock()
+	return err
 }
 
 // room holds the shared document and awareness state for one named room.
@@ -327,6 +555,31 @@ type room struct {
 	persistCh   chan []byte   // buffered channel for serialised writes
 	persistStop chan struct{} // closed to signal goroutine to drain and exit
 	persistDone chan struct{} // closed when persistence goroutine exits
+
+	// persistRetire is closed by the persistence worker ITSELF as the first act
+	// of every exit path — before its final drain of persistCh, whatever
+	// triggered the exit (persistStop, or the server-wide shutdownCh). That
+	// ordering is the whole point, and it is what makes the handoff in
+	// loadRoom's doc.OnUpdate observer race-free (#229):
+	//
+	//	if a producer's send into persistCh completed while persistRetire was
+	//	still open, the worker's final drain — which strictly follows
+	//	close(persistRetire) — is guaranteed to see the buffered element;
+	//	otherwise the producer sees persistRetire closed and takes over the
+	//	write itself via persistStranded.
+	//
+	// Before #229 the worker exited on shutdownCh with no such latch, so every
+	// transaction committed after the one-shot drain landed in the 256-slot
+	// buffer with no reader and was lost without a trace — the exact opposite
+	// of the guarantee the package documents.
+	persistRetire chan struct{}
+
+	// persistFallbackMu serialises the post-retirement direct writes performed
+	// by persistStranded. doc.OnUpdate observers fire OUTSIDE the doc lock
+	// (crdt.buildPhase2), so two committing goroutines can be inside the
+	// observer at once; the adapter contract only promises serialised calls per
+	// room, so the fallback must provide that serialisation itself.
+	persistFallbackMu sync.Mutex
 
 	// flushReq requests an on-demand durable flush of the pending batch without
 	// stopping the worker. The worker drains persistCh, flushes with a
@@ -474,6 +727,41 @@ type Server struct {
 
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{} // closed by Shutdown
+
+	// strandedInFlight counts committing goroutines that are anywhere inside
+	// loadRoom's doc.OnUpdate observer — EVERY commit, not only the ones that
+	// end up on the retirement branch and perform the adapter write themselves
+	// (#229). Shutdown waits for it to reach zero so it does not return while
+	// such a write is still on its way to the adapter; without that wait the fix
+	// would only NARROW the loss window, since the standard
+	// `srv.Shutdown(ctx); return` shape would let the process exit mid-write.
+	//
+	// Counting every commit is not laziness, it is the requirement: the
+	// increment must happen BEFORE the observer's outer select, because an
+	// increment placed after the retirement branch is chosen leaves a gap in
+	// which Shutdown observes zero and returns while a committer has already
+	// decided to write. The cost is two atomic adds on every committed
+	// transaction, which is deliberate — correctness of the shutdown join over a
+	// few nanoseconds on a path that already encodes an update and takes a
+	// channel.
+	//
+	// The consequence of that breadth is worth stating, because it surfaces as a
+	// confusing error: a SUSTAINED producer — code holding a retained *crdt.Doc
+	// and committing in a loop — can keep this above zero indefinitely, so
+	// Shutdown burns its whole deadline and returns context.DeadlineExceeded
+	// with no wedged adapter anywhere. Callers who need Shutdown to return early
+	// must stop their writers, not only their connections.
+	//
+	// strandedZero is a broadcast latch, replaced-and-closed on each 1→0
+	// transition (see strandedBroadcast). A close rather than a token hand-off
+	// because Shutdown may legitimately be called concurrently — shutdownOnce
+	// implies as much — and a cap-1 wake token would be consumed by one caller,
+	// parking the others until their contexts expired. A plain sync.WaitGroup is
+	// unusable here for a different reason: producers appear at arbitrary times,
+	// so Add would race Wait.
+	strandedInFlight atomic.Int64
+	strandedZeroMu   sync.Mutex
+	strandedZero     chan struct{}
 
 	// AuthFunc, if non-nil, is called before upgrading each incoming WebSocket
 	// connection. Return false to reject the connection; the server responds
@@ -976,9 +1264,10 @@ func (s *Server) newPeerLimiter() *rate.Limiter {
 // NewServer returns a new Server with an empty room store and no persistence.
 func NewServer() *Server {
 	s := &Server{
-		rooms:       make(map[string]*room),
-		shutdownCh:  make(chan struct{}),
-		sweeperDone: make(chan struct{}),
+		rooms:        make(map[string]*room),
+		shutdownCh:   make(chan struct{}),
+		sweeperDone:  make(chan struct{}),
+		strandedZero: make(chan struct{}),
 	}
 	s.upgrader = gws.Upgrader{CheckOrigin: s.checkOrigin}
 	return s
@@ -1076,6 +1365,42 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	case <-done:
 	case <-ctx.Done():
 	}
+
+	// Join the stranded writers (#229). A transaction committed during this
+	// Shutdown — peer read loops keep committing right through the connection
+	// closes above — may have arrived too late for its room's worker, in which
+	// case the committing goroutine performs the adapter write itself. It
+	// blocks on the same persistDone the loop above just waited for, so without
+	// this join Shutdown would routinely return with that write still in
+	// flight, and the usual `srv.Shutdown(ctx); return` shape would kill the
+	// process mid-write — the original bug through a narrower window.
+	//
+	// Placed HERE deliberately: after the persistence join (a stranded writer
+	// cannot even start until its worker has exited) and before the relay steps
+	// below, so #202's retire→drain→join→cancel ordering is untouched. Bounded
+	// by ctx like every other wait in this function, so a wedged adapter costs
+	// the caller its deadline and shows up as ctx.Err() rather than as a hang.
+	//
+	// This bounds what Shutdown can see; it is not a claim of losslessness.
+	// Three limits, all real:
+	//
+	//   - A commit that begins after the counter reads zero is not covered, and
+	//     cannot be: peer read loops and any holder of a *crdt.Doc are producers
+	//     the server has no way to join.
+	//   - Neither is a room this function never enumerated. The snapshot above
+	//     is taken once and skips rooms still mid-load, and ServeHTTP has no
+	//     shutdownCh gate, so a connection accepted while Shutdown runs can
+	//     create a room — or finish loading one — afterwards. Nothing waits on
+	//     that room's persistDone, so a commit into it can return from Transact
+	//     with the update merely buffered. Callers who need the documented
+	//     guarantee must stop accepting connections BEFORE calling Shutdown
+	//     (see docs/PERSISTENCE.md). Pre-existing; recorded here because the
+	//     join above would otherwise read as covering it.
+	//   - Conversely the counter covers EVERY commit, not only the stranded
+	//     ones (that breadth is required — see Server.strandedInFlight), so a
+	//     sustained writer can hold this wait open until ctx expires even
+	//     though nothing is stuck.
+	s.waitStranded(ctx)
 
 	// Wind down outbound relay delivery (#202), in three ordered steps. The
 	// peers are gone and the persistence drain is over, so nothing can feed
@@ -1358,12 +1683,50 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 		r.persistCh = make(chan []byte, 256)
 		r.persistStop = make(chan struct{})
 		r.persistDone = make(chan struct{})
+		r.persistRetire = make(chan struct{})
 		r.flushReq = make(chan chan bool)
 		s.startPersistenceWorker(r, name)
 		r.doc.OnUpdate(func(update []byte, _ any) {
+			// #229 — handing the update to persistCh is only safe while the
+			// worker is still reading it. The worker publishes its retirement
+			// by closing persistRetire BEFORE its final drain, which gives this
+			// observer two airtight cases and no third one:
+			//
+			//   1. persistRetire is still open when the send completes. Then
+			//      close(persistRetire) — and therefore the final drain that
+			//      follows it — happens after the send, so the buffered element
+			//      is still there to be drained. Nothing to do.
+			//   2. persistRetire is already closed. A select whose case is a
+			//      closed channel is always ready, so the check below sees it
+			//      with certainty (no scheduling window), and this goroutine
+			//      takes over the write itself.
+			//
+			// The escape hatch must stay: without it a producer would block
+			// forever on a full 256-slot buffer once the worker has gone. What
+			// #229 changes is that the escape hatch now has a durable
+			// destination instead of dropping the update on the floor.
+			//
+			// The enter/leave pair brackets the WHOLE observer, including the
+			// latch reads, so Shutdown can see this goroutine from before it
+			// decides whether it must write. Registering only inside the
+			// retirement branches would leave a gap in which Shutdown observes
+			// zero and returns while this goroutine is already committed to a
+			// write it has not started (see Server.strandedInFlight).
+			s.strandedEnter()
+			defer s.strandedLeave()
+
 			select {
 			case r.persistCh <- update:
-			case <-r.persistStop:
+				// Case 1 unless retirement began in between; re-check, since
+				// select picks uniformly among ready cases and may have taken
+				// the send even with persistRetire already closed.
+				select {
+				case <-r.persistRetire:
+					s.persistStranded(r, name, nil)
+				default:
+				}
+			case <-r.persistRetire:
+				s.persistStranded(r, name, update)
 			}
 		})
 	}
