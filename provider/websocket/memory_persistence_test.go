@@ -191,6 +191,176 @@ func TestUnit_MemoryPersistence_CompactPreservesConcurrentPendingIncrement(t *te
 			"toward the next threshold (PR #230 review, server.go:435)")
 }
 
+// pairedCompactStore parks the first TWO calls to Compact independently, each
+// on its own gate, so a test can interleave two OVERLAPPING
+// websocket.MemoryPersistence.Compact calls for one room deterministically.
+// blockingCompactStore above parks only the first call, which is enough for
+// the single-Compact race but cannot express this one. Every other
+// VersionedPersistence method delegates straight through, unblocked, so a
+// concurrent StoreUpdate proceeds while both folds are parked.
+type pairedCompactStore struct {
+	*persistence.MemoryPersistence
+	calls   atomic.Int32
+	entered [2]chan struct{}
+	proceed [2]chan struct{}
+}
+
+func newPairedCompactStore() *pairedCompactStore {
+	s := &pairedCompactStore{MemoryPersistence: persistence.NewMemoryPersistence()}
+	for i := range s.entered {
+		s.entered[i] = make(chan struct{})
+		s.proceed[i] = make(chan struct{})
+	}
+	return s
+}
+
+func (b *pairedCompactStore) Compact(ctx context.Context, room string, keep int) (int, error) {
+	if n := int(b.calls.Add(1)) - 1; n < len(b.entered) {
+		close(b.entered[n])
+		<-b.proceed[n]
+	}
+	return b.MemoryPersistence.Compact(ctx, room, keep)
+}
+
+// waitEntered fails the test rather than hanging if a fold never arrives.
+func waitEntered(t *testing.T, ch <-chan struct{}, which string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s never reached the wrapped store", which)
+	}
+}
+
+// Two OVERLAPPING compactions must not let the later one erase a write neither
+// of them folded (PR #230 review, second round). The first round of this bug
+// deleted the room's bookkeeping entry outright; the fix snapshotted the count
+// and subtracted only the snapshot, which is still wrong once two Compact
+// calls overlap: both snapshot the same count, the first consumes it, a write
+// lands, and the second consumes its now-stale snapshot on top — erasing the
+// new write's contribution again. The room can then sit above CompactEvery
+// with no further compaction.
+//
+// The interleaving below is exactly that, made deterministic:
+//
+//	C1 reads its mark (3) ────────► parks in the store, before folding
+//	C2 reads the SAME mark (3) ───► parks in the store, before folding
+//	C1 released ──────────────────► folds, reports its mark
+//	a concurrent write lands ─────► outstanding must become 1
+//	C2 released ──────────────────► folds, reports its now-stale mark
+//	                                outstanding must STILL be 1
+//
+// Two overlapping Compact calls for one room are reachable inside a plain
+// Server, not only through direct use of this exported type: LoadDoc compacts
+// before materialising, and since v1.39 room loading runs off the global
+// room-map lock, so a load can overlap the previous residency's on-unload
+// compaction of the same room.
+//
+// CompactEvery is set high so StoreUpdate's own threshold never fires and the
+// folds below are driven only by the explicit Compact calls — otherwise the
+// concurrent write would recurse into a third, nested fold and the test would
+// be asserting on the wrong mechanism.
+func TestUnit_MemoryPersistence_OverlappingCompactsPreserveConcurrentWrite(t *testing.T) {
+	store := newPairedCompactStore()
+	adapter := persistence.NewLegacyAdapter(store)
+	adapter.KeepVersions = 1 // matches websocket.NewMemoryPersistence's own setup
+	p := ygws.NewMemoryPersistenceForTest(adapter)
+	p.CompactEvery = 1_000_000 // never self-compact; drive both folds explicitly
+
+	storeN(t, p, "room", 3) // 3 outstanding, no auto-compact at this threshold
+
+	first := make(chan error, 1)
+	go func() { first <- p.Compact(context.Background(), "room") }()
+	waitEntered(t, store.entered[0], "the first Compact")
+
+	// Started only after the first has parked, so it reads the SAME
+	// outstanding count the first one did — the overlap this test is about.
+	second := make(chan error, 1)
+	go func() { second <- p.Compact(context.Background(), "room") }()
+	waitEntered(t, store.entered[1], "the second Compact")
+
+	close(store.proceed[0])
+	select {
+	case err := <-first:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first Compact never returned")
+	}
+
+	// Lands after the first fold reported and while the second is still
+	// parked, so neither fold's mark covers it.
+	concurrentDoc := crdt.New()
+	concurrentTxt := concurrentDoc.GetText("t")
+	concurrentDoc.Transact(func(txn *crdt.Transaction) { concurrentTxt.Insert(txn, 0, "b", nil) })
+	require.NoError(t, p.StoreUpdate("room", crdt.EncodeStateAsUpdateV1(concurrentDoc, nil)))
+	require.Equal(t, 1, ygws.MemoryPersistencePendingCount(p, "room"),
+		"precondition: the concurrent write is outstanding before the second fold reports")
+
+	close(store.proceed[1])
+	select {
+	case err := <-second:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second Compact never returned")
+	}
+
+	require.Equal(t, 1, ygws.MemoryPersistenceRecordCount(p, "room"),
+		"both folds must succeed and leave the room at one record")
+	require.Equal(t, 1, ygws.MemoryPersistencePendingCount(p, "room"),
+		"the concurrent write must still count toward the next threshold: the "+
+			"second Compact reports a mark it read BEFORE this write existed, "+
+			"and a mark may only advance the folded count, never consume a "+
+			"later write's contribution (PR #230 review, second round)")
+}
+
+// The bookkeeping entry must not be dropped while a compaction is still in
+// flight for that room. Dropping it would reset the room's append count to
+// zero underneath the in-flight call, whose already-read mark would then be
+// applied against a fresh ledger and read as a large phantom debt — the
+// reason compactLedger carries an inflight count rather than being deleted
+// the moment nothing is outstanding.
+func TestUnit_MemoryPersistence_LedgerSurvivesInflightCompact(t *testing.T) {
+	store := newPairedCompactStore()
+	adapter := persistence.NewLegacyAdapter(store)
+	adapter.KeepVersions = 1
+	p := ygws.NewMemoryPersistenceForTest(adapter)
+	p.CompactEvery = 1_000_000
+
+	storeN(t, p, "room", 3)
+
+	first := make(chan error, 1)
+	go func() { first <- p.Compact(context.Background(), "room") }()
+	waitEntered(t, store.entered[0], "the first Compact")
+
+	second := make(chan error, 1)
+	go func() { second <- p.Compact(context.Background(), "room") }()
+	waitEntered(t, store.entered[1], "the second Compact")
+
+	// Release the first and let it fully report. Nothing is outstanding now,
+	// but the second is still in flight holding a mark.
+	close(store.proceed[0])
+	select {
+	case err := <-first:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first Compact never returned")
+	}
+	require.Equal(t, 1, ygws.MemoryPersistencePendingRooms(p),
+		"the entry must be retained while a compaction is still in flight for it")
+
+	close(store.proceed[1])
+	select {
+	case err := <-second:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second Compact never returned")
+	}
+	require.Equal(t, 0, ygws.MemoryPersistencePendingRooms(p),
+		"once the last in-flight compaction reports and nothing is outstanding, "+
+			"the entry must be deleted, not zeroed — rooms come and go, and a map "+
+			"only ever zeroed grows with churn")
+}
+
 // Interface satisfaction is load-bearing: the server type-asserts for these at
 // runtime, so gaining or losing one silently changes which persistence-worker
 // code path runs.

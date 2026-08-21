@@ -30,7 +30,7 @@ func StrandedWritesInFlight(s *Server) int64 { return s.strandedInFlight.Load() 
 func MemoryPersistencePendingRooms(m *MemoryPersistence) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.pending)
+	return len(m.rooms)
 }
 
 // MemoryPersistencePendingCount reports room's outstanding (un-folded) write
@@ -41,7 +41,11 @@ func MemoryPersistencePendingRooms(m *MemoryPersistence) int {
 func MemoryPersistencePendingCount(m *MemoryPersistence, room string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.pending[room]
+	l := m.rooms[room]
+	if l == nil {
+		return 0
+	}
+	return int(l.outstanding())
 }
 
 // NewMemoryPersistenceForTest builds a MemoryPersistence around an arbitrary
@@ -51,5 +55,5 @@ func MemoryPersistencePendingCount(m *MemoryPersistence, room string) int {
 // making the window between MemoryPersistence.Compact's pending snapshot and
 // the fold completing deterministic to hit, without sleeps or timing luck.
 func NewMemoryPersistenceForTest(adapter *persistence.LegacyAdapter) *MemoryPersistence {
-	return &MemoryPersistence{adapter: adapter, pending: make(map[string]int)}
+	return &MemoryPersistence{adapter: adapter, rooms: make(map[string]*compactLedger)}
 }

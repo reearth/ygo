@@ -329,8 +329,60 @@ type MemoryPersistence struct {
 	// Set before serving; read without synchronisation.
 	CompactEvery int
 
-	mu      sync.Mutex
-	pending map[string]int // room → writes since that room last compacted
+	mu    sync.Mutex
+	rooms map[string]*compactLedger // room → append/fold bookkeeping
+}
+
+// compactLedger is MemoryPersistence's per-room compaction bookkeeping. The
+// two counters are MONOTONE and are never reset in place, which is what makes
+// concurrent compactions safe: appended only ever rises, and folded only ever
+// rises to a mark that was read BEFORE the fold that reports it began. The
+// outstanding (un-folded) count is the difference.
+//
+// The obvious alternative — one "writes since last compaction" counter that
+// each Compact snapshots and then subtracts from — is not safe under
+// concurrent compaction, because a snapshot taken by one Compact can be
+// consumed by another after a write that neither fold included (PR #230
+// review, second round). Two Compact calls can overlap for one room even
+// inside a plain Server: LoadDoc compacts before materialising, and since
+// v1.39 room loading runs off the global room-map lock, so a load can overlap
+// the previous residency's on-unload compaction for the same room. Direct use
+// of this exported, documented-thread-safe type can overlap them freely.
+type compactLedger struct {
+	// appended counts every update ever appended for this room.
+	appended int64
+	// folded is the appended-count that the most recent successful fold is
+	// known to have included. It advances only forward (max), so a fold that
+	// finishes late can never retract a later fold's progress.
+	folded int64
+	// inflight counts Compact calls currently folding this room. The entry
+	// must not be dropped while any of them still holds a mark to apply —
+	// dropping it would reset appended to 0 under them, and their folded mark
+	// would then read as a huge outstanding debt.
+	inflight int
+}
+
+// outstanding reports the un-folded write count.
+func (l *compactLedger) outstanding() int64 { return l.appended - l.folded }
+
+// ledgerLocked returns room's ledger, creating it if absent. Caller holds m.mu.
+func (m *MemoryPersistence) ledgerLocked(room string) *compactLedger {
+	l := m.rooms[room]
+	if l == nil {
+		l = &compactLedger{}
+		m.rooms[room] = l
+	}
+	return l
+}
+
+// dropIfIdleLocked deletes room's ledger once nothing is outstanding and no
+// compaction is still in flight for it. Rooms come and go (idle eviction), so
+// a map keyed by room name that is only ever zeroed grows with churn.
+// Caller holds m.mu.
+func (m *MemoryPersistence) dropIfIdleLocked(room string, l *compactLedger) {
+	if l.inflight == 0 && l.outstanding() <= 0 {
+		delete(m.rooms, room)
+	}
 }
 
 // errMemoryPersistenceNotConstructed is returned by every MemoryPersistence
@@ -350,7 +402,7 @@ func NewMemoryPersistence() *MemoryPersistence {
 	// folds a room down to a single record, preserving the one-blob-per-room
 	// memory shape this type has always had.
 	ad.KeepVersions = 1
-	return &MemoryPersistence{adapter: ad, pending: make(map[string]int)}
+	return &MemoryPersistence{adapter: ad, rooms: make(map[string]*compactLedger)}
 }
 
 func (m *MemoryPersistence) compactEvery() int {
@@ -407,8 +459,9 @@ func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
 	// Decide under the lock, compact outside it: MergeUpdatesV1 on a large
 	// room must never block another room's counter update.
 	m.mu.Lock()
-	m.pending[room]++
-	due := m.pending[room] >= m.compactEvery()
+	l := m.ledgerLocked(room)
+	l.appended++
+	due := l.outstanding() >= int64(m.compactEvery())
 	m.mu.Unlock()
 	if due {
 		_ = m.Compact(context.Background(), room) // best-effort; see this method's doc
@@ -420,48 +473,55 @@ func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
 // CompactableAdapter interface so the server's on-unload and CompactEvery
 // compaction work too (both are additive to this type's own threshold).
 //
-// The pending count folded is SNAPSHOTTED before the fold, and only that
-// snapshot is subtracted afterward — Compact never just deletes the entry.
 // MergeUpdatesV1 (invoked by the wrapped adapter, below) runs OUTSIDE m.mu, by
-// design: a large room's fold must never block another room's counter
-// update. That window is exactly what lets a concurrent StoreUpdate append
-// and increment pending[room] while this call is folding. That update was not
-// (or may not have been) included in the fold; deleting the entry regardless
-// — the pre-fix behaviour — erases its contribution, so the un-folded record
-// count can exceed CompactEvery indefinitely once writes stop (PR #230
-// review, reported against the line that used to read `delete(m.pending,
-// room)` unconditionally). Subtracting only the snapshot can occasionally
-// under-forgive the other way — a write that lands late enough to actually be
-// swept into this same fold still gets counted toward the next one — but that
-// is bounded (compacts at most one write early), never unbounded.
+// design: a large room's fold must never block another room's counter update.
+// That window is what makes the bookkeeping delicate — a concurrent
+// StoreUpdate can append while this call is folding, and a concurrent Compact
+// can fold and report while this one is still in flight.
+//
+// The bookkeeping is therefore MONOTONE rather than snapshot-and-subtract.
+// This call reads the room's appended-count as its mark BEFORE folding, and on
+// success advances the room's folded-count to that mark only if it moves it
+// forward. Two properties follow, and both are needed:
+//
+//   - A write appended after this fold began is never forgiven by it, because
+//     the mark was read before it. Erasing such a write's contribution is what
+//     let the un-folded record count exceed CompactEvery indefinitely once
+//     writes stopped — the first round of this bug (PR #230 review), reported
+//     against a line that deleted the room's entry unconditionally.
+//   - A compaction that finishes late can never retract a later one's
+//     progress, because folded only moves forward. Subtracting a snapshot
+//     instead reintroduced the same erasure between two overlapping Compact
+//     calls — the second round of the same review.
+//
+// It can still under-forgive in the harmless direction: a write that lands
+// late enough to actually be swept into this fold is nonetheless counted
+// toward the next one, so the next compaction fires at most one write early.
+// That is bounded, and bounded-early is the correct way to be wrong here.
+//
+// On failure the ledger is left untouched, so the threshold re-fires rather
+// than letting records grow behind a persistently failing fold.
 func (m *MemoryPersistence) Compact(ctx context.Context, room string) error {
 	if m.adapter == nil {
 		return errMemoryPersistenceNotConstructed
 	}
 
 	m.mu.Lock()
-	snapshot := m.pending[room]
+	l := m.ledgerLocked(room)
+	mark := l.appended
+	l.inflight++
 	m.mu.Unlock()
 
 	err := m.adapter.Compact(ctx, room)
-	if err != nil {
-		// Best-effort per this type's own StoreUpdate doc: leave pending
-		// untouched on failure. Resetting it here would let records grow
-		// while the threshold never re-fires for a persistently failing fold.
-		return err
-	}
 
 	m.mu.Lock()
-	// Delete rather than zero when nothing remains: rooms come and go (idle
-	// eviction), and a map keyed by room name that is only ever zeroed grows
-	// with churn.
-	if remaining := m.pending[room] - snapshot; remaining > 0 {
-		m.pending[room] = remaining
-	} else {
-		delete(m.pending, room)
+	l.inflight--
+	if err == nil && mark > l.folded {
+		l.folded = mark
 	}
+	m.dropIfIdleLocked(room, l)
 	m.mu.Unlock()
-	return nil
+	return err
 }
 
 // room holds the shared document and awareness state for one named room.
