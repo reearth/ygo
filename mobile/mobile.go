@@ -1,15 +1,23 @@
-// Package mobile provides a gomobile-bindable façade over ygo's crdt and
-// awareness packages, for embedding ygo natively in iOS and Android apps via
-// `gomobile bind` — no JavaScript runtime, no CGo.
+// Package mobile provides a gomobile-bindable façade over ygo's crdt,
+// awareness, and provider/client packages, for embedding ygo natively in iOS
+// and Android apps via `gomobile bind` — no JavaScript runtime, no CGo.
 //
 // # gomobile-safe surface
 //
 // gomobile bind only supports a restricted set of types across the language
 // boundary. Every exported function and method in this package therefore uses
-// ONLY: string, int64, bool, []byte, error, and the bound pointers *Doc and
-// *Awareness. It never exposes unsigned ints, maps, non-byte slices, `any`,
-// variadics, or callbacks. (crdt/awareness use uint64 IDs, maps, and []uint64
-// internally; this package translates at the boundary.)
+// ONLY: string, int64, bool, []byte, error, the bound pointers *Doc,
+// *Awareness, *SyncClient and *Subscription, and the observer interfaces
+// DocObserver, AwarenessObserver and SyncStatusObserver. It never exposes
+// unsigned ints, maps, non-byte slices, `any`, variadics, or Go func values.
+// (crdt/awareness use uint64 IDs, maps, and []uint64 internally; this package
+// translates at the boundary.)
+//
+// Callbacks cross the boundary as those interfaces rather than as func values,
+// which is the only form gomobile can bind in that direction: the platform
+// implements the interface in Swift or Kotlin and passes it in. See
+// DocObserver, AwarenessObserver and SyncStatusObserver for the threading
+// rules each one imposes.
 //
 // # Threading
 //

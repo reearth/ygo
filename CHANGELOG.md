@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.49.0] — 2026-08-10
+## [1.49.0] — 2026-08-21
 
 ### Added
 
@@ -147,6 +147,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sends `WriteControl(CloseMessage, CloseNormalClosure)` before
   `conn.Close()`, mirroring every other control frame this package already
   sends.
+
+### Documentation
+
+- **`docs/ARCHITECTURE.md`: package dependency graph redrawn.** It listed
+  only `provider/{websocket,http}` and omitted five packages shipped between
+  v1.19 and v1.48 — `persistence/`, `cluster/`, `mobile/`,
+  `provider/webhook`, and `provider/client`. Every arrow in the new graph was
+  verified against real imports with `go list` across 14 packages, including
+  the non-obvious one: `awareness/` does **not** import `crdt/`.
+- **`docs/ARCHITECTURE.md`: the "Garbage collection" section documented an
+  API that does not exist.** It told readers to write `doc.GC = true` /
+  `doc.GC = false`; `Doc` has no exported `GC` field, and the flag is set at
+  construction with `crdt.New(crdt.WithGC(false))`. The section also
+  described only the automatic per-transaction pass, omitting two behaviours
+  shipped since: automatic collection is **suspended while any `UndoManager`
+  is registered** (undo re-inserts a copy of the deleted content, so that
+  content must still be present), and `crdt.RunGC` performs tombstone
+  reclamation (#166) — replacing deleted content with `ContentDeleted`
+  tombstones and then merging adjacent tombstones from the same client into
+  single nodes. Its destructive effect on `RestoreDocument` is now stated.
+- **`docs/ARCHITECTURE.md`: "Compatibility testing" described only the
+  fixture layer.** The randomised layer under `testutil/fuzz/` was missing
+  entirely, including `TestFuzzConvergenceMoves` — the oracle that caught the
+  `YArray.Move` divergence fixed in v1.40.0. All four oracles are now listed
+  with what each one proves, which need node, and how to reproduce a failing
+  seed.
+- **`mobile`: the package doc understated the bound surface.** It named only
+  `*Doc` and `*Awareness` as bound pointers, omitting `*SyncClient` and
+  `*Subscription`, and claimed the package never exposes callbacks — it
+  exposes three observer *interfaces* (`DocObserver`, `AwarenessObserver`,
+  `SyncStatusObserver`), which is the only callback form `gomobile bind`
+  supports in that direction. The claim is now precise (no Go **func
+  values**), and `docs/ARCHITECTURE.md`'s `mobile/` section says the same.
 
 ## [1.48.0] — 2026-08-10
 

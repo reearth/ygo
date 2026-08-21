@@ -301,6 +301,46 @@ a backpressured-but-alive peer could otherwise have added up to 10 seconds
 to `Close`'s return latency, right where the design intent for this
 teardown path was already 2 seconds.
 
+### Documentation drift, fixed alongside
+
+`docs/ARCHITECTURE.md`'s package dependency graph had not been redrawn since
+v1.19: it showed only `provider/{websocket,http}` and omitted five packages
+shipped since — `persistence/`, `cluster/`, `mobile/`, `provider/webhook`,
+and `provider/client`. Every arrow in the replacement was verified against
+real imports with `go list` across 14 packages, which confirmed one arrow
+most readers would draw wrong: `awareness/` does **not** import `crdt/`.
+
+Three further drifts were found while auditing the rest of that file, and are
+fixed here rather than filed:
+
+- **"Garbage collection" documented an API that does not exist.** It told you
+  to write `doc.GC = true` / `doc.GC = false`. `Doc` has no exported `GC`
+  field — the flag is set at construction, `crdt.New(crdt.WithGC(false))`.
+  Code copied from that section would not have compiled.
+- **The same section described only half the behaviour.** Automatic
+  collection is **suspended for as long as any `UndoManager` is registered**
+  (undoing a deletion re-inserts a copy of the deleted content, so that
+  content has to still be there) — worth knowing, because it means a
+  long-lived undo manager keeps deleted content alive. And `crdt.RunGC` does
+  tombstone reclamation (#166): it replaces deleted content with
+  `ContentDeleted` tombstones and then merges adjacent tombstones from the
+  same client into single nodes. It stays available as the manual entry point
+  when auto-GC is suspended, and it is destructive with respect to
+  `RestoreDocument` — take snapshots first.
+- **"Compatibility testing" described only the Yjs fixture layer**, omitting
+  the randomised layer under `testutil/fuzz/` entirely — including
+  `TestFuzzConvergenceMoves`, the oracle that found the `YArray.Move`
+  divergence fixed in v1.40.0. All four oracles are now listed with what each
+  proves, which require node, and how to replay a failing seed.
+
+Finally, `mobile`'s package doc understated its own bound surface: it named
+only `*Doc` and `*Awareness`, omitting `*SyncClient` and `*Subscription`, and
+said the package never exposes callbacks. It exposes three observer
+*interfaces* (`DocObserver`, `AwarenessObserver`, `SyncStatusObserver`) —
+the only callback form `gomobile bind` supports in that direction. The claim
+now says what it meant (no Go **func values**) and points at the threading
+rules each observer imposes.
+
 ## v1.48.0
 
 **Who is affected:** anyone building a Go client — or, via `mobile.SyncClient`,
