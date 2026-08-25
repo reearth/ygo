@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.49.1] — 2026-08-25
+
+### Fixed
+
+- **`crdt`: `ApplyUpdateV2` silently dropped document content when the update
+  contained GC structs.** The V2 client-group loop short-circuited `case 0`
+  (GC): it recorded the collected range in the transaction's delete set, then
+  advanced `clock` and `continue`d. Nothing was appended to the store for that
+  range and the group's `existingEnd` watermark never moved, so the client's
+  struct list had a hole in it. Every subsequent struct from that client then
+  tripped the same-client clock-gap check and was parked in `store.pending`
+  with a `missing` watermark that could never be satisfied, because the
+  predecessor it was waiting for had arrived in this same self-contained
+  update. `ApplyUpdateV2` returned `nil` throughout, so callers saw success
+  and a quietly smaller document. Because origins are cross-client, one
+  stalled client cascaded: items in other clients whose `origin` pointed into
+  the stalled range stalled behind it. Measured on 94 real documents written
+  by `yrs`: `yjs@13.6.32` read 974 nodes and 951 edges, ygo read 535 and 451,
+  and 63 of the 94 documents came out wrong — the largest losing 45 of 46 map
+  entries. The V1 decoder has always been correct here, and its comment names
+  this exact failure ("track progress so subsequent items in the group are not
+  falsely gapped"): it decodes a GC struct into a placeholder `Item`
+  (`ContentDeleted`, `Deleted: true`, no parent) and runs it through the same
+  clock-accounting, park and offset logic as every other struct, appending it
+  to the store via the `Parent == nil && Deleted` branch. The V2 path now does
+  the same, so a GC struct occupies its clock range instead of leaving a hole.
+  The delete-set entry is retained alongside it, so already-held items in the
+  range are still tombstoned and never-seen ranges still park in `pendingDs`.
+  Reproducible with `yjs` alone — no `yrs` involved — with a two-peer document
+  that deletes nested shared types (#231).
+
+### Added
+
+- **`crdt/testdata/gc_yjs_fixtures.json` and
+  `testutil/gen_fixtures_gc.js`: conformance fixtures whose updates contain GC
+  structs.** Every other fixture file here is built from a single-client
+  document with no deletion history, so **not one of the 202 pre-existing V2
+  fixtures carried a single GC struct** — verified by decoding all of them with
+  `Y.decodeUpdateV2` and classifying each struct. That is why #231 shipped: the
+  V2 GC branch had no external-encoder coverage at all. The two existing
+  GC-specific tests (`gc_container_parent_test.go`,
+  `gc_container_attr_misgraft_test.go`) do exercise V2, but they encode with
+  `EncodeStateAsUpdateV2`, and a self round-trip cannot catch a decoder that
+  disagrees with an external encoder. The only tests that hand-built a GC
+  struct onto the wire fed it through `ApplyUpdateV1`.
+
+  Three scenarios (map, array, XML fragment), each two-peer with real
+  deletions, carrying 30, 12 and 8 GC structs. Two peers matters: a
+  single-client document produces no cross-client origins, and it was the
+  cascade through those origins that turned #231 from a lost item into a lost
+  document. The generator asserts every row still contains GC structs, and
+  `TestConformance_GCFixtures_ActuallyContainGCStructs` asserts it again on the
+  Go side, so a future yjs GC-heuristic change cannot silently empty this
+  coverage back out to plain Items. Worth recording for anyone extending the
+  file: deleting **plain values** never produces a GC struct — yjs only
+  substitutes a placeholder once the deleted item's *parent* has been
+  collected, so the deleted content has to be a nested shared type. Measured
+  while writing this: deleting nested `Y.Map`s from a map or an array, or
+  `Y.XmlElement`s from a fragment, yields one GC struct each; deleting a run of
+  plain array values or a span of `YText` yields zero (#232).
+
 ## [1.49.0] — 2026-08-21
 
 ### Added

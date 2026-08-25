@@ -1,3 +1,36 @@
+## v1.49.1
+
+**Who is affected: anyone whose documents have deletion history and who loads
+them through `ApplyUpdateV2`.** That is most persistence backends, since
+`encode_state_as_update_v2` / `encodeStateAsUpdateV2` is the usual on-disk
+format. If your documents were written by `yrs` or by `yjs` and have ever had a
+nested shared type deleted, ygo has been reading them **incompletely**, with no
+error returned.
+
+This is a data-loss fix. Upgrade before your application persists anything it
+read back through `ApplyUpdateV2`, because writing a partially-decoded document
+back over its source destroys the part that did not decode.
+
+- **`ApplyUpdateV2` silently dropped content on GC structs (#231).** The GC
+  branch recorded the collected clock range in the delete set but never
+  occupied that range in the client's struct list, so every later struct from
+  that client looked like a clock gap and was parked in the pending queue
+  permanently — waiting on a predecessor that was already present in the same
+  update. Returned `nil` while doing it. Measured on 94 real `yrs`-written
+  documents: yjs read 974 nodes, ygo read 535, and 63 of 94 documents were
+  wrong. `ApplyUpdateV1` was never affected, and the fix makes V2 follow the
+  V1 path exactly.
+
+- **Conformance fixtures now cover GC structs (#232).** None of the 202
+  pre-existing V2 fixtures contained one, which is how #231 reached a release.
+
+**If you have already persisted a partially-decoded document:** upgrading does
+not undo that. Check your storage for a soft-delete or object-version window
+and restore the pre-overwrite copy. A cheap guard worth adding regardless of
+this fix: after decoding a full-state update, treat `doc.PendingStats().Items
+> 0` as a failed load rather than a smaller document, and refuse to write it
+back.
+
 ## v1.49.0
 
 **Who is affected:** three separate audiences, so read the one that is you.

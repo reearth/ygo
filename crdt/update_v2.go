@@ -638,6 +638,9 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 
 			contentType := info & 0x1F
 
+			var item *Item
+			var contentLen int
+
 			switch contentType {
 			case 0: // GC (garbage collected)
 				l, err := dec.readLen()
@@ -647,12 +650,10 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				length := uint64(l)
 				itemEnd := clock + length
 				if itemEnd > existingEnd {
-					// GC structs carry no parent info in the V2 wire format, so
-					// we cannot integrate them as live items. Instead we add
-					// their clock range to the delete set: items we already hold
-					// in this range will be tombstoned, and items we've never
-					// seen (GC'd before they reached us) are parked in
-					// pendingDs via applyToPartial and retried on later applies.
+					// Record the range in the transaction's delete set: items we
+					// already hold here get tombstoned, and items we have never
+					// seen (GC'd before they reached us) are parked in pendingDs
+					// via applyToPartial and retried on later applies.
 					effectiveStart := clock
 					if effectiveStart < existingEnd {
 						effectiveStart = existingEnd
@@ -662,8 +663,26 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 						txn.deleteSet.add(ID{Client: client, Clock: effectiveStart}, gcLen)
 					}
 				}
-				clock = itemEnd
-				continue
+				// Decode the GC struct into the same placeholder Item the V1
+				// decoder builds (update.go decodeItem, tag 0), so it flows
+				// through the identical clock-accounting, park and offset logic
+				// below instead of short-circuiting past it.
+				//
+				// Short-circuiting is what caused #231. The delete-set entry
+				// above records that the range was deleted, but nothing occupied
+				// the range in the client's struct list and existingEnd never
+				// advanced, so every later struct from this client looked like a
+				// same-client clock gap and was parked in the permanent pending
+				// queue — waiting for a predecessor that was already in this
+				// same update. The V1 path has always appended the placeholder,
+				// and its comment names this exact failure ("so subsequent items
+				// in the group are not falsely gapped").
+				item = &Item{
+					ID:      ID{Client: client, Clock: clock},
+					Content: NewContentDeleted(int(length)),
+					Deleted: true,
+				}
+				contentLen = int(length)
 
 			case 10: // Skip struct
 				l, err := dec.restDec.ReadVarUint()
@@ -676,12 +695,14 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				}
 				clock = skipEnd
 				continue
-			}
 
-			// Regular item
-			item, contentLen, err := decodeItemV2(dec, txn.doc, client, clock, info)
-			if err != nil {
-				return wrapUpdateErr(err)
+			default:
+				// Regular item
+				var derr error
+				item, contentLen, derr = decodeItemV2(dec, txn.doc, client, clock, info)
+				if derr != nil {
+					return wrapUpdateErr(derr)
+				}
 			}
 
 			itemEnd := clock + uint64(contentLen)
@@ -710,6 +731,22 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				}
 				txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
 				mergePendingMissing(txn.doc.store.pending.missing, client, existingEnd)
+				clock = itemEnd
+				continue
+			}
+
+			// GC placeholders have no parent — add them straight to the store
+			// without linked-list integration, and advance existingEnd so the
+			// following structs in this group are not falsely gapped. Mirrors
+			// the V1 decoder (update.go). This is the half of #231's fix that
+			// keeps the client's struct list contiguous.
+			if item.Parent == nil && item.Deleted {
+				if offset > 0 {
+					item.ID.Clock += uint64(offset)
+					item.Content = item.Content.Splice(offset)
+				}
+				txn.doc.store.Append(item)
+				existingEnd = itemEnd
 				clock = itemEnd
 				continue
 			}

@@ -53,6 +53,7 @@ fixtures:
 	node testutil/gen_conformance_fixtures.js
 	node testutil/gen_fixtures_yxml.js
 	node testutil/gen_fixtures_prelim.js
+	node testutil/gen_fixtures_gc.js
 	node testutil/gen_fixtures_ywebsocket_envelope.js
 
 tools:
