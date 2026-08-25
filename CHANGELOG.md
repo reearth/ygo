@@ -36,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Reproducible with `yjs` alone — no `yrs` involved — with a two-peer document
   that deletes nested shared types (#231).
 
+- **`crdt`: `tryIntegrate` appended a partially-overlapping GC placeholder
+  untrimmed.** Both decode loops trim a GC placeholder to its not-yet-integrated
+  suffix before `store.Append` (offset + `Content.Splice`), but the pending-queue
+  retry did not. A GC placeholder parked for a same-client clock gap can be
+  retried after the store's clock for that client has advanced INTO — but not
+  through — its range, and the retry then appended the original item, leaving two
+  structs covering the same clocks in a per-client list that `Append` and the
+  state vector both assume is contiguous and ordered. Pre-existing on the V1
+  path; the V2 GC fix above makes it reachable from V2 as well, since GC structs
+  now become items that can enter the pending queue at all.
+
 ### Added
 
 - **`crdt/testdata/gc_yjs_fixtures.json` and

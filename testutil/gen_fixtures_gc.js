@@ -23,13 +23,15 @@ const path = require('path')
 const outDir = path.join(__dirname, '..', 'crdt', 'testdata')
 const hex = (u8) => Buffer.from(u8).toString('hex')
 
-// countGC reports how many non-Item structs (GC, Skip) an update carries. The
-// generator asserts this is non-zero for every row, so a future change to yjs's
-// GC heuristics cannot silently empty this file back out to plain Items and
-// take the coverage with it.
+// countGC reports how many GC structs an update carries. Deliberately NOT
+// "every non-Item struct": that would also count Skip, so a fixture carrying
+// one Skip and zero GC structs would satisfy the guard while covering none of
+// the path this file exists for. The generator asserts this is non-zero for
+// every row, so a future change to yjs's GC heuristics cannot silently empty
+// the file back out to plain Items and take the coverage with it.
 function countGC (v2) {
 	const { structs } = Y.decodeUpdateV2(v2)
-	return structs.filter((s) => s.constructor.name !== 'Item').length
+	return structs.filter((s) => s.constructor.name === 'GC').length
 }
 
 // pair builds two synced peers with pinned clientIDs.

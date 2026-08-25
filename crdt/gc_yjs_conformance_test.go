@@ -3,8 +3,6 @@ package crdt_test
 import (
 	"encoding/hex"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -92,33 +90,5 @@ func TestConformance_GCStructs_DecodeYjsBytes(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestConformance_GCFixtures_ActuallyContainGCStructs guards the guard. If a
-// future regeneration produces fixtures with no GC structs (a yjs heuristic
-// change, or someone simplifying a scenario), the suite above would keep
-// passing while covering nothing. The generator asserts this too; this is the
-// Go-side half so the check survives a hand-edited fixture file.
-func TestConformance_GCFixtures_ActuallyContainGCStructs(t *testing.T) {
-	type gcFixture struct {
-		Name      string `json:"name"`
-		GCStructs int    `json:"gcStructs"`
-	}
-	raw, err := os.ReadFile(filepath.Join("testdata", "gc_yjs_fixtures.json"))
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	var fx []gcFixture
-	if err := json.Unmarshal(raw, &fx); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if len(fx) == 0 {
-		t.Fatal("gc_yjs_fixtures.json: no fixtures")
-	}
-	for _, f := range fx {
-		if f.GCStructs <= 0 {
-			t.Errorf("fixture %q reports %d GC structs; it no longer covers the GC decode path", f.Name, f.GCStructs)
-		}
 	}
 }

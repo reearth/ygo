@@ -1307,8 +1307,21 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 		return false
 	}
 
-	// GC-orphan path (no parent, deleted): store without integration.
+	// GC-orphan path (no parent, deleted): store without integration, trimmed
+	// to the not-yet-integrated suffix exactly as the decode loops do.
+	//
+	// The trim matters here and not only there: this item was parked for a
+	// same-client clock gap, and by the time the retry runs the store's clock
+	// for that client can have advanced INTO (but not through) the item's
+	// range. Appending it untrimmed would leave overlapping, out-of-order
+	// structs behind, in a store whose Append and state-vector logic assume a
+	// contiguous per-client list. The guards above leave clock <= existingEnd
+	// here, so the offset is never negative.
 	if item.Parent == nil && item.Deleted {
+		if offset := int(existingEnd - item.ID.Clock); offset > 0 {
+			item.ID.Clock += uint64(offset)
+			item.Content = item.Content.Splice(offset)
+		}
 		store.Append(item)
 		return true
 	}
