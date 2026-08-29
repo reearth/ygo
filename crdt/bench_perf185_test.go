@@ -2,48 +2,107 @@ package crdt
 
 import (
 	"fmt"
+	"math/rand"
 	"testing"
 )
 
-// buildFragmented returns a doc whose YText "t" holds n single-character items
-// that CANNOT merge: two clients alternate, so no two adjacent items share a
-// client. This is the shape a real multi-peer document takes, and the shape the
-// existing BenchmarkObservedTxn_Apply fails to produce.
-func buildFragmented(n int) (*Doc, *YText) {
+// ── Fragmented-document fixture ──────────────────────────────────────────────
+//
+// The pre-existing BenchmarkObservedTxn_Apply (bench_test.go) cannot see the
+// cost these benchmarks target: a single client appending merges into a handful
+// of ContentString items, so its observer walk is O(items) and effectively
+// O(1) no matter how many characters the document holds.
+//
+// newFragmentedDoc builds a document that genuinely holds one item per
+// character, by inserting at random positions so no two inserts are contiguous
+// and nothing merges. It is O(n): an earlier version interleaved two clients
+// and synced them per character, which cost two encode+apply round trips per
+// character and was O(n^2) — 4k characters took 60ms, making large sizes
+// untestable.
+//
+// The RNG is seeded so the shape is identical across runs and machines.
+func newFragmentedDoc(n int) (*Doc, *YText) {
 	doc := newTestDoc(1)
 	txt := doc.GetText("t")
-	other := newTestDoc(2)
-	otherTxt := other.GetText("t")
-	for i := 0; i < n/2; i++ {
-		doc.Transact(func(txn *Transaction) { txt.Insert(txn, txt.Len(), "a", nil) })
-		other.Transact(func(txn *Transaction) { otherTxt.Insert(txn, otherTxt.Len(), "b", nil) })
-		if err := ApplyUpdateV1(doc, EncodeStateAsUpdateV1(other, doc.StateVector()), nil); err != nil {
-			panic(err)
-		}
-		if err := ApplyUpdateV1(other, EncodeStateAsUpdateV1(doc, other.StateVector()), nil); err != nil {
-			panic(err)
-		}
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "seed", nil) })
+	rng := rand.New(rand.NewSource(42))
+	for i := 0; i < n; i++ {
+		pos := rng.Intn(txt.Len())
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, pos, "x", nil) })
 	}
 	return doc, txt
 }
 
-func benchObservedFragmented(b *testing.B, n int, withObserver bool) {
-	doc, txt := buildFragmented(n)
-	if withObserver {
-		unsub := txt.Observe(func(YTextEvent) {})
-		defer unsub()
+func textItemCount(txt *YText) int {
+	n := 0
+	for it := txt.start; it != nil; it = it.Right {
+		n++
 	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		doc.Transact(func(txn *Transaction) { txt.Insert(txn, txt.Len(), "x", nil) })
+	return n
+}
+
+// TestNewFragmentedDocIsFragmented guards the fixture. If a future change lets
+// these inserts merge, the benchmarks below would silently start measuring a
+// short item list while still reporting a large n — the exact failure that
+// makes BenchmarkObservedTxn_Apply blind.
+func TestNewFragmentedDocIsFragmented(t *testing.T) {
+	const n = 2000
+	_, txt := newFragmentedDoc(n)
+	if got := textItemCount(txt); got < n {
+		t.Fatalf("fixture merged: %d items for %d inserts; the benchmarks would measure the wrong shape", got, n)
 	}
 }
 
-// The C1 gate (spec §7) compares the baseline-subtracted cost at 100k against
-// 1k. Both the observed and baseline variants are required: the difference
-// between them is the delta-computation cost, which is the quantity #185 is
-// about.
+// ── Observed-transaction cost ────────────────────────────────────────────────
+
+// benchObservedFragmented measures one single-character insert on a document of
+// roughly n items, with and without an observer attached. The difference
+// between the two is the cost of building the observer's delta.
+//
+// The rebuild guard is load-bearing. Each iteration inserts, so the document
+// grows as the benchmark runs; Go chooses b.N by timing progressively larger
+// runs, so without the guard the reported ns/op depends on b.N rather than on
+// n, and a size-labelled result would not describe the size it names. The
+// document is rebuilt (with the timer stopped) once it has grown 2% past n.
+func benchObservedFragmented(b *testing.B, n int, withObserver bool) {
+	doc, txt := newFragmentedDoc(n)
+	var unsub func()
+	if withObserver {
+		unsub = txt.Observe(func(YTextEvent) {})
+	}
+	defer func() {
+		if unsub != nil {
+			unsub()
+		}
+	}()
+
+	maxGrowth := n / 50
+	if maxGrowth < 1 {
+		maxGrowth = 1
+	}
+	grown := 0
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if grown >= maxGrowth {
+			b.StopTimer()
+			if unsub != nil {
+				unsub()
+				unsub = nil
+			}
+			doc, txt = newFragmentedDoc(n)
+			if withObserver {
+				unsub = txt.Observe(func(YTextEvent) {})
+			}
+			grown = 0
+			b.StartTimer()
+		}
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, txt.Len(), "x", nil) })
+		grown++
+	}
+}
+
 func BenchmarkObservedTxn_Fragmented(b *testing.B) {
 	for _, n := range []int{1_000, 10_000, 100_000} {
 		b.Run(fmt.Sprintf("n=%d/observed", n), func(b *testing.B) { benchObservedFragmented(b, n, true) })
@@ -51,9 +110,12 @@ func BenchmarkObservedTxn_Fragmented(b *testing.B) {
 	}
 }
 
-// BenchmarkItemAlloc_SingleCharInsert is E5's before/after measurement: the
-// allocs/op and B/op attributable to Origin, OriginRight and parentID being
-// *ID. Task 6 quotes the delta on #188.
+// ── Per-insert allocations ───────────────────────────────────────────────────
+
+// BenchmarkItemAlloc_SingleCharInsert reports allocs/op and B/op for one
+// single-character insert. Item.Origin, Item.OriginRight and Item.parentID are
+// *ID, and the allocations behind those pointers are what #188's item-origin
+// bullet is about.
 func BenchmarkItemAlloc_SingleCharInsert(b *testing.B) {
 	doc := newTestDoc(1)
 	txt := doc.GetText("t")
@@ -65,34 +127,35 @@ func BenchmarkItemAlloc_SingleCharInsert(b *testing.B) {
 	}
 }
 
-// BenchmarkDeleteSet_IsDeleted isolates E1's win at range counts that span the
-// crossover from linear-is-fine to binary-search-wins.
+// ── Delete-set lookup ────────────────────────────────────────────────────────
+
+// BenchmarkDeleteSet_IsDeleted measures IsDeleted against the number of delete
+// ranges held by one client.
+//
+// The small counts are the important ones, and an earlier version of this
+// benchmark omitted them. A transaction's delete set holds one range per
+// distinct deleted region, so ordinary editing produces 0 or 1 — a pure insert
+// produces an EMPTY set. Measuring only 1/10/100/1000 hides what happens in the
+// range where real workloads sit, and computeDelta calls IsDeleted once per
+// pre-existing item, so a fraction of a nanosecond here is multiplied by the
+// document's item count on every observed transaction.
 func BenchmarkDeleteSet_IsDeleted(b *testing.B) {
-	for _, ranges := range []int{1, 10, 100, 1_000} {
+	for _, ranges := range []int{0, 1, 2, 4, 8, 16, 100, 1_000} {
 		b.Run(fmt.Sprintf("ranges=%d", ranges), func(b *testing.B) {
 			ds := newDeleteSet()
 			for i := 0; i < ranges; i++ {
 				ds.add(ID{Client: 1, Clock: uint64(i * 4)}, 2)
 			}
-			probe := ID{Client: 1, Clock: uint64(ranges*4 - 3)} // worst case: last range
+			// Probe the LAST range, the worst case for a linear scan. With no
+			// ranges at all, probe a clock that cannot match.
+			probe := ID{Client: 1, Clock: 1}
+			if ranges > 0 {
+				probe = ID{Client: 1, Clock: uint64(ranges*4 - 3)}
+			}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				_ = ds.IsDeleted(probe)
 			}
 		})
 	}
-}
-
-func TestBuildFragmentedActuallyFragments(t *testing.T) {
-	doc, txt := buildFragmented(1000)
-	n := 0
-	for item := txt.start; item != nil; item = item.Right {
-		n++
-	}
-	// A merged doc would collapse to a handful of items. Require at least half
-	// the inserted characters to remain as distinct items.
-	if n < 500 {
-		t.Fatalf("expected a fragmented doc (>=500 items), got %d — the benchmark would be measuring the wrong shape", n)
-	}
-	_ = doc
 }
