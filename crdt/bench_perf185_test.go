@@ -3,6 +3,7 @@ package crdt
 import (
 	"fmt"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -14,11 +15,26 @@ import (
 // O(1) no matter how many characters the document holds.
 //
 // newFragmentedDoc builds a document that genuinely holds one item per
-// character, by inserting at random positions so no two inserts are contiguous
-// and nothing merges. It is O(n): an earlier version interleaved two clients
-// and synced them per character, which cost two encode+apply round trips per
-// character and was O(n^2) — 4k characters took 60ms, making large sizes
-// untestable.
+// character. It is O(n): an earlier version interleaved two clients and synced
+// them per character, which cost two encode+apply round trips per character and
+// was O(n^2) — 4k characters took 60ms, making large sizes untestable.
+//
+// Two independent properties keep it fragmented, and it is worth being precise
+// about which does what, because a future edit could remove one while believing
+// the other is doing the work:
+//
+//   - Each insert is its own transaction, so squashRuns — which only collapses
+//     a same-client run created within ONE transaction — never sees a run to
+//     collapse. Verified: 500 SEQUENTIAL end-inserts, one per transaction, still
+//     produce 500 distinct items.
+//   - Positions are random, so items are not contiguous in the linked list even
+//     when they do share a transaction. Verified: 500 random-position inserts in
+//     a SINGLE transaction also stay distinct.
+//
+// Note that randomness alone does not guarantee non-contiguity — two draws can
+// land adjacent — so the per-transaction property is the load-bearing one; the
+// random positions additionally split the seed item, which is why the item count
+// is n+4 rather than n+1.
 //
 // The RNG is seeded so the shape is identical across runs and machines.
 func newFragmentedDoc(n int) (*Doc, *YText) {
@@ -45,11 +61,35 @@ func textItemCount(txt *YText) int {
 // these inserts merge, the benchmarks below would silently start measuring a
 // short item list while still reporting a large n — the exact failure that
 // makes BenchmarkObservedTxn_Apply blind.
+//
+// It counts the inserted single-character items exactly rather than checking a
+// total against a threshold. A total-count check is too loose to be a guard: the
+// random inserts split the 4-character seed into as many as four items, so a
+// document that had quietly merged a handful of inserts could still clear a
+// "total >= n" bar and report success while measuring the wrong shape.
 func TestNewFragmentedDocIsFragmented(t *testing.T) {
 	const n = 2000
 	_, txt := newFragmentedDoc(n)
-	if got := textItemCount(txt); got < n {
-		t.Fatalf("fixture merged: %d items for %d inserts; the benchmarks would measure the wrong shape", got, n)
+
+	singles := 0
+	for it := txt.start; it != nil; it = it.Right {
+		cs, ok := it.Content.(*ContentString)
+		if !ok {
+			continue
+		}
+		if cs.Str == "x" {
+			singles++
+			continue
+		}
+		// Anything else must be a piece of the seed. An "x" that has merged
+		// with a neighbour shows up here as a longer run containing one.
+		if strings.Contains(cs.Str, "x") {
+			t.Fatalf("fixture merged: found item %q containing an inserted character; "+
+				"the benchmarks would measure a shorter item list than the n they report", cs.Str)
+		}
+	}
+	if singles != n {
+		t.Fatalf("fixture merged: %d distinct single-character items, want exactly %d", singles, n)
 	}
 }
 
