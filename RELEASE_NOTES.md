@@ -1,3 +1,37 @@
+## v1.49.2
+
+**Who is affected: nobody's running code.** This release changes no library
+source — `crdt`, `provider`, `cluster`, `persistence` and `mobile` are
+byte-identical to v1.49.1. It ships one corrected benchmark file. If you are
+upgrading for a fix, you already have it.
+
+It is tagged so the corrected measurements have a version to cite.
+
+**What changed.** The benchmark suite added in #180 could not see the cost it
+was pointed at, in three separate ways, and that mattered: it agreed with the
+performance claims in #189 rather than testing them, so one proposed
+optimisation was implemented and reviewed clean before measurement showed it
+made the common path slower.
+
+- The suite's original observed-transaction benchmark is blind by construction.
+  A single client appending merges into a handful of items, so its walk is
+  effectively O(1) regardless of document size.
+- Its replacement measured a document that grew while being measured, so the
+  result described `b.N` rather than the document size it named. One figure was
+  16x artifact.
+- Its fixture was quadratic, which put realistic document sizes out of reach.
+- The delete-set benchmark sampled 1/10/100/1000 ranges and skipped 0/2/4/8/16,
+  which is where every real workload sits.
+
+**What it produced.** With a benchmark that measures the right shape, the
+performance epic went from nine asserted findings to one large measured one —
+building an observer's delta costs roughly 1000x the edit itself on a
+100k-item document — plus two rejections and three claims recorded as
+unverified. #189 now carries all of it, and #181, #184, #185 and #188 are
+closed into it.
+
+**Upgrade notes:** none. There is nothing to migrate and no behaviour change.
+
 ## v1.49.1
 
 **Who is affected: anyone whose documents have deletion history and who loads
