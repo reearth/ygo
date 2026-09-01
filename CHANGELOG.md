@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.49.2] — 2026-09-01
+
+### Fixed
+
+- **Benchmarks: the observed-transaction benchmark could not measure what it
+  claimed.** Test-only; no library source changed in this release. Three
+  separate flaws made the #180 suite agree with the performance claims in #189
+  instead of testing them, which let one claim survive review and
+  implementation before measurement showed it was backwards.
+  - The pre-existing `BenchmarkObservedTxn_Apply` is blind by construction: a
+    single client appending merges into a handful of `ContentString` items, so
+    its observer walk is O(items) and effectively O(1) however many characters
+    the document holds.
+  - Its replacement measured a document that grew while being measured. Every
+    iteration inserts, and Go picks `b.N` by timing progressively larger runs,
+    so the reported ns/op tracked `b.N` rather than the size named in the
+    sub-benchmark. `n=1000/observed` reported 114,392 ns/op before the fix and
+    ~7,300 ns/op after: roughly 16x of the original figure was artifact. The
+    document is now rebuilt, with the timer stopped, once it drifts 2% past
+    `n`.
+  - The fixture was O(n^2) — two encode+apply round trips per character, so 4k
+    characters took 60ms and larger sizes were untestable. It is now linear:
+    50k builds in 103ms.
+- **Benchmarks: `BenchmarkDeleteSet_IsDeleted` sampled the wrong range
+  counts.** It covered 1/10/100/1000 and skipped 0, 2, 4, 8 and 16. A
+  transaction's delete set holds one range per distinct deleted region, so
+  ordinary editing produces 0 or 1 and a pure insert produces an empty set —
+  the omitted region is where every real workload sits. `computeDelta` calls
+  `IsDeleted` once per pre-existing item, so sub-nanosecond differences there
+  are multiplied by the document's item count on every observed transaction.
+
+See #189 for the measurements this produced, including one proposed
+optimisation that was implemented, reviewed, measured, and rejected.
+
 ## [1.49.1] — 2026-08-25
 
 ### Fixed
