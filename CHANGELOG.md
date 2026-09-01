@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.49.3] — 2026-09-01
+
+### Fixed
+
+- **`provider/client`: a rejected auth token could be retried.** `Options.Token`
+  is documented as terminal — a server that refuses the token is reported once,
+  never retried — and `runReconnectLoop` enforces that by returning on
+  `ErrAuthRejected` before its backoff sleep. But both detectors for a rejection
+  live on the READ path: the `PermissionDenied` data frame and the 4401 close
+  code. The client writes the Auth frame and then immediately writes SyncStep1
+  without waiting for a reply, so when the server's rejection and close won that
+  race the SyncStep1 *write* failed, the read loop was never entered, and the
+  failure surfaced as an ordinary retryable I/O error. The reconnect loop then
+  dialled again with a token the server had already refused.
+
+  The rejection was not actually lost when this happened — data the peer sent
+  before closing stays readable even after the local write fails with `EPIPE` —
+  so the client was discarding evidence it already had. A handshake write
+  failure now drains the read side, bounded by 250ms and gated on
+  `Options.Token` being set, and reports `ErrAuthRejected` when it finds the
+  rejection in either form.
+
+  Present since v1.48.0. Observed as intermittent CI failures of
+  `TestClient_Auth_WrongTokenIsTerminal` with `authCalls=2` on v1.49.0's and
+  v1.49.2's `main` runs; that test could not reproduce it on demand, so the new
+  `TestClient_Auth_RejectionSurvivesHandshakeWriteFailure` forces the condition
+  deterministically with a test hook between the two handshake writes.
+
+  Impact is limited: the connection still terminates correctly with
+  `ErrAuthRejected`, so there was never an infinite retry, a hang, or data loss.
+  A rejected client made two authentication attempts instead of one, which
+  matters where a server counts auth failures for rate-limiting or lockout.
+
 ## [1.49.2] — 2026-09-01
 
 ### Fixed

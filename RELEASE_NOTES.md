@@ -1,3 +1,34 @@
+## v1.49.3
+
+**Who is affected: anyone using `provider/client` with `Options.Token` against a
+server that can reject it.** If you do not set `Token`, nothing here changes for
+you.
+
+A rejected authentication token could be sent to the server twice instead of
+once. The client still gave up correctly after that — `Connect` returned
+`ErrAuthRejected` and stopped — so there was never an infinite retry loop, a
+hang, or any data loss. The practical impact is that a client with a bad
+credential made two failed authentication attempts, which matters if your server
+counts those toward rate-limiting or account lockout.
+
+**Why it happened.** The client announces its token and then immediately sends
+its opening sync message, without waiting for a reply. Both of the ways a
+rejection is recognised arrive on the *receiving* side. When the server rejected
+the token and closed fast enough, the client's second message failed to send, it
+never got as far as reading, and a refused credential looked like an ordinary
+network glitch — so it reconnected and tried the same token again.
+
+The rejection was not lost; it was sitting unread. A failed send does not mean
+the other side has stopped talking. The client now checks for it before deciding
+a failure was retryable.
+
+**Present since v1.48.0**, and in every release since. It surfaced as an
+intermittent CI failure that the existing test could not reproduce on demand;
+the new test forces the exact timing every run.
+
+**Upgrade notes:** none. No API change, no behaviour change for anyone not using
+`Token`.
+
 ## v1.49.2
 
 **Who is affected: nobody's running code.** This release changes no library
