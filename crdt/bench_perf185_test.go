@@ -49,14 +49,6 @@ func newFragmentedDoc(n int) (*Doc, *YText) {
 	return doc, txt
 }
 
-func textItemCount(txt *YText) int {
-	n := 0
-	for it := txt.start; it != nil; it = it.Right {
-		n++
-	}
-	return n
-}
-
 // TestNewFragmentedDocIsFragmented guards the fixture. If a future change lets
 // these inserts merge, the benchmarks below would silently start measuring a
 // short item list while still reporting a large n — the exact failure that
