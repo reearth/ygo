@@ -20,8 +20,10 @@ and stopped. It matters if your server counts failed authentications toward
 rate-limiting or account lockout.
 
 **What changed.** The check now lives in one place that every send goes
-through, instead of being attached to two of them, so a send added later cannot
-quietly reopen this.
+through, instead of being attached to two of them. There turned out to be five
+such sends, not the two the previous fix hardened — a test that simply counts
+them now fails if a new one is added without the check, which is how this
+problem reached a release twice.
 
 The same change removes a subtler problem in the previous fix: it read the
 connection directly while the client's own reader was already reading it, which

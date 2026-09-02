@@ -19,10 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error, and `runReconnectLoop` dialled again with a token the server had
   already refused.
 
-  Two of the session's four write sites were covered; this one and the
-  awareness-query reply were not. The classification now happens in a single
-  place that every write site reaches, so the next one added cannot
-  reintroduce it.
+  Two of the session's FIVE write sites were covered; the SyncStep2 reply, the
+  awareness-query reply, and `flushLane`'s own write (which sends a local edit
+  queued while the handshake is still in flight) were not. The classification
+  now happens in a single place that every write site reaches.
+
+  A source-level guard, `TestUnit_EveryWriteSiteClassifiesAuthRejection`, now
+  asserts that every error-checked connection write routes through it. This bug
+  reached `main` twice by the same mechanism — a write site nobody had written
+  a behavioural test for — and a behavioural test can only ever cover the sites
+  someone thought of. The guard caught the `flushLane` site during this very
+  change, after it had already been missed once.
 
   The fix also removes a latent contract violation introduced with #238's:
   `classifyHandshakeWriteErr` called `ReadMessage` on the connection while the

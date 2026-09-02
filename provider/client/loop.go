@@ -1251,7 +1251,13 @@ func (s *session) flushLane(ctx context.Context, deadline time.Duration) error {
 				giveUp = true
 				continue
 			}
-			return fmt.Errorf("client: %s: %w", what, err)
+			// Classified for the same reason as every other write site: a
+			// local edit queued while the handshake is still in flight is
+			// flushed from runLoop's lane-signal case, so this write can be
+			// the one that loses the race with a token rejection. Both
+			// callers are on the loop goroutine, so consulting the read
+			// pump here is single-consumer, as classifyWriteErr requires.
+			return s.classifyWriteErr(fmt.Errorf("client: %s: %w", what, err))
 		}
 	}
 }
