@@ -34,6 +34,13 @@ spacing.
 
 **Present since v1.49.0.** Closes #239.
 
+Also in this release: the pure-Go SQLite driver behind `persistence/sqlite` and
+the offline client's local store moves from `modernc.org/sqlite` v1.34.5 to
+v1.39.0, picking up five minor versions of upstream fixes. That is as far as it
+can go for now — the next release requires Go 1.24 and the current one requires
+Go 1.25, against this module's Go 1.23 floor. Raising the floor would break
+consumers still on 1.23, so it stays where it is.
+
 ## v1.49.3
 
 **Who is affected: anyone using `provider/client` with `Options.Token` against a

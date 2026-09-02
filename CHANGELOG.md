@@ -42,6 +42,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Present since v1.49.0 (#239).
 
+### Changed
+
+- **`modernc.org/sqlite` v1.34.5 → v1.39.0** (with `modernc.org/libc`,
+  `mathutil` and `memory` pulled along). Five minor versions of upstream fixes
+  for the pure-Go SQLite driver behind `persistence/sqlite` and
+  `provider/client`'s local store.
+
+  v1.39.0 is the ceiling, not the latest: v1.39.1 requires Go 1.24 and the
+  current v1.57.0 requires Go 1.25, while this module's floor is Go 1.23. Going
+  further means raising that floor, which is a breaking change for consumers and
+  a separate decision — see `.github/dependabot.yml`, where gomod version
+  updates are disabled for exactly this reason (security updates still flow).
+  The `go` directive normalises from `1.23` to `1.23.0`; the floor is unchanged
+  and no `toolchain` directive is introduced.
+
 ## [1.49.3] — 2026-09-01
 
 ### Fixed
