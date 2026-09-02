@@ -1,3 +1,37 @@
+## v1.49.5
+
+**Who is affected: anyone using `provider/client` with `Options.Token` against
+a server that can reject it.** If you do not set `Token`, nothing here changes
+for you.
+
+v1.49.3 fixed a rejected authentication token being sent twice. It fixed most
+of it. The client announces its token and sends its opening sync message
+without waiting, and v1.49.3 taught both of those writes to notice a rejection
+that had already arrived. But the client also *answers* the server: when the
+server asks what the client has, the client replies — and that reply is sent in
+the same instant the rejection may be arriving. When it was, the reply failed to
+send, the failure looked like an ordinary network glitch, and the client
+reconnected with the same refused token.
+
+So the symptom is the same as before, through a different door: **two failed
+authentication attempts instead of one**. As before there was no infinite
+retry, no hang, and no data loss — `Connect` still returned `ErrAuthRejected`
+and stopped. It matters if your server counts failed authentications toward
+rate-limiting or account lockout.
+
+**What changed.** The check now lives in one place that every send goes
+through, instead of being attached to two of them, so a send added later cannot
+quietly reopen this.
+
+The same change removes a subtler problem in the previous fix: it read the
+connection directly while the client's own reader was already reading it, which
+the WebSocket library does not allow. That is also why it worked only
+sometimes — the two readers competed for the very message the check needed. It
+now asks the existing reader instead.
+
+**Present since v1.48.0**, and only narrowed by v1.49.3. It kept failing our
+own test suite intermittently after that release, which is how it was caught.
+
 ## v1.49.3
 
 **Who is affected: anyone using `provider/client` with `Options.Token` against a
