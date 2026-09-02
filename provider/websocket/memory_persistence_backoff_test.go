@@ -301,3 +301,37 @@ func TestUnit_MemoryPersistence_BackoffResetSurvivesUndroppedLedger(t *testing.T
 	require.Zero(t, failures, "a successful fold did not clear the consecutive-failure count")
 	require.Zero(t, retryAt, "a successful fold did not clear the backoff mark")
 }
+
+// Backoff must gate ONLY the automatic trigger in StoreUpdate. LoadDoc folds
+// before materialising so that later loads are cheap again; if it ever started
+// honouring the backoff mark, a room whose fold had failed once would keep
+// re-merging its whole log on every load instead — the cost LoadDoc's fold
+// exists to avoid, reappearing silently.
+//
+// The same holds for an explicit Compact call, which is the "fold now" API.
+func TestUnit_MemoryPersistence_BackoffDoesNotGateLoadDocOrExplicitCompact(t *testing.T) {
+	// Fails once, then succeeds — so a pending backoff exists, and the fold
+	// that LoadDoc drives can still be observed collapsing the records.
+	p, spy, idx := newFoldSpy(backoffEvery, func(attempt int) bool { return attempt == 1 })
+	w := newSeqWriter(t, p, "room", idx)
+	want := ""
+	for i := 0; i < backoffEvery; i++ {
+		want = w.write(t)
+	}
+	require.Len(t, spy.attempts, 1, "precondition: the threshold fired exactly once")
+
+	// One more write, nowhere near the backed-off mark: the automatic trigger
+	// must stay quiet.
+	want = w.write(t)
+	require.Len(t, spy.attempts, 1, "the automatic trigger fired while backed off")
+
+	// LoadDoc must fold anyway, and must still return the full content.
+	require.Equal(t, want, docTextAfterReload(t, p, "room"))
+	require.Len(t, spy.attempts, 2, "LoadDoc did not fold while a backoff was pending")
+	require.Equal(t, 1, ygws.MemoryPersistenceRecordCount(p, "room"),
+		"LoadDoc's fold did not collapse the records")
+
+	// An explicit Compact is the "fold now" API and must not be gated either.
+	require.NoError(t, p.Compact(context.Background(), "room"))
+	require.Len(t, spy.attempts, 3, "an explicit Compact was gated by the backoff")
+}
