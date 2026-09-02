@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ func withPostAuthWriteHook(t *testing.T, fn func()) {
 // rejected once the hard close has happened.
 func rejectingRawServer(t *testing.T, authFrames *atomic.Int32, rejected chan struct{}) *httptest.Server {
 	t.Helper()
-	var once bool
+	var once sync.Once
 	up := gws.Upgrader{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := up.Upgrade(w, r, nil)
@@ -67,10 +68,11 @@ func rejectingRawServer(t *testing.T, authFrames *atomic.Int32, rejected chan st
 			}
 		}
 		_ = conn.Close()
-		if !once {
-			once = true
-			close(rejected)
-		}
+		// sync.Once, not a plain bool: when the fix is absent the client
+		// RETRIES, so a second handler goroutine reaches this line — the very
+		// case these tests exist to catch. A bool would be a data race there,
+		// and could double-close rejected.
+		once.Do(func() { close(rejected) })
 	}))
 	t.Cleanup(ts.Close)
 	return ts

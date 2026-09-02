@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.49.5] — 2026-09-02
+
+### Fixed
+
+- **`provider/client`: a rejected auth token could still reach a second
+  attempt.** v1.49.3 (#238) taught the two PROACTIVE handshake writes — the
+  Auth frame and SyncStep1 — to recognise a rejection that was already sitting
+  unread when the write failed. But the client also writes in RESPONSE to the
+  server's handshake: reading the server's own SyncStep1 makes it answer with a
+  SyncStep2 reply, and that write is in the same race. When the rejection won
+  it, the reply write failed with EPIPE, surfaced as an ordinary retryable I/O
+  error, and `runReconnectLoop` dialled again with a token the server had
+  already refused.
+
+  Two of the session's FIVE write sites were covered; the SyncStep2 reply, the
+  awareness-query reply, and `flushLane`'s own write (which sends a local edit
+  queued while the handshake is still in flight) were not. The classification
+  now happens in a single place that every write site reaches.
+
+  A source-level guard, `TestUnit_EveryWriteSiteClassifiesAuthRejection`, now
+  asserts that every error-checked connection write routes through it. This bug
+  reached `main` twice by the same mechanism — a write site nobody had written
+  a behavioural test for — and a behavioural test can only ever cover the sites
+  someone thought of. The guard caught the `flushLane` site during this very
+  change, after it had already been missed once.
+
+  The fix also removes a latent contract violation introduced with #238's:
+  `classifyHandshakeWriteErr` called `ReadMessage` on the connection while the
+  read-pump goroutine was also in `ReadMessage`, which gorilla explicitly
+  forbids ("no more than one goroutine calls the read methods"). That is also
+  why it was unreliable — the pump and the classifier raced for the very frame
+  the classifier was looking for, so whichever lost saw nothing.
+  `classifyWriteErr` instead consults the pump's existing channels, which is
+  race-free: frame handlers run from `runLoop`'s own select, so there is
+  exactly one consumer at any moment.
+
+  Impact is unchanged from #238 and still limited: the connection terminated
+  correctly with `ErrAuthRejected`, so there was never an infinite retry, hang,
+  or data loss. A rejected client made two authentication attempts instead of
+  one, which matters where a server counts auth failures for rate-limiting or
+  lockout.
+
+  Present since v1.48.0, and only narrowed by v1.49.3. It kept failing
+  `TestClient_Auth_WrongTokenIsTerminal` intermittently on `main` after that
+  release — reproduced here at `authCalls=2` on run 46 of 400, reporting
+  `send sync step 2 reply: ... write: broken pipe`. The new
+  `TestClient_Auth_RejectionSurvivesSyncReplyWriteFailure` forces that timing
+  deterministically. Mutation-checked in both directions: unguarding the reply
+  site fails only the new test while #238's still passes, and unguarding the
+  proactive writes fails only #238's — so the earlier test structurally could
+  not have caught this (#240 follow-up).
 ## [1.49.4] — 2026-09-02
 
 ### Fixed

@@ -114,6 +114,14 @@ var closeDrainHook = func() {}
 // second attempt — see auth_writefail_test.go. Always a no-op in production.
 var postAuthWriteHook = func() {}
 
+// preSyncReplyWriteHook runs on the loop goroutine immediately before the
+// SyncStep2 reply that answers a peer's SyncStep1, which is the OTHER write
+// that happens while an auth rejection is still in flight — the client writes
+// it in response to the server's own handshake, so it sits in the same race
+// #238 addressed for the two proactive handshake writes. Parking here lets a
+// test make that write fail on purpose. Always a no-op in production.
+var preSyncReplyWriteHook = func() {}
+
 // dialNetDialContext, when non-nil, replaces gws.Dialer's own network-dial
 // function (see runLoop's dialer construction) for the calling test's
 // duration — the same "package-level indirection purely for test
@@ -146,12 +154,12 @@ var dialNetDialContext func(ctx context.Context, network, addr string) (net.Conn
 // can get wrong for no real benefit.
 const reconnectBackoffBase = 500 * time.Millisecond
 
-// handshakeRejectionDrainTimeout bounds classifyHandshakeWriteErr's read of
-// whatever the peer managed to send before the handshake write failed. Short on
-// purpose: the data it is looking for was already in the receive buffer before
-// the write failed, so this never waits on the network in the case it exists to
-// serve — the bound only limits how long an unrelated failure can delay a
-// legitimate reconnect.
+// handshakeRejectionDrainTimeout bounds how long classifyWriteErr waits for the
+// read pump to hand over whatever the peer managed to send before a write
+// failed. Short on purpose: the data it is looking for was already in the
+// receive buffer before the write failed, so this never waits on the network in
+// the case it exists to serve — the bound only limits how long an unrelated
+// failure can delay a legitimate reconnect.
 const handshakeRejectionDrainTimeout = 250 * time.Millisecond
 
 // readDeadlineMultiplier is how many Options.PingInterval periods of total
@@ -235,6 +243,19 @@ type session struct {
 	// HANDSHAKE, not merely a successful dial" (see backoff.reset's doc)
 	// actually happen at the one moment that is true.
 	onSynced func()
+	// frames and readErr are the READ PUMP's channels (runLoop starts the
+	// pump before the handshake writes). classifyWriteErr consults them
+	// rather than reading the connection itself: gorilla requires that no
+	// more than one goroutine call the read methods, and the pump is that
+	// goroutine for this connection's whole life. Reading the socket
+	// directly here — as the original #238 fix did — races the pump for the
+	// very frame it is looking for, so whichever loses sees nothing.
+	//
+	// Consuming from them inside a frame handler is safe: handlers run FROM
+	// runLoop's own select, so runLoop is never selecting on them at the
+	// same time. There is exactly one consumer at any moment.
+	frames  <-chan []byte
+	readErr <-chan error
 }
 
 // runLoop performs one full connection lifecycle: dial, y-websocket
@@ -490,7 +511,7 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 		<-readerDone
 	}()
 
-	s := &session{c: c, conn: conn, onSynced: onSynced}
+	s := &session{c: c, conn: conn, onSynced: onSynced, frames: frames, readErr: readErr}
 	c.emitStatus(Status{State: StateConnected})
 
 	// #165 Task 8: whatever this connection's Awareness view learned about
@@ -550,7 +571,7 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	// comment.
 	if c.opts.Token != "" {
 		if err := s.write(encodeAuthToken(c.opts.Token)); err != nil {
-			return s.classifyHandshakeWriteErr(fmt.Errorf("client: send auth token: %w", err))
+			return s.classifyWriteErr(fmt.Errorf("client: send auth token: %w", err))
 		}
 		postAuthWriteHook()
 	}
@@ -563,7 +584,7 @@ func (c *Client) runLoop(ctx context.Context, onSynced func()) error {
 	// anyway is what makes this client correct against a y-websocket server
 	// that DOES wait — and it costs one state vector.
 	if err := s.write(encodeEnvelope(wireMsgSync, ygsync.EncodeSyncStep1(c.opts.Doc))); err != nil {
-		return s.classifyHandshakeWriteErr(fmt.Errorf("client: send sync step 1: %w", err))
+		return s.classifyWriteErr(fmt.Errorf("client: send sync step 1: %w", err))
 	}
 
 	for {
@@ -763,58 +784,69 @@ func (c *Client) runReconnectLoop(ctx context.Context) error {
 	}
 }
 
-// classifyHandshakeWriteErr upgrades a handshake write failure to
+// classifyWriteErr upgrades ANY write failure on this session to
 // ErrAuthRejected when the server had already rejected this connection's token
-// and the rejection is still sitting unread in the receive buffer.
+// and the rejection has been delivered by the read pump.
 //
 // Both auth-rejection detectors live on the READ path — the PermissionDenied
 // data frame (handleFrame's wireMsgAuth case) and the 4401 close code
-// (runLoop's readErr case). But this client writes the Auth token and then
-// SyncStep1 without waiting for a reply, so if the server's rejection and close
-// win that race the SECOND write fails and the read loop is never entered at
-// all. Without this, that surfaces as an ordinary retryable I/O error and
-// runReconnectLoop dials again with a token the server has already refused,
-// breaking the "reported once, never retried" guarantee ErrAuthRejected's doc
-// makes. It is exactly how TestClient_Auth_WrongTokenIsTerminal came to fail on
-// CI with authCalls=2, on v1.49.0's and v1.49.2's main runs.
+// (runLoop's readErr case). A failed write makes the loop return before either
+// is consumed, so without this the failure surfaces as an ordinary retryable
+// I/O error and runReconnectLoop dials again with a token the server has
+// already refused, breaking the "reported once, never retried" guarantee
+// ErrAuthRejected's doc makes.
 //
-// A failed write does not mean the read side has nothing left to say. Data the
-// peer sent before closing stays readable even after the local write fails with
-// EPIPE — verified, not assumed — so this drains what is already buffered and
-// looks for the rejection in either of the two forms it can take.
+// Applying at EVERY write site is the correction to #238. That fix covered
+// only the two PROACTIVE handshake writes (the Auth frame and SyncStep1), but
+// the client also writes in RESPONSE to the server's handshake: answering the
+// server's SyncStep1 with a SyncStep2 reply is a write in the same race, and
+// it is the one that kept TestClient_Auth_WrongTokenIsTerminal failing at
+// authCalls=2 after #238 — reproduced on run 46 of 400, reporting
+// "send sync step 2 reply: ... write: broken pipe". Classifying in ONE place
+// that all of them reach is what stops the next write site from reintroducing
+// it.
 //
-// Deliberately narrow, so an ordinary network failure is still retried:
-//   - only when Options.Token is set, matching the same gate runLoop's readErr
-//     case applies for the close code;
-//   - bounded by a short deadline, so a peer that is merely slow rather than
-//     rejecting cannot stall reconnection;
-//   - returns writeErr unchanged unless a rejection is actually found.
-func (s *session) classifyHandshakeWriteErr(writeErr error) error {
-	if s.c.opts.Token == "" {
+// It consults the read pump rather than reading the connection, because
+// gorilla permits only one goroutine in the read methods and the pump already
+// is that goroutine — see the frames/readErr fields' own doc.
+//
+// Kept narrow, so ordinary network failures still retry:
+//
+//   - only when Options.Token is set: a connection that never sent a token
+//     cannot be having ITS token rejected.
+//   - only before this session is synced: a completed handshake proves the
+//     token was accepted, so no rejection can still be in flight and a
+//     mid-session write failure is an ordinary retryable one.
+//   - bounded by handshakeRejectionDrainTimeout, returning the original error
+//     unchanged when no rejection turns up.
+func (s *session) classifyWriteErr(writeErr error) error {
+	if s.c.opts.Token == "" || s.synced {
 		return writeErr
 	}
-	if err := s.conn.SetReadDeadline(time.Now().Add(handshakeRejectionDrainTimeout)); err != nil {
-		return writeErr
-	}
+	deadline := time.NewTimer(handshakeRejectionDrainTimeout)
+	defer deadline.Stop()
 	for {
-		_, payload, err := s.conn.ReadMessage()
-		if err != nil {
+		select {
+		case err := <-s.readErr:
 			// The close frame carries the rejection just as well as the data
 			// frame does, and survives an abrupt reset that truncates the
 			// payload — the same reasoning runLoop's readErr case documents.
 			if gws.IsCloseError(err, wsCodeUnauthorized) {
-				return fmt.Errorf("client: %w (via close code, after handshake write failed): %w",
+				return fmt.Errorf("client: %w (via close code, after a write failed): %w",
 					ErrAuthRejected, writeErr)
 			}
 			return writeErr
-		}
-		mt, body, derr := decodeEnvelope(payload)
-		if derr != nil || mt != wireMsgAuth {
-			continue // not the frame we are looking for; keep draining
-		}
-		subType, reason, derr := decodeAuthReply(body)
-		if derr == nil && subType == authTypePermissionDenied {
-			return fmt.Errorf("client: %w: %s", ErrAuthRejected, reason)
+		case payload := <-s.frames:
+			mt, body, derr := decodeEnvelope(payload)
+			if derr != nil || mt != wireMsgAuth {
+				continue // not the frame we are looking for; keep looking
+			}
+			subType, reason, derr := decodeAuthReply(body)
+			if derr == nil && subType == authTypePermissionDenied {
+				return fmt.Errorf("client: %w: %s", ErrAuthRejected, reason)
+			}
+		case <-deadline.C:
+			return writeErr
 		}
 	}
 }
@@ -885,8 +917,9 @@ func (s *session) handleFrame(frame []byte) error {
 			// The peer sent SyncStep1; reply is our SyncStep2 for it. This is
 			// how our own offline edits reach the server: the server asks
 			// what we have, and this answer carries everything it is missing.
+			preSyncReplyWriteHook()
 			if err := s.write(encodeEnvelope(wireMsgSync, reply)); err != nil {
-				return fmt.Errorf("client: send sync step 2 reply: %w", err)
+				return s.classifyWriteErr(fmt.Errorf("client: send sync step 2 reply: %w", err))
 			}
 		}
 		if subErr == nil && subType == ygsync.MsgSyncStep2 && !s.synced {
@@ -1040,7 +1073,7 @@ func (s *session) handleFrame(frame []byte) error {
 			enc.WriteVarBytes(s.c.awareness.EncodeUpdate([]uint64{s.c.awareness.ClientID()}))
 		}))
 		if err := s.write(reply); err != nil {
-			return fmt.Errorf("client: send awareness query reply: %w", err)
+			return s.classifyWriteErr(fmt.Errorf("client: send awareness query reply: %w", err))
 		}
 	}
 	return nil
@@ -1218,7 +1251,13 @@ func (s *session) flushLane(ctx context.Context, deadline time.Duration) error {
 				giveUp = true
 				continue
 			}
-			return fmt.Errorf("client: %s: %w", what, err)
+			// Classified for the same reason as every other write site: a
+			// local edit queued while the handshake is still in flight is
+			// flushed from runLoop's lane-signal case, so this write can be
+			// the one that loses the race with a token rejection. Both
+			// callers are on the loop goroutine, so consulting the read
+			// pump here is single-consumer, as classifyWriteErr requires.
+			return s.classifyWriteErr(fmt.Errorf("client: %s: %w", what, err))
 		}
 	}
 }
