@@ -38,11 +38,32 @@ const hangDeadline = 30 * time.Second
 // a wait hits hangDeadline, so a genuine stall is diagnosable from CI output
 // instead of just reporting that a deadline passed. This is what keeps a
 // generous deadline from becoming a way of not noticing a real hang.
+//
+// The buffer grows until the dump fits. runtime.Stack does not report that it
+// ran out of room — it fills the buffer, silently drops the rest, and returns
+// len(buf), which is indistinguishable from an exact fit. Measured with 500
+// parked goroutines: a 64KiB buffer returned exactly 65536 while the complete
+// dump was 170,583 bytes. A fixed size would therefore truncate hardest in the
+// case this exists to diagnose — a stall that leaked goroutines — so it starts
+// at 1MiB (ample for a healthy run) and doubles, up to maxGoroutineDump. If
+// even that is not enough the log says so, rather than quietly ending
+// mid-frame (raised in review on #244).
 func dumpGoroutines(t *testing.T, what string) {
 	t.Helper()
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	t.Logf("%s: goroutine dump at timeout follows\n%s", what, buf[:n])
+	const maxGoroutineDump = 32 << 20
+	for size := 1 << 20; ; size *= 2 {
+		buf := make([]byte, size)
+		n := runtime.Stack(buf, true)
+		if n < size {
+			t.Logf("%s: goroutine dump at timeout follows\n%s", what, buf[:n])
+			return
+		}
+		if size >= maxGoroutineDump {
+			t.Logf("%s: goroutine dump at timeout follows, TRUNCATED at the %d-byte cap\n%s",
+				what, size, buf[:n])
+			return
+		}
+	}
 }
 
 // startServer stands up a real provider/websocket.Server behind an httptest
