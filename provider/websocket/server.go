@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -360,7 +361,29 @@ type compactLedger struct {
 	// dropping it would reset appended to 0 under them, and their folded mark
 	// would then read as a huge outstanding debt.
 	inflight int
+	// failures counts CONSECUTIVE failed folds, capped at
+	// maxCompactBackoffSteps. Reset to zero by the first success. It selects
+	// the backoff gap; see retryAt.
+	failures int
+	// retryAt is the appended-count at or after which StoreUpdate may next
+	// attempt an automatic fold. Zero means "no backoff pending".
+	//
+	// Backing off by raising the outstanding() THRESHOLD would not work: once
+	// outstanding passed even a heavily inflated threshold it would stay past
+	// it, and every subsequent write would re-fire again. Only a mark that
+	// advances past the current appended-count actually spaces the attempts
+	// out. Like folded, it only ever moves forward, so a fold that finishes
+	// late cannot pull the next attempt earlier than a later one already set.
+	retryAt int64
 }
+
+// maxCompactBackoffSteps bounds the automatic-fold backoff at
+// CompactEvery << (maxCompactBackoffSteps-1) writes between attempts — 64x the
+// base cadence. The cap is not decoration: a fold that never runs is a log that
+// never shrinks, so the backoff has to keep retrying a store that may yet come
+// back, and has to bound how many un-folded records accumulate while it is
+// down. Unbounded geometric backoff trades a retry storm for unbounded growth.
+const maxCompactBackoffSteps = 7
 
 // outstanding reports the un-folded write count.
 func (l *compactLedger) outstanding() int64 { return l.appended - l.folded }
@@ -461,7 +484,7 @@ func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
 	m.mu.Lock()
 	l := m.ledgerLocked(room)
 	l.appended++
-	due := l.outstanding() >= int64(m.compactEvery())
+	due := l.outstanding() >= int64(m.compactEvery()) && l.appended >= l.retryAt
 	m.mu.Unlock()
 	if due {
 		_ = m.Compact(context.Background(), room) // best-effort; see this method's doc
@@ -499,8 +522,21 @@ func (m *MemoryPersistence) StoreUpdate(room string, update []byte) error {
 // toward the next one, so the next compaction fires at most one write early.
 // That is bounded, and bounded-early is the correct way to be wrong here.
 //
-// On failure the ledger is left untouched, so the threshold re-fires rather
-// than letting records grow behind a persistently failing fold.
+// On failure the fold's progress mark is left untouched — the records it could
+// not fold are still outstanding — but the automatic trigger BACKS OFF: each
+// consecutive failure doubles the number of writes before the next attempt, up
+// to 64x the base cadence, and the first success resets it (#239).
+//
+// Without that, outstanding() stays over the threshold and every subsequent
+// write retries the fold, each retry paying a full merge over a log the failed
+// retry could not shrink — quadratic total work for a permanently failing
+// fold, which is the realistic case here (a record MergeUpdatesV1 cannot fold
+// fails identically every time).
+//
+// The backoff governs only the AUTOMATIC trigger in StoreUpdate. This method
+// is the explicit "fold now" API — a direct call, LoadDoc, or the server's
+// CompactableAdapter path always attempts the fold, and Server.CompactEvery
+// has its own damping (onFlushed zeroes its counter before the attempt).
 func (m *MemoryPersistence) Compact(ctx context.Context, room string) error {
 	if m.adapter == nil {
 		return errMemoryPersistenceNotConstructed
@@ -516,8 +552,34 @@ func (m *MemoryPersistence) Compact(ctx context.Context, room string) error {
 
 	m.mu.Lock()
 	l.inflight--
-	if err == nil && mark > l.folded {
-		l.folded = mark
+	if err == nil {
+		if mark > l.folded {
+			l.folded = mark
+		}
+		// A success clears the backoff: one blip must not permanently degrade
+		// an otherwise healthy room's fold cadence.
+		l.failures = 0
+		l.retryAt = 0
+	} else {
+		if l.failures < maxCompactBackoffSteps {
+			l.failures++
+		}
+		// Gap doubles per consecutive failure: N, 2N, 4N ... 64N. Measured from
+		// the CURRENT appended-count, so the wait is in units of writes — a
+		// quiet room does not spin, and a recovered store is retried on its
+		// next writes rather than after a wall-clock sleep unrelated to load.
+		//
+		// CompactEvery is a public field, so the shift is clamped: an absurd
+		// value would otherwise wrap to a negative gap, which compares below
+		// retryAt and would silently disable the backoff altogether. Leaving
+		// such a value unshifted is already a gap no room will reach.
+		gap := int64(m.compactEvery())
+		if shift := l.failures - 1; shift > 0 && gap < math.MaxInt64>>shift {
+			gap <<= shift
+		}
+		if next := l.appended + gap; next > l.retryAt {
+			l.retryAt = next
+		}
 	}
 	m.dropIfIdleLocked(room, l)
 	m.mu.Unlock()

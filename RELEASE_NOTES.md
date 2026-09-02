@@ -33,6 +33,48 @@ now asks the existing reader instead.
 
 **Present since v1.48.0**, and only narrowed by v1.49.3. It kept failing our
 own test suite intermittently after that release, which is how it was caught.
+## v1.49.4
+
+**Who is affected: anyone using the built-in `websocket.MemoryPersistence` whose
+compaction can fail.** In practice that means a corrupt stored record the merge
+cannot fold. If your folds succeed, nothing here changes for you — the healthy
+path is byte-for-byte the same cadence it always was.
+
+`MemoryPersistence` batches its housekeeping: every so many writes it folds a
+room's accumulated update records back into one. When that fold failed, it was
+retried on *every* subsequent write instead of waiting for the next batch. Each
+retry re-read and re-merged the whole log — work the previous failure had
+already shown would not succeed, over a log that only grew.
+
+The result was quadratic: with the fold failing, 800 writes cost 791 compaction
+attempts and merged 320,355 records. It is now 7 attempts and 1,270 records. The
+saving grows with the workload — 33× less merge work at 100 writes, 252× at 800.
+
+**No data was ever at risk.** A fold that fails leaves the records exactly where
+they were, and an un-folded record is still a stored record that still loads.
+This was a cost problem — wasted CPU on a store that was already unhealthy —
+not a correctness one.
+
+**What changed.** Each consecutive failure now doubles the number of writes
+before the next attempt, up to 64× the normal interval, and the first success
+puts it straight back to normal. It stays capped rather than backing off
+forever, because a fold that never runs is a log that never shrinks: a store
+that recovers has to be noticed, and the un-folded backlog has to stay bounded.
+Counting in writes rather than seconds means an idle room does not retry at all,
+and a recovered one is retried as soon as it is being used again.
+
+Explicit `Compact` calls, `LoadDoc`, and `Server.CompactEvery` are unchanged —
+they always fold on demand, and `Server.CompactEvery` already had its own
+spacing.
+
+**Present since v1.49.0.** Closes #239.
+
+Also in this release: the pure-Go SQLite driver behind `persistence/sqlite` and
+the offline client's local store moves from `modernc.org/sqlite` v1.34.5 to
+v1.39.0, picking up five minor versions of upstream fixes. That is as far as it
+can go for now — the next release requires Go 1.24 and the current one requires
+Go 1.25, against this module's Go 1.23 floor. Raising the floor would break
+consumers still on 1.23, so it stays where it is.
 
 ## v1.49.3
 
@@ -487,10 +529,10 @@ release only adds packages.
 Until now, ygo's networked sync story was server-only: `provider/websocket`
 answers peers, but embedding a *client* that dials it meant hand-rolling the
 WebSocket connection, the sync handshake, reconnect-with-backoff, and local
-durability yourself. `provider/client` closes that gap — this is the same
-project's own competitive comparison against Deln0r/ygo naming
-"embeddable offline-first client" as a gap the rival covered and we didn't;
-it no longer is.
+durability yourself. `provider/client` closes that gap — it was the largest
+remaining hole in the library's own coverage, named in this project's
+competitive review as the one thing a Go consumer still could not do without
+writing the client themselves.
 
 **The offline model, concretely — because "offline-first" gets read as
 vaguer than it is.** There is no offline-op queue anywhere in this package,
