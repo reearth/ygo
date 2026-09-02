@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.49.4] — 2026-09-02
+
+### Fixed
+
+- **`provider/websocket`: a failing `MemoryPersistence` fold was retried on every
+  write.** The adapter folds a room once it has accumulated `CompactEvery`
+  un-folded records, and the ledger's progress mark advances only on success —
+  deliberately, so records cannot pile up unnoticed behind a fold that never
+  runs. But the trigger compares the outstanding count against a fixed
+  threshold, and a failed fold leaves that count above the threshold, so the
+  fold was re-attempted on *every* subsequent write rather than once per
+  `CompactEvery` writes.
+
+  Each retry pays a full merge over a log the failed retry could not shrink, so
+  the cost is quadratic in the write count. Measured with `CompactEvery=10` and a
+  fold that fails after doing its read+merge: 800 writes cost 791 attempts and
+  320,355 merged records before, 7 attempts and 1,270 merged records after — the
+  gap widens with scale (33× fewer merged records at 100 writes, 252× at 800).
+
+  The automatic trigger now backs off: each consecutive failure doubles the
+  number of writes before the next attempt, capped at 64× the base cadence, and
+  the first success resets it. The cap is deliberate — a fold that never runs is
+  a log that never shrinks, so the retries have to continue and the un-folded
+  backlog has to stay bounded. Backing off in units of writes rather than
+  wall-clock keeps a quiet room from spinning and lets a recovered store be
+  retried on its next writes instead of after a sleep unrelated to its load.
+
+  This is safe precisely because a failed fold is not a durability event: the
+  updates are already stored, and an un-folded record is still a stored record.
+  The reasoning does not transfer to the store path.
+
+  Backoff governs only the automatic trigger. An explicit `Compact` call,
+  `LoadDoc`, and the server's `CompactableAdapter` path all still fold on
+  demand; `Server.CompactEvery` has its own damping and was never affected.
+
+  Present since v1.49.0 (#239).
+
 ## [1.49.3] — 2026-09-01
 
 ### Fixed
