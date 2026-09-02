@@ -494,10 +494,10 @@ release only adds packages.
 Until now, ygo's networked sync story was server-only: `provider/websocket`
 answers peers, but embedding a *client* that dials it meant hand-rolling the
 WebSocket connection, the sync handshake, reconnect-with-backoff, and local
-durability yourself. `provider/client` closes that gap — this is the same
-project's own competitive comparison against Deln0r/ygo naming
-"embeddable offline-first client" as a gap the rival covered and we didn't;
-it no longer is.
+durability yourself. `provider/client` closes that gap — it was the largest
+remaining hole in the library's own coverage, named in this project's
+competitive review as the one thing a Go consumer still could not do without
+writing the client themselves.
 
 **The offline model, concretely — because "offline-first" gets read as
 vaguer than it is.** There is no offline-op queue anywhere in this package,
