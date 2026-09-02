@@ -314,15 +314,14 @@ func TestUnit_MemoryPersistence_BackoffDoesNotGateLoadDocOrExplicitCompact(t *te
 	// that LoadDoc drives can still be observed collapsing the records.
 	p, spy, idx := newFoldSpy(backoffEvery, func(attempt int) bool { return attempt == 1 })
 	w := newSeqWriter(t, p, "room", idx)
-	want := ""
 	for i := 0; i < backoffEvery; i++ {
-		want = w.write(t)
+		w.write(t)
 	}
 	require.Len(t, spy.attempts, 1, "precondition: the threshold fired exactly once")
 
 	// One more write, nowhere near the backed-off mark: the automatic trigger
 	// must stay quiet.
-	want = w.write(t)
+	want := w.write(t)
 	require.Len(t, spy.attempts, 1, "the automatic trigger fired while backed off")
 
 	// LoadDoc must fold anyway, and must still return the full content.
