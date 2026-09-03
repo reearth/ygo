@@ -2,7 +2,9 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +13,58 @@ import (
 	"github.com/reearth/ygo/crdt"
 	ygws "github.com/reearth/ygo/provider/websocket"
 )
+
+// hangDeadline bounds every "did the client get there?" wait in this package.
+// Its ONLY job is to fail a test that has genuinely hung — and a hang never
+// completes, however long you wait — so it is deliberately generous rather
+// than tight. A wait returns the instant the condition holds, so a large
+// bound costs a passing test nothing.
+//
+// It was 5s, which is marginal on CI. TestClient_Close_JoinsLoopBeforeReturning
+// failed twice on main at exactly 5.01s ("client never reported state 2") on a
+// 2-vCPU runner while the crdt package's ~88s CPU-saturating run overlapped
+// this one. The same tree passed on the PR branch, where the whole suite ran a
+// few seconds faster — the code was identical, only the contention differed
+// (#243).
+//
+// This package already learned the same lesson once: TestClient_Auth_
+// WrongTokenIsTerminal used to assert elapsed < 300ms and that flaked on a
+// loaded runner at 358ms, so the assertion was deleted and its remaining bound
+// documented as "deliberately generous rather than tight". These waits are the
+// tight ones that had not been revisited.
+const hangDeadline = 30 * time.Second
+
+// dumpGoroutines writes every goroutine's stack into the test log. Called when
+// a wait hits hangDeadline, so a genuine stall is diagnosable from CI output
+// instead of just reporting that a deadline passed. This is what keeps a
+// generous deadline from becoming a way of not noticing a real hang.
+//
+// The buffer grows until the dump fits. runtime.Stack does not report that it
+// ran out of room — it fills the buffer, silently drops the rest, and returns
+// len(buf), which is indistinguishable from an exact fit. Measured with 500
+// parked goroutines: a 64KiB buffer returned exactly 65536 while the complete
+// dump was 170,583 bytes. A fixed size would therefore truncate hardest in the
+// case this exists to diagnose — a stall that leaked goroutines — so it starts
+// at 1MiB (ample for a healthy run) and doubles, up to maxGoroutineDump. If
+// even that is not enough the log says so, rather than quietly ending
+// mid-frame (raised in review on #244).
+func dumpGoroutines(t *testing.T, what string) {
+	t.Helper()
+	const maxGoroutineDump = 32 << 20
+	for size := 1 << 20; ; size *= 2 {
+		buf := make([]byte, size)
+		n := runtime.Stack(buf, true)
+		if n < size {
+			t.Logf("%s: goroutine dump at timeout follows\n%s", what, buf[:n])
+			return
+		}
+		if size >= maxGoroutineDump {
+			t.Logf("%s: goroutine dump at timeout follows, TRUNCATED at the %d-byte cap\n%s",
+				what, size, buf[:n])
+			return
+		}
+	}
+}
 
 // startServer stands up a real provider/websocket.Server behind an httptest
 // server and returns both: the *ygws.Server for server-side assertions and
@@ -42,7 +96,7 @@ func startServer(t *testing.T, opts ...func(*ygws.Server)) (*ygws.Server, *httpt
 	}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), hangDeadline)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 		ts.Close()
@@ -72,7 +126,8 @@ func connect(t *testing.T, c *Client) {
 		_ = c.Close()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangDeadline):
+			dumpGoroutines(t, "Connect did not return after cancel + Close")
 			t.Error("Connect did not return after cancel + Close")
 		}
 	})
@@ -109,7 +164,8 @@ func statusWaiter(t *testing.T, c *Client, want State) (wait func()) {
 		defer unsub()
 		select {
 		case <-hit:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangDeadline):
+			dumpGoroutines(t, fmt.Sprintf("client never reported state %v", want))
 			t.Fatalf("client never reported state %v", want)
 		}
 	}
@@ -144,8 +200,9 @@ func dialSynced(t *testing.T, ts *httptest.Server, room string, o Options) (*Cli
 	connect(t, c)
 	select {
 	case <-c.Synced():
-	case <-time.After(5 * time.Second):
-		t.Fatalf("client for room %q did not sync within 5s", room)
+	case <-time.After(hangDeadline):
+		dumpGoroutines(t, fmt.Sprintf("client for room %q did not sync", room))
+		t.Fatalf("client for room %q did not sync within %s", room, hangDeadline)
 	}
 	return c, o.Doc
 }
