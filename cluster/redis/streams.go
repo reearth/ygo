@@ -66,10 +66,8 @@ const (
 // maxKeysPerRead bounds how many stream keys go into one XREAD. Not
 // configurable: an operator has no basis for choosing it, and Readers already
 // controls concurrency. Without it, 10k rooms across 4 readers would build a
-// ~5000-argument command every cycle. The reader task that issues XREAD
-// lands later and consumes it.
-//
-//nolint:unused // consumed by a later task, see the sentence above
+// ~5000-argument command every cycle. keyBatches (streams_reader.go) enforces
+// this; the reader task that issues XREAD lands later and consumes both.
 const maxKeysPerRead = 512
 
 // stalledBackoffBase is the first wait after a room's cursor advance is

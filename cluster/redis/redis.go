@@ -346,6 +346,23 @@ type Relay struct {
 	trimmed  atomic.Uint64 // incremented by MINID sweeper
 	stalled  atomic.Uint64 // incremented by stream reader
 
+	// streamMu guards streamRooms. Separate from mu: mu is held across the
+	// pub/sub SUBSCRIBE/UNSUBSCRIBE RPC (see mu's doc below), and streamRooms
+	// bookkeeping must not be blocked behind a stalled Redis call it has
+	// nothing to do with. It is also separate from workersMu — streamRooms
+	// tracks READER-side (XREAD) assignment, an entirely different axis from
+	// the pub/sub delivery workers workersMu guards.
+	streamMu sync.Mutex
+	// streamRooms is a reference count per room name, mirroring activeRooms
+	// but for the stream reader's assignment instead of pub/sub subscription:
+	// RoomActivated/RoomDeactivated for the same room can arrive out of order
+	// across a room's eviction/reload handoff (see the Relay contract's
+	// RoomActivated doc), and a plain set would let the predecessor's
+	// deactivation evict a room the successor still needs read. Only
+	// incremented/decremented in Streams/Both mode. The reader task that
+	// consumes this to build its XREAD key set lands later.
+	streamRooms map[string]int
+
 	// outbound carries Publish calls to the publisher goroutine. A bounded
 	// channel back-pressures the caller, matching MemRelay.
 	outbound chan cluster.Outbound
@@ -479,6 +496,7 @@ func New(client *goredis.Client, cfg Config) (*Relay, error) {
 		activeRooms: make(map[string]int),
 		laneCap:     cfg.RoomQueueSize,
 		workers:     make(map[string]*roomWorker),
+		streamRooms: make(map[string]int),
 	}, nil
 }
 
@@ -803,6 +821,21 @@ func (r *Relay) RoomActivated(room string) {
 	default:
 	}
 
+	// Reader-side assignment refcount. This runs BEFORE the pub/sub
+	// count>1 short-circuit below, not after it: that short-circuit exists
+	// to skip a redundant SUBSCRIBE RPC, but a second RoomActivated call is
+	// still a real activation this relay must keep counted for the stream
+	// reader, exactly the successor-before-predecessor overlap the Relay
+	// contract requires tolerating. Placing this after the short-circuit
+	// (mirroring where the pub/sub work "ends") would silently skip the
+	// increment on every call past the first, undercounting activations and
+	// making a later RoomDeactivated evict a still-live room.
+	if r.scfg.transport.usesStreams() {
+		r.streamMu.Lock()
+		r.streamRooms[room]++
+		r.streamMu.Unlock()
+	}
+
 	r.activeRooms[room]++
 	if r.activeRooms[room] > 1 {
 		return // already subscribed
@@ -842,6 +875,31 @@ func (r *Relay) RoomDeactivated(room string) {
 	}
 	if r.activeRooms[room] <= 0 {
 		return
+	}
+
+	// Reader-side assignment ONLY — never publish-side state. RoomDeactivated's
+	// own contract (cluster/relay.go) warns that a relay releasing per-room
+	// PUBLISH-side state here — it names "a stream key" — would drop a
+	// trailing update, because the provider's lane worker can still call
+	// Publish for this room after RoomDeactivated returns. publishStream
+	// therefore never consults streamRooms; this map is consulted only by
+	// the (later) stream reader to decide which rooms it still owns.
+	//
+	// Decremented here, guarded by the same "was this room actually active"
+	// check as activeRooms above (r.activeRooms[room] <= 0 already
+	// returned), so an extra/no-op RoomDeactivated call can't underflow this
+	// counter either — mirroring activeRooms's own refcount rather than the
+	// pub/sub count>0 short-circuit below, which exists to skip a redundant
+	// UNSUBSCRIBE RPC and would otherwise leave a still-referenced room's
+	// count untouched on every call past the last one that reaches zero.
+	if r.scfg.transport.usesStreams() {
+		r.streamMu.Lock()
+		if n := r.streamRooms[room] - 1; n > 0 {
+			r.streamRooms[room] = n
+		} else {
+			delete(r.streamRooms, room)
+		}
+		r.streamMu.Unlock()
 	}
 
 	r.activeRooms[room]--
