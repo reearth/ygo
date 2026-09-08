@@ -564,7 +564,25 @@ forgets it. `XADD` is a **write** — it replicates, it lands in AOF/RDB if
 persistence is on, and it holds memory proportional to
 `retention × publish-rate × update size` for every room on the node, plus the
 `MAXLEN ~` overshoot. The default 4096 entries is roughly 800KB per hot room at
-200-byte updates. The tier also adds a steady command floor: `Readers × (1 /
+200-byte updates.
+
+**Size for distinct rooms *ever* used, not for concurrently active rooms.**
+`MAXLEN ~` and the `MINID` sweeper bound the size of each stream; neither
+bounds the *number* of streams, and this package never sets an `EXPIRE`. The
+sweeper only visits rooms some node currently holds, so once a room has gone
+idle everywhere, its two stream keys are swept nowhere and keep whatever they
+last held for the life of the Redis instance. Redis memory therefore grows
+monotonically with the number of distinct rooms that have ever been published
+to. If your room identifiers are long-lived and bounded — a fixed set of
+documents — this is a one-off ceiling you can multiply out. If they are
+per-session, per-tenant, or otherwise unbounded, budget for the whole history
+or reclaim the keys yourself (`XTRIM`/`DEL`/`EXPIRE` from an operations job
+against `StreamPrefix*`) until the built-in reclaim lands: setting an `EXPIRE`
+on each `XADD`, so an untouched key falls out on its own with no keyspace scan
+and nothing to coordinate between nodes, is the intended fix and is tracked as
+a follow-up issue.
+
+The tier also adds a steady command floor: `Readers × (1 /
 ReadBlock)` blocking `XREAD`s per second per node even when nothing is
 happening (4 readers at 250ms is 16/s), and one `XTRIM MINID` per stream per
 `TrimInterval`.
@@ -638,9 +656,19 @@ Every counter is monotonic for the life of the relay, so scrape rates — except
   means entries existed and were trimmed before this reader reached them. A
   single gap means data was lost and the retention window was too small for the
   reader's actual lag. This is the one counter that should always be zero.
-- **`Replayed` — alert on a sustained rate.** Entries re-delivered from before
-  a cursor, i.e. the merge savings on catch-up. Routine on activation and after
-  a restart; a sustained rate means cursors are being lost repeatedly.
+- **`Replayed` — a merge/batching gauge; do *not* alert on its rate.** It
+  counts `len(batch)-1` for every multi-entry batch a reader folded into one
+  merged update — whether or not any of those entries had been delivered
+  before. It is therefore not a count of re-deliveries and says nothing about
+  cursor loss: any room taking more than one remote update per `ReadBlock`
+  (250ms by default) batches on every cycle, so a busy room shows a permanent,
+  perfectly healthy rate. What it is good for is inbound volume — divided by
+  the read rate it approximates merged entries per cycle, so a step change
+  tracks a step change in cluster write traffic, and a catch-up burst
+  (activation, a node restart, a stall clearing) reads as a spike against that
+  room's own baseline. Because that baseline exists, an absolute threshold on
+  it is meaningless. `Gaps`, `Stalled` and `Deferred` are the counters that
+  report loss and lag.
 - **`Stalled` — alert on a sustained rate.** Cursor advances declined because a
   room's inbound lane was full. Routine in bursts, and declining is the *safe*
   response — the entries stay in the stream and are read again next cycle, so

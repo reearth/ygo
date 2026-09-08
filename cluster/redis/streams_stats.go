@@ -12,10 +12,24 @@ package redis
 // take rates rather than absolute values — except Gaps, where presence alone
 // is the signal.
 type StreamStats struct {
-	// Replayed counts entries re-delivered from before a cursor, i.e. the
-	// merge savings on catch-up. Routine on activation and after a restart —
-	// this is the tier working. Alert on a sustained rate, which means
-	// cursors are being lost repeatedly.
+	// Replayed counts entries a merge folded into another entry rather than
+	// pushing separately: len(batch)-1 for every multi-entry batch handed to
+	// a room's lane as one merged update.
+	//
+	// Read it as a MERGE/BATCHING gauge, not as a replay alarm. It is not a
+	// count of entries re-delivered from before a cursor, and it cannot
+	// distinguish catch-up from ordinary throughput: any room taking more
+	// than one remote update per ReadBlock (250ms by default) batches on
+	// every cycle, so a busy room produces a permanent, healthy rate with no
+	// cursor ever having been lost. Do NOT alert on its rate.
+	//
+	// What it is good for: it tracks inbound remote-update volume. Divided by
+	// the read rate it approximates merged entries per cycle, so a step
+	// change means the cluster's write traffic stepped, and a catch-up burst
+	// — activation, a node restart, a stall clearing — is a spike against
+	// that room's own baseline. The existence of the baseline is exactly why
+	// an absolute threshold on it means nothing. The counters that do report
+	// loss or lag are Gaps, Stalled and Deferred.
 	Replayed uint64
 
 	// Gaps counts PROVABLE losses: a source node's seq jumped, so entries

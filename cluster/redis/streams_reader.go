@@ -796,6 +796,10 @@ func (r *Relay) pushSync(w *roomWorker, tgt streamTarget, payloads [][]byte) {
 		return
 	}
 	w.lane.Push(cluster.KindSync, merged)
+	// Counted on EVERY successful multi-entry merge, whether or not any of the
+	// entries had been delivered before — which is why StreamStats.Replayed is
+	// documented as a merge/batching gauge and explicitly not a counter to
+	// alert on the rate of.
 	r.replayed.Add(uint64(len(payloads) - 1))
 }
 
@@ -810,6 +814,16 @@ func (r *Relay) pushSync(w *roomWorker, tgt streamTarget, payloads [][]byte) {
 type seqSource struct {
 	node   string // publisher nodeID, as raw bytes held in a string
 	stream string // stream key the entry was read from
+}
+
+// seqState is what this reader remembers about one sequence series.
+//
+// afterDecrease rides alongside the number rather than being derived from it,
+// because "the previous observation went backwards" is not recoverable from
+// the baseline value alone. See noteSeq for what it suppresses and why.
+type seqState struct {
+	last          uint64
+	afterDecrease bool
 }
 
 // noteSeq tracks one source node's sequence numbers ON ONE STREAM and
@@ -832,6 +846,35 @@ type seqSource struct {
 // under the same identity. Reporting it as a gap would cry data loss on every
 // deploy; worse, treating the lower numbers as already-seen would stall that
 // source forever. So a decrease resets the baseline and is counted separately.
+//
+// THE FIRST COMPARISON AFTER A DECREASE CANNOT REPORT A GAP. A decrease is
+// itself the statement "this source's numbering is not, right now, a reliable
+// basis for inference", so the very next entry re-baselines instead of
+// accusing. Two causes need this, and neither is exotic:
+//
+//   - nextSeq releases streamMu before the XADD it numbered is issued, and
+//     Relay.Publish's contract explicitly requires tolerating two concurrent
+//     Publish calls for the same room (a room's eviction/reload handoff does
+//     exactly that, and room churn is continuous). So one publisher's entries
+//     can land in the stream as [seq2, seq1] — a decrease, then a jump from
+//     seq1 to seq3. The alternative fix is to hold streamMu across the XAdd,
+//     which is refused: that is a lock held across a Redis call, and it would
+//     couple every room on the node to one slow write — the cross-room
+//     head-of-line coupling #187/#200 removed and this branch had to fix once
+//     already.
+//   - a restarted node's fresh [1 2 3…] can be read interleaved with the tail
+//     of its own pre-restart series for the same reason.
+//
+// The trade is explicit and deliberate: this suppresses one REAL gap in the
+// case where a genuine trim-away lands immediately after a genuine restart on
+// the same series, and nothing else — the suppression is one comparison deep
+// and clears on the next entry, so a persistent gap is still reported. That is
+// the right way to be wrong for this counter. StreamStats.Gaps is documented
+// "ALERT ON PRESENCE… a single gap means data was lost": its entire value is
+// that a non-zero reading means something, and a signal that fires on healthy
+// room churn is worth less than no signal at all. Losing one increment in a
+// narrow conjunction costs an alert that a stall of any duration would raise
+// again; a false positive costs the counter its credibility permanently.
 func (r *Relay) noteSeq(streamKey string, nodeID []byte, seq uint64) {
 	src := seqSource{node: string(nodeID), stream: streamKey}
 
@@ -840,15 +883,20 @@ func (r *Relay) noteSeq(streamKey string, nodeID []byte, seq uint64) {
 	if !known && len(r.lastSeq) >= seqLimit {
 		r.evictStaleLastSeqLocked()
 	}
-	r.lastSeq[src] = seq
+	decreased := known && seq < prev.last
+	r.lastSeq[src] = seqState{last: seq, afterDecrease: decreased}
 	r.streamMu.Unlock()
 
 	switch {
 	case !known:
 		// First entry from this node on this stream: a baseline, not a gap.
-	case seq < prev:
+	case decreased:
 		r.restarts.Add(1)
-	case seq > prev+1:
+	case seq > prev.last+1:
+		if prev.afterDecrease {
+			// Re-baselining, not accusing. See the doc comment.
+			return
+		}
 		r.gaps.Add(1)
 	}
 }

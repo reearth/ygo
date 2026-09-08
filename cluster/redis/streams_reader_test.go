@@ -1045,6 +1045,62 @@ func TestUnit_StreamReader_GapDetectionResumesAfterARestart(t *testing.T) {
 	require.Equal(t, uint64(1), r.StreamStats().Gaps, "gap detection must work after a restart")
 }
 
+// Two Publish calls for the SAME room can overlap — Relay.Publish's contract
+// requires tolerating exactly that across a room's eviction/reload handoff,
+// and nextSeq deliberately releases streamMu before the XADD it numbered is
+// issued (holding it across a Redis call would recouple every room on the node
+// to one slow write). So a publisher's entries can be written to the stream in
+// the order [2, 1, 3]: the reader sees a DECREASE and then, from the new
+// baseline of 1, what looks like a jump to 3.
+//
+// That must not score a Gaps. Gaps is documented "ALERT ON PRESENCE… a single
+// gap means data was lost", so a counter that ticks on routine room churn is
+// worth less than no counter at all. The first comparison after a decrease
+// re-baselines instead of accusing.
+//
+// The Restarts increment for the decrease is expected and asserted here: the
+// suppression must be exactly one comparison deep, not a general amnesty.
+//
+// Confirmed by mutation: deleting noteSeq's `prev.afterDecrease` early return
+// (so every jump counts, as before this fix) leaves this test as the ONLY
+// failing test in the package — no existing gap/restart test covers a jump
+// adjacent to a decrease.
+func TestUnit_StreamReader_NoGapOnTheEntryAfterADecrease(t *testing.T) {
+	mr := newMiniRedis(t)
+	// Deliberately NOT Started: nothing else may touch these counters.
+	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	key := r.scfg.syncKey("room1")
+	src := []byte(nodeB)
+
+	// Entries land as [2, 1, 3] — two overlapping publishes, then the next.
+	r.noteSeq(key, src, 2) // baseline
+	r.noteSeq(key, src, 1) // the reordered partner: a decrease
+	require.Equal(t, uint64(1), r.StreamStats().Restarts,
+		"a decrease is still classified and counted; only the gap is suppressed")
+	r.noteSeq(key, src, 3) // 3 > 1+1: a jump only because of the reordering
+	require.Zero(t, r.StreamStats().Gaps,
+		"a jump in the first comparison after a decrease must re-baseline, not accuse")
+
+	// One comparison deep: the very next jump, no longer adjacent to a
+	// decrease, is reported normally. Without this the suppression would be a
+	// latch that disables gap detection for a source forever.
+	r.noteSeq(key, src, 40)
+	require.Equal(t, uint64(1), r.StreamStats().Gaps,
+		"the suppression must clear after one comparison")
+
+	// And the suppression is per series: a decrease on one source must not
+	// license a silent gap on another source reading the same stream.
+	other := []byte(nodeA)
+	r.noteSeq(key, other, 1)
+	r.noteSeq(key, src, 1) // decrease on src arms src's suppression only
+	r.noteSeq(key, other, 9)
+	require.Equal(t, uint64(2), r.StreamStats().Gaps,
+		"a decrease on one source must not suppress another source's gap")
+}
+
 // The first sequence number ever seen from a source establishes a baseline,
 // however large it is — it must never be compared against an implicit zero.
 // A relay that only just started tracking a stream (or a source whose first

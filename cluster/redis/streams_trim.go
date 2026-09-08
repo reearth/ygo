@@ -50,8 +50,21 @@ func (r *Relay) runTrimSweeper(ctx context.Context) {
 // trimOnce sweeps every active room's streams once.
 //
 // Only ACTIVE rooms are swept. A room nobody on this node holds is somebody
-// else's to sweep, and its entries are still bounded by the inline MAXLEN, so
-// scanning the keyspace for orphans would cost more than it saves.
+// else's to sweep while anybody holds it at all, and its ENTRIES are still
+// bounded by the inline MAXLEN, so scanning the keyspace for orphans on every
+// sweep would cost more than it saves.
+//
+// KNOWN LIMITATION, stated plainly because the trim story reads as complete
+// without it: MAXLEN and MINID bound the SIZE of each stream, not the NUMBER
+// of streams. Nothing in this package ever sets an EXPIRE, and a room that has
+// gone idle on every node in the cluster is active nowhere, so it is swept
+// nowhere — its two stream keys keep whatever they last held, for as long as
+// the Redis instance lives. Redis memory therefore grows with the number of
+// DISTINCT ROOMS EVER PUBLISHED TO, not with the number concurrently active,
+// and operators must size for the former. An EXPIRE-based reclaim on each
+// XADD (so an untouched key falls out on its own, with no keyspace scan and
+// nothing to coordinate between nodes) is the intended fix and is tracked as a
+// follow-up issue; docs/CLUSTERING.md says the same in the cost model.
 //
 // The room list is copied out under streamMu and the lock released before any
 // Redis call — streamMu must never be held across I/O (see its doc on

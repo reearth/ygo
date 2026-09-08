@@ -40,18 +40,37 @@ if you have persistence on, and it holds memory proportional to
 commands even when nothing is happening — 16 per second per node at the
 defaults.
 
+**Size Redis for every room you have ever used, not for the rooms in use at
+once.** The retention window bounds how big each room's stream gets; it does
+not bound how many streams exist. This release sets no expiry on stream keys,
+and the trimmer only visits rooms a node currently holds, so once a room has
+gone quiet everywhere its two keys stay where they are, holding their last
+window, for as long as that Redis instance lives. If your room names are a
+bounded set of documents, that is a one-off ceiling you can multiply out. If
+they are per-session or per-tenant and unbounded, budget for the whole history
+or delete the keys from an operations job in the meantime. Expiring idle keys
+automatically is the intended fix and is tracked as a follow-up issue.
+
 So pub/sub is **not deprecated and is not going away**. At-most-once is a
 legitimate choice when your rooms are hot, your Redis is sized for fan-out
 rather than for writes, and catching up from storage on reload is good enough
 for you. Choose Streams when a missed update between reloads is not acceptable
 to you, and pay for it in Redis memory and write throughput.
 
-**Migrating a live cluster without splitting it.** The two mechanisms do not
-talk to each other: a Streams node does not publish to pub/sub, so a pub/sub
-node never sees its edits. Switching a running cluster straight over would
-therefore split it for the length of the rollout. There is a third setting for
-this, `Transport: Both`, which publishes to and reads from both mechanisms at
-once:
+**Migrating a live cluster without splitting it.** A mixed cluster delivers in
+one direction only. A Streams node does not publish to pub/sub, so a pub/sub
+node never sees its edits — that half is what matters, and it is why switching
+a running cluster straight over would leave half of it deaf for the length of
+the rollout. The other half crosses: this release does not gate the *receiving*
+side on the setting, so a Streams node still subscribes to its rooms' pub/sub
+channels and does apply what a pub/sub node publishes. Do not rely on that —
+it means a half-migrated cluster is one-way rather than symmetric, and it also
+means choosing Streams does not by itself remove the pub/sub connection from
+the node's Redis footprint. Gating the receiving side too is tracked as a
+follow-up issue.
+
+The way through is the third setting, `Transport: Both`, which publishes to and
+reads from both mechanisms at once:
 
 1. Roll every node from the default to `Both`.
 2. Once no pub/sub-only node is left, roll every node from `Both` to `Streams`.
@@ -78,10 +97,15 @@ state rather than somewhere to stay.
 
 **What to watch.** `Relay.StreamStats()` is new and separate from the existing
 `Relay.Stats()`. Alert on `Gaps` **appearing at all**; alert on a sustained
-*rate* of `Replayed` (cursors being lost repeatedly), `Stalled` (a room's local
-consumer cannot keep up) or `Deferred` (rooms being read before they are
-ready). `Trimmed` and `Restarts` are informational — the second one exists so
-that a node restarting is never miscounted as data loss.
+*rate* of `Stalled` (a room's local consumer cannot keep up) or `Deferred`
+(rooms being read before they are ready). `Trimmed` and `Restarts` are
+informational — the second one exists so that a node restarting is never
+miscounted as data loss. `Replayed` is a **batching gauge, not an alarm**: it
+counts the entries a reader merged into one update instead of pushing them one
+by one, so any room taking more than about four remote updates a second shows a
+permanent rate at the default read interval, and that is the tier working
+normally. Use it to watch inbound volume and to see catch-up bursts stand out
+against a room's own baseline; do not put a threshold on it.
 [docs/CLUSTERING.md](docs/CLUSTERING.md) has the full posture.
 
 **One note for anyone who ran this from the branch before release.** The stream

@@ -208,9 +208,22 @@ type Config struct {
 	//
 	// Both publishes to and reads from both, for migration. It needs no
 	// deduplication because V1 updates are idempotent, so double-applying is
-	// a no-op. Pub/sub and Streams nodes do NOT interoperate, so the
-	// zero-downtime path is: roll every node to Both, then roll every node to
-	// Streams. See docs/CLUSTERING.md.
+	// a no-op.
+	//
+	// A mixed cluster delivers ONE WAY ONLY, and the asymmetry is worth
+	// stating precisely. Outbound is gated on the setting: a Streams node
+	// does not PUBLISH, so a PubSub-only node never sees its edits. Inbound
+	// is NOT gated in this release — Start still opens the pub/sub connection
+	// and RoomActivated still SUBSCRIBEs each room's channel whatever the
+	// Transport — so a Streams node does still RECEIVE pub/sub traffic and
+	// apply it. Two consequences: choosing Streams does not remove the
+	// pub/sub connection or the per-room SUBSCRIBE from this node's Redis
+	// footprint, and a half-migrated cluster is one-way rather than cleanly
+	// split. Gating the inbound side too is tracked as a follow-up issue.
+	//
+	// The migration advice is the same either way, because it only depends on
+	// the outbound gate: the zero-downtime path is to roll every node to
+	// Both, then roll every node to Streams. See docs/CLUSTERING.md.
 	Transport Transport
 
 	// StreamPrefix namespaces stream keys. Default "ygo:stream:".
@@ -398,14 +411,17 @@ type Relay struct {
 	// room's deactivation, and a residency-scoped home makes that structural:
 	// see roomWorker.awCursor, which also states why the two kinds differ.
 	cursors map[string]string
-	// lastSeq is the highest sequence number seen from each source node ON
-	// EACH STREAM, used to tell a trimmed-away gap from a node restart. Keyed
-	// by both because the publisher's counter is per stream (see seqs): keying
+	// lastSeq is the last sequence number seen from each source node ON EACH
+	// STREAM, used to tell a trimmed-away gap from a node restart. Keyed by
+	// both because the publisher's counter is per stream (see seqs): keying
 	// by nodeID alone would interleave two streams' sequences from one node
-	// into a single series and report the interleaving itself as gaps.
+	// into a single series and report the interleaving itself as gaps. The
+	// value also carries whether the PREVIOUS observation went backwards, so
+	// that the comparison immediately after a decrease re-baselines rather
+	// than reporting a gap — see noteSeq for why that case is routine.
 	// Guarded by streamMu and bounded by seqLimit; see noteSeq /
 	// evictStaleLastSeqLocked.
-	lastSeq map[seqSource]uint64
+	lastSeq map[seqSource]seqState
 
 	// outbound carries Publish calls to the publisher goroutine. A bounded
 	// channel back-pressures the caller, matching MemRelay.
@@ -543,7 +559,7 @@ func New(client *goredis.Client, cfg Config) (*Relay, error) {
 		streamRooms: make(map[string]int),
 		cursors:     make(map[string]string),
 		seqs:        make(map[string]uint64),
-		lastSeq:     make(map[seqSource]uint64),
+		lastSeq:     make(map[seqSource]seqState),
 	}, nil
 }
 
