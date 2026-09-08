@@ -1,3 +1,97 @@
+## v1.50.0
+
+**Who is affected: nobody, unless you choose to be.** This release adds a
+second way for `cluster/redis` to move updates between nodes. The existing way
+is the default and is unchanged — if you do not set the new
+`Config.Transport` field, your cluster behaves exactly as it did in v1.49.x,
+down to the Redis commands it issues.
+
+**What you may want to opt into.** Until now, a multi-node deployment relayed
+updates over Redis pub/sub, which is *at-most-once*: if a node cannot keep up
+with the stream of messages — a slow moment, a network blip, Redis
+disconnecting a client whose buffer overflowed — the messages it missed are
+gone. Nothing reports it. Because collaborative updates depend on each other,
+one missed update quietly parks every later edit from that same client on that
+node, and the node only catches up when the room is next loaded from storage.
+On a busy room that is never loaded again, so it never catches up.
+
+`Transport: Streams` replaces that mechanism with Redis Streams, which keep
+recent messages instead of forgetting them. A node that falls behind, restarts,
+or joins late reads what it missed instead of losing it.
+
+**What it guarantees, precisely.** Delivery is at-least-once **within the
+window Redis is asked to retain** — `min(StreamRetention, StreamMaxLen ÷ your
+publish rate)`, 60 seconds and 4096 messages per room by default. This is not a
+no-loss guarantee and we will not describe it as one: the retained history is
+trimmed at both ends, so a node that falls further behind than the window loses
+whatever was trimmed underneath it. The difference from pub/sub is not that
+loss became impossible. It is that loss became **bounded and visible** — a new
+`Relay.StreamStats()` counter, `Gaps`, goes non-zero when it happens, and a
+single `Gaps` means the window was too small for how far behind that node
+actually got. Size the window for the worst delay you intend to survive: a
+deploy rollover, a long garbage-collection pause, a node restart.
+
+**What it costs, and why pub/sub is still here.** Publishing to pub/sub costs
+Redis nothing: it hands the message to whoever is listening and forgets it.
+Writing to a stream is a real write — it replicates, it goes into your AOF/RDB
+if you have persistence on, and it holds memory proportional to
+`retention × update rate × update size` for every room on the node (roughly
+800KB per busy room at the defaults). Reading costs a small steady stream of
+commands even when nothing is happening — 16 per second per node at the
+defaults.
+
+So pub/sub is **not deprecated and is not going away**. At-most-once is a
+legitimate choice when your rooms are hot, your Redis is sized for fan-out
+rather than for writes, and catching up from storage on reload is good enough
+for you. Choose Streams when a missed update between reloads is not acceptable
+to you, and pay for it in Redis memory and write throughput.
+
+**Migrating a live cluster without splitting it.** The two mechanisms do not
+talk to each other: a Streams node does not publish to pub/sub, so a pub/sub
+node never sees its edits. Switching a running cluster straight over would
+therefore split it for the length of the rollout. There is a third setting for
+this, `Transport: Both`, which publishes to and reads from both mechanisms at
+once:
+
+1. Roll every node from the default to `Both`.
+2. Once no pub/sub-only node is left, roll every node from `Both` to `Streams`.
+
+Reverse the two steps to go back. `Both` needs no deduplication — receiving an
+update twice is harmless, because applying the same update again does nothing —
+so there is no window during the rollout where correctness depends on the order
+you restart your nodes. It does double the publish work, so it is a transition
+state rather than somewhere to stay.
+
+**Two things to know before you turn it on.**
+
+- **Redis Cluster is not supported**, and for the Streams tier that is
+  deliberate rather than unfinished. Reading many rooms in one command requires
+  every one of them to live on the same Cluster shard, and pinning them there
+  would put each node's reader count into the key names — so two nodes
+  configured slightly differently would read and write *different* streams for
+  the same room and never notice. Single-node Redis or Sentinel, as before.
+- **Leave `Config.NodeID` unset unless you have a reason not to.** By default
+  each process gets a fresh random identity, which means a restarted node
+  reads back its own last window of writes from Redis and recovers them. A
+  fixed `NodeID` makes the node recognise and skip its own messages, so its
+  own pre-restart writes have to come from storage instead.
+
+**What to watch.** `Relay.StreamStats()` is new and separate from the existing
+`Relay.Stats()`. Alert on `Gaps` **appearing at all**; alert on a sustained
+*rate* of `Replayed` (cursors being lost repeatedly), `Stalled` (a room's local
+consumer cannot keep up) or `Deferred` (rooms being read before they are
+ready). `Trimmed` and `Restarts` are informational — the second one exists so
+that a node restarting is never miscounted as data loss.
+[docs/CLUSTERING.md](docs/CLUSTERING.md) has the full posture.
+
+**One note for anyone who ran this from the branch before release.** The stream
+key layout changed late in development — the sync/awareness marker now comes
+before the room name, so that a room whose name begins with `a:` cannot collide
+with another room's presence stream. A pre-release build's streams will not
+line up with a v1.50.0 build's. Nothing released was ever affected.
+
+**Nothing else changed.** No existing signature, default, or Redis command
+moved. Closes #206.
 ## v1.49.5
 
 **Who is affected: anyone using `provider/client` with `Options.Token` against

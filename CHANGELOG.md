@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.50.0] — 2026-09-08
+
+### Added
+
+- **`cluster/redis`: an at-least-once delivery tier built on Redis Streams
+  (#206).** `Config.Transport` selects it; the zero value is `PubSub`, so every
+  existing deployment is unchanged and no new field has to be set.
+
+  Redis pub/sub is at-most-once by Redis's own definition: a subscriber that
+  cannot keep up loses the message for good, and no amount of client-side
+  buffering changes that. #187 asked for "no silent divergence on
+  backpressure" and PR #200 could only bound the damage. This tier delivers a
+  bounded version of it: each room becomes a Redis stream, and a reader that
+  stalls or restarts resumes from where it left off.
+
+  The guarantee is bounded and stated as such: **at-least-once within
+  `min(StreamRetention, StreamMaxLen / publish-rate)`** — defaults 60s and 4096
+  entries, the two enforced separately (`MAXLEN ~` inline on `XADD`, `XTRIM
+  MINID` on a `TrimInterval` sweeper), so whichever binds first is the real
+  window. 60s matches y-redis's own `REDIS_MIN_MESSAGE_LIFETIME`. It is not a
+  no-loss guarantee: a reader lagging past its room's window loses what was
+  trimmed underneath it, and `StreamStats.Gaps` makes that loss provable rather
+  than silent.
+
+  Sync streams are read from the **oldest retained entry**, not the tail. V1
+  updates are idempotent, so replay is harmless — which eliminates the race
+  between loading a snapshot and starting to read, and makes late-joiner
+  catch-up fall out for free. No cursor is persisted anywhere; a lost cursor
+  costs a replay, not a loss.
+
+  Under lane backpressure the reader declines to advance its cursor rather than
+  merging or dropping the backlog. The entries stay in the stream and are read
+  again next cycle, so backpressure toward Redis is safe here for the first
+  time — what it costs is lag, and lag past the window shows up as `Gaps`.
+
+  Awareness gets its own stream, read from the tail and never replayed. Sharing
+  the sync stream would let heartbeat traffic evict sync entries out of the
+  retention window, and replaying presence would resurrect clients that are
+  long gone. Awareness entries are excluded from gap accounting for the same
+  reason.
+
+  New `Config` fields: `Transport`, `StreamPrefix`, `StreamRetention`,
+  `StreamMaxLen`, `AwarenessMaxLen`, `AwarenessRetention`, `Readers`,
+  `TrimInterval`, `ReadBlock`. `New` **rejects** rather than silently adjusts:
+  an unknown `Transport`; a client `PoolSize` not greater than `Readers`; a
+  `TrimInterval` not less than `StreamRetention`; and a `ReadBlock` outside
+  `[1ms, 250ms]` — 250ms because a blocked `XREAD` cannot be interrupted, so
+  that value is also how long `Close` and a newly activated room may wait, and
+  1ms because go-redis truncates sub-millisecond values to `BLOCK 0`, which
+  Redis reads as "block forever". Nothing is validated in `PubSub` mode.
+
+  New `StreamStats` and `(*Relay).StreamStats()` report `Replayed`, `Gaps`,
+  `Restarts`, `Trimmed`, `Stalled` and `Deferred`. `Gaps` counts provable
+  losses via a sequence number that is monotonic per **(node, stream)** — a
+  per-node counter would report a hole every time a node published to a second
+  room — and should be alerted on by presence, not by rate. `Stalled` and
+  `Deferred` count the two reasons a cursor advance is declined and are kept
+  apart deliberately: one asks for capacity, the other is an activation bug.
+  `StreamStats` is separate from `Stats` because each type's fields are
+  permanently zero under the other tier.
+
+  Pub/sub remains **supported, not deprecated**: `PUBLISH` costs nothing, while
+  `XADD` is a write with replication, AOF/RDB, and memory proportional to
+  `retention × rate × update size`. At-most-once is a legitimate choice.
+  Migration is `Both` mode, which publishes to and reads from both tiers and
+  needs no deduplication — roll every node to `Both`, then roll every node to
+  `Streams`. Redis Cluster is deliberately unsupported: a multi-key `XREAD`
+  needs one hash slot, and forcing one would bake `Readers` into key names, so
+  a config typo would have two nodes addressing different streams for the same
+  room. See [docs/CLUSTERING.md](docs/CLUSTERING.md).
+
 ## [1.49.5] — 2026-09-02
 
 ### Fixed
