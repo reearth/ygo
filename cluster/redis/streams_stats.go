@@ -34,10 +34,32 @@ type StreamStats struct {
 	Trimmed uint64
 
 	// Stalled counts cursor advances declined because a room's inbound lane
-	// was full. Routine in bursts — declining to advance is the safe,
-	// zero-loss response, and the entries are re-read next cycle. Alert on a
-	// sustained rate, which means a room's consumer cannot keep up.
+	// was full.
+	//
+	// Routine in bursts: declining is the safe response — the entries stay in
+	// the stream and are read again next cycle, so nothing is discarded and
+	// the lane is not made to coalesce. What that costs is lag, and lag is
+	// only safe while the entries survive it: delivery is at-least-once within
+	// min(retention, MaxLen/publish-rate), and a stall that outlasts that
+	// window shows up as Gaps.
+	//
+	// Alert on a sustained rate, which means a room's consumer cannot keep up.
+	// See Deferred for the other reason an advance is declined.
 	Stalled uint64
+
+	// Deferred counts cursor advances declined because the room had no inbound
+	// delivery worker yet — the window inside RoomActivated between a room
+	// joining a reader's assignment set and its worker existing. Routine and
+	// self-clearing: the entries are re-read as soon as the worker exists.
+	//
+	// Deliberately NOT folded into Stalled, though both count a declined
+	// advance on entries that were kept. The two ask for opposite responses: a
+	// sustained Stalled rate means a room's consumer cannot keep up and wants
+	// capacity, while a sustained Deferred rate means rooms are being read
+	// without ever acquiring a worker, which is an activation bug and no
+	// amount of capacity fixes it. One counter carrying both would answer
+	// neither question — the same reason Restarts is not folded into Gaps.
+	Deferred uint64
 }
 
 // StreamStats returns a snapshot of the Streams tier's counters. Safe to call
@@ -49,5 +71,6 @@ func (r *Relay) StreamStats() StreamStats {
 		Restarts: r.restarts.Load(),
 		Trimmed:  r.trimmed.Load(),
 		Stalled:  r.stalled.Load(),
+		Deferred: r.deferred.Load(),
 	}
 }

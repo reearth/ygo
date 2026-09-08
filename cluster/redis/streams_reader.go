@@ -116,7 +116,10 @@ const maxEntriesPerStream = 512
 const readErrorBackoff = 100 * time.Millisecond
 
 // deferredReadBackoff is the pause after a cycle that deliberately left
-// entries under their cursor (see handleStream's non-resident case).
+// entries under their cursor because a room had no delivery worker yet (see
+// handleStream's non-resident case). The other cause of a declined advance,
+// lane backpressure, escalates instead — see stallBackoff for why the two are
+// paced differently.
 //
 // Without it that cycle would spin: the entries are still there, so the next
 // XREAD returns immediately with the same ones, at whatever rate Redis can
@@ -175,9 +178,35 @@ type readResult struct {
 	// batch, whether or not that entry was delivered anywhere.
 	got bool
 	// deferred is true when a stream's entries were deliberately left under
-	// their cursor, so the same entries will be read again next cycle.
+	// their cursor, so the same entries will be read again next cycle. True
+	// for EITHER cause (see streamOutcome), because either one means the next
+	// XREAD returns immediately with the same entries and so has to be paced.
 	deferred bool
+	// stalled narrows that to the lane-backpressure cause, which is paced
+	// differently: a missing worker is a sub-millisecond window inside
+	// RoomActivated, whereas a wedged consumer can last minutes, so only this
+	// one escalates its backoff. See stallBackoff.
+	stalled bool
 }
+
+// streamOutcome is what handleStream did with one stream's entries.
+//
+// Three outcomes rather than the bool this started as, because the two
+// non-consuming ones are indistinguishable to a caller that only learns "the
+// cursor did not move" and yet need different pacing and different counters.
+type streamOutcome int
+
+const (
+	// streamConsumed: the entries were dealt with — delivered, filtered or
+	// dropped — and the cursor advanced past them.
+	streamConsumed streamOutcome = iota
+	// streamUnready: the room has no delivery worker yet, so there is nowhere
+	// to put the entries. Counted as StreamStats.Deferred.
+	streamUnready
+	// streamStalled: the room's lane is at capacity, so delivering would force
+	// it to coalesce. Counted as StreamStats.Stalled.
+	streamStalled
+)
 
 // streamReadCtx derives the readers' context from the relay's bound context so
 // that Close cancels it too.
@@ -239,15 +268,90 @@ func (r *Relay) blockForBatch(i, n int, sawEntries bool) time.Duration {
 	return nonBlockingRead
 }
 
+// stallBackoff is the pause after n consecutive cycles that ended by declining
+// a cursor advance for lane backpressure.
+//
+// It doubles from stalledBackoffBase and is capped at limit (the reader's
+// ReadBlock). Doubling is what stops a room whose consumer is wedged for
+// minutes from re-reading the same entries as fast as Redis can answer:
+// re-reading is free per read and not free per second. Resetting the streak on
+// any cycle that does NOT stall is what keeps recovery prompt — one burst
+// leaves the reader at full speed on the very next cycle rather than serving
+// out an escalated penalty it no longer needs.
+//
+// Capped at ReadBlock, not at some larger number, because ReadBlock is already
+// this tier's stated bound on inbound latency and on how long Close and a
+// newly activated room wait (see maxReadBlock); a backoff past it would
+// silently break a bound Config.ReadBlock documents. The cap can therefore be
+// SMALLER than stalledBackoffBase — ReadBlock accepts values down to 1ms — and
+// the cap wins, because a reader must never pause longer than its own read
+// interval.
+//
+// Doubled by multiplication rather than by shifting stalledBackoffBase << n-1:
+// the streak has no upper bound, and that shift goes negative at n=38.
+func stallBackoff(n int, limit time.Duration) time.Duration {
+	d := stalledBackoffBase
+	for i := 1; i < n && d < limit; i++ {
+		d *= 2
+	}
+	if d > limit {
+		d = limit
+	}
+	return d
+}
+
+// nextPause is a reader's whole pacing decision for one finished cycle: how
+// long to wait before the next XREAD, and what the stall streak becomes.
+//
+// A pure function of (what the cycle saw, the streak so far, the read
+// interval), so the escalate-and-reset behaviour can be asserted directly
+// instead of inferred from how fast a goroutine happens to loop.
+//
+// stalls counts CONSECUTIVE cycles that ended by declining a cursor advance
+// for lane backpressure, and any cycle that did not stall resets it — which is
+// what makes recovery prompt after a single burst. It is per READER rather
+// than per room for three reasons: the pause is one decision per cycle (see
+// deferredReadBackoff), so a per-room map would have to be collapsed to one
+// number here anyway; escalation is driven by the worst room on the reader,
+// which is what that collapse would pick; and a per-room map would grow with
+// room churn and so need its own bound and eviction pass, a cost cursors and
+// lastSeq already each pay once.
+//
+// A stalled cycle outranks a merely deferred one because a wedged consumer
+// outlasts an activation window by orders of magnitude, and a cycle that was
+// both should be paced for the longer-lived condition.
+func nextPause(res readResult, stalls int, readBlock time.Duration) (time.Duration, int) {
+	switch {
+	case res.stalled:
+		stalls++
+		return stallBackoff(stalls, readBlock), stalls
+	case res.deferred:
+		// Entries are still waiting under a cursor, so the next XREAD will
+		// return immediately with the same ones; pace the retry instead of
+		// spinning. See deferredReadBackoff.
+		return deferredReadBackoff, 0
+	default:
+		return 0, 0
+	}
+}
+
 // runStreamReader is one reader goroutine. It owns the rooms hash-assigned to
 // idx and multiplexes them over XREAD.
+//
+// It also carries the cycle's pacing state, because pacing is the one decision
+// in this loop that needs something from the PREVIOUS cycle (the stall streak)
+// and readOnce is deliberately stateless. Goroutine-local, so no reader can
+// contend with another for it.
 func (r *Relay) runStreamReader(ctx context.Context, idx int) {
 	defer r.wg.Done()
+
+	stalls := 0
 	for {
 		if ctx.Err() != nil || r.closed.Load() {
 			return
 		}
-		if err := r.readOnce(ctx, idx); err != nil {
+		res, err := r.readOnce(ctx, idx)
+		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 				return
 			}
@@ -259,6 +363,13 @@ func (r *Relay) runStreamReader(ctx context.Context, idx int) {
 				return
 			case <-time.After(readErrorBackoff):
 			}
+			// The streak is deliberately left alone: a Redis error says
+			// nothing about whether the lane that stalled has drained.
+			continue
+		}
+		var d time.Duration
+		if d, stalls = nextPause(res, stalls, r.scfg.readBlock); d > 0 {
+			r.pause(ctx, d)
 		}
 	}
 }
@@ -275,7 +386,13 @@ func (r *Relay) runStreamReader(ctx context.Context, idx int) {
 // what marks an entry consumed), whereas resuming mid-cycle would mean
 // carrying per-reader batch position across an error path for no correctness
 // gain.
-func (r *Relay) readOnce(ctx context.Context, idx int) error {
+//
+// It reports what the cycle saw and does NOT pace itself: the retry pause
+// depends on how many cycles in a row have stalled, which is state
+// runStreamReader keeps.
+func (r *Relay) readOnce(ctx context.Context, idx int) (readResult, error) {
+	var cycle readResult
+
 	rooms := r.roomsForReader(idx)
 	if len(rooms) == 0 {
 		// XREAD with zero keys is invalid, so an idle reader cannot block on
@@ -283,26 +400,20 @@ func (r *Relay) readOnce(ctx context.Context, idx int) error {
 		// for the same reason the read is: this wait is also how long a
 		// newly activated room and Close wait on this reader.
 		r.pause(ctx, r.scfg.readBlock)
-		return nil
+		return cycle, nil
 	}
 
 	batches := keyBatches(rooms, maxKeysPerRead/streamsPerRoom)
-	var cycle readResult
 	for i := range batches {
 		res, err := r.readBatch(ctx, batches[i], r.blockForBatch(i, len(batches), cycle.got))
 		if err != nil {
-			return err
+			return cycle, err
 		}
 		cycle.got = cycle.got || res.got
 		cycle.deferred = cycle.deferred || res.deferred
+		cycle.stalled = cycle.stalled || res.stalled
 	}
-	if cycle.deferred {
-		// Entries are still waiting under a cursor, so the next XREAD will
-		// return immediately with the same ones; pace the retry instead of
-		// spinning. See deferredReadBackoff.
-		r.pause(ctx, deferredReadBackoff)
-	}
-	return nil
+	return cycle, nil
 }
 
 // pause waits for d unless the relay is shutting down first, so no wait in
@@ -389,8 +500,13 @@ func (r *Relay) readBatch(ctx context.Context, rooms []string, block time.Durati
 				"stream", stream.Stream, "room", room, "kind", kind)
 			continue
 		}
-		if r.handleStream(tgt, stream.Messages) {
+		switch r.handleStream(tgt, stream.Messages) {
+		case streamUnready:
 			out.deferred = true
+		case streamStalled:
+			out.deferred = true
+			out.stalled = true
+		case streamConsumed:
 		}
 	}
 	return out, nil
@@ -444,8 +560,8 @@ func (r *Relay) evictStaleCursorsLocked() {
 	}
 }
 
-// handleStream applies one stream's returned entries and advances its cursor.
-// It reports whether the entries were left for a later cycle instead.
+// handleStream applies one stream's returned entries and advances its cursor,
+// or reports which of the two reasons it left them for a later cycle instead.
 //
 // Entries are handed to the room's LANE, never to Sink.Inject directly, which
 // is load-bearing in four ways:
@@ -472,9 +588,9 @@ func (r *Relay) evictStaleCursorsLocked() {
 // to every local peer — turning one reader's restart into an N-fold broadcast
 // storm. Awareness is not merged: each payload carries its own clock and the
 // receiver's per-client gate handles staleness.
-func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) (deferred bool) {
+func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) streamOutcome {
 	if len(msgs) == 0 {
-		return false
+		return streamConsumed
 	}
 
 	// Resolved once, as the router does: a room retired mid-batch leaves a
@@ -496,8 +612,38 @@ func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) (deferre
 		// routerDrops is deliberately NOT incremented. Nothing was dropped:
 		// RouterDrops counts messages the router DISCARDED, and counting a
 		// deferral there would report loss that did not happen, on a counter
-		// operators are told to watch the rate of.
-		return true
+		// operators are told to watch the rate of. StreamStats.Deferred counts
+		// it instead, which is a declined advance rather than a loss.
+		r.deferred.Add(1)
+		return streamUnready
+	}
+
+	// This branch is the whole argument for this tier over pub/sub. When a
+	// room's local consumer falls behind, pub/sub can only choose between
+	// merging the backlog and dropping it, because the message it holds exists
+	// nowhere else. A stream entry is durable, so there is a third option:
+	// leave the entries under the cursor and read them again next cycle. That
+	// costs one re-read, discards nothing, and asks the lane to merge nothing
+	// — which is what makes backpressure toward Redis safe here.
+	//
+	// Placed BEFORE the decode loop, not before the push as would be the
+	// obvious reading, because the loop is not side-effect free: it calls
+	// noteSeq, which records each source's latest sequence number. Deciding to
+	// stall after that would leave lastSeq holding sequences from entries we
+	// are about to re-read, and next cycle's lower numbers would then be
+	// classified as a publisher RESTART — inflating StreamStats.Restarts once
+	// per stalled cycle on a perfectly healthy cluster. The unready branch
+	// above returns before the loop for the same reason.
+	//
+	// Awareness streams are deliberately exempt. Lane.Full reports on the
+	// SYNC queue, the only thing the lane's capacity governs; an awareness
+	// push replaces a single latest-only slot, so it can neither deepen the
+	// backlog this backoff exists to bound nor trigger a merge. Declining one
+	// would cost presence freshness and buy nothing, and would re-read
+	// presence entries that the next push supersedes anyway.
+	if !tgt.isAwareness && w.lane.Full() {
+		r.stalled.Add(1)
+		return streamStalled
 	}
 
 	syncPayloads := make([][]byte, 0, len(msgs))
@@ -562,7 +708,7 @@ func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) (deferre
 	if lastID != "" {
 		r.setCursor(tgt.key, lastID)
 	}
-	return false
+	return streamConsumed
 }
 
 // pushSync hands a stream's sync entries to a room's lane as ONE merged

@@ -116,11 +116,9 @@ const maxReadBlock = 250 * time.Millisecond
 const minReadBlock = 1 * time.Millisecond
 
 // stalledBackoffBase is the first wait after a room's cursor advance is
-// declined for lane backpressure. It doubles per consecutive stall, capped at
-// ReadBlock. Not configurable, for the same reason as maxKeysPerRead. The
-// reader task that applies backpressure backoff lands later and consumes it.
-//
-//nolint:unused // consumed by a later task, see the sentence above
+// declined for lane backpressure. It doubles per consecutive stalled cycle and
+// is capped at ReadBlock; see stallBackoff, which applies it. Not configurable,
+// for the same reason as maxKeysPerRead.
 const stalledBackoffBase = 50 * time.Millisecond
 
 // streamCfg is Config's stream half with defaults resolved, so no code past

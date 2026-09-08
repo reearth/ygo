@@ -359,13 +359,16 @@ type Relay struct {
 	// bounded by seqLimit; see nextSeq / evictStaleSeqsLocked.
 	seqs map[string]uint64
 
-	// Stream tier counters: replayed, gaps, restarts, trimmed, stalled. Only
-	// incremented in Streams mode; always zero under pub/sub. See StreamStats.
+	// Stream tier counters. Only incremented in Streams mode; always zero
+	// under pub/sub. See StreamStats for what each one means and how an
+	// operator should read it — in particular why the two declined-advance
+	// causes (stalled, deferred) are counted apart.
 	replayed atomic.Uint64 // incremented by stream reader
 	gaps     atomic.Uint64 // incremented by stream reader
 	restarts atomic.Uint64 // incremented by stream reader
 	trimmed  atomic.Uint64 // incremented by MINID sweeper
-	stalled  atomic.Uint64 // incremented by stream reader
+	stalled  atomic.Uint64 // incremented by stream reader: lane at capacity
+	deferred atomic.Uint64 // incremented by stream reader: room has no worker yet
 
 	// streamMu guards streamRooms. Separate from mu: mu is held across the
 	// pub/sub SUBSCRIBE/UNSUBSCRIBE RPC (see mu's doc below), and streamRooms
@@ -380,8 +383,8 @@ type Relay struct {
 	// across a room's eviction/reload handoff (see the Relay contract's
 	// RoomActivated doc), and a plain set would let the predecessor's
 	// deactivation evict a room the successor still needs read. Only
-	// incremented/decremented in Streams/Both mode. The reader task that
-	// consumes this to build its XREAD key set lands later.
+	// incremented/decremented in Streams/Both mode. roomsForReader is what
+	// consumes it, to build each reader's XREAD key set.
 	streamRooms map[string]int
 	// cursors is the last stream ID this node has delivered per stream KEY
 	// (not per room: a room has a sync stream and an awareness stream, and

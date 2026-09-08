@@ -8,11 +8,13 @@ import (
 	"testing"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/cluster"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/internal/relaylane"
 )
 
 // Assignment must be stable: a room that moved readers between cycles would
@@ -148,9 +150,30 @@ func TestUnit_StreamReader_ActivationRefcounts(t *testing.T) {
 type recordingSink struct {
 	mu       sync.Mutex
 	injected [][]byte
+
+	// gate, when non-nil, parks every Inject until it is closed, standing in
+	// for a room whose consumer is wedged. Nil (the zero value) is the
+	// ordinary non-blocking sink every other test here uses, so adding this
+	// changed no existing behaviour and did not need a fourth sink type.
+	gate chan struct{}
+	// entered is closed the first time an Inject parks on gate, so a test can
+	// wait until delivery is genuinely stuck rather than guessing with a
+	// sleep.
+	entered     chan struct{}
+	enteredOnce sync.Once
 }
 
-func (s *recordingSink) Inject(_ context.Context, in cluster.Inbound) error {
+func (s *recordingSink) Inject(ctx context.Context, in cluster.Inbound) error {
+	if s.gate != nil {
+		s.enteredOnce.Do(func() { close(s.entered) })
+		select {
+		case <-s.gate:
+		case <-ctx.Done():
+			// Honour cancellation so Close's wg.Wait cannot hang on this
+			// worker if a test forgets to open the gate.
+			return ctx.Err()
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.injected = append(s.injected, append([]byte(nil), in.Data...))
@@ -1033,4 +1056,346 @@ func TestIntegration_StreamReader_HealthyMultiRoomReaderRecordsNoGaps(t *testing
 		"a healthy multi-room node must produce NO gaps: Gaps is an alert-on-presence signal")
 	require.Equal(t, uint64(0), a.StreamStats().Restarts,
 		"no node restarted, so nothing may be reported as one")
+}
+
+// --- Backpressure: declining the cursor advance ----------------------------
+
+// streamEntry builds one XREAD entry the way go-redis surfaces it, so a unit
+// test can drive handleStream without a round trip through Redis.
+//
+// Built from streamFields, the real encoder, rather than from a hand-written
+// map: a literal here would keep passing if the wire field names changed under
+// it, and would then be testing a format nothing writes.
+func streamEntry(t *testing.T, id, node string, seq uint64, kind cluster.Kind, data []byte) goredis.XMessage {
+	t.Helper()
+	fields := streamFields([]byte(node), seq, kind, data)
+	vals := make(map[string]any, len(fields)/2)
+	for i := 0; i < len(fields); i += 2 {
+		name, ok := fields[i].(string)
+		require.True(t, ok, "field name %d is not a string", i)
+		switch v := fields[i+1].(type) {
+		case string:
+			vals[name] = v
+		case []byte:
+			// Redis returns every field as a bulk string; go-redis hands them
+			// back as Go strings. See streams_test.go's note on this.
+			vals[name] = string(v)
+		default:
+			t.Fatalf("field %q has unexpected type %T", name, v)
+		}
+	}
+	return goredis.XMessage{ID: id, Values: vals}
+}
+
+// wedgeLane registers a room worker whose lane is at capacity and which has NO
+// goroutine, so nothing drains it. That is exactly the state a room reaches
+// when its Sink.Inject is wedged, and it is reachable here without a running
+// websocket server and without a test-only hook in production code — an
+// earlier draft of this change carried a laneFullForTest func on Relay, which
+// this makes unnecessary.
+func wedgeLane(t *testing.T, r *Relay, room string, capacity int) *roomWorker {
+	t.Helper()
+	w := &roomWorker{room: room, lane: relaylane.New(capacity), done: make(chan struct{})}
+	r.workersMu.Lock()
+	r.workers[room] = w
+	r.workersMu.Unlock()
+
+	for i := 0; i < capacity; i++ {
+		w.lane.Push(cluster.KindSync, v1Update(t, fmt.Sprintf("filler-%d", i)))
+	}
+	require.True(t, w.lane.Full(), "the lane must really be at capacity")
+	require.Zero(t, r.Stats().Coalesced, "filling to capacity must not itself have merged")
+	return w
+}
+
+// This is what a durable stream buys that pub/sub cannot. With the local lane
+// at capacity, pub/sub's only options are to merge the backlog or drop it,
+// because the message exists nowhere else. Here the reader declines to advance
+// the cursor and reads the same entries again next cycle: nothing is
+// discarded, and the lane is not made to merge.
+func TestUnit_StreamReader_FullLaneDeclinesTheCursorAdvance(t *testing.T) {
+	mr := newMiniRedis(t)
+	// Deliberately NOT Started: no reader goroutine and no worker goroutine,
+	// so the lane this test fills stays full and the counters it asserts on
+	// are touched by nothing else.
+	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1, RoomQueueSize: 2})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	w := wedgeLane(t, r, "room1", 2)
+	key := r.scfg.syncKey("room1")
+	r.setCursor(key, "5-0")
+
+	tgt := streamTarget{key: key, room: "room1"}
+	msgs := []goredis.XMessage{
+		streamEntry(t, "6-0", nodeB, 1, cluster.KindSync, v1Update(t, "held-back")),
+	}
+
+	require.Equal(t, streamStalled, r.handleStream(tgt, msgs))
+	require.Equal(t, "5-0", r.cursorFor(key, oldestID),
+		"the cursor must stay put so the entry is read again next cycle")
+	require.Equal(t, uint64(1), r.StreamStats().Stalled)
+	require.Equal(t, uint64(0), r.StreamStats().Deferred,
+		"the room HAS a worker; this is backpressure, not the activation window")
+	require.Equal(t, uint64(0), r.Stats().RouterDrops, "nothing was discarded, only deferred")
+	require.Equal(t, 2, w.lane.Depth(), "the payload must not be pushed onto a full lane")
+	require.Equal(t, uint64(0), r.Stats().Coalesced, "and the lane must not be made to merge")
+
+	// The sequence number must NOT have been recorded. The entry is going to be
+	// read again, and a lastSeq holding it would make the re-read's lower
+	// number look like the publisher had restarted.
+	r.streamMu.Lock()
+	_, known := r.lastSeq[seqSource{node: nodeB, stream: key}]
+	r.streamMu.Unlock()
+	require.False(t, known, "a stalled stream must not record sequences it did not consume")
+
+	// The other half of the promise: once the lane drains, the SAME entries go
+	// through and the cursor moves on.
+	_, ok := w.lane.TakeSync()
+	require.True(t, ok)
+	require.Equal(t, streamConsumed, r.handleStream(tgt, msgs))
+	require.Equal(t, "6-0", r.cursorFor(key, oldestID), "a drained lane must advance the cursor")
+	require.Equal(t, 1, w.lane.Depth(), "and the held-back payload must be delivered")
+	require.Equal(t, uint64(1), r.StreamStats().Stalled, "a clean pass must not count as a stall")
+}
+
+// Awareness must NOT be held back by a full lane. Lane.Full reports on the
+// sync queue, the only thing the lane's capacity governs; an awareness push
+// replaces a single latest-only slot, so declining one would cost presence
+// freshness and buy nothing — and would re-read presence that the next push
+// supersedes anyway.
+func TestUnit_StreamReader_AwarenessIsExemptFromLaneBackpressure(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1, RoomQueueSize: 2})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	w := wedgeLane(t, r, "room1", 2)
+	awKey := r.scfg.awKey("room1")
+	tgt := streamTarget{key: awKey, room: "room1", isAwareness: true}
+	msgs := []goredis.XMessage{
+		streamEntry(t, "7-0", nodeB, 1, cluster.KindAwareness, []byte("presence")),
+	}
+
+	require.Equal(t, streamConsumed, r.handleStream(tgt, msgs))
+	require.Equal(t, "7-0", r.cursorFor(awKey, tailID), "an awareness stream advances regardless")
+	require.Equal(t, uint64(0), r.StreamStats().Stalled, "awareness must not register as a stall")
+	require.Equal(t, 3, w.lane.Depth(), "the awareness blob must be delivered to the lane")
+	require.Equal(t, uint64(0), r.Stats().Coalesced,
+		"and the awareness slot is separate, so nothing merged")
+}
+
+// Backoff must grow so a wedged room is not re-read as fast as Redis can
+// answer, and must be capped at the reader's own read interval so recovery
+// stays prompt and no pause outlives a bound ReadBlock documents.
+func TestUnit_StreamReader_StallBackoffGrowsAndCaps(t *testing.T) {
+	const limit = maxReadBlock // 250ms, the largest ReadBlock accepted
+
+	require.Equal(t, stalledBackoffBase, stallBackoff(1, limit))
+	require.Equal(t, 2*stalledBackoffBase, stallBackoff(2, limit))
+	require.Equal(t, 4*stalledBackoffBase, stallBackoff(3, limit))
+	require.Equal(t, limit, stallBackoff(4, limit),
+		"the fourth doubling would be 400ms, past the cap")
+
+	// Monotone, positive and capped for every streak length, including ones
+	// long past the point where a shift of the base would have overflowed to a
+	// negative duration (stalledBackoffBase << 37 does).
+	prev := time.Duration(0)
+	for n := 1; n <= 64; n++ {
+		d := stallBackoff(n, limit)
+		require.GreaterOrEqual(t, d, prev, "backoff must be monotone at n=%d", n)
+		require.LessOrEqual(t, d, limit, "backoff must never exceed the cap at n=%d", n)
+		require.Positive(t, d, "backoff must stay positive at n=%d", n)
+		prev = d
+	}
+
+	// A ReadBlock below the base is legal, down to minReadBlock, and then the
+	// cap wins outright: a reader must never pause longer than its own read
+	// interval.
+	require.Equal(t, minReadBlock, stallBackoff(1, minReadBlock))
+	require.Equal(t, minReadBlock, stallBackoff(9, minReadBlock))
+}
+
+// THE BACKPRESSURE HEADLINE, end to end. A room whose consumer is wedged
+// stalls its reader, and when the consumer frees up every entry published
+// during the stall is still delivered. Delivery is at-least-once within
+// min(retention, MaxLen/publish-rate); this test stays far inside that window,
+// which is what makes the entries still be there.
+//
+// The pub/sub tier structurally cannot pass this: at a full lane it must
+// either merge the backlog or drop it.
+func TestIntegration_StreamReader_WedgedConsumerLosesNothing(t *testing.T) {
+	mr := newMiniRedis(t)
+
+	// RoomQueueSize 1: a single queued payload makes the lane full, so the
+	// stall is reached in a few cycles instead of dozens.
+	acfg := readerConfig(nodeA)
+	acfg.RoomQueueSize = 1
+
+	sink := &recordingSink{gate: make(chan struct{}), entered: make(chan struct{})}
+	gateOnce := sync.Once{}
+	openGate := func() { gateOnce.Do(func() { close(sink.gate) }) }
+	defer openGate() // never leave a worker parked, even on a failure path
+
+	a, err := New(newClient(t, mr), acfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = a.Close() })
+	b, err := New(newClient(t, mr), readerConfig(nodeB))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, a.Start(ctx, sink))
+	require.NoError(t, b.Start(ctx, &countingSink{}))
+	a.RoomActivated("room1")
+
+	// Publish until the reader has actually declined an advance. A fixed
+	// number of publishes could race the cycle boundary and never observe the
+	// stall; every publish here appends a real entry, so the loop always makes
+	// progress toward the condition, and every text it published is asserted
+	// on below.
+	var texts []string
+	deadline := time.Now().Add(20 * time.Second)
+	for a.StreamStats().Stalled == 0 {
+		require.False(t, time.Now().After(deadline),
+			"the reader never declined an advance after %d publishes", len(texts))
+		text := fmt.Sprintf("wedged-edit-%d", len(texts))
+		texts = append(texts, text)
+		require.NoError(t, b.Publish(ctx, cluster.Outbound{
+			Room: "room1", Kind: cluster.KindSync, Data: v1Update(t, text),
+		}))
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.GreaterOrEqual(t, len(texts), 2, "a stall needs the lane to have filled first")
+
+	// Delivery is genuinely parked, and the cursor is being held back rather
+	// than the entries discarded.
+	select {
+	case <-sink.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sink never parked, so nothing was wedged")
+	}
+	require.Equal(t, uint64(0), a.Stats().RouterDrops, "a stall discards nothing")
+	require.Equal(t, uint64(0), a.Stats().HardDrops)
+
+	// Let the consumer go. Everything published during the stall must arrive.
+	openGate()
+	require.Eventually(t, func() bool {
+		for _, text := range texts {
+			if !sink.payloadSeen(text) {
+				return false
+			}
+		}
+		return true
+	}, 20*time.Second, 20*time.Millisecond,
+		"every entry held back by the stall must be delivered once the lane drains")
+
+	require.Equal(t, uint64(0), a.StreamStats().Gaps,
+		"nothing was trimmed out from under the reader, so no gap may be reported")
+	require.Equal(t, uint64(0), a.Stats().RouterDrops)
+	require.Equal(t, uint64(0), a.Stats().HardDrops)
+}
+
+// The pacing decision itself: a stall streak must escalate, any non-stalled
+// cycle must reset it, and a cycle that both stalled and deferred must be
+// paced for the stall — the longer-lived of the two conditions.
+func TestUnit_StreamReader_PacingEscalatesAndResets(t *testing.T) {
+	const readBlock = maxReadBlock
+	stalledCycle := readResult{got: true, deferred: true, stalled: true}
+	unreadyCycle := readResult{got: true, deferred: true}
+	cleanCycle := readResult{got: true}
+
+	// A consecutive run escalates.
+	stalls := 0
+	var seen []time.Duration
+	for i := 0; i < 4; i++ {
+		var d time.Duration
+		d, stalls = nextPause(stalledCycle, stalls, readBlock)
+		seen = append(seen, d)
+	}
+	require.Equal(t, []time.Duration{
+		stalledBackoffBase, 2 * stalledBackoffBase, 4 * stalledBackoffBase, readBlock,
+	}, seen, "consecutive stalls must double until the cap")
+	require.Equal(t, 4, stalls)
+
+	// A clean cycle resets the streak outright, so the next stall starts over
+	// at the base rather than resuming an escalation it no longer needs.
+	d, stalls := nextPause(cleanCycle, stalls, readBlock)
+	require.Zero(t, d, "a clean cycle must not pause at all")
+	require.Zero(t, stalls)
+	d, stalls = nextPause(stalledCycle, stalls, readBlock)
+	require.Equal(t, stalledBackoffBase, d, "recovery must be prompt, not penalised")
+	require.Equal(t, 1, stalls)
+
+	// So does a cycle deferred only for a missing worker: no lane was full, so
+	// there is no backpressure streak to continue. That one gets the short flat
+	// pause, because the window it waits out is short.
+	d, stalls = nextPause(unreadyCycle, stalls, readBlock)
+	require.Equal(t, deferredReadBackoff, d)
+	require.Zero(t, stalls, "an unready cycle is not a stall")
+
+	// Both at once is paced as a stall.
+	d, _ = nextPause(stalledCycle, 0, readBlock)
+	require.Equal(t, stalledBackoffBase, d, "a stalled cycle outranks a merely deferred one")
+	require.Greater(t, stallBackoff(3, readBlock), deferredReadBackoff,
+		"and escalation must be able to exceed the flat deferral pause, or it buys nothing")
+}
+
+// The cycle must carry the stall out to the pacer, and must carry the two
+// deferral causes out SEPARATELY. A cycle that reported a stall only as a
+// plain deferral would be paced with the short flat pause forever, so the
+// escalation would never happen and a wedged room would be re-read at
+// deferredReadBackoff's rate indefinitely.
+//
+// Driven by calling readOnce directly on a relay that was never Started, so
+// there is no reader goroutine and no worker goroutine to race the assertions.
+func TestUnit_StreamReader_ReadOnceReportsEachDeferralCauseSeparately(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{
+		Transport: Streams, Readers: 1, ReadBlock: readerTestBlock, RoomQueueSize: 1,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	// Two rooms on the one reader: "wedged" has a worker whose lane is full,
+	// "unready" has no worker at all.
+	appendEntry := func(room, text string) {
+		require.NoError(t, r.client.XAdd(context.Background(), &goredis.XAddArgs{
+			Stream: r.scfg.syncKey(room),
+			Values: streamFields([]byte(nodeB), 1, cluster.KindSync, v1Update(t, text)),
+		}).Err())
+	}
+	r.streamMu.Lock()
+	r.streamRooms["unready"] = 1
+	r.streamMu.Unlock()
+	appendEntry("unready", "unready-edit")
+
+	res, err := r.readOnce(context.Background(), 0)
+	require.NoError(t, err)
+	require.True(t, res.got)
+	require.True(t, res.deferred, "a missing worker defers")
+	require.False(t, res.stalled, "but it is not lane backpressure")
+	require.Equal(t, uint64(1), r.StreamStats().Deferred)
+	require.Equal(t, uint64(0), r.StreamStats().Stalled)
+
+	// Now the wedged room, alongside it.
+	wedgeLane(t, r, "wedged", 1)
+	r.streamMu.Lock()
+	r.streamRooms["wedged"] = 1
+	r.streamMu.Unlock()
+	appendEntry("wedged", "wedged-edit")
+
+	res, err = r.readOnce(context.Background(), 0)
+	require.NoError(t, err)
+	require.True(t, res.stalled,
+		"a stalled stream must reach the pacer as a stall, or nothing ever escalates")
+	require.True(t, res.deferred, "a stall is also a deferral: the same entries come back")
+	require.Equal(t, uint64(1), r.StreamStats().Stalled)
+	require.Equal(t, uint64(2), r.StreamStats().Deferred,
+		"the unready room deferred again; the two causes are counted apart")
+
+	// And neither cursor moved, so both entries are still there to be read.
+	require.Equal(t, oldestID, r.cursorFor(r.scfg.syncKey("unready"), oldestID))
+	require.Equal(t, oldestID, r.cursorFor(r.scfg.syncKey("wedged"), oldestID))
 }
