@@ -124,16 +124,44 @@ func (s *serialGuardSink) count() int32                                     { re
 // pub/sub, one by streams — would let this room be Injected concurrently
 // from both, violating Sink.Inject's same-room serialisation requirement.
 //
-// Verified non-vacuous two ways:
+// Payloads are genuine V1 update blobs (v1Update, streams_reader_test.go),
+// not arbitrary bytes: a non-update payload takes the stream reader's
+// catch-up merge-failure fallback (crdt.MergeUpdatesV1 fails, so entries are
+// injected individually with a WARN each) instead of the normal merge path,
+// which is both avoidable CI log noise and not the path this test means to
+// exercise — see streams_reader_test.go:247's v1Update doc for the same
+// reasoning applied earlier in this package.
+//
+// The property that actually matters — the pub/sub subscriber and the
+// stream reader resolve to the SAME *roomWorker for room1, not merely to
+// "however many the map happens to hold" — is asserted directly below via
+// require.Same on the *roomWorker pointer, rather than only through
+// len(a.workers). workerForInbound is the one resolution point both
+// runSubscriber (redis.go) and handleStream (streams_reader.go) call, so
+// capturing its return value at two points spanning the whole delivery
+// window (once right after RoomActivated creates the worker, once after
+// both tiers have had a full chance to deliver the burst) and requiring
+// pointer identity pins that no second lane-tracking structure ever swaps
+// room1's worker out from under either tier.
+//
+// Verified non-vacuous three ways:
 //
 //  1. serialGuardSink's detector logic was exercised directly (in a scratch
 //     test, not committed) by calling Inject from two goroutines at once: it
 //     reported the injected error both times, confirming the guard fires
 //     rather than being a silent no-op.
-//  2. The `require.Equal(t, 1, lanes)` assertion below was flipped to expect
-//     2 and re-run against the real relay: it failed
-//     ("expected: 2, actual: 1"), confirming the assertion pins a genuine
-//     value rather than trivially passing for any lane count. Reverted to 1.
+//  2. STRONG: the require.Same check below was verified to actually fire by
+//     temporarily inserting `a.stopWorker("room1"); a.workerFor("room1")`
+//     between the two capture points (a test-local mutation, not a
+//     production change) to force room1 onto a fresh *roomWorker mid-test.
+//     Result: failed with testify's "Not same:" (two distinct *roomWorker
+//     pointers printed). Reverted.
+//  3. WEAK: the `require.Equal(t, 1, lanes)` assertion below was flipped to
+//     expect 2 and re-run against the real relay: it failed ("expected: 2,
+//     actual: 1"). This only shows the count assertion is not trivially
+//     true today — it does NOT show the test would catch a regression like
+//     a second lane-tracking structure introduced elsewhere, which is what
+//     (2)'s require.Same is for. Reverted to 1.
 func TestIntegration_StreamLifecycle_BothModeOneLanePerRoom(t *testing.T) {
 	mr := newMiniRedis(t)
 
@@ -161,13 +189,20 @@ func TestIntegration_StreamLifecycle_BothModeOneLanePerRoom(t *testing.T) {
 	a.RoomActivated("room1")
 	require.NoError(t, b.Start(ctx, &countingSink{}))
 
+	// The worker RoomActivated just created for room1 — captured here so it
+	// can be compared, by pointer identity, against whatever workerForInbound
+	// resolves room1 to once both tiers have had a chance to deliver. See the
+	// require.Same call below.
+	w0, ok := a.workerForInbound("room1")
+	require.True(t, ok, "RoomActivated must create room1's worker before either tier can deliver to it")
+
 	// A burst, not a single publish: this widens the window in which a
 	// pub/sub-delivered and a stream-delivered copy of these entries could
 	// race each other into Inject if they used separate lanes.
 	const n = 30
 	for i := 0; i < n; i++ {
 		require.NoError(t, b.Publish(ctx, cluster.Outbound{
-			Room: "room1", Kind: cluster.KindSync, Data: []byte(fmt.Sprintf("msg-%d", i)),
+			Room: "room1", Kind: cluster.KindSync, Data: v1Update(t, fmt.Sprintf("msg-%d", i)),
 		}))
 	}
 
@@ -188,4 +223,8 @@ func TestIntegration_StreamLifecycle_BothModeOneLanePerRoom(t *testing.T) {
 	lanes := len(a.workers)
 	a.workersMu.Unlock()
 	require.Equal(t, 1, lanes, "one room must have exactly one lane, whichever tier delivered it")
+
+	wLate, ok := a.workerForInbound("room1")
+	require.True(t, ok, "room1 must still resolve to a worker after both tiers have delivered")
+	require.Same(t, w0, wLate, "the pub/sub subscriber and the stream reader must resolve room1 to the SAME *roomWorker")
 }
