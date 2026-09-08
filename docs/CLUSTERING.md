@@ -579,7 +579,7 @@ per-session, per-tenant, or otherwise unbounded, budget for the whole history
 or reclaim the keys yourself (`XTRIM`/`DEL`/`EXPIRE` from an operations job
 against `StreamPrefix*`) until the built-in reclaim lands: setting an `EXPIRE`
 on each `XADD`, so an untouched key falls out on its own with no keyspace scan
-and nothing to coordinate between nodes, is the intended fix and is tracked in #249.
+and nothing to coordinate between nodes, is the intended fix and is tracked in #248.
 
 The tier also adds a steady command floor: `Readers × (1 /
 ReadBlock)` blocking `XREAD`s per second per node even when nothing is
@@ -595,9 +595,15 @@ pay for it in Redis memory and write throughput.
 #### Migration path
 
 **A `Streams`-only node does not `PUBLISH`, so a `PubSub`-only node never sees
-its edits.** The two transports do not interoperate, and you should not rely on
-the asymmetry in the other direction either. Flipping a live cluster from
-`PubSub` straight to `Streams` therefore splits it for the length of the roll.
+its edits.** The gate is one-directional, not a clean separation: a
+`Streams`-only node still subscribes to the pub/sub channels, so it *does*
+apply what a `PubSub` node publishes. Do not build on that — it means a
+half-migrated cluster is one-way rather than symmetric, which is harder to
+notice than a clean split, because *some* edits propagate. Gating the receiving
+side too is tracked in #249.
+
+Either way, flipping a live cluster from `PubSub` straight to `Streams` splits
+it for the length of the roll.
 
 Use `Both`, which publishes to *and* reads from both tiers:
 
