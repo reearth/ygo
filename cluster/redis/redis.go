@@ -262,19 +262,31 @@ type Config struct {
 	// this server's 10k-room target. Rooms are hash-assigned to readers.
 	//
 	// New fails if the client's PoolSize is not greater than Readers, because
-	// every reader holds a pool connection for its whole ReadBlock and an
-	// undersized pool starves publishes.
+	// a reader holds a pool connection for as long as its XREAD blocks, so a
+	// pool no larger than Readers leaves publishes and the trim sweeper
+	// waiting on a connection every cycle.
 	Readers int
 
 	// TrimInterval is how often the MINID sweeper enforces StreamRetention.
 	// Default 30s. New fails if it is not less than StreamRetention.
 	TrimInterval time.Duration
 
-	// ReadBlock bounds each XREAD BLOCK. Default 5s.
+	// ReadBlock is how long one reader's XREAD blocks when it has nothing to
+	// deliver. Default 250ms, which is also the maximum: New fails if it is
+	// larger.
 	//
-	// Bounded rather than infinite so a reader notices room-membership
-	// changes. Activation does not wait for it: a newly activated room gets a
-	// fresh short read folded in immediately.
+	// It is not just a Redis-efficiency knob, because a blocked XREAD cannot
+	// be interrupted (go-redis honours a context deadline, not a
+	// cancellation) and a reader's key set is fixed when its XREAD is issued.
+	// So this value is simultaneously the upper bound on how long Close waits
+	// for a reader to notice shutdown, and on how long a newly activated room
+	// waits before its stream is read at all. Lower it to shorten both at the
+	// cost of more commands per second; it cannot be raised, because the
+	// latencies it would extend are not negotiable. See maxReadBlock
+	// (streams.go) for the full reasoning.
+	//
+	// Delivery latency for a room already being read is NOT bounded by this:
+	// XREAD returns as soon as any of its keys gets an entry.
 	ReadBlock time.Duration
 }
 
@@ -651,11 +663,10 @@ func (r *Relay) Start(ctx context.Context, sink cluster.Sink) error {
 	// zero value, and every existing caller — launches nothing new and
 	// XREADs nothing.
 	//
-	// The readers get a DERIVED context (streamReadCtx), not ctx: a reader
-	// blocks inside XREAD for up to ReadBlock, and Close closes r.done and
-	// then joins r.wg, so a reader watching only ctx would make Close wait
-	// out a ReadBlock — or hang forever when ctx outlives the relay, which
-	// is the ordinary case. See streamReadCtx.
+	// The readers get a DERIVED context (streamReadCtx), not ctx: ctx
+	// ordinarily outlives the relay (Server cancels relayCtx after Close), so
+	// readers bound to it would go on issuing XREADs against a closed relay.
+	// See streamReadCtx for what that context does and does not buy.
 	if r.scfg.transport.usesStreams() {
 		readCtx := r.streamReadCtx(ctx)
 		for i := 0; i < r.scfg.readers; i++ {
@@ -944,6 +955,23 @@ func (r *Relay) RoomDeactivated(room string) {
 			r.streamRooms[room] = n
 		} else {
 			delete(r.streamRooms, room)
+			// The room is really gone from this node, so forget where its
+			// AWARENESS stream had got to — and only its awareness stream.
+			// Presence is read from the tail precisely because replaying it
+			// resurrects clients that are long gone, and a retained cursor
+			// resurrects them the moment the room comes back: the websocket
+			// provider evicts and reloads idle rooms continuously (#183), so
+			// a reactivation inside one process is routine, and it would
+			// otherwise resume mid-stream and replay up to AwarenessMaxLen
+			// presence blobs for the previous occupants. The room's SYNC
+			// cursor is deliberately kept — see cursorLimit.
+			//
+			// Not synchronised against a read already in flight: that read's
+			// id vector was built before this delete, so it can still write
+			// the cursor back once. The residue is bounded by one read cycle
+			// (ReadBlock) and by AwarenessRetention, not by the whole
+			// retention window, and evictStaleCursorsLocked reclaims it.
+			delete(r.cursors, r.scfg.awKey(room))
 		}
 		r.streamMu.Unlock()
 	}

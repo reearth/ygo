@@ -34,11 +34,40 @@ func TestUnit_Streams_ResolveDefaults(t *testing.T) {
 	require.Equal(t, 10*time.Second, got.awRetention)
 	require.Equal(t, 4, got.readers)
 	require.Equal(t, 30*time.Second, got.trimInterval)
-	require.Equal(t, 5*time.Second, got.readBlock)
+	require.Equal(t, 250*time.Millisecond, got.readBlock)
+	require.Equal(t, maxReadBlock, got.readBlock,
+		"the default must be a value the reader actually uses: it is the ceiling too")
 }
 
-// An undersized pool starves publishes: every blocking XREAD holds a pool
-// connection for its whole ReadBlock. Failing construction is much kinder
+// ReadBlock above the ceiling is REJECTED, not capped. A knob silently
+// ignored above some threshold is worse than one with a documented range —
+// and the operator who set 5s wanted something (fewer commands) that this
+// package cannot deliver without extending shutdown and activation latency
+// by the same 5s. See maxReadBlock.
+func TestUnit_Streams_RejectsReadBlockAboveMax(t *testing.T) {
+	mr := newMiniRedis(t)
+	c := newClient(t, mr)
+
+	_, err := resolveStreamCfg(c, Config{Transport: Streams, ReadBlock: 5 * time.Second})
+	require.ErrorContains(t, err, "ReadBlock")
+	require.ErrorContains(t, err, "250ms", "the error must name the ceiling")
+
+	// At the ceiling exactly, and below it, are both fine.
+	for _, ok := range []time.Duration{maxReadBlock, 10 * time.Millisecond} {
+		got, err := resolveStreamCfg(c, Config{Transport: Streams, ReadBlock: ok})
+		require.NoError(t, err)
+		require.Equal(t, ok, got.readBlock, "an accepted value must be used verbatim, not capped")
+	}
+
+	// PubSub mode validates nothing: an existing caller must not start
+	// failing construction because a Streams-only field exists.
+	got, err := resolveStreamCfg(c, Config{ReadBlock: time.Hour})
+	require.NoError(t, err)
+	require.Equal(t, time.Hour, got.readBlock)
+}
+
+// An undersized pool leaves publishes waiting on a connection: a reader holds
+// one for as long as its XREAD blocks. Failing construction is much kinder
 // than presenting as mysterious publish latency later.
 func TestUnit_Streams_RejectsPoolSmallerThanReaders(t *testing.T) {
 	mr := newMiniRedis(t)

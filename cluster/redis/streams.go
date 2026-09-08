@@ -61,7 +61,7 @@ const (
 	defaultAwarenessRetention = 10 * time.Second
 	defaultReaders            = 4
 	defaultTrimInterval       = 30 * time.Second
-	defaultReadBlock          = 5 * time.Second
+	defaultReadBlock          = maxReadBlock
 )
 
 // maxKeysPerRead bounds how many stream keys go into one XREAD. Not
@@ -70,6 +70,39 @@ const (
 // ~5000-argument command every cycle. keyBatches (streams_reader.go) enforces
 // this; the reader task that issues XREAD lands later and consumes both.
 const maxKeysPerRead = 512
+
+// maxReadBlock is the largest Config.ReadBlock this package accepts, and also
+// its default. resolveStreamCfg REJECTS a larger value rather than capping it
+// silently, so the knob can never be set to a number that does not happen.
+//
+// The ceiling exists because a blocked XREAD cannot be interrupted. go-redis
+// arms the socket read deadline from ctx.Deadline() only
+// (internal/pool.(*Conn).deadline, v9.18.0; withConn has no cancellation
+// watcher), so cancelling a reader's context mid-read does nothing. The
+// interval between one reader's reads is therefore BOTH of these latencies at
+// once, and each has a hard requirement:
+//
+//   - Shutdown. Close closes r.done and joins r.wg, so a reader parked in an
+//     XREAD holds Close open for the rest of that block. At a 5s ReadBlock
+//     this was measured at 4.80s — a five-second stall on every
+//     Server.Shutdown, in a path already fixed twice (#202, #229).
+//   - Activation. A reader's key set is fixed when its XREAD is issued, so a
+//     room activated after that cannot be read until the block expires. A
+//     room joining and then seeing no remote edits for seconds is the
+//     pub/sub tier's instant delivery visibly regressed.
+//
+// Neither is satisfiable at a multi-second block without waking a reader out
+// of its read, and the only mechanism for that is closing its connection —
+// connection churn proportional to room churn, which at this tier's 10k-room
+// target is a worse trade than a few extra idle XREADs per second. So the
+// block stays short and ReadBlock's range is honest about it: 250ms x 4
+// readers is 16 XREADs a second on an idle node, and an XREAD that finds
+// nothing is cheap.
+//
+// Lowering ReadBlock below this is a real and supported choice (faster
+// shutdown and activation, more commands); raising it is not offered, because
+// it could not be delivered.
+const maxReadBlock = 250 * time.Millisecond
 
 // stalledBackoffBase is the first wait after a room's cursor advance is
 // declined for lane backpressure. It doubles per consecutive stall, capped at
@@ -147,8 +180,16 @@ func resolveStreamCfg(client *goredis.Client, cfg Config) (streamCfg, error) {
 
 	if pool := client.Options().PoolSize; pool <= sc.readers {
 		return streamCfg{}, fmt.Errorf(
-			"cluster/redis: PoolSize (%d) must exceed Readers (%d): every blocking XREAD holds a pool connection for its whole ReadBlock, so an equal or smaller pool starves publishes",
-			pool, sc.readers)
+			"cluster/redis: PoolSize (%d) must exceed Readers (%d): a reader holds a pool connection for as long as its XREAD blocks (up to ReadBlock, %s), so a pool no larger than Readers leaves publishes and the trim sweeper waiting on a connection every cycle",
+			pool, sc.readers, sc.readBlock)
+	}
+	// Rejected, not capped: a knob whose value is silently ignored above some
+	// threshold is worse than one with a documented range. See maxReadBlock
+	// for why the ceiling is where it is.
+	if sc.readBlock > maxReadBlock {
+		return streamCfg{}, fmt.Errorf(
+			"cluster/redis: ReadBlock (%s) must not exceed %s: the interval between a reader's XREADs is also how long Close and a newly activated room wait, and a blocked XREAD cannot be interrupted",
+			sc.readBlock, maxReadBlock)
 	}
 	if sc.trimInterval >= sc.retention {
 		return streamCfg{}, fmt.Errorf(

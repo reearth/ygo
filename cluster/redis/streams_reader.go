@@ -91,8 +91,8 @@ const (
 //
 // maxKeysPerRead bounds KEYS, so readOnce batches rooms in groups of
 // maxKeysPerRead/streamsPerRoom. Batching rooms directly against
-// maxKeysPerRead — as this task's brief did — would build a command with
-// twice the intended number of keys, defeating the bound it was reaching for.
+// maxKeysPerRead would build a command with twice the intended number of
+// keys, defeating the bound it is reaching for.
 const streamsPerRoom = 2
 
 // maxEntriesPerStream bounds how many entries one XREAD pulls from a single
@@ -100,91 +100,99 @@ const streamsPerRoom = 2
 // size of the batch handed to crdt.MergeUpdatesV1. A deeper backlog is not
 // lost: the cursor advances and the next cycle takes the next slice.
 //
-// Deliberately its own constant rather than reusing maxKeysPerRead (which the
-// brief passed as XREAD's Count): a key budget and an entry budget are
-// different quantities that happen to share a number today, and conflating
-// them means a future change to one silently moves the other.
+// Deliberately its own constant rather than reusing maxKeysPerRead as XREAD's
+// Count: a key budget and an entry budget are different quantities that
+// happen to share a number today, and conflating them means a future change
+// to one silently moves the other.
 const maxEntriesPerStream = 512
 
 // readErrorBackoff is the pause after a failed XREAD, so an unreachable Redis
 // is retried at a bounded rate instead of spun on.
 //
-// Not stalledBackoffBase, which the brief reused here: that constant is
-// documented as the LANE-backpressure backoff and is consumed by the
-// backpressure task. A Redis error and a full local lane are unrelated
-// conditions, and sharing one knob between them would make either one's
-// tuning silently change the other's behaviour.
+// Deliberately not stalledBackoffBase: that constant is documented as the
+// LANE-backpressure backoff. A Redis error and a full local lane are
+// unrelated conditions, and sharing one knob between them would make either
+// one's tuning silently change the other's behaviour.
 const readErrorBackoff = 100 * time.Millisecond
 
-// readerBlockCap caps how long one read cycle waits, independently of
-// Config.ReadBlock. ReadBlock remains the operator's upper bound — its doc
-// says it "bounds each XREAD BLOCK", and a cap keeps that literally true —
-// but two obligations make blocking for the FULL ReadBlock wrong, and neither
-// is satisfiable any other way.
+// deferredReadBackoff is the pause after a cycle that deliberately left
+// entries under their cursor (see handleStream's non-resident case).
 //
-// Close. There is no way to interrupt a blocked XREAD: go-redis honours a
-// context DEADLINE when it arms the socket read deadline, but a context
-// CANCELLED mid-read does nothing (internal/pool.(*Conn).deadline reads only
-// ctx.Deadline()). Close closes r.done and then joins r.wg, so a reader
-// blocking for the full default ReadBlock made Close take a measured 4.80s of
-// the 5s window — a five-second stall on every Server.Shutdown, in a
-// shutdown path the project has already had to fix twice (#202, #229).
+// Without it that cycle would spin: the entries are still there, so the next
+// XREAD returns immediately with the same ones, at whatever rate Redis can
+// answer. Re-reading is free per read and not free per second. The pause is
+// short because the condition it waits out is short — the window inside
+// RoomActivated between a room being assigned to a reader and its worker
+// existing — and it applies to the whole cycle rather than to the one stream,
+// which can cost a co-batched room this much extra latency during that
+// window. That trade is deliberate: it keeps the loop's control flow one
+// decision per cycle instead of one per stream.
+const deferredReadBackoff = 20 * time.Millisecond
+
+// nonBlockingRead is the XReadArgs.Block value for a read that must return
+// whatever is already there and not wait.
 //
-// Room membership. Config.ReadBlock's own doc promises that "a newly
-// activated room gets a fresh short read folded in immediately". A reader
-// parked in one long XREAD cannot see a room activated after that read
-// started, so the interval BETWEEN reads is the activation latency, and at
-// the default it would have been up to five seconds. Honouring that promise
-// properly — waking the reader from RoomActivated — needs a signal this task
-// is scoped out of adding; capping the interval delivers the promise's
-// substance without reaching into the activation path.
-//
-// 250ms buys both bounds for a handful of extra commands per reader per
-// second. An XREAD that finds nothing is cheap, and there are Readers of them
-// (4 by default), not one per room.
-const readerBlockCap = 250 * time.Millisecond
+// It must be NEGATIVE, not zero. go-redis emits the BLOCK argument for any
+// Block >= 0 (stream_commands.go), and Redis reads "BLOCK 0" as block
+// FOREVER; only a negative value omits BLOCK and makes XREAD non-blocking.
+const nonBlockingRead = -1 * time.Nanosecond
 
 // cursorLimit bounds how many stream cursors are remembered.
 //
-// Cursors are kept past a room's deactivation on purpose: dropping one at
-// deactivation would make ordinary room churn re-replay the room's whole
-// retention window on every reactivation. Bounding the map is what stops that
-// memory growing forever. See evictStaleCursorsLocked for which entries go.
+// The two kinds of cursor have deliberately different retention, because
+// they start from different defaults when they are missing:
+//
+//   - A SYNC cursor survives its room's deactivation. Its default is the
+//     oldest retained entry, so dropping it at deactivation would make
+//     ordinary room churn replay the room's whole retention window on every
+//     reactivation — the condition StreamStats.Replayed exists to alarm on.
+//   - An AWARENESS cursor is dropped at deactivation (see RoomDeactivated).
+//     Its default is the tail, so keeping it would resume a reactivated room
+//     mid-stream and replay presence for whoever was in the room last time.
+//
+// So sync cursors accumulate across churn and this limit is what stops that
+// growing forever. See evictStaleCursorsLocked for which entries go.
 const cursorLimit = 4096
 
 // streamTarget is one XREAD key together with what it means.
 //
 // readBatch builds the keys from room names, so it already knows the room and
-// which of the two streams the key is; carrying that forward means
-// handleStream never has to derive a room from a key. That mattered
-// enormously under the earlier key layout, where syncKey and awKey shared one
-// namespace and prefix+"aw:foo" was simultaneously room "aw:foo"'s sync key
-// and room "foo"'s awareness key — an ambiguity no amount of care at the read
-// site could resolve, because the two rooms genuinely shared one stream.
-//
-// The discriminated layout (see the kindDiscrim constants) removes the
-// collision at the source: distinct rooms now have provably distinct keys, and
-// parseStreamKey can recover room and kind exactly. streamTarget stays anyway,
-// because attributing an entry by the key set that ASKED for it is still the
-// stronger construction — it needs no parsing to be correct, and a returned
-// key that was never requested is then something to ignore rather than
-// something to interpret.
+// which of the two streams a key is; carrying that forward means handleStream
+// never has to derive a room from a key. Attributing an entry by the key set
+// that ASKED for it needs no parsing to be correct, which also makes a
+// returned key nobody asked for something to ignore rather than something to
+// interpret. parseStreamKey exists for the diagnostic path only.
 type streamTarget struct {
 	key         string
 	room        string
 	isAwareness bool
 }
 
+// readResult is what one batch's XREAD found, which is what the next batch's
+// blocking decision and the cycle's pacing are made from.
+type readResult struct {
+	// got is true when XREAD returned at least one entry for any key in the
+	// batch, whether or not that entry was delivered anywhere.
+	got bool
+	// deferred is true when a stream's entries were deliberately left under
+	// their cursor, so the same entries will be read again next cycle.
+	deferred bool
+}
+
 // streamReadCtx derives the readers' context from the relay's bound context so
 // that Close cancels it too.
 //
-// Load-bearing. A reader spends most of its life blocked inside XREAD for up
-// to ReadBlock, and Close closes r.done and then joins r.wg. A reader that
-// watched only the bound context would therefore make Close wait out a full
-// ReadBlock — and in the common case, where a caller closes the relay while
-// its bound context is still live (every test here, and any caller whose
-// context outlives the relay), Close would block forever. Cancelling the
-// derived context makes the in-flight XREAD return immediately.
+// The ordinary case is a caller whose context OUTLIVES the relay — every
+// test here, and Server, which cancels relayCtx after Close. Readers bound to
+// that context would keep issuing XREADs against a closed relay until it was
+// cancelled; the derived context is what makes Close stop them.
+//
+// What it does NOT do is shorten Close. An XREAD already in flight runs to
+// its block deadline whatever happens to its context, because go-redis arms
+// the socket deadline from ctx.Deadline() and never watches for cancellation
+// (v9.18.0). What ends a reader is the r.closed check at the top of
+// runStreamReader's loop, and what bounds how long that takes is
+// maxReadBlock.
 //
 // The watcher is registered on r.wg like every other relay goroutine. That is
 // safe rather than self-deadlocking because it exits on r.done, which Close
@@ -203,14 +211,32 @@ func (r *Relay) streamReadCtx(parent context.Context) context.Context {
 	return ctx
 }
 
-// readerBlock is how long one cycle waits: the operator's ReadBlock, capped
-// at readerBlockCap. Used for both the XREAD BLOCK and the idle wait, so
-// shutdown and activation latency are bounded the same way on both paths.
-func (r *Relay) readerBlock() time.Duration {
-	if r.scfg.readBlock < readerBlockCap {
+// blockForBatch is how long batch i of n may block.
+//
+// Only the LAST batch of a cycle blocks, and only when every batch before it
+// came back empty. Blocking on each batch in turn would make a reader's
+// inbound latency scale with its batch COUNT rather than with Redis: a reader
+// owning 2500 rooms has 10 batches, so an entry waiting in batch 10 would sit
+// there while batches 1-9 each waited out their own full block, up to 10 x
+// ReadBlock behind an idle cluster. Reading the earlier batches without
+// blocking costs one round trip each and finds anything that is already
+// there; the single trailing block is what keeps an idle reader from spinning.
+//
+// sawEntries also suppresses the trailing block: if an earlier batch returned
+// something there is work to do now, and the next cycle re-reads everything
+// anyway.
+//
+// The trade is command rate. A 10-batch reader used to spend 10 x ReadBlock
+// per cycle and so issued ~4 commands a second; it now completes a cycle in
+// one ReadBlock and issues ~40. That is the right side of the trade for this
+// tier — it also divides that reader's shutdown and activation latency by its
+// batch count, which is what Config.ReadBlock's bound is supposed to mean —
+// and an XREAD that finds nothing is cheap.
+func (r *Relay) blockForBatch(i, n int, sawEntries bool) time.Duration {
+	if i == n-1 && !sawEntries {
 		return r.scfg.readBlock
 	}
-	return readerBlockCap
+	return nonBlockingRead
 }
 
 // runStreamReader is one reader goroutine. It owns the rooms hash-assigned to
@@ -241,46 +267,75 @@ func (r *Relay) runStreamReader(ctx context.Context, idx int) {
 //
 // A reader with NO assigned rooms idles instead of reading: XREAD with zero
 // keys is invalid.
+//
+// A failing batch abandons the cycle and runStreamReader restarts it from
+// batch 0, so the batches before the failure are read again. Deliberate: they
+// are non-blocking reads whose cursors did not move, so the re-read costs one
+// round trip each and cannot double-deliver anything (advancing a cursor is
+// what marks an entry consumed), whereas resuming mid-cycle would mean
+// carrying per-reader batch position across an error path for no correctness
+// gain.
 func (r *Relay) readOnce(ctx context.Context, idx int) error {
 	rooms := r.roomsForReader(idx)
 	if len(rooms) == 0 {
 		// XREAD with zero keys is invalid, so an idle reader cannot block on
-		// Redis; it sleeps and re-checks its assignment.
-		select {
-		case <-ctx.Done():
-		case <-r.done:
-		case <-time.After(r.readerBlock()):
-		}
+		// Redis; it sleeps and re-checks its assignment. Bounded by ReadBlock
+		// for the same reason the read is: this wait is also how long a
+		// newly activated room and Close wait on this reader.
+		r.pause(ctx, r.scfg.readBlock)
 		return nil
 	}
 
-	for _, batch := range keyBatches(rooms, maxKeysPerRead/streamsPerRoom) {
-		if err := r.readBatch(ctx, batch); err != nil {
+	batches := keyBatches(rooms, maxKeysPerRead/streamsPerRoom)
+	var cycle readResult
+	for i := range batches {
+		res, err := r.readBatch(ctx, batches[i], r.blockForBatch(i, len(batches), cycle.got))
+		if err != nil {
 			return err
 		}
+		cycle.got = cycle.got || res.got
+		cycle.deferred = cycle.deferred || res.deferred
+	}
+	if cycle.deferred {
+		// Entries are still waiting under a cursor, so the next XREAD will
+		// return immediately with the same ones; pace the retry instead of
+		// spinning. See deferredReadBackoff.
+		r.pause(ctx, deferredReadBackoff)
 	}
 	return nil
+}
+
+// pause waits for d unless the relay is shutting down first, so no wait in
+// the loop outlives Close by more than a scheduling hop.
+func (r *Relay) pause(ctx context.Context, d time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-r.done:
+	case <-time.After(d):
+	}
 }
 
 // readBatch reads one XREAD's worth of rooms: each room's sync stream from
 // its cursor (defaulting to the oldest retained entry) and its awareness
 // stream from its cursor (defaulting to the tail). See the oldestID/tailID
 // constants for why those two defaults differ.
-func (r *Relay) readBatch(ctx context.Context, rooms []string) error {
+//
+// block is chosen by the caller per batch; see blockForBatch.
+func (r *Relay) readBatch(ctx context.Context, rooms []string, block time.Duration) (readResult, error) {
+	var out readResult
+
 	n := len(rooms) * streamsPerRoom
 	targets := make(map[string]streamTarget, n)
 	keys := make([]string, 0, n)
 	ids := make([]string, 0, n)
 
 	add := func(tgt streamTarget, dflt string) {
-		// Unreachable for distinct rooms under the discriminated key layout:
-		// syncKey and awKey cannot collide with each other for ANY pair of
-		// room names, and roomsForReader yields each room once. It survives as
+		// Unreachable for distinct rooms: syncKey and awKey cannot collide
+		// with each other for ANY pair of room names (see the kindDiscrim
+		// constants), and roomsForReader yields each room once. It survives as
 		// the structural guarantee that keys and ids stay index-aligned — a
 		// duplicate key would make XREAD's own command malformed — and it
 		// costs one lookup in a map the attribution below needs regardless.
-		// Under the earlier suffix layout it was load-bearing: a room named
-		// "aw:foo" really did produce room "foo"'s awareness key.
 		if _, dup := targets[tgt.key]; dup {
 			return
 		}
@@ -299,17 +354,22 @@ func (r *Relay) readBatch(ctx context.Context, rooms []string) error {
 
 	res, err := r.client.XRead(ctx, &goredis.XReadArgs{
 		Streams: args,
-		Block:   r.readerBlock(),
+		Block:   block,
 		Count:   maxEntriesPerStream,
 	}).Result()
 	if err != nil {
 		if errors.Is(err, goredis.Nil) {
-			return nil // BLOCK expired with nothing new; normal
+			// Nothing new: the block expired, or this was a non-blocking read
+			// of streams that had nothing past their cursors. Normal.
+			return out, nil
 		}
-		return err
+		return out, err
 	}
 
 	for _, stream := range res {
+		if len(stream.Messages) > 0 {
+			out.got = true
+		}
 		tgt, ok := targets[stream.Stream]
 		if !ok {
 			// Ignored, never guessed at. Attribution comes from the key set
@@ -329,9 +389,11 @@ func (r *Relay) readBatch(ctx context.Context, rooms []string) error {
 				"stream", stream.Stream, "room", room, "kind", kind)
 			continue
 		}
-		r.handleStream(tgt, stream.Messages)
+		if r.handleStream(tgt, stream.Messages) {
+			out.deferred = true
+		}
 	}
-	return nil
+	return out, nil
 }
 
 // cursorFor returns the remembered cursor for a key, or dflt when this reader
@@ -358,11 +420,11 @@ func (r *Relay) setCursor(key, id string) {
 // evictStaleCursorsLocked drops the cursors of rooms this relay no longer
 // reads, in one pass, and keeps every cursor whose room is still assigned.
 //
-// The selectivity is the point. Evicting an ARBITRARY entry on overflow — as
-// this task's brief did — costs "only a replay" per its own comment, but on a
-// node with more than cursorLimit/2 active rooms it lands on a LIVE room's
-// cursor about half the time, and a live room that loses its cursor replays
-// its entire retention window. That is exactly the condition
+// The selectivity is the point. Evicting an ARBITRARY entry on overflow costs
+// "only a replay", but on a node with more than cursorLimit/2 active rooms it
+// lands on a LIVE room's cursor about half the time, and a live room that
+// loses its cursor replays its entire retention window. That is exactly the
+// condition
 // StreamStats.Replayed tells operators to alert on ("cursors are being lost
 // repeatedly"), so arbitrary eviction would make the tier trip its own alarm
 // under nothing worse than ordinary scale.
@@ -383,10 +445,10 @@ func (r *Relay) evictStaleCursorsLocked() {
 }
 
 // handleStream applies one stream's returned entries and advances its cursor.
+// It reports whether the entries were left for a later cycle instead.
 //
-// Entries are handed to the room's LANE, not to Sink.Inject directly. This
-// deviates from the task brief, which called r.inject from here, and the
-// difference is load-bearing in four ways:
+// Entries are handed to the room's LANE, never to Sink.Inject directly, which
+// is load-bearing in four ways:
 //
 //  1. Inject is the caller's code and may be arbitrarily slow. One reader
 //     serves up to maxKeysPerRead/streamsPerRoom rooms, so injecting inline
@@ -410,21 +472,42 @@ func (r *Relay) evictStaleCursorsLocked() {
 // to every local peer — turning one reader's restart into an N-fold broadcast
 // storm. Awareness is not merged: each payload carries its own clock and the
 // receiver's per-client gate handles staleness.
-func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) {
+func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) (deferred bool) {
 	if len(msgs) == 0 {
-		return
+		return false
 	}
 
 	// Resolved once, as the router does: a room retired mid-batch leaves a
 	// stale handle, which is the same accepted staleness runSubscriber has.
 	w, resident := r.workerForInbound(tgt.room)
+	if !resident {
+		// The room is in this reader's assignment set but has no delivery
+		// worker: RoomActivated adds a room to streamRooms BEFORE it creates
+		// the worker, so a reader can pick the room up in between.
+		//
+		// Every entry stays under its cursor and is read again next cycle.
+		// Advancing here instead would consume the room's entire retained
+		// backlog — a reader that reaches a brand-new room in that window
+		// reads it from the oldest retained entry — and discard it before the
+		// worker that was about to exist could receive any of it. That is
+		// silent loss of precisely what this tier exists to prevent, and the
+		// stream is durable, so deferring costs one extra read.
+		//
+		// routerDrops is deliberately NOT incremented. Nothing was dropped:
+		// RouterDrops counts messages the router DISCARDED, and counting a
+		// deferral there would report loss that did not happen, on a counter
+		// operators are told to watch the rate of.
+		return true
+	}
 
 	syncPayloads := make([][]byte, 0, len(msgs))
 	lastID := ""
 	for _, msg := range msgs {
-		// Recorded before every skip below, deliberately: a malformed, foreign
-		// or self-published entry has been fully accounted for, and leaving it
-		// under the cursor would make the reader re-read it forever.
+		// Recorded before every skip below, deliberately: a malformed,
+		// foreign or self-published entry has been fully accounted for, and
+		// leaving it under the cursor would make the reader re-read it
+		// forever. Every remaining path in this loop is such a case — the one
+		// skip that must NOT advance the cursor returned above.
 		lastID = msg.ID
 
 		nodeID, seq, kind, data, err := decodeStreamEntry(msg.Values)
@@ -458,13 +541,6 @@ func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) {
 			r.routerDrops.Add(1)
 			continue
 		}
-		if !resident {
-			// No worker for this room: the same acceptable-drop class as the
-			// router's workerForInbound miss (see Stats.RouterDrops).
-			r.routerDrops.Add(1)
-			continue
-		}
-
 		if tgt.isAwareness {
 			// Not counted in noteSeq: awareness is read from the tail and
 			// bounded to AwarenessMaxLen, so skipped sequence numbers are the
@@ -479,30 +555,37 @@ func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) {
 	}
 
 	if len(syncPayloads) > 0 {
-		merged := syncPayloads[0]
-		if len(syncPayloads) > 1 {
-			m, err := crdt.MergeUpdatesV1(syncPayloads...)
-			if err != nil {
-				// Deliver individually rather than dropping the batch: the
-				// N-fold rebroadcast the merge exists to avoid is a cost,
-				// whereas losing the entries would be divergence.
-				r.log.Warn("cluster/redis: catch-up merge failed; injecting individually",
-					"room", tgt.room, "entries", len(syncPayloads), "err", err)
-				for _, p := range syncPayloads {
-					w.lane.Push(cluster.KindSync, p)
-				}
-				r.setCursor(tgt.key, lastID)
-				return
-			}
-			merged = m
-			r.replayed.Add(uint64(len(syncPayloads) - 1))
-		}
-		w.lane.Push(cluster.KindSync, merged)
+		r.pushSync(w, tgt, syncPayloads)
 	}
-
+	// One advance for every path that reaches here, because every path that
+	// reaches here has finished with the entries it read.
 	if lastID != "" {
 		r.setCursor(tgt.key, lastID)
 	}
+	return false
+}
+
+// pushSync hands a stream's sync entries to a room's lane as ONE merged
+// update where it can. See handleStream for why merging matters.
+func (r *Relay) pushSync(w *roomWorker, tgt streamTarget, payloads [][]byte) {
+	if len(payloads) == 1 {
+		w.lane.Push(cluster.KindSync, payloads[0])
+		return
+	}
+	merged, err := crdt.MergeUpdatesV1(payloads...)
+	if err != nil {
+		// Deliver individually rather than dropping the batch: the N-fold
+		// rebroadcast the merge exists to avoid is a cost, whereas losing the
+		// entries would be divergence.
+		r.log.Warn("cluster/redis: catch-up merge failed; injecting individually",
+			"room", tgt.room, "entries", len(payloads), "err", err)
+		for _, p := range payloads {
+			w.lane.Push(cluster.KindSync, p)
+		}
+		return
+	}
+	w.lane.Push(cluster.KindSync, merged)
+	r.replayed.Add(uint64(len(payloads) - 1))
 }
 
 // seqSource identifies one sequence series: one publishing node's entries in

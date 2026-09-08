@@ -188,18 +188,21 @@ const (
 // readerConfig is the shared Streams config for the reader tests.
 //
 // Readers: 1 makes every room land on reader 0, so a test never has to guess
-// which goroutine owns its room. ReadBlock is shortened from the 5s default
-// because it also bounds how long an idle reader waits for Redis; leaving it
-// at 5s would put the tests' own assertions inside a single XREAD's blocking
-// window and make them race the default rather than the code.
+// which goroutine owns its room. ReadBlock is set explicitly, just below the
+// 250ms default and ceiling, so these tests state the interval their own
+// sleeps are sized against rather than inheriting it.
 func readerConfig(node string) Config {
 	return Config{
 		Transport: Streams,
 		NodeID:    []byte(node),
 		Readers:   1,
-		ReadBlock: 200 * time.Millisecond,
+		ReadBlock: readerTestBlock,
 	}
 }
+
+// readerTestBlock is readerConfig's ReadBlock, named so a test that has to
+// outwait a read cycle says so instead of hard-coding a number.
+const readerTestBlock = 200 * time.Millisecond
 
 // v1Update produces a real V1 update blob containing text verbatim, so the
 // catch-up path exercises crdt.MergeUpdatesV1 for real instead of falling
@@ -511,14 +514,16 @@ func TestUnit_StreamReader_CursorEvictionKeepsActiveRooms(t *testing.T) {
 	require.Less(t, held, cursorLimit, "eviction must actually bound the map")
 }
 
-// Close must not wait out ReadBlock. Both tests below deliberately use the
-// DEFAULT 5s ReadBlock, because that is the configuration the defect appeared
-// in and the one every operator gets.
+// Both tests below run at the DEFAULT ReadBlock, because that is what every
+// operator gets and, since it is also the ceiling, the worst case any
+// operator can configure.
 //
-// There is no way to interrupt a blocked XREAD — go-redis arms the socket read
-// deadline from ctx.Deadline() only, so cancelling the context mid-read has no
-// effect — and Close joins r.wg. Before readerBlockCap this Close took a
-// measured 4.80s, which is a five-second stall on every Server.Shutdown.
+// A blocked XREAD cannot be interrupted — go-redis arms the socket read
+// deadline from ctx.Deadline() only, so cancelling the context mid-read has
+// no effect — and Close joins r.wg, so the block interval IS how long Close
+// takes. At the 5s ReadBlock this package used to default to, Close was
+// measured at 4.80s: a five-second stall on every Server.Shutdown. See
+// maxReadBlock, which now rejects any value that could bring that back.
 func TestUnit_StreamReader_CloseDoesNotWaitOutReadBlock(t *testing.T) {
 	mr := newMiniRedis(t)
 	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1})
@@ -531,15 +536,15 @@ func TestUnit_StreamReader_CloseDoesNotWaitOutReadBlock(t *testing.T) {
 
 	start := time.Now()
 	require.NoError(t, r.Close())
-	require.Less(t, time.Since(start), 2*time.Second,
-		"Close must not block for ReadBlock (%s); a reader cannot be interrupted mid-XREAD, so the block itself has to be capped", defaultReadBlock)
+	require.Less(t, time.Since(start), time.Second,
+		"Close must not stall on a reader: a reader cannot be interrupted mid-XREAD, so the block itself has to be short (ReadBlock %s)", defaultReadBlock)
 }
 
-// Config.ReadBlock's doc promises "a newly activated room gets a fresh short
-// read folded in immediately". A reader already parked in an XREAD for
-// room1 cannot see room2 until that read returns, so the read interval IS the
-// activation latency. At the default 5s ReadBlock and without readerBlockCap
-// this fails: the room2 update arrives about five seconds late.
+// A reader already parked in an XREAD for room1 cannot see room2 until that
+// read returns, so the read interval IS the activation latency — a room
+// joining and then seeing no remote edits for that long. At the 5s ReadBlock
+// this package used to default to, the room2 update arrived about five
+// seconds late; maxReadBlock is what bounds it.
 func TestIntegration_StreamReader_ActivationDoesNotWaitOutReadBlock(t *testing.T) {
 	mr := newMiniRedis(t)
 
@@ -550,7 +555,7 @@ func TestIntegration_StreamReader_ActivationDoesNotWaitOutReadBlock(t *testing.T
 	require.NoError(t, b.Start(context.Background(), &countingSink{}))
 
 	sink := &recordingSink{}
-	// Default ReadBlock (5s) on purpose — see the doc comment.
+	// Default ReadBlock on purpose — see the doc comment.
 	a, err := New(newClient(t, mr), Config{Transport: Streams, NodeID: []byte(nodeA), Readers: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = a.Close() })
@@ -573,6 +578,246 @@ func TestIntegration_StreamReader_ActivationDoesNotWaitOutReadBlock(t *testing.T
 	require.Eventually(t, func() bool { return sink.payloadSeen("room2-edit") },
 		3*time.Second, 10*time.Millisecond,
 		"a room activated mid-read must not wait out ReadBlock (%s)", defaultReadBlock)
+}
+
+// A room this reader owns but has no worker for must not lose its backlog.
+//
+// RoomActivated adds the room to streamRooms BEFORE it creates the room's
+// worker, so a reader can own a room with no lane to deliver to. A reader
+// that treated that as a drop and advanced the cursor anyway would consume
+// the room's ENTIRE retained backlog — a room reached in that window is read
+// from the oldest retained entry — and discard it before the worker that was
+// about to exist could receive any of it.
+//
+// The witness room is what makes this airtight: Readers is 1, so both rooms'
+// keys are in the SAME XREAD, and the witness edit arriving proves the
+// orphan's entries were in that very response.
+func TestIntegration_StreamReader_BacklogSurvivesAMissingWorker(t *testing.T) {
+	mr := newMiniRedis(t)
+
+	sink := &recordingSink{}
+	a, err := New(newClient(t, mr), readerConfig(nodeA))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = a.Close() })
+	b, err := New(newClient(t, mr), readerConfig(nodeB))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, a.Start(ctx, sink))
+	require.NoError(t, b.Start(ctx, &countingSink{}))
+
+	// "witness" is activated properly, so it has a worker. "orphan" is only
+	// added to the reader's assignment map — exactly the state RoomActivated
+	// passes through on its way to creating the worker, held open here.
+	a.RoomActivated("witness")
+	a.streamMu.Lock()
+	a.streamRooms["orphan"] = 1
+	a.streamMu.Unlock()
+
+	publish := func(room, text string) {
+		require.NoError(t, b.Publish(ctx, cluster.Outbound{
+			Room: room, Kind: cluster.KindSync, Data: v1Update(t, text),
+		}))
+	}
+	orphanEdits := []string{"orphan-edit-0", "orphan-edit-1", "orphan-edit-2"}
+	for _, text := range orphanEdits {
+		publish("orphan", text)
+	}
+	publish("witness", "witness-edit")
+
+	require.Eventually(t, func() bool { return sink.payloadSeen("witness-edit") },
+		5*time.Second, 10*time.Millisecond,
+		"the witness proves the reader completed a cycle covering both rooms")
+
+	for _, text := range orphanEdits {
+		require.False(t, sink.payloadSeen(text), "a room with no worker has nowhere to deliver")
+	}
+	require.Equal(t, oldestID, a.cursorFor(a.scfg.syncKey("orphan"), oldestID),
+		"the cursor must NOT advance past entries nobody could receive")
+	require.Equal(t, uint64(0), a.Stats().RouterDrops,
+		"nothing was discarded, only deferred; RouterDrops counts discards and operators watch its rate")
+
+	// The worker exists now. The backlog must still be there to read.
+	a.RoomActivated("orphan")
+	require.Eventually(t, func() bool {
+		for _, text := range orphanEdits {
+			if !sink.payloadSeen(text) {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, 10*time.Millisecond,
+		"every entry read while the room had no worker must still be delivered once it has one")
+}
+
+// Awareness must not be replayed across a room's deactivate/reactivate.
+//
+// TestIntegration_StreamReader_AwarenessIsNotReplayed covers only a FRESH
+// relay, where no cursor exists and the tail default applies on its own. The
+// case that actually happens in production is a room evicted and reloaded
+// inside one process — the websocket provider has done that continuously
+// since idle-room residency landed (#183) — where a retained awareness cursor
+// resumes mid-stream and replays presence for the room's previous occupants.
+//
+// The sync half is asserted in the same test on purpose: the two kinds need
+// OPPOSITE retention (see cursorLimit), so a fix that dropped both would stop
+// the replay and reintroduce the whole-window sync replay it exists to
+// prevent.
+func TestIntegration_StreamReader_AwarenessNotReplayedAcrossReactivation(t *testing.T) {
+	mr := newMiniRedis(t)
+
+	sink := &recordingSink{}
+	a, err := New(newClient(t, mr), readerConfig(nodeA))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = a.Close() })
+	b, err := New(newClient(t, mr), readerConfig(nodeB))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, a.Start(ctx, sink))
+	require.NoError(t, b.Start(ctx, &countingSink{}))
+	a.RoomActivated("room1")
+
+	pubSync := func(text string) {
+		require.NoError(t, b.Publish(ctx, cluster.Outbound{
+			Room: "room1", Kind: cluster.KindSync, Data: v1Update(t, text),
+		}))
+	}
+	pubPresence := func(text string) error {
+		return b.Publish(ctx, cluster.Outbound{
+			Room: "room1", Kind: cluster.KindAwareness, Data: []byte(text),
+		})
+	}
+
+	// Establish BOTH cursors by getting both kinds delivered.
+	pubSync("edit-before")
+	require.Eventually(t, func() bool {
+		if err := pubPresence("presence-before"); err != nil {
+			return false
+		}
+		return sink.payloadSeen("edit-before") && sink.payloadSeen("presence-before")
+	}, 5*time.Second, 20*time.Millisecond, "both kinds must flow before the room is deactivated")
+
+	a.RoomDeactivated("room1")
+	// Outwait any read that was already in flight: its id vector was built
+	// before the deactivation, so it can still write a cursor back once.
+	time.Sleep(3 * readerTestBlock)
+
+	a.streamMu.Lock()
+	_, awKnown := a.cursors[a.scfg.awKey("room1")]
+	_, syncKnown := a.cursors[a.scfg.syncKey("room1")]
+	a.streamMu.Unlock()
+	require.False(t, awKnown,
+		"deactivation must forget the awareness cursor, or reactivation resumes mid-presence-stream")
+	require.True(t, syncKnown,
+		"deactivation must KEEP the sync cursor, or room churn replays the whole retention window")
+
+	// Published to a room nothing is reading: this presence belongs to
+	// clients that left with the room.
+	require.NoError(t, pubPresence("presence-while-gone"))
+	pubSync("edit-while-gone")
+
+	a.RoomActivated("room1")
+
+	// Witness: the surviving sync cursor still delivers what was published
+	// while the room was gone, which also proves the reader is reading room1
+	// again — so the awareness absence below is policy, not a dead path.
+	require.Eventually(t, func() bool { return sink.payloadSeen("edit-while-gone") },
+		5*time.Second, 10*time.Millisecond, "a kept sync cursor must still deliver")
+
+	// Witness: live presence flows again after reactivation. Republished each
+	// attempt because a tail-started stream has a one-cycle blind spot for an
+	// entry appended between two reads — which is what a real client's
+	// heartbeat rides out too.
+	require.Eventually(t, func() bool {
+		if err := pubPresence("presence-after"); err != nil {
+			return false
+		}
+		return sink.payloadSeen("presence-after")
+	}, 5*time.Second, 20*time.Millisecond, "awareness must flow after reactivation")
+
+	require.False(t, sink.payloadSeen("presence-while-gone"),
+		"presence published while the room was gone must not be replayed to its new occupants")
+}
+
+// Inbound latency must not scale with a reader's batch COUNT.
+//
+// Each XREAD blocks for the whole ReadBlock, so running the batches of one
+// cycle sequentially with every one of them blocking puts data waiting in
+// batch 10 behind nine full blocks. keyBatches's own doc cites 2500 rooms per
+// reader, which is 10 batches.
+func TestUnit_StreamReader_OnlyTheLastBatchOfACycleBlocks(t *testing.T) {
+	mr := newMiniRedis(t)
+	block := 40 * time.Millisecond
+	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1, ReadBlock: block})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	require.Negative(t, int64(nonBlockingRead),
+		"a non-blocking read needs a NEGATIVE Block: go-redis emits the BLOCK argument for any Block >= 0, and Redis reads BLOCK 0 as block FOREVER")
+
+	// One batch is also the last batch, so nothing changes for the ordinary
+	// single-batch reader: it still blocks.
+	require.Equal(t, block, r.blockForBatch(0, 1, false))
+	require.Equal(t, nonBlockingRead, r.blockForBatch(0, 1, true),
+		"a cycle that already found entries has work to do and must not sit in a block")
+
+	const n = 10 // 2500 rooms at maxKeysPerRead/streamsPerRoom per batch
+	for i := 0; i < n-1; i++ {
+		require.Equal(t, nonBlockingRead, r.blockForBatch(i, n, false),
+			"batch %d of %d must not block: an entry in a later batch would wait out every earlier one", i, n)
+	}
+	require.Equal(t, block, r.blockForBatch(n-1, n, false),
+		"the trailing block is what stops an idle reader spinning")
+	require.Equal(t, nonBlockingRead, r.blockForBatch(n-1, n, true))
+}
+
+// End-to-end companion to the test above: a room in the SECOND batch is
+// delivered normally.
+//
+// This is the guard against getting the non-blocking value wrong. "BLOCK 0"
+// means block forever, so a batch-0 read issued with Block: 0 would never
+// return and nothing here would ever arrive.
+func TestIntegration_StreamReader_DeliversToARoomInALaterBatch(t *testing.T) {
+	mr := newMiniRedis(t)
+
+	sink := &recordingSink{}
+	a, err := New(newClient(t, mr), readerConfig(nodeA))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = a.Close() })
+	b, err := New(newClient(t, mr), readerConfig(nodeB))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, a.Start(ctx, sink))
+	require.NoError(t, b.Start(ctx, &countingSink{}))
+
+	// More rooms than one batch holds, so there are two. roomsForReader sorts,
+	// so the last name is in the last batch.
+	perBatch := maxKeysPerRead / streamsPerRoom
+	rooms := make([]string, 0, perBatch+4)
+	for i := 0; i < perBatch+4; i++ {
+		rooms = append(rooms, fmt.Sprintf("room-%04d", i))
+	}
+	for _, room := range rooms {
+		a.RoomActivated(room)
+	}
+	require.Len(t, keyBatches(a.roomsForReader(0), perBatch), 2, "this test needs two batches")
+
+	last := rooms[len(rooms)-1]
+	require.NoError(t, b.Publish(ctx, cluster.Outbound{
+		Room: last, Kind: cluster.KindSync, Data: v1Update(t, "later-batch-edit"),
+	}))
+
+	require.Eventually(t, func() bool { return sink.payloadSeen("later-batch-edit") },
+		5*time.Second, 10*time.Millisecond,
+		"a room in the last batch must be delivered to, not stuck behind an earlier batch's block")
 }
 
 // --- Gap detection ---------------------------------------------------------
