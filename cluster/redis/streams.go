@@ -3,9 +3,12 @@ package redis
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+
+	"github.com/reearth/ygo/cluster"
 )
 
 // Transport selects how a Relay moves payloads between nodes.
@@ -167,3 +170,84 @@ func (s streamCfg) syncKey(room string) string { return s.prefix + room }
 //
 //nolint:unused // consumed by a later task, see the sentence above
 func (s streamCfg) awKey(room string) string { return s.prefix + "aw:" + room }
+
+// Stream entry field names. Single letters on purpose: every byte is
+// multiplied by retention x rate x rooms.
+//
+// room is absent because the stream KEY is authoritative — XRANGE shows it,
+// and there is no route by which an entry could reach the wrong room's key.
+const (
+	fieldNode = "n" // publisher nodeID, for the self-delivery filter
+	fieldSeq  = "s" // per-node monotonic sequence, for gap detection
+	fieldKind = "k" // cluster.Kind
+	fieldData = "d" // payload
+)
+
+// nextSeq issues this relay's next sequence number.
+//
+// The counter is per-node and monotonic, and it must exist from the first
+// release: it cannot be retrofitted, and without it gap detection is
+// impossible. XREAD from a trimmed ID returns the next surviving entry with
+// NO error, and stream IDs are ms-seq rather than contiguous, so trimming is
+// indistinguishable from ordinary advancement by ID arithmetic alone.
+//
+// It lives in memory, so it restarts at 0 when the process does. A reader
+// treats a DECREASE as a restart rather than a gap — see the reader's
+// gap-detection notes.
+func (r *Relay) nextSeq() uint64 { return r.seq.Add(1) }
+
+// streamFields builds the XADD field list for one entry.
+func streamFields(nodeID []byte, seq uint64, kind cluster.Kind, data []byte) []any {
+	return []any{
+		fieldNode, nodeID,
+		fieldSeq, strconv.FormatUint(seq, 10),
+		fieldKind, strconv.Itoa(int(kind)),
+		fieldData, data,
+	}
+}
+
+// decodeStreamEntry reads one XREAD entry's fields.
+//
+// Every field is required. A malformed entry is rejected rather than
+// defaulted: the pub/sub router already learned (see its unrecognised-kind
+// handling) that guessing at a payload can cost a room its legitimate
+// updates, because a non-V1 blob makes the lane's MergeUpdatesV1 fail.
+func decodeStreamEntry(vals map[string]any) (nodeID []byte, seq uint64, kind cluster.Kind, data []byte, err error) {
+	str := func(k string) (string, error) {
+		v, ok := vals[k]
+		if !ok {
+			return "", fmt.Errorf("missing field %q", k)
+		}
+		s, ok := v.(string)
+		if !ok {
+			return "", fmt.Errorf("field %q is %T, want string", k, v)
+		}
+		return s, nil
+	}
+
+	n, err := str(fieldNode)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	sRaw, err := str(fieldSeq)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	s, err := strconv.ParseUint(sRaw, 10, 64)
+	if err != nil {
+		return nil, 0, 0, nil, fmt.Errorf("parse seq %q: %w", sRaw, err)
+	}
+	kRaw, err := str(fieldKind)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	k, err := strconv.Atoi(kRaw)
+	if err != nil {
+		return nil, 0, 0, nil, fmt.Errorf("parse kind %q: %w", kRaw, err)
+	}
+	d, err := str(fieldData)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	return []byte(n), s, cluster.Kind(k), []byte(d), nil
+}

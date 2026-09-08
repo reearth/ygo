@@ -1,11 +1,15 @@
 package redis
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/cluster"
 )
 
 // Transport's zero value must be PubSub so an existing Config keeps working.
@@ -72,4 +76,86 @@ func TestUnit_Streams_PubSubModeSkipsStreamValidation(t *testing.T) {
 
 	_, err := resolveStreamCfg(c, Config{Readers: 999})
 	require.NoError(t, err)
+}
+
+// Round-tripping through native stream fields is what lets the reader read
+// seq without decoding the payload.
+func TestUnit_Streams_EntryRoundTrip(t *testing.T) {
+	nodeID := []byte("0123456789abcdef")
+	fields := streamFields(nodeID, 42, cluster.KindSync, []byte("payload"))
+
+	vals := asRedisValues(fields)
+
+	gotNode, gotSeq, gotKind, gotData, err := decodeStreamEntry(vals)
+	require.NoError(t, err)
+	require.Equal(t, nodeID, gotNode)
+	require.Equal(t, uint64(42), gotSeq)
+	require.Equal(t, cluster.KindSync, gotKind)
+	require.Equal(t, []byte("payload"), gotData)
+}
+
+// room is deliberately NOT a field: the key is authoritative and every
+// omitted byte is multiplied by retention x rate.
+func TestUnit_Streams_EntryOmitsRoom(t *testing.T) {
+	fields := streamFields([]byte("n"), 1, cluster.KindSync, []byte("d"))
+	for i := 0; i < len(fields); i += 2 {
+		require.NotEqual(t, "room", fields[i])
+	}
+	require.Len(t, fields, 8) // exactly n, s, k, d
+}
+
+// asRedisValues rebuilds what XREAD hands back from what XADD was given.
+//
+// The conversion is the point: XADD takes []byte happily, but Redis stores
+// bulk strings and go-redis surfaces XMessage.Values as map[string]any holding
+// STRINGS. A test that fed []byte straight back in would pass against a
+// decoder that accepts []byte and then fail against real Redis.
+func asRedisValues(fields []any) map[string]any {
+	out := make(map[string]any, len(fields)/2)
+	for i := 0; i+1 < len(fields); i += 2 {
+		k, _ := fields[i].(string)
+		switch v := fields[i+1].(type) {
+		case []byte:
+			out[k] = string(v)
+		case string:
+			out[k] = v
+		default:
+			out[k] = fmt.Sprint(v)
+		}
+	}
+	return out
+}
+
+func TestUnit_Streams_DecodeRejectsMissingFields(t *testing.T) {
+	_, _, _, _, err := decodeStreamEntry(map[string]any{"n": "x"})
+	require.Error(t, err)
+}
+
+func TestUnit_Streams_DecodeRejectsGarbageSeq(t *testing.T) {
+	_, _, _, _, err := decodeStreamEntry(map[string]any{
+		"n": "x", "s": "not-a-number", "k": "0", "d": "d",
+	})
+	require.ErrorContains(t, err, "seq")
+}
+
+// seq must be monotonic per relay and safe under concurrent Publish, which
+// the Relay contract explicitly permits for distinct rooms.
+func TestUnit_Streams_SeqIsMonotonicUnderConcurrency(t *testing.T) {
+	r := &Relay{}
+	const n = 200
+	got := make(chan uint64, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); got <- r.nextSeq() }()
+	}
+	wg.Wait()
+	close(got)
+
+	seen := map[uint64]bool{}
+	for s := range got {
+		require.False(t, seen[s], "seq %d issued twice", s)
+		seen[s] = true
+	}
+	require.Len(t, seen, n)
 }

@@ -332,6 +332,12 @@ type Relay struct {
 	chanSize int
 	scfg     streamCfg
 
+	// seq is incremented by nextSeq for each stream entry published by this
+	// node, allowing readers to detect trimmed or dropped entries. It restarts
+	// at 0 on process restart; a decrease is treated as a restart rather than a
+	// gap. See nextSeq.
+	seq atomic.Uint64
+
 	// outbound carries Publish calls to the publisher goroutine. A bounded
 	// channel back-pressures the caller, matching MemRelay.
 	outbound chan cluster.Outbound
