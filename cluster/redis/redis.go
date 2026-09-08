@@ -679,6 +679,15 @@ func (r *Relay) Start(ctx context.Context, sink cluster.Sink) error {
 			r.wg.Add(1)
 			go r.runStreamReader(readCtx, i)
 		}
+
+		// The MINID trim sweeper: the age half of the delivery guarantee
+		// (see runTrimSweeper's doc). It gets the plain Start ctx, not the
+		// derived readCtx above — its own select watches r.done directly,
+		// which is enough for a ticker loop and does not need
+		// streamReadCtx's r.done→cancel forwarding (that forwarding exists
+		// only because a blocked XREAD can't otherwise be interrupted).
+		r.wg.Add(1)
+		go r.runTrimSweeper(ctx)
 	}
 
 	// started is set LAST: the atomic Store acts as a release barrier so
