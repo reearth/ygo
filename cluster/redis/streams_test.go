@@ -182,13 +182,19 @@ func TestUnit_StreamStats_SnapshotsEveryCounter(t *testing.T) {
 }
 
 // Stats() is the pub/sub tier's and must not grow stream fields.
+// Verify that a pub/sub-mode relay reports zero stream activity, and that
+// the pub/sub tier's Stats() method still works correctly.
 func TestUnit_StreamStats_PubSubStatsUnchanged(t *testing.T) {
 	mr := newMiniRedis(t)
 	r, err := New(newClient(t, mr), Config{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close() })
 
-	_ = r.Stats() // must still compile and run for a pub/sub relay
+	// A pub/sub relay's StreamStats must be all zeros
 	require.Equal(t, StreamStats{}, r.StreamStats(),
 		"a pub/sub relay reports zero stream activity")
+
+	// The pub/sub tier's Stats() must also report zero values (no events have occurred)
+	require.Equal(t, Stats{}, r.Stats(),
+		"a fresh pub/sub relay has zero degraded-path activity")
 }
