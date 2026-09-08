@@ -362,6 +362,19 @@ type Relay struct {
 	// incremented/decremented in Streams/Both mode. The reader task that
 	// consumes this to build its XREAD key set lands later.
 	streamRooms map[string]int
+	// cursors is the last stream ID this node has delivered per stream KEY
+	// (not per room: a room has a sync stream and an awareness stream, and
+	// they advance independently). Purely in-memory and never persisted — a
+	// lost cursor costs a replay, not a loss, because a sync stream is read
+	// from its oldest retained entry when no cursor is known. Entries are
+	// kept past a room's deactivation so ordinary churn does not re-replay
+	// the whole retention window, and bounded by cursorLimit. Guarded by
+	// streamMu; see setCursor / evictStaleCursorsLocked.
+	cursors map[string]string
+	// lastSeq is the highest sequence number seen from each source node,
+	// keyed by nodeID, used to tell a trimmed-away gap from a node restart.
+	// Guarded by streamMu; see noteSeq.
+	lastSeq map[string]uint64
 
 	// outbound carries Publish calls to the publisher goroutine. A bounded
 	// channel back-pressures the caller, matching MemRelay.
@@ -497,6 +510,8 @@ func New(client *goredis.Client, cfg Config) (*Relay, error) {
 		laneCap:     cfg.RoomQueueSize,
 		workers:     make(map[string]*roomWorker),
 		streamRooms: make(map[string]int),
+		cursors:     make(map[string]string),
+		lastSeq:     make(map[string]uint64),
 	}, nil
 }
 
@@ -617,6 +632,23 @@ func (r *Relay) Start(ctx context.Context, sink cluster.Sink) error {
 	r.wg.Add(2)
 	go r.runSubscriber(ctx)
 	go r.runPublisher(ctx)
+
+	// Streams-tier readers. Gated on the transport, so PubSub mode — the
+	// zero value, and every existing caller — launches nothing new and
+	// XREADs nothing.
+	//
+	// The readers get a DERIVED context (streamReadCtx), not ctx: a reader
+	// blocks inside XREAD for up to ReadBlock, and Close closes r.done and
+	// then joins r.wg, so a reader watching only ctx would make Close wait
+	// out a ReadBlock — or hang forever when ctx outlives the relay, which
+	// is the ordinary case. See streamReadCtx.
+	if r.scfg.transport.usesStreams() {
+		readCtx := r.streamReadCtx(ctx)
+		for i := 0; i < r.scfg.readers; i++ {
+			r.wg.Add(1)
+			go r.runStreamReader(readCtx, i)
+		}
+	}
 
 	// started is set LAST: the atomic Store acts as a release barrier so
 	// any goroutine that observes started=true via Load() sees the writes
