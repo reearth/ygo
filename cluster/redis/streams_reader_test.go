@@ -851,6 +851,13 @@ func TestUnit_StreamReader_AwarenessFromAPriorResidencyIsNotDelivered(t *testing
 		"the entries are dealt with, not deferred: the successor reads from the tail")
 	require.Equal(t, 0, fresh.lane.Depth(),
 		"presence published before the reactivation must not reach the new occupants")
+	// And not onto the RETIRED residency's lane either, which is the half a
+	// residency check performed separately from the push would miss. A
+	// stopped worker performs one final drain into Sink.Inject (see
+	// runRoomWorker), and Inject is addressed by ROOM — so a blob parked on
+	// the old lane still reaches room1, whose occupants are now the new ones.
+	require.Equal(t, 0, old.lane.Depth(),
+		"a read from a prior residency must not push anywhere: the retired lane still drains into the room")
 	residency, awFrom := r.awarenessCursor("room1")
 	require.Same(t, fresh, residency)
 	require.Equal(t, tailID, awFrom,
