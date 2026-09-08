@@ -104,6 +104,17 @@ const maxKeysPerRead = 512
 // it could not be delivered.
 const maxReadBlock = 250 * time.Millisecond
 
+// minReadBlock is the smallest Config.ReadBlock this package accepts.
+// resolveStreamCfg REJECTS a smaller value rather than degrading it silently.
+//
+// The floor exists because go-redis builds the BLOCK argument as
+// int64(block / time.Millisecond), so a sub-millisecond value truncates to 0.
+// In Redis, BLOCK 0 means block forever, so a reader in that XREAD would never
+// return, and Close's wg.Wait would hang. The reader also arms its socket read
+// deadline from ctx.Deadline(), not from cancellation, so there is no other
+// mechanism to wake it.
+const minReadBlock = 1 * time.Millisecond
+
 // stalledBackoffBase is the first wait after a room's cursor advance is
 // declined for lane backpressure. It doubles per consecutive stall, capped at
 // ReadBlock. Not configurable, for the same reason as maxKeysPerRead. The
@@ -190,6 +201,11 @@ func resolveStreamCfg(client *goredis.Client, cfg Config) (streamCfg, error) {
 		return streamCfg{}, fmt.Errorf(
 			"cluster/redis: ReadBlock (%s) must not exceed %s: the interval between a reader's XREADs is also how long Close and a newly activated room wait, and a blocked XREAD cannot be interrupted",
 			sc.readBlock, maxReadBlock)
+	}
+	if sc.readBlock < minReadBlock {
+		return streamCfg{}, fmt.Errorf(
+			"cluster/redis: ReadBlock (%s) must not be less than %s: go-redis truncates sub-millisecond values to 0, which Redis reads as BLOCK 0 (block forever), so the reader would hang and Close would deadlock waiting for it",
+			sc.readBlock, minReadBlock)
 	}
 	if sc.trimInterval >= sc.retention {
 		return streamCfg{}, fmt.Errorf(

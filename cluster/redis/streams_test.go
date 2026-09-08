@@ -66,6 +66,30 @@ func TestUnit_Streams_RejectsReadBlockAboveMax(t *testing.T) {
 	require.Equal(t, time.Hour, got.readBlock)
 }
 
+func TestUnit_Streams_RejectsReadBlockBelowMin(t *testing.T) {
+	mr := newMiniRedis(t)
+	c := newClient(t, mr)
+
+	// A sub-millisecond value truncates to BLOCK 0 in go-redis, which Redis
+	// reads as block forever. The reader would hang and Close would deadlock.
+	_, err := resolveStreamCfg(c, Config{Transport: Streams, ReadBlock: 500 * time.Microsecond})
+	require.ErrorContains(t, err, "ReadBlock")
+	require.ErrorContains(t, err, "1ms", "the error must name the floor")
+
+	// At the floor exactly, and above it, are both fine.
+	for _, ok := range []time.Duration{minReadBlock, 100 * time.Millisecond} {
+		got, err := resolveStreamCfg(c, Config{Transport: Streams, ReadBlock: ok})
+		require.NoError(t, err)
+		require.Equal(t, ok, got.readBlock, "an accepted value must be used verbatim, not adjusted")
+	}
+
+	// PubSub mode validates nothing: an existing caller must not start
+	// failing construction because a Streams-only field exists.
+	got, err := resolveStreamCfg(c, Config{ReadBlock: 100 * time.Microsecond})
+	require.NoError(t, err)
+	require.Equal(t, 100*time.Microsecond, got.readBlock)
+}
+
 // An undersized pool leaves publishes waiting on a connection: a reader holds
 // one for as long as its XREAD blocks. Failing construction is much kinder
 // than presenting as mysterious publish latency later.

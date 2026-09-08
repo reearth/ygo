@@ -273,7 +273,7 @@ type Config struct {
 
 	// ReadBlock is how long one reader's XREAD blocks when it has nothing to
 	// deliver. Default 250ms, which is also the maximum: New fails if it is
-	// larger.
+	// larger, and the minimum: New fails if it is smaller than 1ms.
 	//
 	// It is not just a Redis-efficiency knob, because a blocked XREAD cannot
 	// be interrupted (go-redis honours a context deadline, not a
@@ -282,8 +282,8 @@ type Config struct {
 	// for a reader to notice shutdown, and on how long a newly activated room
 	// waits before its stream is read at all. Lower it to shorten both at the
 	// cost of more commands per second; it cannot be raised, because the
-	// latencies it would extend are not negotiable. See maxReadBlock
-	// (streams.go) for the full reasoning.
+	// latencies it would extend are not negotiable. See maxReadBlock and
+	// minReadBlock (streams.go) for the full reasoning.
 	//
 	// Delivery latency for a room already being read is NOT bounded by this:
 	// XREAD returns as soon as any of its keys gets an entry.
