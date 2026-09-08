@@ -873,6 +873,80 @@ func TestUnit_StreamReader_NoteSeqIsPerNodePerStream(t *testing.T) {
 	require.Equal(t, uint64(1), r.StreamStats().Restarts)
 }
 
+// A source that restarts its in-memory counter must not just avoid being
+// misreported as data loss — detection must keep working against the NEW
+// baseline afterwards. This is the half of restart-handling that a
+// restarts-vs-gaps classification alone does not prove: a baseline that
+// never resets down would either report every post-restart entry as a fresh
+// gap, or (if the fix instead treated already-seen-looking lower numbers as
+// duplicates) silently stop advancing for that source at all — a stall, not
+// merely a miscount.
+//
+// Verified by mutation: changing noteSeq to only ever raise its baseline
+// (`if seq > prev { r.lastSeq[src] = seq }`, imitating a fix that tracks the
+// high-water mark instead of the last-seen value) leaves this test as the
+// only one in the package that fails; every other gap/restart test still
+// passes because none of them re-probes classification after a decrease.
+func TestUnit_StreamReader_GapDetectionResumesAfterARestart(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	key := r.scfg.syncKey("room1")
+	src := []byte(nodeB)
+
+	for _, seq := range []uint64{1, 2, 3} {
+		r.noteSeq(key, src, seq)
+	}
+
+	r.noteSeq(key, src, 1) // the same node, restarted
+	require.Equal(t, uint64(1), r.StreamStats().Restarts)
+	require.Zero(t, r.StreamStats().Gaps, "a restart must not itself be reported as data loss")
+
+	// The baseline must now be the restarted value, not the pre-restart one:
+	// a contiguous follow-on must stay silent...
+	r.noteSeq(key, src, 2)
+	require.Zero(t, r.StreamStats().Gaps)
+	require.Equal(t, uint64(1), r.StreamStats().Restarts, "no second restart on ordinary advancement")
+
+	// ...and a real jump measured from that new baseline must still be
+	// caught, proving detection did not stall or silently latch onto the
+	// pre-restart series.
+	r.noteSeq(key, src, 7)
+	require.Equal(t, uint64(1), r.StreamStats().Gaps, "gap detection must work after a restart")
+}
+
+// The first sequence number ever seen from a source establishes a baseline,
+// however large it is — it must never be compared against an implicit zero.
+// A relay that only just started tracking a stream (or a source whose first
+// live entry lands well past 1, e.g. after a retention window skipped ahead
+// of a fresh reader) must not have that first observation mistaken for a
+// jump.
+//
+// Deliberately uses a large first value (12345, not 1): every other test in
+// this file happens to start its series at 1, which cannot distinguish
+// "unknown source treated as a fresh baseline" from "unknown source treated
+// as if its previous seq were 0" — both behave identically when the first
+// real seq is 1. Confirmed by mutation: dropping noteSeq's `!known` case (so
+// an untracked source silently compares against a zero-value prev) passes
+// every other gap/restart test in the package but fails only this one.
+func TestUnit_StreamReader_FirstSeqEstablishesBaselineRegardlessOfValue(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	key := r.scfg.syncKey("room1")
+	r.noteSeq(key, []byte(nodeB), 12345)
+	require.Zero(t, r.StreamStats().Gaps, "a source's first observed seq is a baseline, never a gap")
+	require.Zero(t, r.StreamStats().Restarts)
+
+	// And normal tracking proceeds from that baseline.
+	r.noteSeq(key, []byte(nodeB), 12346)
+	require.Zero(t, r.StreamStats().Gaps)
+}
+
 // A healthy node publishing to SEVERAL rooms must leave a reader's Gaps and
 // Restarts at zero. This is the assertion that protects the contract:
 // StreamStats.Gaps is documented "ALERT ON PRESENCE, not on rate — a single
