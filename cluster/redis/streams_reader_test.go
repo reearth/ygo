@@ -837,8 +837,14 @@ func TestUnit_StreamReader_AwarenessFromAPriorResidencyIsNotDelivered(t *testing
 	tgt := streamTarget{
 		key: r.scfg.awKey("room1"), room: "room1", isAwareness: true, residency: old,
 	}
+	// A batch rather than a single entry: deliverAwareness pushes only the
+	// last payload of a read, so a fence applied to that one payload and a
+	// fence applied to the read are the same code — but a single-entry batch
+	// could not tell the two apart if that ever stopped being true.
 	msgs := []goredis.XMessage{
 		streamEntry(t, "7-0", nodeB, 1, cluster.KindAwareness, []byte("presence-while-gone")),
+		streamEntry(t, "8-0", nodeB, 2, cluster.KindAwareness, []byte("presence-while-gone-2")),
+		streamEntry(t, "9-0", nodeB, 3, cluster.KindAwareness, []byte("presence-while-gone-3")),
 	}
 
 	// Deactivate, then reactivate: a NEW worker, which is what makes the
@@ -1285,6 +1291,50 @@ func TestUnit_StreamReader_AwarenessIsExemptFromLaneBackpressure(t *testing.T) {
 	require.Equal(t, 3, w.lane.Depth(), "the awareness blob must be delivered to the lane")
 	require.Equal(t, uint64(0), r.Stats().Coalesced,
 		"and the awareness slot is separate, so nothing merged")
+}
+
+// One read of a busy presence stream returns several blobs; the lane holds
+// ONE. Pushing all of them would supersede the reader's own work N-1 times —
+// N-1 lane-mutex acquisitions and Signal sends discarded on the spot, and N-1
+// AwarenessSuperseded increments reporting a backlog this room's worker never
+// had. Only the last payload of a read is pushed. See deliverAwareness.
+func TestUnit_StreamReader_AwarenessBatchPushesOnlyTheLatest(t *testing.T) {
+	mr := newMiniRedis(t)
+	// Deliberately NOT Started: with no worker goroutine, the lane's depth and
+	// contents are assertions rather than a race with a concurrent drain.
+	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	w := &roomWorker{room: "room1", lane: relaylane.New(r.laneCap), done: make(chan struct{})}
+	r.workersMu.Lock()
+	r.workers["room1"] = w
+	r.workersMu.Unlock()
+
+	tgt := streamTarget{
+		key: r.scfg.awKey("room1"), room: "room1", isAwareness: true, residency: w,
+	}
+	msgs := []goredis.XMessage{
+		streamEntry(t, "7-0", nodeB, 1, cluster.KindAwareness, []byte("presence-1")),
+		streamEntry(t, "8-0", nodeB, 2, cluster.KindAwareness, []byte("presence-2")),
+		streamEntry(t, "9-0", nodeB, 3, cluster.KindAwareness, []byte("presence-3")),
+	}
+
+	require.Equal(t, streamConsumed, r.handleStream(tgt, msgs))
+
+	require.Equal(t, uint64(0), r.Stats().AwarenessSuperseded,
+		"a three-entry read must cost ONE push, not three: the other two would be "+
+			"superseded before anything could read them, and each would leave an "+
+			"AwarenessSuperseded increment claiming this room's worker fell behind")
+	require.Equal(t, 1, w.lane.Depth(), "so the lane holds exactly one blob")
+	got, ok := w.lane.TakeAwareness()
+	require.True(t, ok)
+	require.Equal(t, []byte("presence-3"), got,
+		"and it is the LAST payload of the read, the only one still current")
+
+	_, from := r.awarenessCursor("room1")
+	require.Equal(t, "9-0", from,
+		"the cursor still advances past the WHOLE read, or the superseded entries are re-read forever")
 }
 
 // Backoff must grow so a wedged room is not re-read as fast as Redis can

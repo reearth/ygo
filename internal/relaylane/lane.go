@@ -96,9 +96,18 @@ func New(capacity int) *Lane {
 	return &Lane{cap: capacity, signal: make(chan struct{}, 1)}
 }
 
-// Push enqueues a payload. It NEVER blocks: an over-cap sync queue is
-// collapsed by merging, and awareness is kept latest-only. data must not be
-// mutated by the caller afterwards — the Lane retains the slice.
+// Push enqueues a payload. It NEVER blocks on CAPACITY: an over-cap sync
+// queue is collapsed by merging, and awareness is kept latest-only, so a
+// producer is never made to wait for a consumer. data must not be mutated by
+// the caller afterwards — the Lane retains the slice.
+//
+// "Never blocks" stops at capacity, though: Push takes mu, and both Push
+// (via collapseLocked) and TakeSync hold mu across crdt.MergeUpdatesV1. So a
+// Push can wait for an in-flight merge on the SAME lane, and a caller must
+// not hold a lock that other rooms need across a Push — that turns one
+// room's merge into every room's stall, which is the coupling a lane per
+// room exists to remove. Stats() is deliberately lock-free for the same
+// reason (see the Lane struct's doc).
 func (l *Lane) Push(kind cluster.Kind, data []byte) {
 	l.mu.Lock()
 	if kind == cluster.KindAwareness {
@@ -198,16 +207,21 @@ func (l *Lane) Empty() bool {
 // Depth reports how many payloads the lane currently holds: every queued sync
 // blob, plus one for a pending awareness blob.
 //
-// Read-only and purely observational. Empty() answers "is there work?" but
-// nothing answered "how much?", and the degraded-path counters only rise
-// AFTER a merge or a drop has already happened — too late for a producer that
-// wants to see saturation coming.
+// This is a TEST-ASSERTION primitive, not a production signal, and relaylane
+// being an internal package is the whole of its audience. It exists so tests
+// here and in cluster/redis can state "exactly this much was queued" or
+// "nothing was pushed" directly, instead of inferring queue state from a
+// worker goroutine's observable side effects — which is the difference
+// between a deterministic assertion and a timing one. No production caller
+// exists, and none should: a producer deciding whether to send wants Full(),
+// a consumer wants Empty(), and neither wants a count.
 //
-// Do NOT derive a full-lane decision from this by comparing it against a cap
-// held elsewhere: the awareness slot is latest-only and never contributes to
-// the capacity Push enforces, so such a comparison would report a lane as
-// full one payload early whenever awareness happened to be pending. Ask
-// Full() instead, which is defined against the queue the cap actually governs.
+// A count is in fact the WRONG basis for a full-lane decision, which is the
+// second reason to keep it out of production. The awareness slot is
+// latest-only and never contributes to the capacity Push enforces, so
+// comparing Depth() against a cap held elsewhere would report a lane full one
+// payload early whenever awareness happened to be pending. Full() is defined
+// against the queue the cap actually governs.
 func (l *Lane) Depth() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()

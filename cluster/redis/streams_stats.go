@@ -50,7 +50,18 @@ type StreamStats struct {
 	// Deferred counts cursor advances declined because the room had no inbound
 	// delivery worker yet — the window inside RoomActivated between a room
 	// joining a reader's assignment set and its worker existing. Routine and
-	// self-clearing: the entries are re-read as soon as the worker exists.
+	// self-clearing.
+	//
+	// What becomes of the deferred entries depends on which stream they were
+	// on. On a SYNC stream they are re-read: that cursor is relay-scoped and
+	// was not advanced, so the next cycle asks for the same entries and the
+	// worker, once it exists, receives all of them. On an AWARENESS stream
+	// they are NOT re-read — the baseline there is the residency's own cursor
+	// (roomWorker.awCursor), which does not exist yet, so the next read
+	// starts from tailID and those entries are already behind it. That is the
+	// intended outcome rather than a loss to fix: presence appended before a
+	// room had any local residency belongs to nobody here, and live clients
+	// re-announce within one heartbeat interval.
 	//
 	// Deliberately NOT folded into Stalled, though both count a declined
 	// advance on entries that were kept. The two ask for opposite responses: a

@@ -617,22 +617,25 @@ func (r *Relay) evictStaleCursorsLocked() {
 //  3. Close promises that nothing reaches the Sink after it returns
 //     (redis.go's Close doc), which drainLane enforces with its closed check.
 //     A direct Inject from a reader has no such gate.
-//  4. Lane.Push never blocks and never drops — an over-cap sync queue is
-//     merged, awareness is kept latest-only — so nothing is traded away for
-//     the isolation.
+//  4. Lane.Push never blocks on capacity and never drops — an over-cap sync
+//     queue is merged, awareness is kept latest-only — so nothing is traded
+//     away for the isolation. (It does take the lane's own mutex, which is
+//     why no relay-wide lock may be held across it — see deliverAwareness.)
 //
 // Sync entries are MERGED into a single payload first. Without that, a
 // catch-up of N entries would push N payloads, and each one is re-broadcast
 // to every local peer — turning one reader's restart into an N-fold broadcast
-// storm. Awareness is not merged: each payload carries its own clock and the
-// receiver's per-client gate handles staleness.
+// storm. Awareness is not merged — each payload carries its own clock and the
+// receiver's per-client gate handles staleness — but only the LAST payload of
+// a read is pushed, because the lane's awareness slot holds one blob and
+// would supersede the rest untouched.
 //
 // Awareness also takes a different route to the lane. It is handed over by
-// deliverAwareness, which drops the whole read if the room has changed
-// residency since the id vector was built, because presence published before
-// a reactivation must not reach the room's new occupants. Sync goes straight
-// to the lane resolved above: replaying a sync entry is harmless, so it
-// inherits the same accepted staleness runSubscriber has.
+// deliverAwareness, which drops the read if the room has changed residency
+// since the id vector was built, because presence published before a
+// reactivation must not reach the room's new occupants. Sync goes straight to
+// the lane resolved above: replaying a sync entry is harmless, so it inherits
+// the same accepted staleness runSubscriber has.
 func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) streamOutcome {
 	if len(msgs) == 0 {
 		return streamConsumed
@@ -750,11 +753,14 @@ func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) streamOu
 	}
 
 	if tgt.isAwareness {
-		// Payloads and cursor together, accepted only if the room is still on
-		// the residency this read was issued for. A false return is a
-		// deliberate discard of presence published before a reactivation, not
-		// a deferral: the successor residency reads from the tail, so the
-		// outcome is still "these entries are dealt with".
+		// Cursor and latest payload, accepted only while the room is still on
+		// the residency this read was issued for. Declining is a deliberate
+		// discard of presence published before a reactivation, not a
+		// deferral — the successor residency reads from the tail, so the
+		// entries are dealt with either way, hence streamConsumed
+		// unconditionally. deliverAwareness pushes only the LAST of these
+		// payloads; see its doc for why the rest are not worth a lane
+		// acquisition each.
 		r.deliverAwareness(tgt.room, tgt.residency, awPayloads, lastID)
 		return streamConsumed
 	}
