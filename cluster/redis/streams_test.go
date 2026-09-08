@@ -1,11 +1,13 @@
 package redis
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
@@ -197,4 +199,122 @@ func TestUnit_StreamStats_PubSubStatsUnchanged(t *testing.T) {
 	// The pub/sub tier's Stats() must also report zero values (no events have occurred)
 	require.Equal(t, Stats{}, r.Stats(),
 		"a fresh pub/sub relay has zero degraded-path activity")
+}
+
+// streamEntries reads every entry currently in a stream key.
+func streamEntries(t *testing.T, mr *miniredis.Miniredis, key string) []miniredis.StreamEntry {
+	t.Helper()
+	e, err := mr.Stream(key)
+	if err != nil {
+		return nil // key absent: no entries
+	}
+	return e
+}
+
+// entryValues flattens one miniredis entry's fields into a map.
+//
+// miniredis.StreamEntry.Values is a []string of alternating key/value — NOT a
+// map — so it cannot be indexed by field name directly.
+func entryValues(e miniredis.StreamEntry) map[string]string {
+	m := make(map[string]string, len(e.Values)/2)
+	for i := 0; i+1 < len(e.Values); i += 2 {
+		m[e.Values[i]] = e.Values[i+1]
+	}
+	return m
+}
+
+func TestUnit_Streams_PublishSyncLandsInSyncStream(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{Transport: Streams})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	require.NoError(t, r.publishStream(context.Background(), cluster.Outbound{
+		Room: "room1", Kind: cluster.KindSync, Data: []byte("update"),
+	}))
+
+	entries := streamEntries(t, mr, "ygo:stream:room1")
+	require.Len(t, entries, 1)
+	require.Equal(t, "update", entryValues(entries[0])["d"])
+	require.Equal(t, "1", entryValues(entries[0])["s"], "first publish must be seq 1")
+	require.Empty(t, streamEntries(t, mr, "ygo:stream:aw:room1"))
+}
+
+// Awareness must go to its own stream: sharing would let heartbeat traffic
+// evict sync entries out of the retention window.
+func TestUnit_Streams_PublishAwarenessLandsInAwarenessStream(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{Transport: Streams})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	require.NoError(t, r.publishStream(context.Background(), cluster.Outbound{
+		Room: "room1", Kind: cluster.KindAwareness, Data: []byte("presence"),
+	}))
+
+	require.Len(t, streamEntries(t, mr, "ygo:stream:aw:room1"), 1)
+	require.Empty(t, streamEntries(t, mr, "ygo:stream:room1"))
+}
+
+// Server.Shutdown cancels the relay ctx and then joins lane workers; a
+// Publish that ignores cancellation stalls that join (#202).
+func TestUnit_Streams_PublishHonoursCancelledContext(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{Transport: Streams})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = r.publishStream(ctx, cluster.Outbound{
+		Room: "room1", Kind: cluster.KindSync, Data: []byte("update"),
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// Both must reach BOTH tiers, since pub/sub and Streams nodes do not
+// interoperate and migration rolls through Both.
+//
+// r.Start is required here even though the brief's version of this test
+// omitted it: Publish's existing started-guard returns ErrRelayNotStarted
+// before reaching the transport-routing branch this task adds, so without
+// Start the require.NoError below would fail regardless of whether the new
+// routing code is correct.
+func TestUnit_Streams_BothPublishesToChannelAndStream(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{Transport: Both})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	require.NoError(t, r.Start(context.Background(), &countingSink{}))
+
+	require.NoError(t, r.Publish(context.Background(), cluster.Outbound{
+		Room: "room1", Kind: cluster.KindSync, Data: []byte("update"),
+	}))
+
+	// Stream side is synchronous and observable immediately.
+	require.Eventually(t, func() bool {
+		return len(streamEntries(t, mr, "ygo:stream:room1")) == 1
+	}, 2*time.Second, 10*time.Millisecond, "Both must XADD to the stream")
+}
+
+// PubSub mode must never touch the keyspace.
+//
+// r.Start is required here for the same reason as the Both test above: the
+// brief's version discarded Publish's error and never called Start, so
+// Publish returned ErrRelayNotStarted before ever reaching the new
+// transport-routing branch — meaning the stream-emptiness assertion below
+// would have passed even if PubSub mode wrongly wrote to a stream. Calling
+// Start first makes Publish actually exercise usesStreams()/usesPubSub().
+func TestUnit_Streams_PubSubModeWritesNoStream(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	require.NoError(t, r.Start(context.Background(), &countingSink{}))
+
+	require.NoError(t, r.Publish(context.Background(), cluster.Outbound{
+		Room: "room1", Kind: cluster.KindSync, Data: []byte("update"),
+	}))
+	require.Empty(t, streamEntries(t, mr, "ygo:stream:room1"))
 }

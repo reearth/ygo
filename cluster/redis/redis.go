@@ -719,6 +719,16 @@ func (r *Relay) runSubscriber(ctx context.Context) {
 // Publish does NOT acquire r.mu: the started/closed atomics combined with
 // the done/startCtx channels give it all the ordering it needs, and the
 // hot path must not be serialised against lifecycle/room-membership ops.
+//
+// Config.Transport routes what happens next. When the transport uses
+// streams (Streams or Both), Publish XADDs synchronously, inline on the
+// caller's goroutine, before anything is queued for pub/sub — a failed XADD
+// must fail the call rather than be swallowed by the async pub/sub hand-off,
+// since Streams mode is the durable tier callers opted into for exactly that
+// error visibility. When the transport does not also use pub/sub (Streams
+// only), Publish returns immediately after the XADD and never touches the
+// outbound queue or PUBLISH at all — a Streams deployment must not still pay
+// for, or depend on, the at-most-once channel it exists to replace.
 func (r *Relay) Publish(ctx context.Context, out cluster.Outbound) error {
 	if r.closed.Load() {
 		return ErrRelayClosed
@@ -729,6 +739,16 @@ func (r *Relay) Publish(ctx context.Context, out cluster.Outbound) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
+	if r.scfg.transport.usesStreams() {
+		if err := r.publishStream(ctx, out); err != nil {
+			return err
+		}
+	}
+	if !r.scfg.transport.usesPubSub() {
+		return nil
+	}
+
 	// Safe to read r.startCtx unlocked: started.Store(true) happens-after
 	// the startCtx write in Start, so the started.Load()==true above acts
 	// as the matching acquire.

@@ -2,6 +2,7 @@
 package redis
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"time"
@@ -43,11 +44,11 @@ func (t Transport) String() string {
 // usesStreams reports whether this transport reads from and writes to streams.
 func (t Transport) usesStreams() bool { return t == Streams || t == Both }
 
-// usesPubSub reports whether this transport reads from and writes to channels.
-// This task adds Transport's full API; the reader/writer tasks that dispatch
-// on it land later.
-//
-//nolint:unused // consumed by a later task, see the sentence above
+// usesPubSub reports whether this transport reads from and writes to
+// channels. Publish consults this to decide whether the pub/sub hand-off
+// runs at all: Streams-only mode must skip PUBLISH entirely, not merely
+// ignore its result, or a Streams deployment would still pay for and depend
+// on the at-most-once channel it exists to replace.
 func (t Transport) usesPubSub() bool { return t == PubSub || t == Both }
 
 // Stream tier defaults. See the corresponding Config fields for rationale.
@@ -158,17 +159,13 @@ func resolveStreamCfg(client *goredis.Client, cfg Config) (streamCfg, error) {
 	return sc, nil
 }
 
-// syncKey is the room's sync stream key. The reader/writer tasks that
-// XADD/XREAD by key land later and consume it.
-//
-//nolint:unused // consumed by a later task, see the sentence above
+// syncKey is the room's sync stream key. publishStream XADDs to it; the
+// reader task that XREADs it lands later.
 func (s streamCfg) syncKey(room string) string { return s.prefix + room }
 
 // awKey is the room's awareness stream key. Separate from syncKey — see
-// Config.AwarenessMaxLen. The reader/writer tasks that XADD/XREAD by key
-// land later and consume it.
-//
-//nolint:unused // consumed by a later task, see the sentence above
+// Config.AwarenessMaxLen. publishStream XADDs to it; the reader task that
+// XREADs it lands later.
 func (s streamCfg) awKey(room string) string { return s.prefix + "aw:" + room }
 
 // Stream entry field names. Single letters on purpose: every byte is
@@ -250,4 +247,37 @@ func decodeStreamEntry(vals map[string]any) (nodeID []byte, seq uint64, kind clu
 		return nil, 0, 0, nil, err
 	}
 	return []byte(n), s, cluster.Kind(k), []byte(d), nil
+}
+
+// publishStream appends one payload to its room's stream.
+//
+// Trimming is inline MAXLEN ~ rather than a separate XTRIM call: it costs
+// nothing extra on a write that is already happening, and it is the memory
+// half of the guarantee. The time half is the MINID sweeper, because MAXLEN
+// alone gives no age bound — a hot room's 4096 entries might be two seconds.
+//
+// The approximate form (~) is deliberate. Exact trimming is O(n) per XADD on
+// a hot stream, and Redis recommends ~ for exactly this reason. Approximate
+// trimming keeps MORE entries than asked, never fewer, so it can overshoot on
+// memory but can never shrink the delivery window.
+//
+// ctx is the caller's: Server.Shutdown cancels the relay context and then
+// joins the lane workers, so a publish that ignored cancellation would stall
+// that join and leave a worker running past Shutdown (#202).
+func (r *Relay) publishStream(ctx context.Context, out cluster.Outbound) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	key, maxLen := r.scfg.syncKey(out.Room), r.scfg.maxLen
+	if out.Kind == cluster.KindAwareness {
+		key, maxLen = r.scfg.awKey(out.Room), r.scfg.awMaxLen
+	}
+
+	return r.client.XAdd(ctx, &goredis.XAddArgs{
+		Stream: key,
+		MaxLen: maxLen,
+		Approx: true,
+		Values: streamFields(r.nodeID, r.nextSeq(), out.Kind, out.Data),
+	}).Err()
 }
