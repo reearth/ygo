@@ -159,3 +159,36 @@ func TestUnit_Streams_SeqIsMonotonicUnderConcurrency(t *testing.T) {
 	}
 	require.Len(t, seen, n)
 }
+
+// A separate type, not extra fields on Stats: a counter that is permanently
+// zero for the tier you are running is what makes a dashboard untrustworthy.
+func TestUnit_StreamStats_SnapshotsEveryCounter(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{Transport: Streams})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	require.Equal(t, StreamStats{}, r.StreamStats(), "a fresh relay has zero of everything")
+
+	r.replayed.Add(3)
+	r.gaps.Add(1)
+	r.restarts.Add(2)
+	r.trimmed.Add(10)
+	r.stalled.Add(4)
+
+	require.Equal(t, StreamStats{
+		Replayed: 3, Gaps: 1, Restarts: 2, Trimmed: 10, Stalled: 4,
+	}, r.StreamStats())
+}
+
+// Stats() is the pub/sub tier's and must not grow stream fields.
+func TestUnit_StreamStats_PubSubStatsUnchanged(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	_ = r.Stats() // must still compile and run for a pub/sub relay
+	require.Equal(t, StreamStats{}, r.StreamStats(),
+		"a pub/sub relay reports zero stream activity")
+}

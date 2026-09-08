@@ -338,6 +338,14 @@ type Relay struct {
 	// gap. See nextSeq.
 	seq atomic.Uint64
 
+	// Stream tier counters: replayed, gaps, restarts, trimmed, stalled. Only
+	// incremented in Streams mode; always zero under pub/sub. See StreamStats.
+	replayed atomic.Uint64 //nolint:unused // incremented by stream reader
+	gaps     atomic.Uint64 //nolint:unused // incremented by stream reader
+	restarts atomic.Uint64 //nolint:unused // incremented by stream reader
+	trimmed  atomic.Uint64 //nolint:unused // incremented by MINID sweeper
+	stalled  atomic.Uint64 //nolint:unused // incremented by stream reader
+
 	// outbound carries Publish calls to the publisher goroutine. A bounded
 	// channel back-pressures the caller, matching MemRelay.
 	outbound chan cluster.Outbound
