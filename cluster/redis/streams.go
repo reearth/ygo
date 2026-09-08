@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -157,14 +158,87 @@ func resolveStreamCfg(client *goredis.Client, cfg Config) (streamCfg, error) {
 	return sc, nil
 }
 
-// syncKey is the room's sync stream key. publishStream XADDs to it; the
-// reader task that XREADs it lands later.
-func (s streamCfg) syncKey(room string) string { return s.prefix + room }
+// Stream-kind discriminators. The room name is APPENDED to one of these, so
+// the discriminator sits immediately after the prefix, ahead of every
+// caller-supplied byte.
+//
+// That placement is the whole point of the layout. internal/roomname.Valid
+// deliberately accepts every printable character, ":" included, to match the
+// y-websocket JS server, so a room name may contain anything a key may. Under
+// the earlier layout — syncKey = prefix+room, awKey = prefix+"aw:"+room — a
+// room named "aw:foo" produced byte-for-byte room "foo"'s awareness key, so
+// that room's SYNC traffic and room "foo"'s PRESENCE traffic shared one Redis
+// stream, each reader interpreting the other room's entries under its own
+// kind.
+//
+// With the discriminator first, a collision would require "s:"+x == "a:"+y
+// for some room names x and y. Those two strings differ in their first byte,
+// so no pair of room names can satisfy it: the room name can no longer forge
+// a discriminator, because it is never in a position to be read as one.
+const (
+	kindDiscrimSync      = "s:"
+	kindDiscrimAwareness = "a:"
+)
 
-// awKey is the room's awareness stream key. Separate from syncKey — see
-// Config.AwarenessMaxLen. publishStream XADDs to it; the reader task that
-// XREADs it lands later.
-func (s streamCfg) awKey(room string) string { return s.prefix + "aw:" + room }
+// syncKey is the room's sync stream key: prefix + "s:" + room. publishStream
+// XADDs to it and readBatch XREADs it.
+//
+// See the discriminator constants above for why "s:" precedes the room name
+// instead of the two key shapes differing by a suffix on one of them.
+func (s streamCfg) syncKey(room string) string { return s.prefix + kindDiscrimSync + room }
+
+// awKey is the room's awareness stream key: prefix + "a:" + room. A separate
+// stream from syncKey — see Config.AwarenessMaxLen — and provably a separate
+// KEY for every possible pair of room names, per the discriminator constants.
+func (s streamCfg) awKey(room string) string { return s.prefix + kindDiscrimAwareness + room }
+
+// parseStreamKey recovers the room and the stream kind from a stream key,
+// exactly or not at all.
+//
+// Exact because of the layout above: after the prefix the next two bytes are
+// the discriminator, and every remaining byte is the room name verbatim.
+// There is no second reading to weigh, because one key cannot be both a sync
+// key and an awareness key, and the room name never occupies the
+// discriminator's position. Under the earlier suffix layout this operation was
+// genuinely ambiguous, which is why the reader carries a streamTarget forward
+// rather than parsing (see streamTarget); this function serves the diagnostic
+// path, where a key the reader did not ask for turns up and the useful thing
+// to log is what that key claims to be.
+//
+// A key matching neither discriminator returns ok=false and must be IGNORED,
+// never guessed at. Guessing is what would attribute a foreign key's entries
+// to a real room, and this file already records what filing a payload under
+// the wrong interpretation costs (see decodeStreamEntry).
+func (s streamCfg) parseStreamKey(key string) (room string, isAwareness, ok bool) {
+	rest, found := strings.CutPrefix(key, s.prefix)
+	if !found {
+		return "", false, false
+	}
+	if room, found := strings.CutPrefix(rest, kindDiscrimSync); found {
+		return room, false, true
+	}
+	if room, found := strings.CutPrefix(rest, kindDiscrimAwareness); found {
+		return room, true, true
+	}
+	return "", false, false
+}
+
+// liveStreamKeysLocked is the set of stream keys this node still has a room
+// for: both streams of every room in streamRooms.
+//
+// Built in the forward direction — room names through syncKey/awKey — rather
+// than by parsing keys back into rooms, so it holds for any room name without
+// depending on the key layout being reversible at all.
+//
+// Caller must hold streamMu (which guards streamRooms).
+func (r *Relay) liveStreamKeysLocked() map[string]struct{} {
+	live := make(map[string]struct{}, len(r.streamRooms)*streamsPerRoom)
+	for room := range r.streamRooms {
+		live[r.scfg.syncKey(room)] = struct{}{}
+		live[r.scfg.awKey(room)] = struct{}{}
+	}
+	return live
+}
 
 // Stream entry field names. Single letters on purpose: every byte is
 // multiplied by retention x rate x rooms.
@@ -173,23 +247,86 @@ func (s streamCfg) awKey(room string) string { return s.prefix + "aw:" + room }
 // and there is no route by which an entry could reach the wrong room's key.
 const (
 	fieldNode = "n" // publisher nodeID, for the self-delivery filter
-	fieldSeq  = "s" // per-node monotonic sequence, for gap detection
+	fieldSeq  = "s" // per-node, per-stream monotonic sequence, for gap detection
 	fieldKind = "k" // cluster.Kind
 	fieldData = "d" // payload
 )
 
-// nextSeq issues this relay's next sequence number.
+// seqLimit bounds how many per-stream sequence counters this node keeps. See
+// evictStaleSeqsLocked for which entries go, and why losing one is safe.
+const seqLimit = 4096
+
+// nextSeq issues this node's next sequence number FOR ONE STREAM.
 //
-// The counter is per-node and monotonic, and it must exist from the first
-// release: it cannot be retrofitted, and without it gap detection is
-// impossible. XREAD from a trimmed ID returns the next surviving entry with
-// NO error, and stream IDs are ms-seq rather than contiguous, so trimming is
-// indistinguishable from ordinary advancement by ID arithmetic alone.
+// The counter must exist from the first release: it cannot be retrofitted,
+// and without it gap detection is impossible. XREAD from a trimmed ID returns
+// the next surviving entry with NO error, and stream IDs are ms-seq rather
+// than contiguous, so trimming is indistinguishable from ordinary
+// advancement by ID arithmetic alone.
 //
-// It lives in memory, so it restarts at 0 when the process does. A reader
-// treats a DECREASE as a restart rather than a gap — see the reader's
-// gap-detection notes.
-func (r *Relay) nextSeq() uint64 { return r.seq.Add(1) }
+// It is per node PER STREAM, keyed by the stream key this entry is about to be
+// written to. A single per-node counter — the earlier design — is not merely
+// coarser, it is wrong, and it breaks the counter's only consumer. A reader
+// watching one stream sees only the subset of a publisher's entries that
+// landed in THAT stream, so a node publishing to rooms A and B writes seqs
+// [1 3 5] into A's stream and [2 4 6] into B's, and both readers see a
+// sequence full of holes. noteSeq classifies seq > prev+1 as a gap, and
+// StreamStats.Gaps is documented "ALERT ON PRESENCE… a single gap means data
+// was lost" — so a per-node counter makes the tier's headline signal fire
+// constantly on every healthy multi-room node, which is the same as having no
+// signal at all. Per stream, one node's entries in one stream are contiguous,
+// and a jump can only mean entries were trimmed before the reader reached
+// them.
+//
+// Counters live in memory, so they restart at 0 when the process does, and a
+// reader treats a DECREASE as a restart rather than a gap — see noteSeq.
+//
+// streamMu rather than an atomic per counter: the map lookup has to be
+// serialised anyway, and once it is, incrementing a plain uint64 under that
+// same lock costs one arithmetic op and saves a per-stream heap allocation.
+// The lock is cheap here in absolute terms and cheaper still in context —
+// streamMu is never held across I/O anywhere (that is why it exists separately
+// from mu), and the caller is about to make a network round trip.
+func (r *Relay) nextSeq(streamKey string) uint64 {
+	r.streamMu.Lock()
+	defer r.streamMu.Unlock()
+
+	if _, known := r.seqs[streamKey]; !known && len(r.seqs) >= seqLimit {
+		r.evictStaleSeqsLocked()
+	}
+	r.seqs[streamKey]++
+	return r.seqs[streamKey]
+}
+
+// evictStaleSeqsLocked drops the counters of streams whose room this node no
+// longer holds, in one pass, and keeps every counter whose room is still live.
+//
+// Bounding is needed because the map grows with the streams this node has
+// ever published to, and room churn over a long-lived process is unbounded
+// even though the live set is not. It mirrors evictStaleCursorsLocked's policy
+// exactly, for the same reason: if every counter is live the map is left above
+// seqLimit, which is correct, because the residual is then bounded by real
+// load (streamsPerRoom x resident rooms) rather than by history.
+//
+// Dropping a stale counter is safe in the direction that matters. A room this
+// node has released is a room it has stopped publishing to — the Relay
+// contract has the server activate every room it hosts — so if it is ever
+// reactivated here the counter restarts at 1, and a reader classifies a
+// DECREASE as a restart, never as a gap. The eviction therefore cannot
+// manufacture the alarm this counter exists to raise — at worst it adds one
+// Restarts increment, a counter documented as informational. A caller that
+// published without ever activating (nothing does in production; some tests
+// do) would trade the same way: extra Restarts, never a Gap.
+//
+// Caller must hold streamMu.
+func (r *Relay) evictStaleSeqsLocked() {
+	live := r.liveStreamKeysLocked()
+	for key := range r.seqs {
+		if _, ok := live[key]; !ok {
+			delete(r.seqs, key)
+		}
+	}
+}
 
 // streamFields builds the XADD field list for one entry.
 func streamFields(nodeID []byte, seq uint64, kind cluster.Kind, data []byte) []any {
@@ -276,6 +413,9 @@ func (r *Relay) publishStream(ctx context.Context, out cluster.Outbound) error {
 		Stream: key,
 		MaxLen: maxLen,
 		Approx: true,
-		Values: streamFields(r.nodeID, r.nextSeq(), out.Kind, out.Data),
+		// nextSeq is passed the key this entry is about to be written to:
+		// the counter is per stream, because a reader of one stream sees only
+		// that stream's entries. See nextSeq.
+		Values: streamFields(r.nodeID, r.nextSeq(key), out.Kind, out.Data),
 	}).Err()
 }

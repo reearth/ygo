@@ -215,6 +215,11 @@ type Config struct {
 
 	// StreamPrefix namespaces stream keys. Default "ygo:stream:".
 	//
+	// A room's two streams are StreamPrefix+"s:"+room (sync) and
+	// StreamPrefix+"a:"+room (awareness). The kind discriminator precedes the
+	// room name so that no room name — and every printable character is a
+	// legal room name, ":" included — can produce another room's key.
+	//
 	// Deliberately distinct from ChannelPrefix's "ygo:cluster:": streams live
 	// in the keyspace where SCAN, MEMORY USAGE and eviction policy can see
 	// them, and channels do not, so sharing one prefix would make a
@@ -332,11 +337,15 @@ type Relay struct {
 	chanSize int
 	scfg     streamCfg
 
-	// seq is incremented by nextSeq for each stream entry published by this
-	// node, allowing readers to detect trimmed or dropped entries. It restarts
-	// at 0 on process restart; a decrease is treated as a restart rather than a
-	// gap. See nextSeq.
-	seq atomic.Uint64
+	// seqs holds this node's sequence counter for each stream KEY it has
+	// published to, so readers can detect trimmed or dropped entries. Per
+	// stream, not per node: a reader of one stream sees only the entries that
+	// landed in that stream, so one shared counter would look full of holes on
+	// any node publishing to more than one room, and gap detection would fire
+	// on healthy clusters. Counters restart at 0 on process restart; a
+	// decrease is read as a restart rather than a gap. Guarded by streamMu and
+	// bounded by seqLimit; see nextSeq / evictStaleSeqsLocked.
+	seqs map[string]uint64
 
 	// Stream tier counters: replayed, gaps, restarts, trimmed, stalled. Only
 	// incremented in Streams mode; always zero under pub/sub. See StreamStats.
@@ -371,10 +380,14 @@ type Relay struct {
 	// the whole retention window, and bounded by cursorLimit. Guarded by
 	// streamMu; see setCursor / evictStaleCursorsLocked.
 	cursors map[string]string
-	// lastSeq is the highest sequence number seen from each source node,
-	// keyed by nodeID, used to tell a trimmed-away gap from a node restart.
-	// Guarded by streamMu; see noteSeq.
-	lastSeq map[string]uint64
+	// lastSeq is the highest sequence number seen from each source node ON
+	// EACH STREAM, used to tell a trimmed-away gap from a node restart. Keyed
+	// by both because the publisher's counter is per stream (see seqs): keying
+	// by nodeID alone would interleave two streams' sequences from one node
+	// into a single series and report the interleaving itself as gaps.
+	// Guarded by streamMu and bounded by seqLimit; see noteSeq /
+	// evictStaleLastSeqLocked.
+	lastSeq map[seqSource]uint64
 
 	// outbound carries Publish calls to the publisher goroutine. A bounded
 	// channel back-pressures the caller, matching MemRelay.
@@ -511,7 +524,8 @@ func New(client *goredis.Client, cfg Config) (*Relay, error) {
 		workers:     make(map[string]*roomWorker),
 		streamRooms: make(map[string]int),
 		cursors:     make(map[string]string),
-		lastSeq:     make(map[string]uint64),
+		seqs:        make(map[string]uint64),
+		lastSeq:     make(map[seqSource]uint64),
 	}, nil
 }
 

@@ -155,15 +155,20 @@ const cursorLimit = 4096
 // streamTarget is one XREAD key together with what it means.
 //
 // readBatch builds the keys from room names, so it already knows the room and
-// which of the two streams the key is; carrying that forward is what lets
-// handleStream skip parsing a room back out of a key. That parsing is not
-// merely redundant, it is AMBIGUOUS: syncKey and awKey share one namespace,
-// so prefix+"aw:foo" is simultaneously room "aw:foo"'s sync key and room
-// "foo"'s awareness key. Deriving the room from the key (as this task's brief
-// did) silently mislabels the first of those as room "foo". Carrying the
-// target forward cannot fix the underlying key collision — two rooms really
-// can map to one key — but it does keep every entry attributed to the room
-// whose key set asked for it.
+// which of the two streams the key is; carrying that forward means
+// handleStream never has to derive a room from a key. That mattered
+// enormously under the earlier key layout, where syncKey and awKey shared one
+// namespace and prefix+"aw:foo" was simultaneously room "aw:foo"'s sync key
+// and room "foo"'s awareness key — an ambiguity no amount of care at the read
+// site could resolve, because the two rooms genuinely shared one stream.
+//
+// The discriminated layout (see the kindDiscrim constants) removes the
+// collision at the source: distinct rooms now have provably distinct keys, and
+// parseStreamKey can recover room and kind exactly. streamTarget stays anyway,
+// because attributing an entry by the key set that ASKED for it is still the
+// stronger construction — it needs no parsing to be correct, and a returned
+// key that was never requested is then something to ignore rather than
+// something to interpret.
 type streamTarget struct {
 	key         string
 	room        string
@@ -268,10 +273,14 @@ func (r *Relay) readBatch(ctx context.Context, rooms []string) error {
 	ids := make([]string, 0, n)
 
 	add := func(tgt streamTarget, dflt string) {
-		// The dup guard is not paranoia: syncKey and awKey share a namespace,
-		// so a room literally named "aw:foo" produces the same key as room
-		// "foo"'s awareness stream. Sending one key to XREAD twice would make
-		// a malformed command out of a merely unlucky room name.
+		// Unreachable for distinct rooms under the discriminated key layout:
+		// syncKey and awKey cannot collide with each other for ANY pair of
+		// room names, and roomsForReader yields each room once. It survives as
+		// the structural guarantee that keys and ids stay index-aligned — a
+		// duplicate key would make XREAD's own command malformed — and it
+		// costs one lookup in a map the attribution below needs regardless.
+		// Under the earlier suffix layout it was load-bearing: a room named
+		// "aw:foo" really did produce room "foo"'s awareness key.
 		if _, dup := targets[tgt.key]; dup {
 			return
 		}
@@ -303,10 +312,21 @@ func (r *Relay) readBatch(ctx context.Context, rooms []string) error {
 	for _, stream := range res {
 		tgt, ok := targets[stream.Stream]
 		if !ok {
-			// Nothing sane to do: recovering a room name from the key is the
-			// ambiguous operation streamTarget exists to avoid.
+			// Ignored, never guessed at. Attribution comes from the key set
+			// this call built, so a key nobody asked for has no room to be
+			// delivered to; parseStreamKey is used only to make the log
+			// actionable, and a key that matches neither discriminator (a
+			// foreign key sharing the prefix, say) reports as unrecognised
+			// rather than being coerced into a room name.
+			room, kind := "", "unrecognised"
+			if parsed, isAw, ok := r.scfg.parseStreamKey(stream.Stream); ok {
+				room, kind = parsed, "sync"
+				if isAw {
+					kind = "awareness"
+				}
+			}
 			r.log.Warn("cluster/redis: XREAD returned an unrequested stream; skip",
-				"stream", stream.Stream)
+				"stream", stream.Stream, "room", room, "kind", kind)
 			continue
 		}
 		r.handleStream(tgt, stream.Messages)
@@ -354,11 +374,7 @@ func (r *Relay) setCursor(key, id string) {
 //
 // Caller must hold streamMu (which also guards streamRooms).
 func (r *Relay) evictStaleCursorsLocked() {
-	live := make(map[string]struct{}, len(r.streamRooms)*streamsPerRoom)
-	for room := range r.streamRooms {
-		live[r.scfg.syncKey(room)] = struct{}{}
-		live[r.scfg.awKey(room)] = struct{}{}
-	}
+	live := r.liveStreamKeysLocked()
 	for key := range r.cursors {
 		if _, ok := live[key]; !ok {
 			delete(r.cursors, key)
@@ -458,7 +474,7 @@ func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) {
 			w.lane.Push(cluster.KindAwareness, data)
 			continue
 		}
-		r.noteSeq(nodeID, seq)
+		r.noteSeq(tgt.key, nodeID, seq)
 		syncPayloads = append(syncPayloads, data)
 	}
 
@@ -489,32 +505,77 @@ func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) {
 	}
 }
 
-// noteSeq tracks a source node's sequence numbers and classifies what it sees.
+// seqSource identifies one sequence series: one publishing node's entries in
+// one stream.
+//
+// Both halves are load-bearing, and a struct key rather than a concatenated
+// string because both halves are arbitrary bytes — nodeID is caller-supplied
+// via Config.NodeID and a room name may contain anything — so any joining
+// character could be forged by one half into the other's territory. A struct
+// key has no encoding to get wrong.
+type seqSource struct {
+	node   string // publisher nodeID, as raw bytes held in a string
+	stream string // stream key the entry was read from
+}
+
+// noteSeq tracks one source node's sequence numbers ON ONE STREAM and
+// classifies what it sees.
+//
+// Keyed by (nodeID, stream key), matching nextSeq's per-stream counter. Both
+// halves are required. Without the nodeID, two nodes' independent series
+// would be compared against each other; without the stream key, one node's
+// two streams would be folded into one series, and their legitimate
+// interleaving — [1 3 5] in one stream, [2 4 6] in the other — would be
+// reported as gaps on a perfectly healthy node.
 //
 // A JUMP is a provable gap: entries existed and were trimmed before this
 // reader got to them. It is the only detectable form of loss, because XREAD
 // from a trimmed ID returns the next surviving entry with no error and stream
 // IDs are ms-seq rather than contiguous.
 //
-// A DECREASE is a restart, not a gap. seq lives in memory, so a node restarts
-// it at 0 — and a node configured with a STATIC NodeID does that under the
-// same identity. Reporting it as a gap would cry data loss on every deploy;
-// worse, treating the lower numbers as already-seen would stall that source
-// forever. So a decrease resets the baseline and is counted separately.
-func (r *Relay) noteSeq(nodeID []byte, seq uint64) {
-	key := string(nodeID)
+// A DECREASE is a restart, not a gap. Counters live in memory, so a node
+// restarts them at 0 — and a node configured with a STATIC NodeID does that
+// under the same identity. Reporting it as a gap would cry data loss on every
+// deploy; worse, treating the lower numbers as already-seen would stall that
+// source forever. So a decrease resets the baseline and is counted separately.
+func (r *Relay) noteSeq(streamKey string, nodeID []byte, seq uint64) {
+	src := seqSource{node: string(nodeID), stream: streamKey}
 
 	r.streamMu.Lock()
-	prev, known := r.lastSeq[key]
-	r.lastSeq[key] = seq
+	prev, known := r.lastSeq[src]
+	if !known && len(r.lastSeq) >= seqLimit {
+		r.evictStaleLastSeqLocked()
+	}
+	r.lastSeq[src] = seq
 	r.streamMu.Unlock()
 
 	switch {
 	case !known:
-		// First entry from this node: a baseline, not a gap.
+		// First entry from this node on this stream: a baseline, not a gap.
 	case seq < prev:
 		r.restarts.Add(1)
 	case seq > prev+1:
 		r.gaps.Add(1)
+	}
+}
+
+// evictStaleLastSeqLocked drops the baselines of streams this relay no longer
+// reads, keeping every baseline whose room is still assigned.
+//
+// Needed because keying by (node, stream) rather than by node alone turns a
+// map bounded by CLUSTER SIZE into one that also grows with room churn. Same
+// selective policy as evictStaleCursorsLocked, and safe in the same
+// direction: a dropped baseline makes the next entry from that source a
+// FIRST entry, which is counted as neither a gap nor a restart. It can only
+// hide a gap on a stream this node had stopped reading — where nothing was
+// being delivered to lose — and can never invent one.
+//
+// Caller must hold streamMu.
+func (r *Relay) evictStaleLastSeqLocked() {
+	live := r.liveStreamKeysLocked()
+	for src := range r.lastSeq {
+		if _, ok := live[src.stream]; !ok {
+			delete(r.lastSeq, src)
+		}
 	}
 }

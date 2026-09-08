@@ -574,3 +574,144 @@ func TestIntegration_StreamReader_ActivationDoesNotWaitOutReadBlock(t *testing.T
 		3*time.Second, 10*time.Millisecond,
 		"a room activated mid-read must not wait out ReadBlock (%s)", defaultReadBlock)
 }
+
+// --- Gap detection ---------------------------------------------------------
+
+// noteSeq must key its baseline by (nodeID, stream key). One node's two
+// streams carry two INDEPENDENT series — nextSeq counts per stream — so
+// folding them into one series by nodeID alone compares numbers that were
+// never meant to be compared.
+//
+// The A,A,A,B,B,B ordering below is what makes this test discriminating: with
+// per-node keying it reads as 1,2,3 then a DECREASE to 1, so Restarts climbs
+// on a node that merely publishes to two rooms. Ordering the two series
+// strictly alternately would hide the defect, since 1,1,2,2,3,3 contains
+// neither a jump nor a decrease.
+func TestUnit_StreamReader_NoteSeqIsPerNodePerStream(t *testing.T) {
+	mr := newMiniRedis(t)
+	// Deliberately NOT Started: no reader goroutine, so nothing else touches
+	// the counters this test asserts on.
+	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	keyA, keyB := r.scfg.syncKey("room1"), r.scfg.syncKey("room2")
+	src := []byte(nodeB)
+
+	for _, seq := range []uint64{1, 2, 3} {
+		r.noteSeq(keyA, src, seq)
+	}
+	for _, seq := range []uint64{1, 2, 3} {
+		r.noteSeq(keyB, src, seq)
+	}
+	require.Equal(t, uint64(0), r.StreamStats().Gaps,
+		"two contiguous per-stream series from one node are not a gap")
+	require.Equal(t, uint64(0), r.StreamStats().Restarts,
+		"the second stream's series starting over is not a restart")
+
+	// A real jump within ONE stream is still a gap.
+	r.noteSeq(keyA, src, 9)
+	require.Equal(t, uint64(1), r.StreamStats().Gaps, "a jump on one stream must be reported")
+
+	// And the other stream's baseline was untouched by it.
+	r.noteSeq(keyB, src, 4)
+	require.Equal(t, uint64(1), r.StreamStats().Gaps, "streams must not interfere")
+
+	// A different node on the same stream is its own series, so its first
+	// entry is a baseline rather than a decrease.
+	r.noteSeq(keyA, []byte(nodeA), 1)
+	require.Equal(t, uint64(0), r.StreamStats().Restarts)
+	require.Equal(t, uint64(1), r.StreamStats().Gaps)
+
+	// A genuine decrease on one series is still a restart.
+	r.noteSeq(keyA, src, 2)
+	require.Equal(t, uint64(1), r.StreamStats().Restarts)
+}
+
+// A healthy node publishing to SEVERAL rooms must leave a reader's Gaps and
+// Restarts at zero. This is the assertion that protects the contract:
+// StreamStats.Gaps is documented "ALERT ON PRESENCE, not on rate — a single
+// gap means data was lost", so a counter that ticks during ordinary
+// multi-room operation is worse than no counter at all, and issue #196 reads
+// this number directly.
+//
+// Two phases, because the two halves of the defect need different traffic
+// shapes to expose them, and one of them is invisible under the other's
+// shape:
+//
+//   - Interleaved across rooms catches the PUBLISHER half. With one counter
+//     shared across rooms, room1's stream held [1 3 5] and room2's [2 4 6];
+//     measured Gaps=4 against that counter.
+//   - Room-at-a-time catches the READER half. With lastSeq keyed by nodeID
+//     alone, one node's two per-stream series concatenate into 4,5,6 then
+//     4,5,6 and the second one reads as a DECREASE; measured Restarts=1
+//     against that keying. Interleaved traffic hides it entirely, because
+//     4,4,5,5,6,6 contains neither a jump nor a decrease — which is why this
+//     phase exists and why it waits for delivery between rooms.
+//
+// Both mutations recorded in task-6-report.md.
+func TestIntegration_StreamReader_HealthyMultiRoomReaderRecordsNoGaps(t *testing.T) {
+	mr := newMiniRedis(t)
+
+	sink := &recordingSink{}
+	a, err := New(newClient(t, mr), readerConfig(nodeA))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = a.Close() })
+	b, err := New(newClient(t, mr), readerConfig(nodeB))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, a.Start(ctx, sink))
+	require.NoError(t, b.Start(ctx, &countingSink{}))
+	a.RoomActivated("room1")
+	a.RoomActivated("room2")
+
+	publish := func(room, text string) {
+		require.NoError(t, b.Publish(ctx, cluster.Outbound{
+			Room: room, Kind: cluster.KindSync, Data: v1Update(t, text),
+		}))
+	}
+	// A witness on every phase: without it a Gaps assertion would pass on a
+	// reader that never delivered anything at all.
+	waitSeen := func(texts ...string) {
+		require.Eventually(t, func() bool {
+			for _, text := range texts {
+				if !sink.payloadSeen(text) {
+					return false
+				}
+			}
+			return true
+		}, 5*time.Second, 10*time.Millisecond, "every edit must be delivered: %v", texts)
+	}
+
+	// Phase 1: interleaved across rooms, which is what a node hosting two
+	// rooms ordinarily does.
+	var interleaved []string
+	for i := 0; i < 3; i++ {
+		for _, room := range []string{"room1", "room2"} {
+			text := fmt.Sprintf("edit-%s-%d", room, i)
+			interleaved = append(interleaved, text)
+			publish(room, text)
+		}
+	}
+	waitSeen(interleaved...)
+
+	// Phase 2: one room's whole batch delivered before the other's starts, so
+	// the reader observes the two per-stream series back to back.
+	for _, room := range []string{"room1", "room2"} {
+		var batch []string
+		for i := 3; i < 6; i++ {
+			text := fmt.Sprintf("edit-%s-%d", room, i)
+			batch = append(batch, text)
+			publish(room, text)
+		}
+		waitSeen(batch...)
+	}
+
+	require.Equal(t, uint64(0), a.StreamStats().Gaps,
+		"a healthy multi-room node must produce NO gaps: Gaps is an alert-on-presence signal")
+	require.Equal(t, uint64(0), a.StreamStats().Restarts,
+		"no node restarted, so nothing may be reported as one")
+}
