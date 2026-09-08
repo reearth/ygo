@@ -195,6 +195,50 @@ func (l *Lane) Empty() bool {
 	return len(l.syncQ) == 0 && !l.hasAw
 }
 
+// Depth reports how many payloads the lane currently holds: every queued sync
+// blob, plus one for a pending awareness blob.
+//
+// Read-only and purely observational. Empty() answers "is there work?" but
+// nothing answered "how much?", and the degraded-path counters only rise
+// AFTER a merge or a drop has already happened — too late for a producer that
+// wants to see saturation coming.
+//
+// Do NOT derive a full-lane decision from this by comparing it against a cap
+// held elsewhere: the awareness slot is latest-only and never contributes to
+// the capacity Push enforces, so such a comparison would report a lane as
+// full one payload early whenever awareness happened to be pending. Ask
+// Full() instead, which is defined against the queue the cap actually governs.
+func (l *Lane) Depth() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := len(l.syncQ)
+	if l.hasAw {
+		n++
+	}
+	return n
+}
+
+// Full reports whether the next KindSync Push would push the lane past its
+// capacity and so force a coalescing merge.
+//
+// The predicate lives here, not in the caller, because the cap and the
+// threshold Push compares it against are both lane-internal: a caller
+// recomputing "depth >= my copy of the cap" duplicates two facts it does not
+// own and drifts silently if either changes. It is exact rather than
+// conservative — collapseLocked triggers on len(syncQ) > cap after the
+// append, which is len(syncQ) >= cap before it.
+//
+// This is advisory only. Push still never blocks and never drops, so a
+// producer is free to ignore Full and take the merge. It exists for a producer
+// that has something CHEAPER to do than make the lane merge — cluster/redis's
+// stream reader declines to advance its cursor and re-reads the same durable
+// entries next cycle instead.
+func (l *Lane) Full() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.syncQ) >= l.cap
+}
+
 // Stats returns a snapshot of the degraded-path counters. Lock-free by
 // design (see the counters' doc on the Lane struct): it never acquires mu,
 // so it cannot block behind Push/collapseLocked/TakeSync's crdt.MergeUpdatesV1
