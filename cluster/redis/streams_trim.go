@@ -64,7 +64,7 @@ func (r *Relay) runTrimSweeper(ctx context.Context) {
 // and operators must size for the former. An EXPIRE-based reclaim on each
 // XADD (so an untouched key falls out on its own, with no keyspace scan and
 // nothing to coordinate between nodes) is the intended fix and is tracked as a
-// follow-up issue; docs/CLUSTERING.md says the same in the cost model.
+// follow-up (#248); docs/CLUSTERING.md says the same in the cost model.
 //
 // The room list is copied out under streamMu and the lock released before any
 // Redis call — streamMu must never be held across I/O (see its doc on

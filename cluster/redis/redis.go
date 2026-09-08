@@ -219,7 +219,7 @@ type Config struct {
 	// apply it. Two consequences: choosing Streams does not remove the
 	// pub/sub connection or the per-room SUBSCRIBE from this node's Redis
 	// footprint, and a half-migrated cluster is one-way rather than cleanly
-	// split. Gating the inbound side too is tracked as a follow-up issue.
+	// split. Gating the inbound side too is tracked in #249.
 	//
 	// The migration advice is the same either way, because it only depends on
 	// the outbound gate: the zero-downtime path is to roll every node to

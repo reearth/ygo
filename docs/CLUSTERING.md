@@ -579,8 +579,7 @@ per-session, per-tenant, or otherwise unbounded, budget for the whole history
 or reclaim the keys yourself (`XTRIM`/`DEL`/`EXPIRE` from an operations job
 against `StreamPrefix*`) until the built-in reclaim lands: setting an `EXPIRE`
 on each `XADD`, so an untouched key falls out on its own with no keyspace scan
-and nothing to coordinate between nodes, is the intended fix and is tracked as
-a follow-up issue.
+and nothing to coordinate between nodes, is the intended fix and is tracked in #249.
 
 The tier also adds a steady command floor: `Readers × (1 /
 ReadBlock)` blocking `XREAD`s per second per node even when nothing is

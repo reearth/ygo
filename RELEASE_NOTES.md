@@ -49,7 +49,7 @@ window, for as long as that Redis instance lives. If your room names are a
 bounded set of documents, that is a one-off ceiling you can multiply out. If
 they are per-session or per-tenant and unbounded, budget for the whole history
 or delete the keys from an operations job in the meantime. Expiring idle keys
-automatically is the intended fix and is tracked as a follow-up issue.
+automatically is the intended fix and is tracked in #248.
 
 So pub/sub is **not deprecated and is not going away**. At-most-once is a
 legitimate choice when your rooms are hot, your Redis is sized for fan-out
@@ -66,8 +66,8 @@ side on the setting, so a Streams node still subscribes to its rooms' pub/sub
 channels and does apply what a pub/sub node publishes. Do not rely on that —
 it means a half-migrated cluster is one-way rather than symmetric, and it also
 means choosing Streams does not by itself remove the pub/sub connection from
-the node's Redis footprint. Gating the receiving side too is tracked as a
-follow-up issue.
+the node's Redis footprint. Gating the receiving side too is tracked
+in #249.
 
 The way through is the third setting, `Transport: Both`, which publishes to and
 reads from both mechanisms at once:
