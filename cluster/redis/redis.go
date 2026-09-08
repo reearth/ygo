@@ -103,6 +103,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 
@@ -191,6 +192,85 @@ type Config struct {
 	// uses relaylane.DefaultCap. Coalescing never loses an edit — it trades
 	// per-update delivery granularity for bounded memory on a wedged room.
 	RoomQueueSize int
+
+	// Transport selects the delivery mechanism. The zero value is PubSub,
+	// which is the behaviour every existing deployment already has.
+	//
+	// Streams trades Redis memory for an at-least-once guarantee: each room
+	// becomes a Redis stream, and a reader that stalls or restarts resumes
+	// from where it left off instead of losing whatever it missed. The
+	// guarantee is bounded — at-least-once within
+	// min(StreamRetention, StreamMaxLen/rate) — because a stream is trimmed.
+	//
+	// PubSub remains supported, not deprecated: PUBLISH costs nothing, while
+	// XADD is a write with replication, AOF/RDB and memory proportional to
+	// retention x rate x update size. At-most-once is a legitimate choice.
+	//
+	// Both publishes to and reads from both, for migration. It needs no
+	// deduplication because V1 updates are idempotent, so double-applying is
+	// a no-op. Pub/sub and Streams nodes do NOT interoperate, so the
+	// zero-downtime path is: roll every node to Both, then roll every node to
+	// Streams. See docs/CLUSTERING.md.
+	Transport Transport
+
+	// StreamPrefix namespaces stream keys. Default "ygo:stream:".
+	//
+	// Deliberately distinct from ChannelPrefix's "ygo:cluster:": streams live
+	// in the keyspace where SCAN, MEMORY USAGE and eviction policy can see
+	// them, and channels do not, so sharing one prefix would make a
+	// keyspace listing mix two unrelated kinds of thing.
+	StreamPrefix string
+
+	// StreamRetention is the age bound on a room's sync stream. Default 60s,
+	// matching y-redis's own REDIS_MIN_MESSAGE_LIFETIME, which is long enough
+	// to cover a node restart, a deploy rollover, or a GC pause.
+	//
+	// This is one half of the delivery guarantee; StreamMaxLen is the other.
+	StreamRetention time.Duration
+
+	// StreamMaxLen is the entry-count ceiling on a room's sync stream.
+	// Default 4096, which is roughly 800KB per hot room at 200-byte updates.
+	//
+	// Enforced inline on XADD with MAXLEN ~, so trimming is approximate and a
+	// stream may briefly hold more. That overshoot costs memory; it never
+	// costs delivery, because approximate trimming keeps MORE than asked,
+	// never fewer.
+	StreamMaxLen int64
+
+	// AwarenessMaxLen and AwarenessRetention bound the SEPARATE awareness
+	// stream. Defaults 64 entries and 10s.
+	//
+	// Awareness gets its own stream deliberately. It is high-frequency
+	// heartbeat traffic, so sharing the sync stream's MAXLEN would let
+	// presence evict sync entries out of the retention window — silently
+	// shrinking the very guarantee this tier exists to provide. It is also
+	// never replayed: awareness is read from the stream's tail, because
+	// replaying it would resurrect presence for clients that are long gone.
+	AwarenessMaxLen    int64
+	AwarenessRetention time.Duration
+
+	// Readers is how many goroutines multiplex the node's assigned rooms.
+	// Default 4.
+	//
+	// Not one per room: each blocking XREAD holds a connection, so a reader
+	// per room would exhaust Redis's default maxclients (10000) well before
+	// this server's 10k-room target. Rooms are hash-assigned to readers.
+	//
+	// New fails if the client's PoolSize is not greater than Readers, because
+	// every reader holds a pool connection for its whole ReadBlock and an
+	// undersized pool starves publishes.
+	Readers int
+
+	// TrimInterval is how often the MINID sweeper enforces StreamRetention.
+	// Default 30s. New fails if it is not less than StreamRetention.
+	TrimInterval time.Duration
+
+	// ReadBlock bounds each XREAD BLOCK. Default 5s.
+	//
+	// Bounded rather than infinite so a reader notices room-membership
+	// changes. Activation does not wait for it: a newly activated room gets a
+	// fresh short read folded in immediately.
+	ReadBlock time.Duration
 }
 
 // Stats is a point-in-time snapshot of the relay's inbound degraded-path
@@ -250,6 +330,7 @@ type Relay struct {
 	log      *slog.Logger
 	nodeID   []byte
 	chanSize int
+	scfg     streamCfg
 
 	// outbound carries Publish calls to the publisher goroutine. A bounded
 	// channel back-pressures the caller, matching MemRelay.
@@ -356,6 +437,11 @@ func New(client *goredis.Client, cfg Config) (*Relay, error) {
 		cfg.Logger = slog.Default()
 	}
 
+	scfg, err := resolveStreamCfg(client, cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	nodeID := cfg.NodeID
 	if len(nodeID) == 0 {
 		nodeID = make([]byte, nodeIDLen)
@@ -373,6 +459,7 @@ func New(client *goredis.Client, cfg Config) (*Relay, error) {
 		log:         cfg.Logger,
 		nodeID:      nodeID,
 		chanSize:    cfg.ChannelSize,
+		scfg:        scfg,
 		outbound:    make(chan cluster.Outbound, cfg.OutboundBuffer),
 		done:        make(chan struct{}),
 		activeRooms: make(map[string]int),
