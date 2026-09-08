@@ -386,14 +386,17 @@ type Relay struct {
 	// incremented/decremented in Streams/Both mode. roomsForReader is what
 	// consumes it, to build each reader's XREAD key set.
 	streamRooms map[string]int
-	// cursors is the last stream ID this node has delivered per stream KEY
-	// (not per room: a room has a sync stream and an awareness stream, and
-	// they advance independently). Purely in-memory and never persisted — a
-	// lost cursor costs a replay, not a loss, because a sync stream is read
-	// from its oldest retained entry when no cursor is known. Entries are
-	// kept past a room's deactivation so ordinary churn does not re-replay
-	// the whole retention window, and bounded by cursorLimit. Guarded by
-	// streamMu; see setCursor / evictStaleCursorsLocked.
+	// cursors is the last SYNC stream ID this node has delivered, per stream
+	// key. Purely in-memory and never persisted — a lost cursor costs a
+	// replay, not a loss, because a sync stream is read from its oldest
+	// retained entry when no cursor is known. Entries are kept past a room's
+	// deactivation so ordinary churn does not re-replay the whole retention
+	// window, and bounded by cursorLimit. Guarded by streamMu; see setCursor
+	// / evictStaleCursorsLocked.
+	//
+	// Awareness cursors are deliberately NOT here. They must not survive a
+	// room's deactivation, and a residency-scoped home makes that structural:
+	// see roomWorker.awCursor, which also states why the two kinds differ.
 	cursors map[string]string
 	// lastSeq is the highest sequence number seen from each source node ON
 	// EACH STREAM, used to tell a trimmed-away gap from a node restart. Keyed
@@ -958,23 +961,24 @@ func (r *Relay) RoomDeactivated(room string) {
 			r.streamRooms[room] = n
 		} else {
 			delete(r.streamRooms, room)
-			// The room is really gone from this node, so forget where its
-			// AWARENESS stream had got to — and only its awareness stream.
-			// Presence is read from the tail precisely because replaying it
-			// resurrects clients that are long gone, and a retained cursor
-			// resurrects them the moment the room comes back: the websocket
-			// provider evicts and reloads idle rooms continuously (#183), so
-			// a reactivation inside one process is routine, and it would
-			// otherwise resume mid-stream and replay up to AwarenessMaxLen
-			// presence blobs for the previous occupants. The room's SYNC
-			// cursor is deliberately kept — see cursorLimit.
+			// The room is really gone from this node — and no cursor is
+			// deleted here, deliberately. Its SYNC cursor is KEPT: dropping
+			// it would make ordinary room churn replay the room's whole
+			// retention window on every reactivation, the condition
+			// StreamStats.Replayed exists to alarm on (see cursorLimit). Its
+			// AWARENESS cursor must NOT survive — presence is read from the
+			// tail precisely because replaying it resurrects clients that are
+			// long gone, and the websocket provider evicts and reloads idle
+			// rooms continuously (#183), so a reactivation inside one process
+			// is routine — but it is not stored here to delete. It lives on
+			// the room's delivery worker, which stopWorker retires below, so
+			// it dies with the residency it belongs to.
 			//
-			// Not synchronised against a read already in flight: that read's
-			// id vector was built before this delete, so it can still write
-			// the cursor back once. The residue is bounded by one read cycle
-			// (ReadBlock) and by AwarenessRetention, not by the whole
-			// retention window, and evictStaleCursorsLocked reclaims it.
-			delete(r.cursors, r.scfg.awKey(room))
+			// That placement is what makes the rule hold rather than nearly
+			// hold: deleting an awareness cursor from this map could only
+			// NARROW the replay window, because a read whose id vector was
+			// built before the delete applies afterwards and writes the old
+			// position straight back. See roomWorker.awCursor.
 		}
 		r.streamMu.Unlock()
 	}

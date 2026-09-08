@@ -201,6 +201,22 @@ func (s *recordingSink) payloadSeen(want string) bool {
 	return false
 }
 
+// payloadCount is how many INJECTED PAYLOADS carried want, which is what
+// tells a delivery from a re-delivery. Not the number of occurrences within a
+// payload: a catch-up merge folds several entries into one blob, and that
+// blob is still one delivery.
+func (s *recordingSink) payloadCount(want string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, got := range s.injected {
+		if bytes.Contains(got, []byte(want)) {
+			n++
+		}
+	}
+	return n
+}
+
 // readerTestNodeIDs are 16-byte node identities, matching nodeIDLen so these
 // look like the real thing rather than relying on a short id being accepted.
 const (
@@ -688,6 +704,23 @@ func TestIntegration_StreamReader_BacklogSurvivesAMissingWorker(t *testing.T) {
 // OPPOSITE retention (see cursorLimit), so a fix that dropped both would stop
 // the replay and reintroduce the whole-window sync replay it exists to
 // prevent.
+//
+// BOTH halves are asserted through DELIVERY, never by reading a cursor. An
+// earlier version read Relay.cursors at an instant just after
+// RoomDeactivated, and that assertion was flaky at ~25% for a reason worth
+// keeping written down: RoomDeactivated's contract (cluster/relay.go)
+// explicitly does not stop a read whose id vector predates it, so "the
+// awareness cursor is absent right now" was never an invariant the relay
+// offered — the state was reachable, just not at that instant. What an
+// operator actually needs IS invariant, and is what this asserts: after a
+// reactivation, no presence published before it is delivered.
+//
+// The closing assertion is an ordering argument rather than a timing one.
+// presence-while-gone sits EARLIER in the same awareness stream than
+// presence-after, so a residency resuming from a surviving cursor would read
+// it in the same XREAD as presence-after, or in an earlier one. Waiting for
+// presence-after therefore proves presence-while-gone had every chance to
+// arrive, without this test having to guess at a duration.
 func TestIntegration_StreamReader_AwarenessNotReplayedAcrossReactivation(t *testing.T) {
 	mr := newMiniRedis(t)
 
@@ -726,18 +759,14 @@ func TestIntegration_StreamReader_AwarenessNotReplayedAcrossReactivation(t *test
 	}, 5*time.Second, 20*time.Millisecond, "both kinds must flow before the room is deactivated")
 
 	a.RoomDeactivated("room1")
-	// Outwait any read that was already in flight: its id vector was built
-	// before the deactivation, so it can still write a cursor back once.
+	// Outwait the DEPARTING residency, not just the read. A read in flight at
+	// the deactivation can still push onto a lane whose worker has not yet
+	// performed its final drain, and presence delivered to the occupants who
+	// are leaving is legitimate — it is not the replay this test hunts. This
+	// wait is what makes everything published below unambiguously "published
+	// while the room was gone", so the closing assertion cannot mistake a
+	// teardown delivery for a resurrection.
 	time.Sleep(3 * readerTestBlock)
-
-	a.streamMu.Lock()
-	_, awKnown := a.cursors[a.scfg.awKey("room1")]
-	_, syncKnown := a.cursors[a.scfg.syncKey("room1")]
-	a.streamMu.Unlock()
-	require.False(t, awKnown,
-		"deactivation must forget the awareness cursor, or reactivation resumes mid-presence-stream")
-	require.True(t, syncKnown,
-		"deactivation must KEEP the sync cursor, or room churn replays the whole retention window")
 
 	// Published to a room nothing is reading: this presence belongs to
 	// clients that left with the room.
@@ -765,6 +794,69 @@ func TestIntegration_StreamReader_AwarenessNotReplayedAcrossReactivation(t *test
 
 	require.False(t, sink.payloadSeen("presence-while-gone"),
 		"presence published while the room was gone must not be replayed to its new occupants")
+
+	// The opposite half of the retention rule, asserted the same way. A sync
+	// cursor that did NOT survive the deactivation reads from the oldest
+	// retained entry, so the reactivated room would be handed edit-before a
+	// second time — inside the catch-up merge that also carries
+	// edit-while-gone, hence a second payload containing it rather than a
+	// second occurrence inside the first.
+	require.Equal(t, 1, sink.payloadCount("edit-before"),
+		"deactivation must KEEP the sync cursor, or room churn replays the whole retention window")
+}
+
+// The fence that makes the test above hold under the read it cannot stop.
+//
+// Deterministic where the integration test is opportunistic: it plays out the
+// exact interleaving — a read's id vector is built on one residency, the room
+// is deactivated and reactivated, and only THEN does the response apply. The
+// entries in that response are presence published before the reactivation, so
+// none of them may reach the successor residency, and neither may the cursor
+// they would have advanced.
+func TestUnit_StreamReader_AwarenessFromAPriorResidencyIsNotDelivered(t *testing.T) {
+	mr := newMiniRedis(t)
+	// Deliberately NOT Started: registering workers by hand keeps this to the
+	// two lifecycle transitions under test, with no goroutine draining a lane
+	// whose depth is the assertion.
+	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	register := func(room string) *roomWorker {
+		w := &roomWorker{room: room, lane: relaylane.New(r.laneCap), done: make(chan struct{})}
+		r.workersMu.Lock()
+		r.workers[room] = w
+		r.workersMu.Unlock()
+		return w
+	}
+
+	// The residency the read was issued for, mid-stream on its own cursor.
+	old := register("room1")
+	_, from := r.awarenessCursor("room1")
+	require.Equal(t, tailID, from, "a fresh residency starts at the tail")
+	tgt := streamTarget{
+		key: r.scfg.awKey("room1"), room: "room1", isAwareness: true, residency: old,
+	}
+	msgs := []goredis.XMessage{
+		streamEntry(t, "7-0", nodeB, 1, cluster.KindAwareness, []byte("presence-while-gone")),
+	}
+
+	// Deactivate, then reactivate: a NEW worker, which is what makes the
+	// reset structural. stopWorker is the real production path.
+	r.stopWorker("room1")
+	fresh := register("room1")
+	require.NotSame(t, old, fresh, "a reactivation must be a new residency")
+
+	require.Equal(t, streamConsumed, r.handleStream(tgt, msgs),
+		"the entries are dealt with, not deferred: the successor reads from the tail")
+	require.Equal(t, 0, fresh.lane.Depth(),
+		"presence published before the reactivation must not reach the new occupants")
+	residency, awFrom := r.awarenessCursor("room1")
+	require.Same(t, fresh, residency)
+	require.Equal(t, tailID, awFrom,
+		"and the stale read must not advance the successor's cursor, or the next read resumes mid-presence-stream")
+	require.Equal(t, uint64(0), r.Stats().RouterDrops,
+		"a fenced presence blob is a policy discard, not a router drop operators alert on")
 }
 
 // Inbound latency must not scale with a reader's batch COUNT.
@@ -1172,13 +1264,16 @@ func TestUnit_StreamReader_AwarenessIsExemptFromLaneBackpressure(t *testing.T) {
 
 	w := wedgeLane(t, r, "room1", 2)
 	awKey := r.scfg.awKey("room1")
-	tgt := streamTarget{key: awKey, room: "room1", isAwareness: true}
+	// residency is what readBatch would have captured: the worker the room was
+	// on when the id vector was built. See deliverAwareness.
+	tgt := streamTarget{key: awKey, room: "room1", isAwareness: true, residency: w}
 	msgs := []goredis.XMessage{
 		streamEntry(t, "7-0", nodeB, 1, cluster.KindAwareness, []byte("presence")),
 	}
 
 	require.Equal(t, streamConsumed, r.handleStream(tgt, msgs))
-	require.Equal(t, "7-0", r.cursorFor(awKey, tailID), "an awareness stream advances regardless")
+	_, from := r.awarenessCursor("room1")
+	require.Equal(t, "7-0", from, "an awareness stream advances regardless")
 	require.Equal(t, uint64(0), r.StreamStats().Stalled, "awareness must not register as a stall")
 	require.Equal(t, 3, w.lane.Depth(), "the awareness blob must be delivered to the lane")
 	require.Equal(t, uint64(0), r.Stats().Coalesced,

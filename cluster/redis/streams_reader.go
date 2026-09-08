@@ -142,19 +142,27 @@ const nonBlockingRead = -1 * time.Nanosecond
 
 // cursorLimit bounds how many stream cursors are remembered.
 //
-// The two kinds of cursor have deliberately different retention, because
-// they start from different defaults when they are missing:
+// It bounds SYNC cursors only, because those are the only kind this map
+// holds. The two kinds need opposite retention across a room's
+// deactivate/reactivate cycle, since they start from opposite defaults when
+// they are missing, and they are stored in different places so that each
+// retention follows from where the cursor lives rather than from remembering
+// to delete it:
 //
 //   - A SYNC cursor survives its room's deactivation. Its default is the
 //     oldest retained entry, so dropping it at deactivation would make
 //     ordinary room churn replay the room's whole retention window on every
 //     reactivation — the condition StreamStats.Replayed exists to alarm on.
-//   - An AWARENESS cursor is dropped at deactivation (see RoomDeactivated).
-//     Its default is the tail, so keeping it would resume a reactivated room
-//     mid-stream and replay presence for whoever was in the room last time.
-//
-// So sync cursors accumulate across churn and this limit is what stops that
-// growing forever. See evictStaleCursorsLocked for which entries go.
+//     Hence a relay-scoped map, outliving any one residency, and hence this
+//     limit: sync cursors accumulate across churn and something has to stop
+//     that growing forever. See evictStaleCursorsLocked for which entries go.
+//   - An AWARENESS cursor must NOT survive it. Its default is the tail, so
+//     keeping it would resume a reactivated room mid-stream and replay
+//     presence for whoever was in the room last time. Hence it is not in
+//     this map at all: it lives on the room's delivery worker
+//     (roomWorker.awCursor), whose lifetime IS the residency, so a
+//     reactivated room starts at the tail with nothing to delete and no
+//     in-flight read able to write the old position back.
 const cursorLimit = 4096
 
 // streamTarget is one XREAD key together with what it means.
@@ -169,6 +177,20 @@ type streamTarget struct {
 	key         string
 	room        string
 	isAwareness bool
+	// residency is the roomWorker that owned the room when this read's id
+	// vector was built, and is the fence awareness delivery is accepted
+	// against — see awarenessCursor and deliverAwareness. Meaningful for
+	// awareness targets only.
+	//
+	// Sync delivery is deliberately NOT fenced this way: re-delivering a sync
+	// entry to a reactivated room is idempotent and commutative (see
+	// oldestID), whereas re-delivering presence resurrects departed clients.
+	// A worker POINTER rather than a generation counter because the worker is
+	// already the object whose lifetime is exactly one residency, so it needs
+	// no second map to bound, and because a live reference to the retired
+	// worker keeps its address from being recycled — a counter that could be
+	// deleted and reissued would compare equal across residencies.
+	residency *roomWorker
 }
 
 // readResult is what one batch's XREAD found, which is what the next batch's
@@ -427,9 +449,10 @@ func (r *Relay) pause(ctx context.Context, d time.Duration) {
 }
 
 // readBatch reads one XREAD's worth of rooms: each room's sync stream from
-// its cursor (defaulting to the oldest retained entry) and its awareness
-// stream from its cursor (defaulting to the tail). See the oldestID/tailID
-// constants for why those two defaults differ.
+// the relay's cursor (defaulting to the oldest retained entry) and its
+// awareness stream from its RESIDENCY's cursor (defaulting to the tail). See
+// the oldestID/tailID constants for why those two defaults differ, and
+// roomWorker.awCursor for why the two cursors are kept in different places.
 //
 // block is chosen by the caller per batch; see blockForBatch.
 func (r *Relay) readBatch(ctx context.Context, rooms []string, block time.Duration) (readResult, error) {
@@ -440,7 +463,11 @@ func (r *Relay) readBatch(ctx context.Context, rooms []string, block time.Durati
 	keys := make([]string, 0, n)
 	ids := make([]string, 0, n)
 
-	add := func(tgt streamTarget, dflt string) {
+	// from is the ID this stream is read from, resolved by the caller: the two
+	// kinds read their cursor out of different places (see
+	// roomWorker.awCursor), and the awareness one has to be resolved together
+	// with the residency that owns it.
+	add := func(tgt streamTarget, from string) {
 		// Unreachable for distinct rooms: syncKey and awKey cannot collide
 		// with each other for ANY pair of room names (see the kindDiscrim
 		// constants), and roomsForReader yields each room once. It survives as
@@ -452,11 +479,21 @@ func (r *Relay) readBatch(ctx context.Context, rooms []string, block time.Durati
 		}
 		targets[tgt.key] = tgt
 		keys = append(keys, tgt.key)
-		ids = append(ids, r.cursorFor(tgt.key, dflt))
+		ids = append(ids, from)
 	}
 	for _, room := range rooms {
-		add(streamTarget{key: r.scfg.syncKey(room), room: room}, oldestID)
-		add(streamTarget{key: r.scfg.awKey(room), room: room, isAwareness: true}, tailID)
+		syncKey := r.scfg.syncKey(room)
+		add(streamTarget{key: syncKey, room: room}, r.cursorFor(syncKey, oldestID))
+		// Resolved as a pair, under one lock: the awareness position and the
+		// residency it belongs to are one fact, and handleStream delivers the
+		// response only while that residency is still the room's.
+		residency, awFrom := r.awarenessCursor(room)
+		add(streamTarget{
+			key:         r.scfg.awKey(room),
+			room:        room,
+			isAwareness: true,
+			residency:   residency,
+		}, awFrom)
 	}
 
 	args := make([]string, 0, len(keys)+len(ids))
@@ -546,9 +583,10 @@ func (r *Relay) setCursor(key, id string) {
 // under nothing worse than ordinary scale.
 //
 // If every cursor is live the map is left above cursorLimit. That is the
-// correct outcome: the residual is then bounded by streamsPerRoom x the
-// rooms this node actually reads, i.e. by real load, and it is the same order
-// as streamRooms itself.
+// correct outcome: the residual is then bounded by the rooms this node
+// actually reads — one sync cursor each, awareness being held on the workers
+// instead (see roomWorker.awCursor) — i.e. by real load, and it is the same
+// order as streamRooms itself.
 //
 // Caller must hold streamMu (which also guards streamRooms).
 func (r *Relay) evictStaleCursorsLocked() {
@@ -588,6 +626,13 @@ func (r *Relay) evictStaleCursorsLocked() {
 // to every local peer — turning one reader's restart into an N-fold broadcast
 // storm. Awareness is not merged: each payload carries its own clock and the
 // receiver's per-client gate handles staleness.
+//
+// Awareness also takes a different route to the lane. It is handed over by
+// deliverAwareness, which drops the whole read if the room has changed
+// residency since the id vector was built, because presence published before
+// a reactivation must not reach the room's new occupants. Sync goes straight
+// to the lane resolved above: replaying a sync entry is harmless, so it
+// inherits the same accepted staleness runSubscriber has.
 func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) streamOutcome {
 	if len(msgs) == 0 {
 		return streamConsumed
@@ -647,6 +692,10 @@ func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) streamOu
 	}
 
 	syncPayloads := make([][]byte, 0, len(msgs))
+	// Collected rather than pushed inline, because the push and the cursor
+	// advance have to happen as ONE residency-fenced operation — see
+	// deliverAwareness.
+	var awPayloads [][]byte
 	lastID := ""
 	for _, msg := range msgs {
 		// Recorded before every skip below, deliberately: a malformed,
@@ -693,11 +742,21 @@ func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) streamOu
 			// designed behaviour rather than evidence of loss, and feeding
 			// them to gap detection would make Gaps — a counter documented as
 			// "alert on presence" — nonzero on every healthy node.
-			w.lane.Push(cluster.KindAwareness, data)
+			awPayloads = append(awPayloads, data)
 			continue
 		}
 		r.noteSeq(tgt.key, nodeID, seq)
 		syncPayloads = append(syncPayloads, data)
+	}
+
+	if tgt.isAwareness {
+		// Payloads and cursor together, accepted only if the room is still on
+		// the residency this read was issued for. A false return is a
+		// deliberate discard of presence published before a reactivation, not
+		// a deferral: the successor residency reads from the tail, so the
+		// outcome is still "these entries are dealt with".
+		r.deliverAwareness(tgt.room, tgt.residency, awPayloads, lastID)
+		return streamConsumed
 	}
 
 	if len(syncPayloads) > 0 {
