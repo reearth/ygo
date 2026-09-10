@@ -221,6 +221,16 @@ func (r *Relay) workerForInbound(room string) (w *roomWorker, ok bool) {
 	return w, ok
 }
 
+// stillResident reports whether w is currently the room's delivery worker: the
+// fence a resolved worker is checked against before its delivery is treated as
+// having happened. deliverAwareness inlines the same check because it writes
+// awCursor under the same hold.
+func (r *Relay) stillResident(room string, w *roomWorker) bool {
+	r.workersMu.Lock()
+	defer r.workersMu.Unlock()
+	return r.workers[room] == w
+}
+
 // awarenessCursor resolves a room's residency together with the awareness
 // stream ID to read from, in ONE workersMu hold so the pair cannot be torn.
 //

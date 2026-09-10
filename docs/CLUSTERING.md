@@ -538,7 +538,10 @@ than asked, never fewer), and `StreamRetention` is enforced by a periodic
 may be only a few seconds' worth. A reader that lags past its room's window
 loses whatever was trimmed underneath it — and, unlike pub/sub, *says so*: a
 per-node, per-stream sequence number in every entry makes that loss provable
-and it is counted in `StreamStats().Gaps`. Size `StreamRetention` and
+and it is counted in `StreamStats().Gaps`. Within the limit that counter has:
+it detects a jump only once this process has observed a baseline for that
+source, and the baselines are in memory, so loss that happened while this node
+was **down** is bounded by the retention window rather than reported. Size `StreamRetention` and
 `StreamMaxLen` for the worst lag you intend to survive (a deploy rollover, a GC
 pause, a node restart); the 60s default matches y-redis's own
 `REDIS_MIN_MESSAGE_LIFETIME`.
@@ -581,10 +584,18 @@ against `StreamPrefix*`) until the built-in reclaim lands: setting an `EXPIRE`
 on each `XADD`, so an untouched key falls out on its own with no keyspace scan
 and nothing to coordinate between nodes, is the intended fix and is tracked in #248.
 
-The tier also adds a steady command floor: `Readers × (1 /
-ReadBlock)` blocking `XREAD`s per second per node even when nothing is
-happening (4 readers at 250ms is 16/s), and one `XTRIM MINID` per stream per
-`TrimInterval`.
+The tier also adds a steady command floor, and it **grows with the room
+count**: a reader issues one `XREAD` per 512-key batch, and each room
+contributes two keys, so an idle node costs
+
+    Readers × ceil(2 × rooms ÷ Readers ÷ 512) × (1 ÷ ReadBlock)
+
+blocking `XREAD`s per second. Four readers at 250ms is 16/s only while every
+reader's keys fit in one batch — up to roughly 1,000 rooms a node; at the
+10,000-room target each reader has ~5,000 keys, so it is ~160/s. Size Redis
+from the formula, not from the small-cluster number. On top of that, one `XTRIM
+MINID` per stream per `TrimInterval`, pipelined in chunks rather than one round
+trip per key.
 
 So `PubSub` is not a legacy mode and is not deprecated. **At-most-once is a
 legitimate choice** when your rooms are hot, your Redis is sized for fan-out
@@ -661,6 +672,12 @@ Every counter is monotonic for the life of the relay, so scrape rates — except
   means entries existed and were trimmed before this reader reached them. A
   single gap means data was lost and the retention window was too small for the
   reader's actual lag. This is the one counter that should always be zero.
+  **What it cannot see:** baselines are per-process and in memory, so the first
+  entry a restarted relay reads from a source establishes a baseline whatever
+  its sequence number — entries lost during that relay's own downtime leave
+  `Gaps` at zero. Loss over a reader's downtime is bounded by
+  `StreamRetention`, not reported; size the window for your restart and deploy
+  times rather than watching for it here.
 - **`Replayed` — a merge/batching gauge; do *not* alert on its rate.** It
   counts `len(batch)-1` for every multi-entry batch a reader folded into one
   merged update — whether or not any of those entries had been delivered

@@ -5,7 +5,21 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	goredis "github.com/redis/go-redis/v9"
 )
+
+// trimBatch is how many XTRIMs go into one pipelined round trip. Sequentially
+// the 10k-room target is 20k round trips per sweep, which cannot finish inside
+// TrimInterval at any realistic latency; 256 bounds one command's reply and
+// keeps the ctx check frequent.
+const trimBatch = 256
+
+// trimTarget is one key and the MINID cutoff for its kind.
+type trimTarget struct {
+	key   string
+	minID string
+}
 
 // runTrimSweeper enforces the age half of the delivery guarantee.
 //
@@ -81,36 +95,81 @@ func (r *Relay) trimOnce(ctx context.Context) error {
 	}
 	r.streamMu.Unlock()
 
-	now := time.Now()
+	if len(rooms) == 0 {
+		return nil
+	}
+
+	// The cutoff must come from the clock that MINTED the ids: XADD * takes
+	// its milliseconds from the Redis server, so a cutoff read off an app host
+	// running ahead deletes entries still inside the window — and the streams
+	// are shared, so one skewed node shrinks it for every node. One TIME per
+	// sweep, because the drift a sweep's own duration adds is bounded by that
+	// duration while host skew is not bounded at all; a failed TIME skips the
+	// sweep, since trimming nothing only costs memory until the next tick.
+	now, err := r.client.Time(ctx).Result()
+	if err != nil {
+		return fmt.Errorf("TIME: %w", err)
+	}
+	syncMinID := minIDAt(now.Add(-r.scfg.retention))
+	awMinID := minIDAt(now.Add(-r.scfg.awRetention))
+
+	targets := make([]trimTarget, 0, len(rooms)*streamsPerRoom)
 	for _, room := range rooms {
+		targets = append(targets,
+			trimTarget{key: r.scfg.syncKey(room), minID: syncMinID},
+			trimTarget{key: r.scfg.awKey(room), minID: awMinID},
+		)
+	}
+	for start := 0; start < len(targets); start += trimBatch {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := r.trimKey(ctx, r.scfg.syncKey(room), now.Add(-r.scfg.retention)); err != nil {
-			return err
-		}
-		if err := r.trimKey(ctx, r.scfg.awKey(room), now.Add(-r.scfg.awRetention)); err != nil {
-			return err
-		}
+		r.trimChunk(ctx, targets[start:min(start+trimBatch, len(targets))])
 	}
 	return nil
 }
 
-// trimKey removes entries older than cutoff from one stream.
+// minIDAt renders a cutoff as an XTRIM MINID argument. Stream IDs are
+// milliseconds-sequence, so every entry with a smaller id is older than the
+// window.
+func minIDAt(cutoff time.Time) string {
+	return fmt.Sprintf("%d-0", cutoff.UnixMilli())
+}
+
+// trimChunk issues one pipelined round trip of XTRIMs and counts what they
+// removed. A failing key is logged and the rest still go: aborting would leave
+// every key behind it untrimmed until the next tick, and one log line per
+// chunk rather than per key because a broken connection fails all of them
+// alike.
 //
-// Stream IDs are milliseconds-sequence, so the cutoff is expressed as
-// "<unix-millis>-0": every entry with a smaller ID is older than the window.
 // A key that does not exist yet (a room activated but never published to)
 // trims zero entries rather than erroring — XTRIM MINID on a missing key
 // returns 0 in both Redis and miniredis.
-func (r *Relay) trimKey(ctx context.Context, key string, cutoff time.Time) error {
-	minID := fmt.Sprintf("%d-0", cutoff.UnixMilli())
-	n, err := r.client.XTrimMinID(ctx, key, minID).Result()
-	if err != nil {
-		return fmt.Errorf("XTRIM MINID %s %s: %w", key, minID, err)
+func (r *Relay) trimChunk(ctx context.Context, targets []trimTarget) {
+	cmds := make([]*goredis.IntCmd, len(targets))
+	_, _ = r.client.Pipelined(ctx, func(p goredis.Pipeliner) error {
+		for i, t := range targets {
+			cmds[i] = p.XTrimMinID(ctx, t.key, t.minID)
+		}
+		return nil
+	})
+
+	failed := 0
+	var first error
+	for i, cmd := range cmds {
+		n, err := cmd.Result()
+		if err != nil {
+			if failed == 0 {
+				first = fmt.Errorf("XTRIM MINID %s %s: %w", targets[i].key, targets[i].minID, err)
+			}
+			failed++
+			continue
+		}
+		if n > 0 {
+			r.trimmed.Add(uint64(n)) //nolint:gosec // XTRIM returns a non-negative count
+		}
 	}
-	if n > 0 {
-		r.trimmed.Add(uint64(n)) //nolint:gosec // XTRIM returns a non-negative count
+	if failed > 0 && ctx.Err() == nil {
+		r.log.Warn("cluster/redis: stream trim failed", "keys", failed, "err", first)
 	}
-	return nil
 }

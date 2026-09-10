@@ -76,6 +76,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a config typo would have two nodes addressing different streams for the same
   room. See [docs/CLUSTERING.md](docs/CLUSTERING.md).
 
+  Review fixes folded into the tier before release: a sync payload pushed onto
+  a lane whose worker was retired between the reader resolving it and the push
+  no longer advances that stream's cursor, so the entries are re-read for the
+  successor residency instead of being skipped; a **negative** `ReadBlock` is
+  rejected as documented rather than defaulted to 250ms (only the unset value
+  defaults); the `XTRIM MINID` cutoff is derived from the **Redis server's**
+  clock via `TIME` rather than the application host's, so a skewed app node can
+  no longer trim entries that are still inside the window (a failed `TIME`
+  skips the sweep), and the sweep pipelines its `XTRIM`s in chunks instead of
+  one round trip per key, which the 10,000-room target needs to finish inside
+  `TrimInterval`. Three documentation overclaims were corrected with them:
+  `StreamStats.Gaps` detects jumps only after this process has observed a
+  baseline for a source (loss during a reader's own downtime is bounded by the
+  retention window, not reported), and the idle `XREAD` rate is room-dependent
+  — `Readers × ceil(2 × rooms ÷ Readers ÷ 512) ÷ ReadBlock`, i.e. ~160/s at
+  10,000 rooms, not the 16/s that holds only for a single batch per reader.
+
 ## [1.49.5] — 2026-09-02
 
 ### Fixed

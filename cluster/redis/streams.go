@@ -95,9 +95,10 @@ const maxKeysPerRead = 512
 // of its read, and the only mechanism for that is closing its connection —
 // connection churn proportional to room churn, which at this tier's 10k-room
 // target is a worse trade than a few extra idle XREADs per second. So the
-// block stays short and ReadBlock's range is honest about it: 250ms x 4
-// readers is 16 XREADs a second on an idle node, and an XREAD that finds
-// nothing is cheap.
+// block stays short and ReadBlock's range is honest about it: the idle cost is
+// Readers x ceil(keys-per-reader / maxKeysPerRead) XREADs per ReadBlock — 16/s
+// for a node with one batch per reader, ~160/s at 10k rooms across 4 readers —
+// and an XREAD that finds nothing is cheap.
 //
 // Lowering ReadBlock below this is a real and supported choice (faster
 // shutdown and activation, more commands); raising it is not offered, because
@@ -179,7 +180,10 @@ func resolveStreamCfg(client *goredis.Client, cfg Config) (streamCfg, error) {
 	if sc.trimInterval <= 0 {
 		sc.trimInterval = defaultTrimInterval
 	}
-	if sc.readBlock <= 0 {
+	// Only the UNSET value is defaulted: a negative ReadBlock must reach the
+	// minReadBlock rejection below, as its doc promises, not be adjusted into
+	// the default.
+	if sc.readBlock == 0 {
 		sc.readBlock = defaultReadBlock
 	}
 

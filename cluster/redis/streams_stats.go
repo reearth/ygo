@@ -37,6 +37,12 @@ type StreamStats struct {
 	//
 	// ALERT ON PRESENCE, not on rate. A single gap means data was lost and
 	// the retention window was too small for the reader's actual lag.
+	//
+	// Detects jumps only AFTER this process has observed a baseline for a
+	// source: lastSeq is in-memory, so the first entry seen from a source is a
+	// baseline whatever its number. Loss that happened while this reader was
+	// down is therefore bounded by the retention window rather than reported
+	// here.
 	Gaps uint64
 
 	// Restarts counts source nodes observed restarting, inferred from a seq

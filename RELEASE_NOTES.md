@@ -31,14 +31,26 @@ single `Gaps` means the window was too small for how far behind that node
 actually got. Size the window for the worst delay you intend to survive: a
 deploy rollover, a long garbage-collection pause, a node restart.
 
+One limit on that visibility, stated plainly: `Gaps` detects a jump only after
+the process has seen a baseline for the publishing node, and those baselines
+live in memory. A relay that has just restarted takes whatever sequence number
+it reads first as its baseline, so anything trimmed away **while it was down**
+leaves `Gaps` at zero. Loss over a reader's own downtime is bounded by the
+retention window rather than reported — which is the other reason to size the
+window for your restart and deploy times.
+
 **What it costs, and why pub/sub is still here.** Publishing to pub/sub costs
 Redis nothing: it hands the message to whoever is listening and forgets it.
 Writing to a stream is a real write — it replicates, it goes into your AOF/RDB
 if you have persistence on, and it holds memory proportional to
 `retention × update rate × update size` for every room on the node (roughly
 800KB per busy room at the defaults). Reading costs a small steady stream of
-commands even when nothing is happening — 16 per second per node at the
-defaults.
+commands even when nothing is happening, and that cost **grows with how many
+rooms a node holds**: each reader issues one `XREAD` per 512 stream keys, and
+each room has two, so an idle node costs `Readers × ceil(2 × rooms ÷ Readers ÷
+512) ÷ ReadBlock` commands per second — 16 per second at the defaults for a
+node under about a thousand rooms, and roughly 160 per second at ten thousand.
+Size Redis from the formula rather than from the small-cluster figure.
 
 **Size Redis for every room you have ever used, not for the rooms in use at
 once.** The retention window bounds how big each room's stream gets; it does

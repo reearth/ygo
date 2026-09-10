@@ -1607,3 +1607,68 @@ func TestUnit_StreamReader_ReadOnceReportsEachDeferralCauseSeparately(t *testing
 	require.Equal(t, oldestID, r.cursorFor(r.scfg.syncKey("unready"), oldestID))
 	require.Equal(t, oldestID, r.cursorFor(r.scfg.syncKey("wedged"), oldestID))
 }
+
+// The sync half of the residency fence, and the one place the tier can lose an
+// entry outright.
+//
+// handleStream resolves the room's worker, pushes onto its lane, and then
+// advances the cursor. stopWorker can land in between, and if the retiring
+// worker's final drainLane has ALREADY run, the pushed payload sits on a lane
+// with no consumer left — so an unconditional advance would move the cursor
+// past an entry nothing ever read, and the successor residency, which starts
+// from that cursor, would skip it permanently.
+func TestUnit_StreamReader_SyncOntoARetiredResidencyKeepsTheCursor(t *testing.T) {
+	mr := newMiniRedis(t)
+	// Deliberately NOT Started: registering workers by hand keeps this to the
+	// residency transition, with no goroutine draining a lane whose depth is
+	// the assertion.
+	r, err := New(newClient(t, mr), Config{Transport: Streams, Readers: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	register := func(room string) *roomWorker {
+		w := &roomWorker{room: room, lane: relaylane.New(r.laneCap), done: make(chan struct{})}
+		r.workersMu.Lock()
+		r.workers[room] = w
+		r.workersMu.Unlock()
+		return w
+	}
+
+	key := r.scfg.syncKey("room1")
+	r.setCursor(key, "5-0")
+	tgt := streamTarget{key: key, room: "room1"}
+	payloads := [][]byte{v1Update(t, "edit")}
+
+	// The residency the read resolved, retired and replaced before the push
+	// lands. stopWorker is the real production path.
+	old := register("room1")
+	r.stopWorker("room1")
+	fresh := register("room1")
+	require.NotSame(t, old, fresh, "a reactivation must be a new residency")
+
+	require.Equal(t, streamUnready, r.applySync(old, tgt, payloads, "6-0"))
+	require.Equal(t, "5-0", r.cursorFor(key, oldestID),
+		"the cursor must not advance past an entry pushed onto a retired lane: the successor reads from it and would skip the entry for good")
+	require.Equal(t, uint64(1), r.StreamStats().Deferred,
+		"a declined advance on entries that were kept is a deferral, and reports as one")
+	require.Equal(t, uint64(0), r.Stats().RouterDrops, "nothing was discarded")
+	require.Equal(t, 0, fresh.lane.Depth(),
+		"the successor gets these entries from the re-read, not from this push")
+	require.Equal(t, 1, old.lane.Depth(),
+		"the duplicate push onto the dead lane is the accepted cost: V1 updates are idempotent")
+
+	// The other half of the promise: on the live residency the same entries
+	// are delivered and the cursor does move on.
+	require.Equal(t, streamConsumed, r.applySync(fresh, tgt, payloads, "6-0"))
+	require.Equal(t, "6-0", r.cursorFor(key, oldestID), "a live residency must advance the cursor")
+	require.Equal(t, 1, fresh.lane.Depth())
+	require.Equal(t, uint64(1), r.StreamStats().Deferred, "a clean pass must not count as a deferral")
+
+	// Entries that produced no payload at all — self-published, malformed —
+	// have nothing to lose, so a residency change must not defer them: they
+	// would be read and skipped again forever.
+	r.stopWorker("room1")
+	require.Equal(t, streamConsumed, r.applySync(fresh, tgt, nil, "7-0"))
+	require.Equal(t, "7-0", r.cursorFor(key, oldestID))
+	require.Equal(t, uint64(1), r.StreamStats().Deferred)
+}

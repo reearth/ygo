@@ -765,8 +765,27 @@ func (r *Relay) handleStream(tgt streamTarget, msgs []goredis.XMessage) streamOu
 		return streamConsumed
 	}
 
-	if len(syncPayloads) > 0 {
-		r.pushSync(w, tgt, syncPayloads)
+	return r.applySync(w, tgt, syncPayloads, lastID)
+}
+
+// applySync delivers one stream's sync entries and advances its cursor, but
+// only while w is still the room's residency: stopWorker can retire w after
+// handleStream resolved it, and a worker whose final drain has already run
+// leaves the payload on a lane nobody reads, so advancing past it would lose
+// the entry for good. Declining re-reads the entries next cycle onto the
+// successor residency; the duplicate push onto the retired lane is harmless
+// because V1 updates are idempotent.
+//
+// The check follows the push rather than sharing one lock with it because
+// Lane.Push holds the lane's mutex across crdt.MergeUpdatesV1, and workersMu
+// held across that couples every room on the node to one room's merge (#187).
+func (r *Relay) applySync(w *roomWorker, tgt streamTarget, payloads [][]byte, lastID string) streamOutcome {
+	if len(payloads) > 0 {
+		r.pushSync(w, tgt, payloads)
+		if !r.stillResident(tgt.room, w) {
+			r.deferred.Add(1)
+			return streamUnready
+		}
 	}
 	// One advance for every path that reaches here, because every path that
 	// reaches here has finished with the entries it read.

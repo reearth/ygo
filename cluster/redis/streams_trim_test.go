@@ -2,9 +2,11 @@ package redis
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/cluster"
@@ -199,5 +201,165 @@ func TestUnit_StreamTrim_ZeroRefcountRoomIsSkipped(t *testing.T) {
 
 	require.Len(t, streamEntries(t, mr, r.scfg.syncKey("room1")), 1,
 		"a room with a zero refcount must not be swept even though it is still a map key")
+	require.Zero(t, r.StreamStats().Trimmed)
+}
+
+// The cutoff must be minted by the same clock as the ids it is compared
+// against. XADD * takes its milliseconds from the REDIS server, so a cutoff
+// read off the application host sweeps entries still inside the window
+// whenever that host's clock runs ahead — and because the streams are shared,
+// one skewed node shrinks the advertised window for every node.
+//
+// miniredis's own clock drives both XADD's auto-id and TIME (effectiveNow),
+// so SetTime makes the two clocks disagree the way a real deployment's do.
+// Verified by mutation: computing the cutoff from time.Now() again sweeps the
+// whole stream here, because a local cutoff sits two hours past every id.
+func TestUnit_StreamTrim_CutoffComesFromTheServerClock(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{
+		Transport:       Streams,
+		StreamRetention: time.Minute,
+		TrimInterval:    30 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	require.NoError(t, r.Start(context.Background(), &countingSink{}))
+	r.RoomActivated("room1")
+
+	base := time.Now().Add(-2 * time.Hour)
+	mr.SetTime(base)
+	require.NoError(t, r.publishStream(context.Background(), cluster.Outbound{
+		Room: "room1", Kind: cluster.KindSync, Data: []byte("aged"),
+	}))
+
+	// Two retention windows later ON THE SERVER CLOCK: "aged" is now outside
+	// the window and "fresh" is inside it, with no sleeping.
+	mr.SetTime(base.Add(2 * time.Minute))
+	require.NoError(t, r.publishStream(context.Background(), cluster.Outbound{
+		Room: "room1", Kind: cluster.KindSync, Data: []byte("fresh"),
+	}))
+
+	require.NoError(t, r.trimOnce(context.Background()))
+
+	entries := streamEntries(t, mr, r.scfg.syncKey("room1"))
+	require.Len(t, entries, 1,
+		"an entry inside the server-clock window must survive: a cutoff from this host's clock would be two hours past every id and sweep the stream")
+	require.Equal(t, "fresh", entryValues(entries[0])[fieldData],
+		"and the entry that survived must be the recent one, not merely some entry")
+	require.Equal(t, uint64(1), r.StreamStats().Trimmed)
+}
+
+// The sweep must not cost one round trip per key. At the 10k-room target a
+// sequential sweep is 20k round trips, which cannot finish inside
+// TrimInterval — so neither the age bound nor the memory model would hold.
+//
+// Round trips are counted from the connection pool, not from wall-clock time
+// (a race on a loaded machine) and not from the command count (which a
+// pipeline does not change): every command takes one pool connection for its
+// round trip, while one pipeline takes one for the whole chunk.
+func TestUnit_StreamTrim_SweepIsPipelined(t *testing.T) {
+	mr := newMiniRedis(t)
+	c := newClient(t, mr)
+	r, err := New(c, Config{
+		Transport:       Streams,
+		StreamRetention: time.Minute,
+		TrimInterval:    30 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	// Deliberately NOT Started: the reader goroutines Start launches issue
+	// their own XREADs on the same pool, which would make both counts below a
+	// race. streamRooms is what trimOnce reads, so it is populated directly.
+	const rooms = 300 // 600 keys: more than trimBatch, so chunking is exercised
+	r.streamMu.Lock()
+	for i := 0; i < rooms; i++ {
+		r.streamRooms[fmt.Sprintf("room-%d", i)] = 1
+	}
+	r.streamMu.Unlock()
+
+	// Warm the pool: go-redis runs a handshake (HELLO, CLIENT SETINFO) on
+	// every new connection, and those commands would land inside the window
+	// measured below.
+	require.NoError(t, c.Ping(context.Background()).Err())
+
+	beforeCmds := mr.CommandCount()
+	before := c.PoolStats()
+	require.NoError(t, r.trimOnce(context.Background()))
+	after := c.PoolStats()
+
+	// One TIME plus every key's XTRIM: pipelining saves round trips, not
+	// commands, so this is also the sequential count.
+	require.Equal(t, 1+rooms*streamsPerRoom, mr.CommandCount()-beforeCmds,
+		"every active room's two streams must be swept, on one TIME per sweep")
+
+	trips := (after.Hits + after.Misses) - (before.Hits + before.Misses)
+	chunks := (rooms*streamsPerRoom + trimBatch - 1) / trimBatch
+	require.LessOrEqual(t, int(trips), 1+chunks,
+		"600 XTRIMs must go in %d pipelined round trips (plus TIME), not 600", chunks)
+}
+
+// A failing XTRIM is logged and the sweep goes on: aborting would leave every
+// key after it untrimmed until the next tick, and Trimmed must still count
+// what actually went.
+//
+// The BROKEN key is the room's sync key, which trimOnce queues first, so the
+// surviving awareness sweep behind it is only reached by a chunk that carries
+// on past a failure.
+func TestUnit_StreamTrim_ChunkFailureDoesNotAbortTheSweep(t *testing.T) {
+	mr := newMiniRedis(t)
+	r, err := New(newClient(t, mr), Config{
+		Transport:       Streams,
+		StreamRetention: time.Minute,
+		TrimInterval:    30 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	require.NoError(t, r.Start(context.Background(), &countingSink{}))
+	r.RoomActivated("room1")
+
+	base := time.Now().Add(-2 * time.Hour)
+	mr.SetTime(base)
+	require.NoError(t, r.publishStream(context.Background(), cluster.Outbound{
+		Room: "room1", Kind: cluster.KindAwareness, Data: []byte("aged"),
+	}))
+	mr.SetTime(base.Add(2 * time.Minute)) // past AwarenessRetention on the server clock
+
+	// A key of the wrong TYPE fails its own XTRIM and nothing else.
+	require.NoError(t, mr.Set(r.scfg.syncKey("room1"), "not-a-stream"))
+
+	require.NoError(t, r.trimOnce(context.Background()),
+		"one failed key must not fail the sweep")
+	require.Empty(t, streamEntries(t, mr, r.scfg.awKey("room1")),
+		"the healthy key queued behind the failing one must still be swept")
+	require.Equal(t, uint64(1), r.StreamStats().Trimmed,
+		"Trimmed must count what actually went, and only that")
+}
+
+// A failed TIME skips the sweep rather than falling back to this host's clock.
+// Trimming nothing costs memory until the next tick; trimming on a cutoff from
+// the wrong clock deletes live entries.
+func TestUnit_StreamTrim_TimeFailureSkipsTheSweep(t *testing.T) {
+	mr := newMiniRedis(t)
+	// MaxRetries: -1 so the dial against the closed server fails at once
+	// instead of spending the default backoff schedule on it.
+	c := goredis.NewClient(&goredis.Options{Addr: mr.Addr(), MaxRetries: -1})
+	t.Cleanup(func() { _ = c.Close() })
+	r, err := New(c, Config{
+		Transport:       Streams,
+		StreamRetention: time.Minute,
+		TrimInterval:    30 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	r.streamMu.Lock()
+	r.streamRooms["room1"] = 1
+	r.streamMu.Unlock()
+
+	mr.Close() // every command now fails, TIME first
+
+	require.ErrorContains(t, r.trimOnce(context.Background()), "TIME",
+		"the sweep must abandon on the clock rather than proceed on a local cutoff")
 	require.Zero(t, r.StreamStats().Trimmed)
 }

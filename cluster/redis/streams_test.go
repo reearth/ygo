@@ -90,6 +90,30 @@ func TestUnit_Streams_RejectsReadBlockBelowMin(t *testing.T) {
 	require.Equal(t, 100*time.Microsecond, got.readBlock)
 }
 
+// A NEGATIVE ReadBlock must reach the same rejection as a sub-millisecond
+// one. Defaulting everything <= 0 turned -5ms into the 250ms default, so the
+// documented "New fails if it is smaller than 1ms" did not hold for the values
+// most likely to be a typo.
+func TestUnit_Streams_RejectsNegativeReadBlock(t *testing.T) {
+	mr := newMiniRedis(t)
+	c := newClient(t, mr)
+
+	_, err := resolveStreamCfg(c, Config{Transport: Streams, ReadBlock: -5 * time.Millisecond})
+	require.ErrorContains(t, err, "ReadBlock")
+	require.ErrorContains(t, err, "1ms", "the error must name the floor")
+
+	// Only the UNSET value may be defaulted.
+	got, err := resolveStreamCfg(c, Config{Transport: Streams})
+	require.NoError(t, err)
+	require.Equal(t, defaultReadBlock, got.readBlock)
+
+	// PubSub mode validates nothing: an existing caller must not start
+	// failing construction because a Streams-only field exists.
+	got, err = resolveStreamCfg(c, Config{ReadBlock: -5 * time.Millisecond})
+	require.NoError(t, err)
+	require.Equal(t, -5*time.Millisecond, got.readBlock)
+}
+
 // An undersized pool leaves publishes waiting on a connection: a reader holds
 // one for as long as its XREAD blocks. Failing construction is much kinder
 // than presenting as mysterious publish latency later.
