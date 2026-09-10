@@ -189,6 +189,9 @@ func TestClient_Reconnect_BackoffResetsOnlyAfterHandshake(t *testing.T) {
 	// catches starting at the very first un-reset iteration.
 	const resetThreshold = 700 * time.Millisecond
 	for i := 0; i < 3; i++ {
+		// The room must be resident before CloseRoom, or it returns
+		// ErrRoomNotFound — see awaitRoomResident.
+		awaitRoomResident(t, srv, room)
 		waitSynced := statusWaiter(t, c, StateSynced)
 		require.NoError(t, srv.CloseRoom(room, true))
 		waitSynced()
