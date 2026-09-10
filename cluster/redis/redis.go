@@ -197,46 +197,37 @@ type Config struct {
 	// which is the behaviour every existing deployment already has.
 	//
 	// Streams trades Redis memory for an at-least-once guarantee: each room
-	// becomes a Redis stream, and a reader that stalls or restarts resumes
-	// from where it left off instead of losing whatever it missed. The
-	// guarantee is bounded — at-least-once within
+	// becomes a Redis stream, and a reader that stalls or restarts resumes from
+	// where it left off. The guarantee is bounded — at-least-once within
 	// min(StreamRetention, StreamMaxLen/rate) — because a stream is trimmed.
 	//
 	// PubSub remains supported, not deprecated: PUBLISH costs nothing, while
 	// XADD is a write with replication, AOF/RDB and memory proportional to
 	// retention x rate x update size. At-most-once is a legitimate choice.
 	//
-	// Both publishes to and reads from both, for migration. It needs no
-	// deduplication because V1 updates are idempotent, so double-applying is
-	// a no-op.
+	// Both publishes to and reads from both, for migration; no deduplication is
+	// needed, because V1 updates are idempotent.
 	//
-	// A mixed cluster delivers ONE WAY ONLY, and the asymmetry is worth
-	// stating precisely. Outbound is gated on the setting: a Streams node
-	// does not PUBLISH, so a PubSub-only node never sees its edits. Inbound
-	// is NOT gated in this release — Start still opens the pub/sub connection
-	// and RoomActivated still SUBSCRIBEs each room's channel whatever the
-	// Transport — so a Streams node does still RECEIVE pub/sub traffic and
-	// apply it. Two consequences: choosing Streams does not remove the
-	// pub/sub connection or the per-room SUBSCRIBE from this node's Redis
-	// footprint, and a half-migrated cluster is one-way rather than cleanly
-	// split. Gating the inbound side too is tracked in #249.
+	// A MIXED CLUSTER DELIVERS ONE WAY ONLY. Outbound is gated on the setting,
+	// so a Streams node does not PUBLISH and a PubSub-only node never sees its
+	// edits. Inbound is NOT gated in this release — Start still opens the
+	// pub/sub connection and RoomActivated still SUBSCRIBEs each room's channel
+	// whatever the Transport — so a Streams node still receives and applies
+	// pub/sub traffic, keeping that connection and every per-room SUBSCRIBE in
+	// its Redis footprint. Gating inbound too is tracked in #249.
 	//
-	// The migration advice is the same either way, because it only depends on
-	// the outbound gate: the zero-downtime path is to roll every node to
-	// Both, then roll every node to Streams. See docs/CLUSTERING.md.
+	// Migration depends only on the outbound gate: roll every node to Both,
+	// then roll every node to Streams. See docs/CLUSTERING.md.
 	Transport Transport
 
 	// StreamPrefix namespaces stream keys. Default "ygo:stream:".
 	//
 	// A room's two streams are StreamPrefix+"s:"+room (sync) and
 	// StreamPrefix+"a:"+room (awareness). The kind discriminator precedes the
-	// room name so that no room name — and every printable character is a
-	// legal room name, ":" included — can produce another room's key.
-	//
-	// Deliberately distinct from ChannelPrefix's "ygo:cluster:": streams live
-	// in the keyspace where SCAN, MEMORY USAGE and eviction policy can see
-	// them, and channels do not, so sharing one prefix would make a
-	// keyspace listing mix two unrelated kinds of thing.
+	// room name so that no room name — and every printable character is legal
+	// in one, ":" included — can produce another room's key. Deliberately
+	// distinct from ChannelPrefix's "ygo:cluster:", because streams live in the
+	// keyspace where SCAN, MEMORY USAGE and eviction policy see them.
 	StreamPrefix string
 
 	// StreamRetention is the age bound on a room's sync stream. Default 60s,
@@ -258,26 +249,22 @@ type Config struct {
 	// AwarenessMaxLen and AwarenessRetention bound the SEPARATE awareness
 	// stream. Defaults 64 entries and 10s.
 	//
-	// Awareness gets its own stream deliberately. It is high-frequency
-	// heartbeat traffic, so sharing the sync stream's MAXLEN would let
-	// presence evict sync entries out of the retention window — silently
-	// shrinking the very guarantee this tier exists to provide. It is also
-	// never replayed: awareness is read from the stream's tail, because
-	// replaying it would resurrect presence for clients that are long gone.
+	// Its own stream deliberately: presence is high-frequency, so sharing the
+	// sync stream's MAXLEN would let it evict sync entries out of the retention
+	// window, silently shrinking the guarantee this tier provides. It is also
+	// never replayed — read from the tail, because replay resurrects clients
+	// long gone.
 	AwarenessMaxLen    int64
 	AwarenessRetention time.Duration
 
-	// Readers is how many goroutines multiplex the node's assigned rooms.
-	// Default 4.
+	// Readers is how many goroutines multiplex the node's assigned rooms
+	// (hash-assigned). Default 4.
 	//
-	// Not one per room: each blocking XREAD holds a connection, so a reader
-	// per room would exhaust Redis's default maxclients (10000) well before
-	// this server's 10k-room target. Rooms are hash-assigned to readers.
-	//
-	// New fails if the client's PoolSize is not greater than Readers, because
-	// a reader holds a pool connection for as long as its XREAD blocks, so a
-	// pool no larger than Readers leaves publishes and the trim sweeper
-	// waiting on a connection every cycle.
+	// Not one per room: each blocking XREAD holds a connection, so a reader per
+	// room would exhaust Redis's default maxclients (10000) well before this
+	// server's 10k-room target. New fails if PoolSize is not greater than
+	// Readers, since a pool no larger than Readers leaves publishes and the
+	// trim sweeper waiting on a connection every cycle.
 	Readers int
 
 	// TrimInterval is how often the MINID sweeper enforces StreamRetention.
@@ -288,15 +275,13 @@ type Config struct {
 	// deliver. Default 250ms, which is also the maximum: New fails if it is
 	// larger, and the minimum: New fails if it is smaller than 1ms.
 	//
-	// It is not just a Redis-efficiency knob, because a blocked XREAD cannot
-	// be interrupted (go-redis honours a context deadline, not a
-	// cancellation) and a reader's key set is fixed when its XREAD is issued.
-	// So this value is simultaneously the upper bound on how long Close waits
-	// for a reader to notice shutdown, and on how long a newly activated room
-	// waits before its stream is read at all. Lower it to shorten both at the
-	// cost of more commands per second; it cannot be raised, because the
-	// latencies it would extend are not negotiable. See maxReadBlock and
-	// minReadBlock (streams.go) for the full reasoning.
+	// Not just a Redis-efficiency knob: a blocked XREAD cannot be interrupted
+	// (go-redis honours a context deadline, not a cancellation) and a reader's
+	// key set is fixed when its XREAD is issued, so this is simultaneously the
+	// upper bound on how long Close waits for a reader to notice shutdown and
+	// on how long a newly activated room waits to be read at all. Lower it to
+	// shorten both at the cost of more commands per second; it cannot be
+	// raised. See maxReadBlock and minReadBlock (streams.go).
 	//
 	// Delivery latency for a room already being read is NOT bounded by this:
 	// XREAD returns as soon as any of its keys gets an entry.
@@ -364,12 +349,10 @@ type Relay struct {
 
 	// seqs holds this node's sequence counter for each stream KEY it has
 	// published to, so readers can detect trimmed or dropped entries. Per
-	// stream, not per node: a reader of one stream sees only the entries that
-	// landed in that stream, so one shared counter would look full of holes on
-	// any node publishing to more than one room, and gap detection would fire
-	// on healthy clusters. Counters restart at 0 on process restart; a
-	// decrease is read as a restart rather than a gap. Guarded by streamMu and
-	// bounded by seqLimit; see nextSeq / evictStaleSeqsLocked.
+	// stream, not per node — see nextSeq for why one shared counter would make
+	// gap detection fire on healthy clusters. Counters restart at 0 with the
+	// process, and a decrease is read as a restart rather than a gap. Guarded
+	// by streamMu and bounded by seqLimit; see evictStaleSeqsLocked.
 	seqs map[string]uint64
 
 	// Stream tier counters. Only incremented in Streams mode; always zero
@@ -383,44 +366,34 @@ type Relay struct {
 	stalled  atomic.Uint64 // incremented by stream reader: lane at capacity
 	deferred atomic.Uint64 // incremented by stream reader: room has no worker yet
 
-	// streamMu guards streamRooms. Separate from mu: mu is held across the
-	// pub/sub SUBSCRIBE/UNSUBSCRIBE RPC (see mu's doc below), and streamRooms
-	// bookkeeping must not be blocked behind a stalled Redis call it has
-	// nothing to do with. It is also separate from workersMu — streamRooms
-	// tracks READER-side (XREAD) assignment, an entirely different axis from
-	// the pub/sub delivery workers workersMu guards.
+	// streamMu guards streamRooms. Separate from mu, which is held across the
+	// pub/sub SUBSCRIBE/UNSUBSCRIBE RPC, so this bookkeeping never blocks
+	// behind a stalled Redis call it has nothing to do with; separate from
+	// workersMu because reader assignment is a different axis from delivery.
 	streamMu sync.Mutex
-	// streamRooms is a reference count per room name, mirroring activeRooms
-	// but for the stream reader's assignment instead of pub/sub subscription:
-	// RoomActivated/RoomDeactivated for the same room can arrive out of order
-	// across a room's eviction/reload handoff (see the Relay contract's
-	// RoomActivated doc), and a plain set would let the predecessor's
-	// deactivation evict a room the successor still needs read. Only
-	// incremented/decremented in Streams/Both mode. roomsForReader is what
-	// consumes it, to build each reader's XREAD key set.
+	// streamRooms is a reference count per room name, mirroring activeRooms but
+	// for reader assignment: RoomActivated/RoomDeactivated for one room can
+	// arrive out of order across an eviction/reload handoff (see the Relay
+	// contract's RoomActivated doc), and a plain set would let the
+	// predecessor's deactivation evict a room the successor still needs read.
+	// Maintained in Streams/Both mode only; consumed by roomsForReader.
 	streamRooms map[string]int
 	// cursors is the last SYNC stream ID this node has delivered, per stream
-	// key. Purely in-memory and never persisted — a lost cursor costs a
-	// replay, not a loss, because a sync stream is read from its oldest
-	// retained entry when no cursor is known. Entries are kept past a room's
-	// deactivation so ordinary churn does not re-replay the whole retention
-	// window, and bounded by cursorLimit. Guarded by streamMu; see setCursor
-	// / evictStaleCursorsLocked.
-	//
-	// Awareness cursors are deliberately NOT here. They must not survive a
-	// room's deactivation, and a residency-scoped home makes that structural:
-	// see roomWorker.awCursor, which also states why the two kinds differ.
+	// key. Purely in-memory and never persisted: a lost cursor costs a replay,
+	// not a loss, because a sync stream is read from its oldest retained entry
+	// when no cursor is known. Kept past a room's deactivation and bounded by
+	// cursorLimit; guarded by streamMu (see setCursor,
+	// evictStaleCursorsLocked). Awareness cursors are deliberately NOT here —
+	// roomWorker.awCursor states the retention rule for both kinds.
 	cursors map[string]string
 	// lastSeq is the last sequence number seen from each source node ON EACH
 	// STREAM, used to tell a trimmed-away gap from a node restart. Keyed by
-	// both because the publisher's counter is per stream (see seqs): keying
-	// by nodeID alone would interleave two streams' sequences from one node
-	// into a single series and report the interleaving itself as gaps. The
-	// value also carries whether the PREVIOUS observation went backwards, so
-	// that the comparison immediately after a decrease re-baselines rather
-	// than reporting a gap — see noteSeq for why that case is routine.
-	// Guarded by streamMu and bounded by seqLimit; see noteSeq /
-	// evictStaleLastSeqLocked.
+	// both because the publisher's counter is per stream: keying by nodeID
+	// alone would fold two streams' sequences into one series and report the
+	// interleaving itself as gaps. The value also carries whether the PREVIOUS
+	// observation went backwards, so the comparison after a decrease
+	// re-baselines instead of accusing — see noteSeq. Guarded by streamMu and
+	// bounded by seqLimit; see evictStaleLastSeqLocked.
 	lastSeq map[seqSource]seqState
 
 	// outbound carries Publish calls to the publisher goroutine. A bounded
@@ -681,14 +654,10 @@ func (r *Relay) Start(ctx context.Context, sink cluster.Sink) error {
 	go r.runSubscriber(ctx)
 	go r.runPublisher(ctx)
 
-	// Streams-tier readers. Gated on the transport, so PubSub mode — the
-	// zero value, and every existing caller — launches nothing new and
-	// XREADs nothing.
-	//
-	// The readers get a DERIVED context (streamReadCtx), not ctx: ctx
-	// ordinarily outlives the relay (Server cancels relayCtx after Close), so
-	// readers bound to it would go on issuing XREADs against a closed relay.
-	// See streamReadCtx for what that context does and does not buy.
+	// Streams-tier readers, gated on the transport so PubSub mode — the zero
+	// value, and every existing caller — launches nothing new. They get a
+	// DERIVED context, not ctx, which ordinarily outlives the relay; see
+	// streamReadCtx for what that buys and what it does not.
 	if r.scfg.transport.usesStreams() {
 		readCtx := r.streamReadCtx(ctx)
 		for i := 0; i < r.scfg.readers; i++ {
@@ -696,12 +665,9 @@ func (r *Relay) Start(ctx context.Context, sink cluster.Sink) error {
 			go r.runStreamReader(readCtx, i)
 		}
 
-		// The MINID trim sweeper: the age half of the delivery guarantee
-		// (see runTrimSweeper's doc). It gets the plain Start ctx, not the
-		// derived readCtx above — its own select watches r.done directly,
-		// which is enough for a ticker loop and does not need
-		// streamReadCtx's r.done→cancel forwarding (that forwarding exists
-		// only because a blocked XREAD can't otherwise be interrupted).
+		// The MINID trim sweeper: the age half of the delivery guarantee. It
+		// gets the plain Start ctx, because its own select watches r.done
+		// directly — enough for a ticker loop. See runTrimSweeper.
 		r.wg.Add(1)
 		go r.runTrimSweeper(ctx)
 	}
@@ -826,15 +792,12 @@ func (r *Relay) runSubscriber(ctx context.Context) {
 // the done/startCtx channels give it all the ordering it needs, and the
 // hot path must not be serialised against lifecycle/room-membership ops.
 //
-// Config.Transport routes what happens next. When the transport uses
-// streams (Streams or Both), Publish XADDs synchronously, inline on the
-// caller's goroutine, before anything is queued for pub/sub — a failed XADD
-// must fail the call rather than be swallowed by the async pub/sub hand-off,
-// since Streams mode is the durable tier callers opted into for exactly that
-// error visibility. When the transport does not also use pub/sub (Streams
-// only), Publish returns immediately after the XADD and never touches the
-// outbound queue or PUBLISH at all — a Streams deployment must not still pay
-// for, or depend on, the at-most-once channel it exists to replace.
+// Config.Transport routes what happens next. Under Streams or Both, Publish
+// XADDs synchronously before anything is queued for pub/sub, so a failed XADD
+// fails the call rather than being swallowed by the async hand-off — error
+// visibility is what callers opt into the durable tier for. Under Streams alone
+// it returns straight after the XADD, never touching the outbound queue or
+// PUBLISH.
 func (r *Relay) Publish(ctx context.Context, out cluster.Outbound) error {
 	if r.closed.Load() {
 		return ErrRelayClosed
@@ -909,15 +872,11 @@ func (r *Relay) RoomActivated(room string) {
 	default:
 	}
 
-	// Reader-side assignment refcount. This runs BEFORE the pub/sub
-	// count>1 short-circuit below, not after it: that short-circuit exists
-	// to skip a redundant SUBSCRIBE RPC, but a second RoomActivated call is
-	// still a real activation this relay must keep counted for the stream
-	// reader, exactly the successor-before-predecessor overlap the Relay
-	// contract requires tolerating. Placing this after the short-circuit
-	// (mirroring where the pub/sub work "ends") would silently skip the
-	// increment on every call past the first, undercounting activations and
-	// making a later RoomDeactivated evict a still-live room.
+	// Reader-side assignment refcount, BEFORE the pub/sub count>1
+	// short-circuit below: that only skips a redundant SUBSCRIBE RPC, whereas a
+	// second RoomActivated is still a real activation the reader must count —
+	// the successor-before-predecessor overlap the Relay contract requires
+	// tolerating. After it, a later RoomDeactivated would evict a live room.
 	if r.scfg.transport.usesStreams() {
 		r.streamMu.Lock()
 		r.streamRooms[room]++
@@ -965,45 +924,28 @@ func (r *Relay) RoomDeactivated(room string) {
 		return
 	}
 
-	// Reader-side assignment ONLY — never publish-side state. RoomDeactivated's
-	// own contract (cluster/relay.go) warns that a relay releasing per-room
-	// PUBLISH-side state here — it names "a stream key" — would drop a
+	// Reader-side assignment ONLY — never publish-side state.
+	// RoomDeactivated's own contract (cluster/relay.go) warns that releasing
+	// per-room PUBLISH-side state here — it names "a stream key" — would drop a
 	// trailing update, because the provider's lane worker can still call
 	// Publish for this room after RoomDeactivated returns. publishStream
-	// therefore never consults streamRooms; this map is consulted only by
-	// the (later) stream reader to decide which rooms it still owns.
+	// therefore never consults streamRooms; only the reader does.
 	//
-	// Decremented here, guarded by the same "was this room actually active"
-	// check as activeRooms above (r.activeRooms[room] <= 0 already
-	// returned), so an extra/no-op RoomDeactivated call can't underflow this
-	// counter either — mirroring activeRooms's own refcount rather than the
-	// pub/sub count>0 short-circuit below, which exists to skip a redundant
-	// UNSUBSCRIBE RPC and would otherwise leave a still-referenced room's
-	// count untouched on every call past the last one that reaches zero.
+	// Guarded by the same "was this room actually active" check as activeRooms
+	// above (r.activeRooms[room] <= 0 already returned), so a no-op
+	// RoomDeactivated cannot underflow this counter — mirroring activeRooms's
+	// own refcount rather than the pub/sub count>0 short-circuit below.
 	if r.scfg.transport.usesStreams() {
 		r.streamMu.Lock()
 		if n := r.streamRooms[room] - 1; n > 0 {
 			r.streamRooms[room] = n
 		} else {
 			delete(r.streamRooms, room)
-			// The room is really gone from this node — and no cursor is
-			// deleted here, deliberately. Its SYNC cursor is KEPT: dropping
-			// it would make ordinary room churn replay the room's whole
-			// retention window on every reactivation, the condition
-			// StreamStats.Replayed exists to alarm on (see cursorLimit). Its
-			// AWARENESS cursor must NOT survive — presence is read from the
-			// tail precisely because replaying it resurrects clients that are
-			// long gone, and the websocket provider evicts and reloads idle
-			// rooms continuously (#183), so a reactivation inside one process
-			// is routine — but it is not stored here to delete. It lives on
-			// the room's delivery worker, which stopWorker retires below, so
-			// it dies with the residency it belongs to.
-			//
-			// That placement is what makes the rule hold rather than nearly
-			// hold: deleting an awareness cursor from this map could only
-			// NARROW the replay window, because a read whose id vector was
-			// built before the delete applies afterwards and writes the old
-			// position straight back. See roomWorker.awCursor.
+			// No cursor is deleted here, deliberately: the sync cursor is kept
+			// and the awareness cursor is not stored here to delete — it dies
+			// with the worker stopWorker retires below. See
+			// roomWorker.awCursor for the rule and why placement, not deletion,
+			// is what enforces it.
 		}
 		r.streamMu.Unlock()
 	}

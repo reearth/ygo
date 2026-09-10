@@ -80,26 +80,17 @@ func TestUnit_StreamReader_KeyBatchingEmpty(t *testing.T) {
 // predecessor's RoomDeactivated, in either order. Refcounting rides that out;
 // treating deactivation as an unconditional removal would drop a live room.
 //
-// r.Start is required here even though the brief's version of this test
-// omitted it: RoomActivated/RoomDeactivated both return immediately when
-// !r.started.Load(), before ever reaching the pub/sub work this task's
-// stream block is appended after — so without Start, streamRooms would
-// never be touched and this test would fail regardless of whether the new
-// refcounting code is correct (the same class of gap already caught and
-// documented in streams_test.go's Both/PubSub Publish tests).
+// r.Start is REQUIRED: RoomActivated/RoomDeactivated both return immediately
+// when !r.started.Load(), before ever reaching the stream block, so without it
+// streamRooms would never be touched and this test would pass or fail
+// regardless of the refcounting code.
 //
-// The brief's version of this test asserted only presence/absence via
-// roomsForReader, which does not actually distinguish a true integer refcount
-// from a naive boolean flag that merely mirrors whether activeRooms[room] is
-// zero: since every RoomActivated/RoomDeactivated call drives BOTH activeRooms
-// and streamRooms off the exact same events, a flag that flips on the 0->1
-// and >0->0 crossings would show identically "present" after the successor
-// activation and "absent" after the final deactivation, with no assertion
-// ever distinguishing it from streamRooms holding the real count (2, then 1).
-// Added a direct read of r.streamRooms (this is package redis, so the
-// unexported field is reachable) to require the count itself is 2 after both
-// activations, and 1 after the predecessor's deactivation — the "reference
-// count" the interface's own doc comment calls for, not just a derived flag.
+// It asserts r.streamRooms's count directly rather than presence/absence via
+// roomsForReader, because presence cannot distinguish a real integer refcount
+// from a boolean flag: both drive off the same events, so a flag would read
+// "present" after the successor activation and "absent" after the final
+// deactivation either way. The counts (2, then 1) are the discriminating
+// assertion.
 func TestUnit_StreamReader_ActivationRefcounts(t *testing.T) {
 	mr := newMiniRedis(t)
 	r, err := New(newClient(t, mr), Config{Transport: Streams})
@@ -130,23 +121,18 @@ func TestUnit_StreamReader_ActivationRefcounts(t *testing.T) {
 
 // --- Reader loop -----------------------------------------------------------
 //
-// Test-double naming: this file uses recordingSink rather than the fakeSink
-// the brief named. redis_test.go (package redis_test) already has a DIFFERENT
-// fakeSink, and internal_test.go (package redis) has countingSink; a third
-// type sharing the name fakeSink in the same directory compiles but is a
-// readability trap. countingSink could not simply be extended either — it
-// records only a count, and half of these tests need to assert on the actual
-// payload bytes, and widening a helper five existing tests depend on is a
-// larger change than adding a purpose-built one.
+// Test-double naming: recordingSink, not fakeSink — redis_test.go already has
+// a different fakeSink and internal_test.go has countingSink, so a third
+// same-named type in one directory compiles but misleads. countingSink records
+// only a count, and half these tests assert on payload bytes.
 
 // recordingSink records what a relay injects, so a test can assert on the
 // payload rather than only on a count.
 //
-// It has no room registry, unlike the brief's version: workerForInbound
-// routes on r.workers (populated by RoomActivated), and cluster/redis never
-// calls Sink.Rooms() at all — verified by grep. A rooms map here would have
-// implied that Sink residency gates inbound delivery, which is false, and the
-// next reader of this file would have believed it.
+// No room registry, deliberately: workerForInbound routes on r.workers
+// (populated by RoomActivated), and cluster/redis never calls Sink.Rooms(). A
+// rooms map here would imply Sink residency gates inbound delivery, which is
+// false.
 type recordingSink struct {
 	mu       sync.Mutex
 	injected [][]byte
@@ -265,7 +251,7 @@ func v1Update(t *testing.T, text string) []byte {
 //
 // Verified non-vacuous: with the reader loop absent (Start not launching
 // runStreamReader) this fails at the FIRST require.Eventually, because
-// nothing is ever injected. See task-6-report.md for the recorded output.
+// nothing is ever injected.
 func TestIntegration_StreamReader_ResumesAfterStopAndDeliversMissedUpdates(t *testing.T) {
 	mr := newMiniRedis(t)
 
@@ -367,14 +353,12 @@ func TestIntegration_StreamReader_CatchUpMergedIntoSingleInject(t *testing.T) {
 // Awareness is read from the tail and never replayed: replaying it would
 // resurrect presence for clients that are long gone.
 //
-// The brief's version of this test asserted ONLY that the stale awareness
-// payload is absent, after a fixed sleep. That would have passed even if the
-// reader never ran at all, or never read awareness streams at all — which is
-// the same vacuous-test class already caught in tasks 3 and 4. Two positive
-// witnesses are added: a sync entry published before start MUST be replayed
-// (proving the reader reached this room), and an awareness entry published
-// after start MUST arrive (proving awareness delivery works at all, so the
-// absence below is about the replay policy and not about a dead code path).
+// Asserting only the stale payload's absence would pass even if the reader
+// never ran, or never read awareness streams at all. Two positive witnesses
+// make it non-vacuous: a sync entry published before start MUST be replayed
+// (the reader reached this room), and an awareness entry published after start
+// MUST arrive (awareness delivery works at all), so the absence below is about
+// replay policy rather than a dead code path.
 func TestIntegration_StreamReader_AwarenessIsNotReplayed(t *testing.T) {
 	mr := newMiniRedis(t)
 	b, err := New(newClient(t, mr), readerConfig(nodeB))
@@ -417,10 +401,9 @@ func TestIntegration_StreamReader_AwarenessIsNotReplayed(t *testing.T) {
 
 // A node must not re-inject its own writes.
 //
-// Strengthened over the brief, which asserted only the absence of the node's
-// own payload after a fixed sleep — vacuous if the reader had not yet read
-// anything. Node B's payload is the witness: it proves the reader consumed
-// the same stream past A's own entry.
+// Absence of A's own payload alone would be vacuous if the reader had not yet
+// read anything. Node B's payload is the witness: it proves the reader
+// consumed the same stream past A's own entry.
 func TestIntegration_StreamReader_SelfFilter(t *testing.T) {
 	mr := newMiniRedis(t)
 	sink := &recordingSink{}
@@ -451,15 +434,12 @@ func TestIntegration_StreamReader_SelfFilter(t *testing.T) {
 
 // Transport's zero value is PubSub, and a PubSub relay must not grow a reader.
 //
-// The second half of this test is what actually pins the usesStreams gate in
-// Start. The first half — activate a room on a PubSub relay and see nothing
-// arrive — passes even with that gate removed, because RoomActivated has its
-// own usesStreams gate on streamRooms (task 5), so a launched reader would
-// simply idle with no assignment. Verified by mutation: replacing the Start
-// gate with `if true` left the first half green. So the second half forces
-// streamRooms to hold the room, which is the only other thing standing
-// between a reader and this stream; then the gate in Start is the sole
-// remaining defence, and removing it makes this test fail.
+// The second half is what pins the usesStreams gate in Start. The first half
+// passes even with that gate removed, because RoomActivated has its own
+// usesStreams gate on streamRooms, so a launched reader would idle with no
+// assignment (verified by mutation: `if true` in Start left it green). The
+// second half forces streamRooms to hold the room, leaving Start's gate as the
+// sole remaining defence.
 func TestIntegration_StreamReader_PubSubModeReadsNoStreams(t *testing.T) {
 	mr := newMiniRedis(t)
 
@@ -518,13 +498,11 @@ func TestUnit_StreamReader_CursorDefaultsAndRoundTrip(t *testing.T) {
 
 // Cursor eviction must not evict a room this relay is still reading.
 //
-// This deviates from the brief, which evicted an ARBITRARY map entry on
-// overflow. Doing that on a node with more than cursorLimit/2 active rooms
-// drops a live room's cursor roughly half the time, and losing a live
-// cursor replays that room's whole retention window — which is precisely
-// the condition StreamStats.Replayed tells operators to alert on. Evicting
-// only cursors whose room is no longer in streamRooms bounds the map by real
-// load instead.
+// Evicting an ARBITRARY entry on overflow drops a live room's cursor roughly
+// half the time on a node with more than cursorLimit/2 active rooms, and a
+// live room that loses its cursor replays its whole retention window — the
+// condition StreamStats.Replayed tells operators to alert on. Evicting only
+// cursors whose room has left streamRooms bounds the map by real load.
 func TestUnit_StreamReader_CursorEvictionKeepsActiveRooms(t *testing.T) {
 	mr := newMiniRedis(t)
 	// Deliberately NOT Started: no reader goroutine, so nothing races the
@@ -1151,8 +1129,6 @@ func TestUnit_StreamReader_FirstSeqEstablishesBaselineRegardlessOfValue(t *testi
 //     against that keying. Interleaved traffic hides it entirely, because
 //     4,4,5,5,6,6 contains neither a jump nor a decrease — which is why this
 //     phase exists and why it waits for delivery between rooms.
-//
-// Both mutations recorded in task-6-report.md.
 func TestIntegration_StreamReader_HealthyMultiRoomReaderRecordsNoGaps(t *testing.T) {
 	mr := newMiniRedis(t)
 

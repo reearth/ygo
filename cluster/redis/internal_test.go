@@ -337,7 +337,7 @@ func newTestRelayNoStart() *Relay {
 // message arriving after RoomDeactivated already unsubscribed would
 // re-create a worker that nothing could ever reap (a later RoomDeactivated
 // for the same room just no-ops, since activeRooms is already back at
-// zero) — the exact unbounded per-room growth this task exists to stop.
+// zero) — the exact unbounded per-room growth this drop prevents.
 func TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray(t *testing.T) {
 	r := newTestRelayNoStart()
 	t.Cleanup(func() { close(r.done) })
@@ -506,8 +506,7 @@ func TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated(t *testing.T) {
 
 	// The Redis subscription and activeRooms refcount are both untouched by
 	// stopWorker: publishing now must be DROPPED, not lazily recreate the
-	// worker (that behaviour was removed by this task's carried-forward
-	// router simplification).
+	// worker.
 	require.NoError(t, pub.Publish(context.Background(), cluster.Outbound{
 		Room: "room", Kind: cluster.KindSync, Data: []byte{0x09},
 	}))

@@ -101,13 +101,11 @@ func New(capacity int) *Lane {
 // producer is never made to wait for a consumer. data must not be mutated by
 // the caller afterwards — the Lane retains the slice.
 //
-// "Never blocks" stops at capacity, though: Push takes mu, and both Push
-// (via collapseLocked) and TakeSync hold mu across crdt.MergeUpdatesV1. So a
-// Push can wait for an in-flight merge on the SAME lane, and a caller must
-// not hold a lock that other rooms need across a Push — that turns one
-// room's merge into every room's stall, which is the coupling a lane per
-// room exists to remove. Stats() is deliberately lock-free for the same
-// reason (see the Lane struct's doc).
+// "Never blocks" stops at capacity, though: Push takes mu, and both Push (via
+// collapseLocked) and TakeSync hold mu across crdt.MergeUpdatesV1. So a Push
+// can wait for an in-flight merge on the SAME lane, and a caller must not hold
+// a lock that other rooms need across a Push — that turns one room's merge into
+// every room's stall, the coupling a lane per room exists to remove.
 func (l *Lane) Push(kind cluster.Kind, data []byte) {
 	l.mu.Lock()
 	if kind == cluster.KindAwareness {
@@ -207,21 +205,15 @@ func (l *Lane) Empty() bool {
 // Depth reports how many payloads the lane currently holds: every queued sync
 // blob, plus one for a pending awareness blob.
 //
-// This is a TEST-ASSERTION primitive, not a production signal, and relaylane
-// being an internal package is the whole of its audience. It exists so tests
-// here and in cluster/redis can state "exactly this much was queued" or
-// "nothing was pushed" directly, instead of inferring queue state from a
-// worker goroutine's observable side effects — which is the difference
-// between a deterministic assertion and a timing one. No production caller
-// exists, and none should: a producer deciding whether to send wants Full(),
-// a consumer wants Empty(), and neither wants a count.
+// A TEST-ASSERTION primitive, not a production signal: it lets tests state
+// "exactly this much was queued" directly, rather than inferring queue state
+// from a worker goroutine's side effects.
 //
-// A count is in fact the WRONG basis for a full-lane decision, which is the
-// second reason to keep it out of production. The awareness slot is
-// latest-only and never contributes to the capacity Push enforces, so
+// A count is also the WRONG basis for a full-lane decision, since the awareness
+// slot is latest-only and never contributes to the capacity Push enforces:
 // comparing Depth() against a cap held elsewhere would report a lane full one
-// payload early whenever awareness happened to be pending. Full() is defined
-// against the queue the cap actually governs.
+// payload early whenever awareness was pending. Producers want Full(), defined
+// against the queue the cap actually governs; consumers want Empty().
 func (l *Lane) Depth() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -238,15 +230,13 @@ func (l *Lane) Depth() int {
 // The predicate lives here, not in the caller, because the cap and the
 // threshold Push compares it against are both lane-internal: a caller
 // recomputing "depth >= my copy of the cap" duplicates two facts it does not
-// own and drifts silently if either changes. It is exact rather than
-// conservative — collapseLocked triggers on len(syncQ) > cap after the
-// append, which is len(syncQ) >= cap before it.
+// own. It is exact rather than conservative — collapseLocked triggers on
+// len(syncQ) > cap after the append, which is len(syncQ) >= cap before it.
 //
-// This is advisory only. Push still never blocks and never drops, so a
-// producer is free to ignore Full and take the merge. It exists for a producer
-// that has something CHEAPER to do than make the lane merge — cluster/redis's
-// stream reader declines to advance its cursor and re-reads the same durable
-// entries next cycle instead.
+// Advisory only: Push still never blocks and never drops, so a producer may
+// ignore Full and take the merge. It exists for a producer with something
+// CHEAPER to do — cluster/redis's stream reader declines to advance its cursor
+// and re-reads the same durable entries next cycle instead.
 func (l *Lane) Full() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()

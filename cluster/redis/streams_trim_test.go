@@ -12,31 +12,18 @@ import (
 	"github.com/reearth/ygo/cluster"
 )
 
-// r.Start is required in every test below that calls RoomActivated, even
-// though the task-9 brief's version omitted it: RoomActivated returns
-// immediately when !r.started.Load(), before it ever touches streamRooms —
-// so without Start, streamRooms stays empty, trimOnce finds no rooms, and
-// these tests would pass vacuously (or fail outright) regardless of whether
-// trimOnce is correct. Same class of gap already documented in
-// streams_reader_test.go's TestUnit_StreamReader_ActivationRefcounts.
+// r.Start is REQUIRED in every test below that calls RoomActivated:
+// RoomActivated returns immediately when !r.started.Load(), before it ever
+// touches streamRooms, so without it trimOnce finds no rooms and these tests
+// pass vacuously.
 //
-// These tests also do NOT use miniredis's mr.FastForward to simulate aged
-// entries, unlike the brief's version. FastForward only decreases TTLs
-// (miniredis's db.fastForward walks expiring keys) — it does not move
-// miniredis's own now() used by XADD's "*" auto-ID, which stays real
-// time.Now() unless a test calls the separate mr.SetTime. trimOnce's cutoff
-// is computed from real time.Now() too (see streams_trim.go), entirely on
-// the Go client side — XTRIM MINID takes an explicit ID and does not consult
-// any server-side clock at all. So mr.FastForward has NO effect on whether
-// an entry looks old to either side of this mechanism: an entry published a
-// few microseconds before trimOnce runs is still only a few microseconds
-// old by real time, FastForward or not, and the brief's tests would have
-// failed to observe any trimming at all. Real time.Sleep — already this
-// package's established idiom (see e.g. streams_reader_test.go,
-// internal_test.go, redis_test.go; grep finds no existing use of
-// FastForward anywhere in this package) — is what actually ages an entry,
-// so retention/AwarenessRetention below are set small enough to keep that
-// fast.
+// These tests do NOT use miniredis's mr.FastForward to age entries.
+// FastForward only decreases TTLs (db.fastForward walks expiring keys); it
+// moves neither miniredis's now() behind XADD's "*" auto-ID nor its TIME reply
+// — both stay real time.Now() unless a test calls mr.SetTime. Since trimOnce's
+// cutoff comes from TIME and the ids come from that same clock, FastForward has
+// no effect on whether an entry looks old to either side. Real time.Sleep ages
+// it, so retention/AwarenessRetention below are small enough to stay fast.
 
 // MAXLEN alone gives no age bound — a hot room's 4096 entries might be two
 // seconds. The MINID sweeper is the time half of the guarantee.
@@ -128,13 +115,12 @@ func TestUnit_StreamTrim_AwarenessUsesItsOwnRetention(t *testing.T) {
 }
 
 // Close must not hang with the sweeper running. runTrimSweeper's select
-// watches r.done directly, the same way runPublisher/runSubscriber do — NOT
-// only ctx.Done(), which is what the task-9 brief's version of this file
-// did. ctx here is context.Background(), which is never cancelled (matching
-// the ordinary case documented on streamReadCtx: ctx usually outlives the
-// relay), so a sweeper gated on ctx.Done() alone would never observe Close
-// at all, and Close's r.wg.Wait() would block forever. Verified by mutation:
-// dropping the "case <-r.done: return" arm reproduces exactly that hang
+// watches r.done directly, the same way runPublisher/runSubscriber do, NOT
+// only ctx.Done(). ctx here is context.Background(), which is never cancelled
+// (the ordinary case documented on streamReadCtx: ctx usually outlives the
+// relay), so a sweeper gated on ctx.Done() alone would never observe Close and
+// Close's r.wg.Wait() would block forever. Verified by mutation: dropping the
+// "case <-r.done: return" arm reproduces exactly that hang
 // (Close does not return within a bounded wait).
 func TestUnit_StreamTrim_CloseDoesNotHang(t *testing.T) {
 	mr := newMiniRedis(t)

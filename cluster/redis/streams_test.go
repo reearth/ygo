@@ -379,11 +379,9 @@ func TestUnit_Streams_PublishHonoursCancelledContext(t *testing.T) {
 // Both must reach BOTH tiers, since pub/sub and Streams nodes do not
 // interoperate and migration rolls through Both.
 //
-// r.Start is required here even though the brief's version of this test
-// omitted it: Publish's existing started-guard returns ErrRelayNotStarted
-// before reaching the transport-routing branch this task adds, so without
-// Start the require.NoError below would fail regardless of whether the new
-// routing code is correct.
+// r.Start is REQUIRED: Publish's started-guard returns ErrRelayNotStarted
+// before reaching the transport-routing branch, so without it the
+// require.NoError below fails regardless of the routing code.
 func TestUnit_Streams_BothPublishesToChannelAndStream(t *testing.T) {
 	mr := newMiniRedis(t)
 	r, err := New(newClient(t, mr), Config{Transport: Both})
@@ -403,12 +401,10 @@ func TestUnit_Streams_BothPublishesToChannelAndStream(t *testing.T) {
 
 // PubSub mode must never touch the keyspace.
 //
-// r.Start is required here for the same reason as the Both test above: the
-// brief's version discarded Publish's error and never called Start, so
-// Publish returned ErrRelayNotStarted before ever reaching the new
-// transport-routing branch — meaning the stream-emptiness assertion below
-// would have passed even if PubSub mode wrongly wrote to a stream. Calling
-// Start first makes Publish actually exercise usesStreams()/usesPubSub().
+// r.Start is REQUIRED for the same reason as the Both test above: without it
+// Publish returns ErrRelayNotStarted before reaching the transport-routing
+// branch, so the stream-emptiness assertion below would pass even if PubSub
+// mode wrongly wrote to a stream.
 func TestUnit_Streams_PubSubModeWritesNoStream(t *testing.T) {
 	mr := newMiniRedis(t)
 	r, err := New(newClient(t, mr), Config{})
@@ -431,9 +427,8 @@ func TestUnit_Streams_PubSubModeWritesNoStream(t *testing.T) {
 // This is the end-to-end shape of the defect the per-stream counter fixes: a
 // single per-relay counter, incremented for every publish regardless of room,
 // wrote [1 3 5] into room1's stream and [2 4 6] into room2's, so every reader
-// of either room raised StreamStats.Gaps against a node that was doing
-// nothing but working. Verified failing against that counter — see
-// task-6-report.md.
+// of either room raised StreamStats.Gaps against a healthy node. Verified
+// failing against that counter.
 func TestUnit_Streams_InterleavedRoomPublishesAreContiguousPerStream(t *testing.T) {
 	mr := newMiniRedis(t)
 	r, err := New(newClient(t, mr), Config{Transport: Streams})

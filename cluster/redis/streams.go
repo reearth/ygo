@@ -45,11 +45,10 @@ func (t Transport) String() string {
 // usesStreams reports whether this transport reads from and writes to streams.
 func (t Transport) usesStreams() bool { return t == Streams || t == Both }
 
-// usesPubSub reports whether this transport reads from and writes to
-// channels. Publish consults this to decide whether the pub/sub hand-off
-// runs at all: Streams-only mode must skip PUBLISH entirely, not merely
-// ignore its result, or a Streams deployment would still pay for and depend
-// on the at-most-once channel it exists to replace.
+// usesPubSub reports whether this transport reads from and writes to channels.
+// Publish consults it to skip the pub/sub hand-off entirely in Streams-only
+// mode, rather than merely ignoring its result: a Streams deployment must not
+// still depend on the at-most-once channel it exists to replace.
 func (t Transport) usesPubSub() bool { return t == PubSub || t == Both }
 
 // Stream tier defaults. See the corresponding Config fields for rationale.
@@ -67,59 +66,42 @@ const (
 // maxKeysPerRead bounds how many stream keys go into one XREAD. Not
 // configurable: an operator has no basis for choosing it, and Readers already
 // controls concurrency. Without it, 10k rooms across 4 readers would build a
-// ~5000-argument command every cycle. keyBatches (streams_reader.go) enforces
-// this; the reader task that issues XREAD lands later and consumes both.
+// ~5000-argument command every cycle. keyBatches enforces it.
 const maxKeysPerRead = 512
 
-// maxReadBlock is the largest Config.ReadBlock this package accepts, and also
-// its default. resolveStreamCfg REJECTS a larger value rather than capping it
-// silently, so the knob can never be set to a number that does not happen.
+// maxReadBlock is the largest Config.ReadBlock this package accepts, and its
+// default. resolveStreamCfg REJECTS a larger value rather than capping it, so
+// the knob can never be set to a number that does not happen.
 //
-// The ceiling exists because a blocked XREAD cannot be interrupted. go-redis
+// The ceiling exists because A BLOCKED XREAD CANNOT BE INTERRUPTED: go-redis
 // arms the socket read deadline from ctx.Deadline() only
 // (internal/pool.(*Conn).deadline, v9.18.0; withConn has no cancellation
-// watcher), so cancelling a reader's context mid-read does nothing. The
-// interval between one reader's reads is therefore BOTH of these latencies at
-// once, and each has a hard requirement:
+// watcher). One reader's read interval is therefore two latencies at once: how
+// long Close waits for a reader parked in an XREAD (measured 4.80s at a 5s
+// ReadBlock, in a path already fixed twice, #202/#229), and how long a room
+// activated after a reader's key set was fixed waits to be read at all.
 //
-//   - Shutdown. Close closes r.done and joins r.wg, so a reader parked in an
-//     XREAD holds Close open for the rest of that block. At a 5s ReadBlock
-//     this was measured at 4.80s — a five-second stall on every
-//     Server.Shutdown, in a path already fixed twice (#202, #229).
-//   - Activation. A reader's key set is fixed when its XREAD is issued, so a
-//     room activated after that cannot be read until the block expires. A
-//     room joining and then seeing no remote edits for seconds is the
-//     pub/sub tier's instant delivery visibly regressed.
-//
-// Neither is satisfiable at a multi-second block without waking a reader out
-// of its read, and the only mechanism for that is closing its connection —
-// connection churn proportional to room churn, which at this tier's 10k-room
-// target is a worse trade than a few extra idle XREADs per second. So the
-// block stays short and ReadBlock's range is honest about it: the idle cost is
-// Readers x ceil(keys-per-reader / maxKeysPerRead) XREADs per ReadBlock — 16/s
-// for a node with one batch per reader, ~160/s at 10k rooms across 4 readers —
-// and an XREAD that finds nothing is cheap.
-//
-// Lowering ReadBlock below this is a real and supported choice (faster
-// shutdown and activation, more commands); raising it is not offered, because
-// it could not be delivered.
+// Waking a reader out of its read would mean closing its connection — churn
+// proportional to room churn, a worse trade at this tier's 10k-room target
+// than a few extra idle XREADs per second. The idle cost is Readers x
+// ceil(keys-per-reader / maxKeysPerRead) XREADs per ReadBlock: 16/s with one
+// batch per reader, ~160/s at 10k rooms across 4 readers. So lowering ReadBlock
+// is supported; raising it is not offered, because it could not be delivered.
 const maxReadBlock = 250 * time.Millisecond
 
 // minReadBlock is the smallest Config.ReadBlock this package accepts.
 // resolveStreamCfg REJECTS a smaller value rather than degrading it silently.
 //
 // The floor exists because go-redis builds the BLOCK argument as
-// int64(block / time.Millisecond), so a sub-millisecond value truncates to 0.
-// In Redis, BLOCK 0 means block forever, so a reader in that XREAD would never
-// return, and Close's wg.Wait would hang. The reader also arms its socket read
-// deadline from ctx.Deadline(), not from cancellation, so there is no other
-// mechanism to wake it.
+// int64(block / time.Millisecond), so a sub-millisecond value truncates to 0,
+// and Redis reads BLOCK 0 as block forever: the reader would never return and
+// Close's wg.Wait would hang, with nothing able to wake it (see maxReadBlock).
 const minReadBlock = 1 * time.Millisecond
 
 // stalledBackoffBase is the first wait after a room's cursor advance is
 // declined for lane backpressure. It doubles per consecutive stalled cycle and
-// is capped at ReadBlock; see stallBackoff, which applies it. Not configurable,
-// for the same reason as maxKeysPerRead.
+// is capped at ReadBlock; see stallBackoff. Not configurable, for the same
+// reason as maxKeysPerRead.
 const stalledBackoffBase = 50 * time.Millisecond
 
 // streamCfg is Config's stream half with defaults resolved, so no code past
@@ -181,8 +163,7 @@ func resolveStreamCfg(client *goredis.Client, cfg Config) (streamCfg, error) {
 		sc.trimInterval = defaultTrimInterval
 	}
 	// Only the UNSET value is defaulted: a negative ReadBlock must reach the
-	// minReadBlock rejection below, as its doc promises, not be adjusted into
-	// the default.
+	// minReadBlock rejection below, as its doc promises.
 	if sc.readBlock == 0 {
 		sc.readBlock = defaultReadBlock
 	}
@@ -197,8 +178,7 @@ func resolveStreamCfg(client *goredis.Client, cfg Config) (streamCfg, error) {
 			pool, sc.readers, sc.readBlock)
 	}
 	// Rejected, not capped: a knob whose value is silently ignored above some
-	// threshold is worse than one with a documented range. See maxReadBlock
-	// for why the ceiling is where it is.
+	// threshold is worse than one with a documented range. See maxReadBlock.
 	if sc.readBlock > maxReadBlock {
 		return streamCfg{}, fmt.Errorf(
 			"cluster/redis: ReadBlock (%s) must not exceed %s: the interval between a reader's XREADs is also how long Close and a newly activated room wait, and a blocked XREAD cannot be interrupted",
@@ -217,57 +197,38 @@ func resolveStreamCfg(client *goredis.Client, cfg Config) (streamCfg, error) {
 	return sc, nil
 }
 
-// Stream-kind discriminators. The room name is APPENDED to one of these, so
-// the discriminator sits immediately after the prefix, ahead of every
-// caller-supplied byte.
+// Stream-kind discriminators. The room name is APPENDED to one of these, so the
+// discriminator sits ahead of every caller-supplied byte.
 //
-// That placement is the whole point of the layout. internal/roomname.Valid
-// deliberately accepts every printable character, ":" included, to match the
-// y-websocket JS server, so a room name may contain anything a key may. Under
-// the earlier layout — syncKey = prefix+room, awKey = prefix+"aw:"+room — a
-// room named "aw:foo" produced byte-for-byte room "foo"'s awareness key, so
-// that room's SYNC traffic and room "foo"'s PRESENCE traffic shared one Redis
-// stream, each reader interpreting the other room's entries under its own
-// kind.
-//
-// With the discriminator first, a collision would require "s:"+x == "a:"+y
-// for some room names x and y. Those two strings differ in their first byte,
-// so no pair of room names can satisfy it: the room name can no longer forge
-// a discriminator, because it is never in a position to be read as one.
+// internal/roomname.Valid accepts every printable character, ":" included, to
+// match the y-websocket JS server, so a room name may contain anything a key
+// may. Under a suffix layout — awKey = prefix+"aw:"+room — a room named
+// "aw:foo" produced byte-for-byte room "foo"'s awareness key, sharing one
+// stream between that room's SYNC traffic and "foo"'s PRESENCE traffic. With
+// the discriminator first, a collision needs "s:"+x == "a:"+y, which differ in
+// their first byte.
 const (
 	kindDiscrimSync      = "s:"
 	kindDiscrimAwareness = "a:"
 )
 
-// syncKey is the room's sync stream key: prefix + "s:" + room. publishStream
-// XADDs to it and readBatch XREADs it.
-//
-// See the discriminator constants above for why "s:" precedes the room name
-// instead of the two key shapes differing by a suffix on one of them.
+// syncKey is the room's sync stream key: prefix + "s:" + room. See the
+// discriminator constants for why "s:" precedes the room name.
 func (s streamCfg) syncKey(room string) string { return s.prefix + kindDiscrimSync + room }
 
 // awKey is the room's awareness stream key: prefix + "a:" + room. A separate
-// stream from syncKey — see Config.AwarenessMaxLen — and provably a separate
-// KEY for every possible pair of room names, per the discriminator constants.
+// stream from syncKey (see Config.AwarenessMaxLen) and provably a separate KEY
+// for every possible pair of room names, per the discriminator constants.
 func (s streamCfg) awKey(room string) string { return s.prefix + kindDiscrimAwareness + room }
 
 // parseStreamKey recovers the room and the stream kind from a stream key,
-// exactly or not at all.
+// exactly or not at all — after the prefix the next two bytes are the
+// discriminator and every remaining byte is the room name verbatim.
 //
-// Exact because of the layout above: after the prefix the next two bytes are
-// the discriminator, and every remaining byte is the room name verbatim.
-// There is no second reading to weigh, because one key cannot be both a sync
-// key and an awareness key, and the room name never occupies the
-// discriminator's position. Under the earlier suffix layout this operation was
-// genuinely ambiguous, which is why the reader carries a streamTarget forward
-// rather than parsing (see streamTarget); this function serves the diagnostic
-// path, where a key the reader did not ask for turns up and the useful thing
-// to log is what that key claims to be.
-//
-// A key matching neither discriminator returns ok=false and must be IGNORED,
-// never guessed at. Guessing is what would attribute a foreign key's entries
-// to a real room, and this file already records what filing a payload under
-// the wrong interpretation costs (see decodeStreamEntry).
+// For the DIAGNOSTIC path only: the reader carries a streamTarget forward
+// rather than parsing. A key matching neither discriminator returns ok=false
+// and must be IGNORED, never guessed at — guessing would attribute a foreign
+// key's entries to a real room.
 func (s streamCfg) parseStreamKey(key string) (room string, isAwareness, ok bool) {
 	rest, found := strings.CutPrefix(key, s.prefix)
 	if !found {
@@ -283,11 +244,9 @@ func (s streamCfg) parseStreamKey(key string) (room string, isAwareness, ok bool
 }
 
 // liveStreamKeysLocked is the set of stream keys this node still has a room
-// for: both streams of every room in streamRooms.
-//
-// Built in the forward direction — room names through syncKey/awKey — rather
-// than by parsing keys back into rooms, so it holds for any room name without
-// depending on the key layout being reversible at all.
+// for: both streams of every room in streamRooms. Built forward — room names
+// through syncKey/awKey — rather than by parsing keys back into rooms, so it
+// holds for any room name without depending on the layout being reversible.
 //
 // Caller must hold streamMu (which guards streamRooms).
 func (r *Relay) liveStreamKeysLocked() map[string]struct{} {
@@ -299,11 +258,10 @@ func (r *Relay) liveStreamKeysLocked() map[string]struct{} {
 	return live
 }
 
-// Stream entry field names. Single letters on purpose: every byte is
-// multiplied by retention x rate x rooms.
-//
-// room is absent because the stream KEY is authoritative — XRANGE shows it,
-// and there is no route by which an entry could reach the wrong room's key.
+// Stream entry field names. Single letters on purpose: every byte is multiplied
+// by retention x rate x rooms. room is absent because the stream KEY is
+// authoritative, and there is no route by which an entry could reach the wrong
+// room's key.
 const (
 	fieldNode = "n" // publisher nodeID, for the self-delivery filter
 	fieldSeq  = "s" // per-node, per-stream monotonic sequence, for gap detection
@@ -317,35 +275,22 @@ const seqLimit = 4096
 
 // nextSeq issues this node's next sequence number FOR ONE STREAM.
 //
-// The counter must exist from the first release: it cannot be retrofitted,
-// and without it gap detection is impossible. XREAD from a trimmed ID returns
-// the next surviving entry with NO error, and stream IDs are ms-seq rather
-// than contiguous, so trimming is indistinguishable from ordinary
-// advancement by ID arithmetic alone.
+// It cannot be retrofitted, and without it gap detection is impossible: XREAD
+// from a trimmed ID returns the next surviving entry with NO error, and stream
+// IDs are ms-seq rather than contiguous, so trimming is indistinguishable from
+// ordinary advancement by ID arithmetic alone.
 //
-// It is per node PER STREAM, keyed by the stream key this entry is about to be
-// written to. A single per-node counter — the earlier design — is not merely
-// coarser, it is wrong, and it breaks the counter's only consumer. A reader
-// watching one stream sees only the subset of a publisher's entries that
-// landed in THAT stream, so a node publishing to rooms A and B writes seqs
-// [1 3 5] into A's stream and [2 4 6] into B's, and both readers see a
-// sequence full of holes. noteSeq classifies seq > prev+1 as a gap, and
-// StreamStats.Gaps is documented "ALERT ON PRESENCE… a single gap means data
-// was lost" — so a per-node counter makes the tier's headline signal fire
-// constantly on every healthy multi-room node, which is the same as having no
-// signal at all. Per stream, one node's entries in one stream are contiguous,
-// and a jump can only mean entries were trimmed before the reader reached
-// them.
+// Per node PER STREAM. A single per-node counter is not merely coarser, it is
+// wrong: a reader of one stream sees only the publisher's entries that landed
+// in THAT stream, so a node publishing to rooms A and B writes [1 3 5] into A's
+// stream and [2 4 6] into B's, and both readers see holes — and noteSeq
+// classifies seq > prev+1 as a gap, so per-node would fire StreamStats.Gaps
+// ("ALERT ON PRESENCE") constantly on every healthy multi-room node. Counters
+// restart at 0 with the process; a reader reads a DECREASE as a restart.
 //
-// Counters live in memory, so they restart at 0 when the process does, and a
-// reader treats a DECREASE as a restart rather than a gap — see noteSeq.
-//
-// streamMu rather than an atomic per counter: the map lookup has to be
-// serialised anyway, and once it is, incrementing a plain uint64 under that
-// same lock costs one arithmetic op and saves a per-stream heap allocation.
-// The lock is cheap here in absolute terms and cheaper still in context —
-// streamMu is never held across I/O anywhere (that is why it exists separately
-// from mu), and the caller is about to make a network round trip.
+// streamMu rather than an atomic per counter: the map lookup is serialised
+// anyway, so incrementing under it costs one arithmetic op and saves a
+// per-stream allocation. streamMu is never held across I/O.
 func (r *Relay) nextSeq(streamKey string) uint64 {
 	r.streamMu.Lock()
 	defer r.streamMu.Unlock()
@@ -358,24 +303,15 @@ func (r *Relay) nextSeq(streamKey string) uint64 {
 }
 
 // evictStaleSeqsLocked drops the counters of streams whose room this node no
-// longer holds, in one pass, and keeps every counter whose room is still live.
+// longer holds: the map grows with every stream ever published to, and room
+// churn over a long-lived process is unbounded even though the live set is not.
+// Same policy as evictStaleCursorsLocked, including leaving the map above
+// seqLimit when every counter is live.
 //
-// Bounding is needed because the map grows with the streams this node has
-// ever published to, and room churn over a long-lived process is unbounded
-// even though the live set is not. It mirrors evictStaleCursorsLocked's policy
-// exactly, for the same reason: if every counter is live the map is left above
-// seqLimit, which is correct, because the residual is then bounded by real
-// load (streamsPerRoom x resident rooms) rather than by history.
-//
-// Dropping a stale counter is safe in the direction that matters. A room this
-// node has released is a room it has stopped publishing to — the Relay
-// contract has the server activate every room it hosts — so if it is ever
-// reactivated here the counter restarts at 1, and a reader classifies a
-// DECREASE as a restart, never as a gap. The eviction therefore cannot
-// manufacture the alarm this counter exists to raise — at worst it adds one
-// Restarts increment, a counter documented as informational. A caller that
-// published without ever activating (nothing does in production; some tests
-// do) would trade the same way: extra Restarts, never a Gap.
+// Safe in the direction that matters: a room this node released is one it
+// stopped publishing to — the Relay contract has the server activate every room
+// it hosts — so a reactivation restarts the counter at 1, and a reader reads a
+// DECREASE as a restart, never a gap. At worst it adds one Restarts increment.
 //
 // Caller must hold streamMu.
 func (r *Relay) evictStaleSeqsLocked() {
@@ -397,12 +333,10 @@ func streamFields(nodeID []byte, seq uint64, kind cluster.Kind, data []byte) []a
 	}
 }
 
-// decodeStreamEntry reads one XREAD entry's fields.
-//
-// Every field is required. A malformed entry is rejected rather than
-// defaulted: the pub/sub router already learned (see its unrecognised-kind
-// handling) that guessing at a payload can cost a room its legitimate
-// updates, because a non-V1 blob makes the lane's MergeUpdatesV1 fail.
+// decodeStreamEntry reads one XREAD entry's fields. Every field is required: a
+// malformed entry is rejected rather than defaulted, because guessing at a
+// payload can cost a room its legitimate updates — a non-V1 blob makes the
+// lane's MergeUpdatesV1 fail.
 func decodeStreamEntry(vals map[string]any) (nodeID []byte, seq uint64, kind cluster.Kind, data []byte, err error) {
 	str := func(k string) (string, error) {
 		v, ok := vals[k]
@@ -445,19 +379,16 @@ func decodeStreamEntry(vals map[string]any) (nodeID []byte, seq uint64, kind clu
 
 // publishStream appends one payload to its room's stream.
 //
-// Trimming is inline MAXLEN ~ rather than a separate XTRIM call: it costs
-// nothing extra on a write that is already happening, and it is the memory
-// half of the guarantee. The time half is the MINID sweeper, because MAXLEN
-// alone gives no age bound — a hot room's 4096 entries might be two seconds.
+// Trimming is inline MAXLEN ~ rather than a separate XTRIM: free on a write
+// already happening, and the memory half of the guarantee. The time half is the
+// MINID sweeper, because MAXLEN alone gives no age bound — a hot room's 4096
+// entries might be two seconds. The approximate form (~) avoids O(n) per XADD
+// on a hot stream, and keeps MORE entries than asked, never fewer, so it can
+// overshoot on memory but can never shrink the delivery window.
 //
-// The approximate form (~) is deliberate. Exact trimming is O(n) per XADD on
-// a hot stream, and Redis recommends ~ for exactly this reason. Approximate
-// trimming keeps MORE entries than asked, never fewer, so it can overshoot on
-// memory but can never shrink the delivery window.
-//
-// ctx is the caller's: Server.Shutdown cancels the relay context and then
-// joins the lane workers, so a publish that ignored cancellation would stall
-// that join and leave a worker running past Shutdown (#202).
+// ctx is the caller's: Server.Shutdown cancels the relay context and then joins
+// the lane workers, so a publish that ignored cancellation would stall that
+// join and leave a worker running past Shutdown (#202).
 func (r *Relay) publishStream(ctx context.Context, out cluster.Outbound) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -472,9 +403,8 @@ func (r *Relay) publishStream(ctx context.Context, out cluster.Outbound) error {
 		Stream: key,
 		MaxLen: maxLen,
 		Approx: true,
-		// nextSeq is passed the key this entry is about to be written to:
-		// the counter is per stream, because a reader of one stream sees only
-		// that stream's entries. See nextSeq.
+		// nextSeq is passed the key this entry is about to be written to: the
+		// counter is per stream. See nextSeq.
 		Values: streamFields(r.nodeID, r.nextSeq(key), out.Kind, out.Data),
 	}).Err()
 }

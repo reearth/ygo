@@ -1,33 +1,15 @@
 // Package-internal: pins two cluster.Relay/cluster.Sink contract obligations
-// (cluster/relay.go) for the streams tier that are easy to satisfy by
-// accident and easy to break silently later.
+// (cluster/relay.go) for the streams tier that are easy to satisfy by accident
+// and easy to break silently later.
 //
-// Most of the obligations this task set out to cover already have a pinning
-// test from Tasks 5-9 — see the task-10 report for the full inventory of
-// what was checked and found already covered:
-//
-//   - RoomActivated/RoomDeactivated refcounting across a successor-before-
-//     predecessor overlap: TestUnit_StreamReader_ActivationRefcounts
-//     (streams_reader_test.go) for the stream-side refcount,
-//     TestInteg_RoomActivated_RefCounted (redis_test.go) for the pub/sub
-//     side.
-//   - Close must not hang with a reader mid-XREAD or the sweeper ticking:
-//     TestUnit_StreamReader_CloseDoesNotWaitOutReadBlock
-//     (streams_reader_test.go) and TestUnit_StreamTrim_CloseDoesNotHang
-//     (streams_trim_test.go). Combined with the tier-agnostic
-//     TestInteg_Close_NothingFiresAfterReturn (isolation_test.go), which
-//     pins the drainLane closed-check that governs every roomWorker
-//     regardless of which tier fed it, nothing further to add: Close joins
-//     every goroutine on r.wg (publisher, subscriber, every room worker,
-//     every stream reader, the streamReadCtx watcher, the trim sweeper) by
-//     construction of sync.WaitGroup, so "Close returns promptly" and "wg.Wait
-//     already joined everyone" are the same fact from two angles.
-//   - Publish after Close returning ErrRelayClosed: TestUnit_Publish_AfterClose_ReturnsClosed
-//     (redis_test.go) already exercises this on the exact code path (the
-//     closed.Load() check at the top of Publish, before Transport is ever
-//     read) that a Streams-transport config would take too.
-//
-// Two obligations were genuinely uncovered and are pinned below.
+// The tier's other contract obligations are already pinned elsewhere:
+// activation refcounting by TestUnit_StreamReader_ActivationRefcounts and
+// TestInteg_RoomActivated_RefCounted; Close not hanging by
+// TestUnit_StreamReader_CloseDoesNotWaitOutReadBlock,
+// TestUnit_StreamTrim_CloseDoesNotHang and
+// TestInteg_Close_NothingFiresAfterReturn; Publish-after-Close by
+// TestUnit_Publish_AfterClose_ReturnsClosed, whose closed.Load() check runs
+// before Transport is ever read.
 package redis
 
 import (
@@ -132,36 +114,11 @@ func (s *serialGuardSink) count() int32                                     { re
 // exercise — see streams_reader_test.go:247's v1Update doc for the same
 // reasoning applied earlier in this package.
 //
-// The property that actually matters — the pub/sub subscriber and the
-// stream reader resolve to the SAME *roomWorker for room1, not merely to
-// "however many the map happens to hold" — is asserted directly below via
-// require.Same on the *roomWorker pointer, rather than only through
-// len(a.workers). workerForInbound is the one resolution point both
-// runSubscriber (redis.go) and handleStream (streams_reader.go) call, so
-// capturing its return value at two points spanning the whole delivery
-// window (once right after RoomActivated creates the worker, once after
-// both tiers have had a full chance to deliver the burst) and requiring
-// pointer identity pins that no second lane-tracking structure ever swaps
-// room1's worker out from under either tier.
-//
-// Verified non-vacuous three ways:
-//
-//  1. serialGuardSink's detector logic was exercised directly (in a scratch
-//     test, not committed) by calling Inject from two goroutines at once: it
-//     reported the injected error both times, confirming the guard fires
-//     rather than being a silent no-op.
-//  2. STRONG: the require.Same check below was verified to actually fire by
-//     temporarily inserting `a.stopWorker("room1"); a.workerFor("room1")`
-//     between the two capture points (a test-local mutation, not a
-//     production change) to force room1 onto a fresh *roomWorker mid-test.
-//     Result: failed with testify's "Not same:" (two distinct *roomWorker
-//     pointers printed). Reverted.
-//  3. WEAK: the `require.Equal(t, 1, lanes)` assertion below was flipped to
-//     expect 2 and re-run against the real relay: it failed ("expected: 2,
-//     actual: 1"). This only shows the count assertion is not trivially
-//     true today — it does NOT show the test would catch a regression like
-//     a second lane-tracking structure introduced elsewhere, which is what
-//     (2)'s require.Same is for. Reverted to 1.
+// The load-bearing assertion is require.Same on the *roomWorker pointer, not
+// len(a.workers): capturing workerForInbound's return at two points spanning
+// the whole delivery window pins that no second lane-tracking structure swaps
+// room1's worker out from under either tier. The count assertion alone would
+// not catch that.
 func TestIntegration_StreamLifecycle_BothModeOneLanePerRoom(t *testing.T) {
 	mr := newMiniRedis(t)
 
