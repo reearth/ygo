@@ -28,6 +28,29 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
+// newMiniRedis and newClient duplicate the identically-named helpers in
+// redis_test.go on purpose: those live in package redis_test (a separate
+// package from this file's package redis), so they are no more reachable
+// from here than any other unexported symbol in a different package — the
+// same reason countingSink below duplicates redis_test's fakeSink instead of
+// reusing it. streams_test.go needs resolveStreamCfg and streamCfg's
+// unexported fields directly, which requires package redis, so it gets its
+// own copy of the miniredis boilerplate rather than none at all.
+
+// newMiniRedis returns a miniredis instance scoped to t.
+func newMiniRedis(t *testing.T) *miniredis.Miniredis {
+	t.Helper()
+	return miniredis.RunT(t)
+}
+
+// newClient returns a *goredis.Client pointed at mr, registered for cleanup.
+func newClient(t *testing.T, mr *miniredis.Miniredis) *goredis.Client {
+	t.Helper()
+	c := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
 // countingSink is a minimal cluster.Sink test double for internal-package
 // tests. It is deliberately not the redis_test package's fakeSink: that type
 // lives in package redis_test and is not visible from these package-redis
@@ -314,7 +337,7 @@ func newTestRelayNoStart() *Relay {
 // message arriving after RoomDeactivated already unsubscribed would
 // re-create a worker that nothing could ever reap (a later RoomDeactivated
 // for the same room just no-ops, since activeRooms is already back at
-// zero) — the exact unbounded per-room growth this task exists to stop.
+// zero) — the exact unbounded per-room growth this drop prevents.
 func TestUnit_WorkerForInbound_MissOnInactiveRoom_DropsStray(t *testing.T) {
 	r := newTestRelayNoStart()
 	t.Cleanup(func() { close(r.done) })
@@ -483,8 +506,7 @@ func TestInteg_StopWorker_ReapedRoom_DropsUntilReactivated(t *testing.T) {
 
 	// The Redis subscription and activeRooms refcount are both untouched by
 	// stopWorker: publishing now must be DROPPED, not lazily recreate the
-	// worker (that behaviour was removed by this task's carried-forward
-	// router simplification).
+	// worker.
 	require.NoError(t, pub.Publish(context.Background(), cluster.Outbound{
 		Room: "room", Kind: cluster.KindSync, Data: []byte{0x09},
 	}))

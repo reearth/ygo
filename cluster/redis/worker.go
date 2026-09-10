@@ -18,6 +18,37 @@ type roomWorker struct {
 	room string
 	lane *relaylane.Lane
 	done chan struct{} // closed to stop this worker
+
+	// awCursor is the last awareness stream ID the stream reader delivered FOR
+	// THIS RESIDENCY, or "" when it has delivered none yet (read from the tail
+	// — see tailID).
+	//
+	// THIS IS THE PACKAGE'S CURSOR-RETENTION RULE, stated once here. The two
+	// kinds need OPPOSITE retention across a room's deactivate/reactivate
+	// cycle, because they start from opposite defaults when missing:
+	//
+	//   - A SYNC cursor MUST survive it. Default = oldest retained entry, so
+	//     forgetting it would make ordinary room churn (the websocket provider
+	//     evicts and reloads idle rooms continuously, #183) replay the room's
+	//     whole retention window on every reactivation — the condition
+	//     StreamStats.Replayed exists to alarm on. Hence the relay-scoped
+	//     Relay.cursors map, outliving any residency.
+	//   - An AWARENESS cursor MUST NOT survive it. Default = the tail, so
+	//     keeping it would resume a reactivated room mid-presence-stream and
+	//     replay up to AwarenessMaxLen blobs for the room's last occupants.
+	//
+	// Deleting an awareness cursor from a relay-scoped map at deactivation can
+	// only NARROW the second rule, not deliver it: a reader builds its XREAD id
+	// vector before the delete and applies the response after, writing the
+	// cursor straight back for the next residency. Scoping it to the worker
+	// resets it by construction — a new residency is a NEW worker, whose cursor
+	// is empty and which no earlier reader can write — so no ordering is left
+	// for a reset to lose. deliverAwareness says how far the same fence reaches
+	// the PAYLOADS, which is narrowed, not closed.
+	//
+	// Guarded by workersMu, the lock that publishes the map entry through which
+	// this field is reachable at all.
+	awCursor string
 }
 
 // workerFor returns the worker for room, creating and starting it if needed.
@@ -181,6 +212,98 @@ func (r *Relay) workerForInbound(room string) (w *roomWorker, ok bool) {
 	w, ok = r.workers[room]
 	r.workersMu.Unlock()
 	return w, ok
+}
+
+// stillResident reports whether w is currently the room's delivery worker: the
+// fence a resolved worker is checked against before its delivery counts as
+// having happened. deliverAwareness inlines the same check, because it writes
+// awCursor under the same hold.
+func (r *Relay) stillResident(room string, w *roomWorker) bool {
+	r.workersMu.Lock()
+	defer r.workersMu.Unlock()
+	return r.workers[room] == w
+}
+
+// awarenessCursor resolves a room's residency together with the awareness
+// stream ID to read from, in ONE workersMu hold so the pair cannot be torn.
+//
+// The returned worker is a fence TOKEN, not a delivery handle: readBatch
+// carries it on the streamTarget and deliverAwareness accepts the response only
+// while that same worker is still the room's residency. A nil worker —
+// RoomActivated's increment→create window — reads from the tail and can never
+// be accepted, which is right: presence appended before a room's first
+// residency existed belongs to nobody local.
+func (r *Relay) awarenessCursor(room string) (residency *roomWorker, from string) {
+	r.workersMu.Lock()
+	defer r.workersMu.Unlock()
+
+	w, ok := r.workers[room]
+	if !ok || w.awCursor == "" {
+		return w, tailID // w is nil when !ok
+	}
+	return w, w.awCursor
+}
+
+// deliverAwareness hands one awareness read to a room — the latest payload onto
+// its lane, the stream position onto its residency-scoped cursor — but only
+// while want is STILL the room's resident worker.
+//
+// Only the LAST payload is pushed. The lane's single awareness slot is
+// superseded on every push, so pushing all N would be N-1 replacements of a
+// slot nothing has read, plus N-1 AwarenessSuperseded increments claiming the
+// worker fell behind when it did not — and since a busy presence stream returns
+// several blobs per read, that would make the counter a healthy-traffic gauge
+// here while it stays a backlog alarm under pub/sub, where one message is one
+// push. It gives up an intermediate blob the worker might have drained
+// mid-read: latest-only, one read interval wide, on state every live client
+// re-announces next interval.
+//
+// The CURSOR half of the reactivation race is closed by awCursor's PLACEMENT,
+// not by this lock (see roomWorker.awCursor). The write sits inside the hold
+// because workersMu is awCursor's declared guard, not because check and write
+// must be atomic — a room's reads are single-goroutine, readerFor being
+// deterministic. Keeping the guard makes "declined" mean "nothing happened".
+//
+// The PAYLOAD half is NARROWED, NOT CLOSED. A check that passes microseconds
+// BEFORE stopWorker lands still pushes onto the retiring lane, and a retired
+// worker performs one final drainLane into Sink.Inject addressed by ROOM NAME
+// (see runRoomWorker's w.done case) — so if a reactivation completes first,
+// that pre-reactivation presence reaches the new occupants. Do not read this
+// fence as making that impossible.
+//
+// The residual is accepted on three grounds: it is bounded at one in-flight
+// read times one drain window, against the whole AwarenessMaxLen window a
+// surviving relay-scoped cursor would replay on every reactivation; it is
+// pre-existing and identical on the pub/sub path, whose router pushes through a
+// stale workerForInbound handle with no lock at all; and presence is
+// self-healing (see streamTarget.residency).
+//
+// The push is OUTSIDE the hold because Lane.Push takes the lane's mutex, held
+// across crdt.MergeUpdatesV1 by both Push and TakeSync: pushing under workersMu
+// would let ONE room's in-flight merge stall workerForInbound, workerFor,
+// stopWorker and Stats() for EVERY other room — the cross-room head-of-line
+// coupling #187/#200 removed. That costs only fence exactness at the boundary,
+// which is the residual above.
+//
+// Declining is a discard, not a deferral, and deliberately has no counter:
+// every payload it drops is presence published before a reactivation this node
+// has already performed, and the successor residency reads from the tail.
+func (r *Relay) deliverAwareness(room string, want *roomWorker, payloads [][]byte, lastID string) {
+	if want == nil {
+		return
+	}
+
+	r.workersMu.Lock()
+	resident := r.workers[room] == want
+	if resident && lastID != "" {
+		want.awCursor = lastID
+	}
+	r.workersMu.Unlock()
+
+	if !resident || len(payloads) == 0 {
+		return
+	}
+	want.lane.Push(cluster.KindAwareness, payloads[len(payloads)-1])
 }
 
 // inject hands one payload to the Sink, logging failures at Warn (a transient

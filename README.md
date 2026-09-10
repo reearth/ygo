@@ -72,6 +72,7 @@ func main() {
 - **The y-protocols layer** — the `SyncStep1`/`SyncStep2`/incremental-update handshake, and awareness for presence and cursors.
 - **Transport-agnostic core** — the CRDT has no transport dependency; the WebSocket and HTTP bindings are addons.
 - **A production WebSocket server** — [Hocuspocus](https://tiptap.dev/docs/hocuspocus)-compatible, scaling horizontally across instances through a Redis-backed [cluster relay](docs/CLUSTERING.md), with versioned [persistence](docs/PERSISTENCE.md) (including a CGo-free SQLite store), snapshots, and a turnkey [`ygo-server`](cmd/ygo-server/) binary.
+- **Two cluster delivery tiers** — the Redis [cluster relay](docs/CLUSTERING.md) runs on pub/sub (the default, at-most-once, free to publish) or on Redis Streams, which is at-least-once within `min(StreamRetention, StreamMaxLen/rate)` and makes anything trimmed past that window a visible, counted `Gaps` rather than silent divergence. `Both` mode migrates a live cluster between them without deduplication.
 - **An embeddable offline-first client** — [`provider/client`](docs/CLIENT.md) is a `*crdt.Doc` that is readable and editable whether or not it has ever connected, hydrated from a local store before any dial. There is no separate offline-op queue: the sync handshake itself carries edits made while disconnected.
 - **Native mobile bindings** — [`mobile/`](mobile/) embeds in iOS and Android apps via `gomobile bind`, with on-device editing, sync, presence, change observers, and a self-syncing `mobile.SyncClient`.
 
