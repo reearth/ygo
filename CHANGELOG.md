@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.50.1] — 2026-09-25
+
+### Fixed
+
+- **`crdt`: an update carrying a skip struct silently lost the content that
+  later filled the gap (#251).** A skip struct marks clocks the sender
+  withheld. Both `ApplyUpdateV1` and `ApplyUpdateV2` treated it as the
+  opposite — clocks the receiver already had — and advanced the client's
+  clock over the hole. Structs after the skip integrated with no predecessor,
+  and the update that later filled the gap was discarded as already
+  integrated. No error was returned.
+
+  Skip structs come from merging non-contiguous updates from one client
+  (`MergeUpdatesV1`/`MergeUpdatesV2`, or yjs's `mergeUpdates`, whose output is
+  byte-identical). The websocket persistence worker produces such merges when
+  concurrent committers enqueue out of clock order across a coalescing flush,
+  so an adapter that replays its stored log update by update could lose
+  writes. The bundled adapters rebuild with `MergeUpdatesV1` over the whole log,
+  which heals the gap, so they were not affected on load.
+
+  Structs after a skip now park until the missing range arrives, matching yjs
+  13.6.30 in both arrival orders. `TestUnit_ApplyUpdateV1_SkipStruct` asserted
+  the old behaviour and now asserts yjs's.
+
 ## [1.50.0] — 2026-09-10
 
 ### Added

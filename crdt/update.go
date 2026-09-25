@@ -537,17 +537,12 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 				return nil, err
 			}
 
-			// Skip structs (tag 10) are clock-range placeholders that are
-			// never stored — just advance the clock. Update existingEnd so
-			// that subsequent items in this group are not mistakenly flagged
-			// as having a clock gap (skip structs tell the receiver those
-			// clocks are intentionally absent).
+			// Skip structs (tag 10) mark clocks the sender withheld, so the
+			// receiver does NOT have them: advance the read cursor only. Items
+			// after the skip then fall into the clock-gap branch and park until
+			// the range arrives (yjs parity, #251).
 			if _, isSkip := item.Content.(*contentSkip); isSkip {
-				skipEnd := clock + uint64(item.Content.Len())
-				if skipEnd > existingEnd {
-					existingEnd = skipEnd
-				}
-				clock = skipEnd
+				clock += uint64(item.Content.Len())
 				continue
 			}
 
