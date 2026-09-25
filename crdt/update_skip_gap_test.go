@@ -23,18 +23,7 @@ type skipGapFormat struct {
 
 var skipGapFormats = []skipGapFormat{
 	{"V1", func(u []byte) ([]byte, error) { return u, nil }, MergeUpdatesV1, ApplyUpdateV1},
-	{"V2", structsV1ToV2, MergeUpdatesV2, ApplyUpdateV2},
-}
-
-// structsV1ToV2 converts at the struct level, preserving the clock gaps an
-// incremental update starts with (UpdateV1ToV2 integrates into a scratch doc,
-// which parks them). Byte-identical to yjs convertUpdateFormatV1ToV2 here.
-func structsV1ToV2(v1 []byte) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore([][]byte{v1}, decodeStructsV1)
-	if err != nil {
-		return nil, err
-	}
-	return encodeStructStoreV2(perClient, ds, StateVector{}, store), nil
+	{"V2", UpdateV1ToV2, MergeUpdatesV2, ApplyUpdateV2},
 }
 
 // threeUpdates records the V1 update of each of three sequential transactions.

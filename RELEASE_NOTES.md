@@ -25,6 +25,13 @@ arrives, then apply — the same outcome as yjs, in either arrival order.
 are not repaired by upgrading; if the original update log is still stored,
 reloading from it with this version restores the edit.
 
+**Also fixed: the V1/V2 format converters.** `UpdateV1ToV2` and
+`UpdateV2ToV1` only worked on a document's *first* update. Anything later — an
+ordinary incremental edit, or an update that only deletes — came back as an
+empty update, with no error. If you convert updates between formats at an edge
+(for example to talk to a V2 client), those edits never reached the other side.
+Both now produce exactly the bytes yjs's own converters do.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a

@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   13.6.30 in both arrival orders. `TestUnit_ApplyUpdateV1_SkipStruct` asserted
   the old behaviour and now asserts yjs's.
 
+- **`crdt`: `UpdateV1ToV2` and `UpdateV2ToV1` returned an empty update for any
+  incremental or delete-only input.** Both converted by integrating into a
+  scratch doc and re-encoding its state, so structs whose clocks did not start
+  at 0 parked there and a delete set naming items the scratch doc lacked was
+  dropped. They now convert at the struct level, like `MergeUpdatesV1`, and
+  match yjs's `convertUpdateFormatV1ToV2` / `convertUpdateFormatV2ToV1` byte
+  for byte. Only a first, self-contained update converted correctly before.
+
 ## [1.50.0] — 2026-09-10
 
 ### Added
