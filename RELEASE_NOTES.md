@@ -1,3 +1,37 @@
+## v1.50.1
+
+**Who is affected:** anyone who applies *merged* updates one at a time with
+`ApplyUpdateV1` or `ApplyUpdateV2` — for example a custom persistence adapter
+that replays its stored log on load, or a peer that receives the output of
+`MergeUpdatesV1` / yjs `mergeUpdates`. If your adapter rebuilds documents by
+merging its whole log first (every adapter bundled with ygo does), you were not
+affected on load.
+
+**What went wrong.** Merging two updates from the same client that are not
+consecutive — say its 1st and 3rd edits — produces an update with a marker
+saying "clocks withheld here". ygo read that marker the wrong way round, as
+"the receiver already has these". So when the 2nd edit arrived, ygo believed it
+already had it and threw it away. Nothing reported an error; the document was
+just missing that edit, permanently.
+
+The websocket server can produce these merges itself: it batches persistence
+writes, and when several goroutines commit to one room concurrently their
+updates can reach the batcher out of order.
+
+**What changed.** Edits after the marker now wait until the missing range
+arrives, then apply — the same outcome as yjs, in either arrival order.
+
+**Upgrading.** No API change. Documents already rebuilt with an edit missing
+are not repaired by upgrading; if the original update log is still stored,
+reloading from it with this version restores the edit.
+
+**Also fixed: the V1/V2 format converters.** `UpdateV1ToV2` and
+`UpdateV2ToV1` only worked on a document's *first* update. Anything later — an
+ordinary incremental edit, or an update that only deletes — came back as an
+empty update, with no error. If you convert updates between formats at an edge
+(for example to talk to a V2 client), those edits never reached the other side.
+Both now produce exactly the bytes yjs's own converters do.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a
