@@ -342,12 +342,11 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	if item.ParentSub != nil {
 		key := *item.ParentSub
 		rightmost := true
-		// Fast path: if no item has ever been recorded for this key, none can be
-		// to our right, so we are trivially the rightmost. This keeps populating a
-		// map with N distinct keys O(N) rather than O(N²). Only when a prior
-		// same-key item exists do we scan right (past other keys / tombstones) to
-		// see whether it sits to our right and supersedes us.
-		if _, exists := item.Parent.itemMap[key]; exists {
+		// A new key has no successor with the same key. Likewise, when the
+		// previous rightmost same-key item is immediately to our left, no
+		// same-key item can be to our right. Avoid scanning unrelated keys for
+		// these common insertion and replacement cases.
+		if previous, exists := item.Parent.itemMap[key]; exists && previous != item.Left {
 			for r := item.Right; r != nil; r = r.Right {
 				if parentSubEqual(r.ParentSub, item.ParentSub) {
 					// A same-key item (live or tombstone) sits to our right and is

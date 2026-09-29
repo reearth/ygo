@@ -1,3 +1,7 @@
+## v1.50.1
+
+Avoid scanning unrelated map keys when a replacement is placed immediately after the previous rightmost value of that key. Concurrent replacements still use the existing conflict resolution path.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a
