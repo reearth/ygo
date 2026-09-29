@@ -1,3 +1,7 @@
+## v1.50.1
+
+Avoid repeated prefix scans when collecting sparse transaction delete ranges. The range starts at the containing struct found by binary search; partial overlaps and tombstones retain their existing behavior.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a

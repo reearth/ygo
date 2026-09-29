@@ -247,8 +247,13 @@ func gcTxnDeleteSet(doc *Doc, txn *Transaction) {
 		}
 		for _, r := range ranges {
 			rangeEnd := r.Clock + r.Len
-			// Skip past items whose end is before the range start.
-			for _, item := range items {
+			// Start at the item containing the range boundary. Searching by
+			// start clock avoids rescanning a growing prefix for every deletion.
+			start := sort.Search(len(items), func(i int) bool { return items[i].ID.Clock > r.Clock }) - 1
+			if start < 0 {
+				start = 0
+			}
+			for _, item := range items[start:] {
 				if item.ID.Clock >= rangeEnd {
 					break
 				}
