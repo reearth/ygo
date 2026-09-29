@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.50.1] — 2026-09-29
+
+### Fixed
+
+- Avoid scanning unrelated map keys during item integration. New keys and causal
+  replacements after the current key winner bypass conflict scanning; concurrent
+  writes still resolve against items belonging to the same key.
+
 ## [1.50.0] — 2026-09-10
 
 ### Added

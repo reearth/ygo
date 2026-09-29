@@ -117,7 +117,11 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// Fast path: no conflict scanning needed when there are no items between
 	// the left origin and the right origin. This is the common case for local
 	// inserts at the end of a run and for remote items decoded in clock order.
-	if o != nil && o != item.Right {
+	// Different map keys have independent conflict orders. A new key or a
+	// replacement immediately after its current winner has no same-key
+	// competitor to its right. Keep unrelated keys out of conflict scanning.
+	uncontestedMapKey := item.ParentSub != nil && item.Parent.itemMap[*item.ParentSub] == item.Left
+	if !uncontestedMapKey && o != nil && o != item.Right {
 		// Slow path: conflicting is the set of items in the current conflict
 		// group (items with the same left origin as us that we are comparing
 		// against). beforeOrigin tracks every item we have scanned past, so we
@@ -130,6 +134,10 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 
 		// Scan right until we hit our right origin (item.Right) or the end.
 		for o != nil && o != item.Right {
+			if item.ParentSub != nil && !parentSubEqual(item.ParentSub, o.ParentSub) {
+				o = o.Right
+				continue
+			}
 			beforeOrigin[o] = struct{}{}
 			conflicting[o] = struct{}{}
 

@@ -1,3 +1,10 @@
+## v1.50.1
+
+Map updates no longer spend time building conflict sets for unrelated keys.
+This removes quadratic conflict-scan work when another client inserts new keys
+into a large map, while preserving same-key arbitration, snapshot recovery and
+the existing wire format.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a
