@@ -243,10 +243,16 @@ var ErrDepthExceeded = errors.New("encoding: nested Any exceeds maximum depth")
 // Nested arrays and maps are limited to maxAnyDepth levels to prevent
 // stack-overflow DoS from crafted inputs.
 func (d *Decoder) ReadAny() (any, error) {
-	return d.readAny(0)
+	return d.readAny(0, false)
 }
 
-func (d *Decoder) readAny(depth int) (any, error) {
+// SkipAny validates and consumes an Any value without allocating its object tree.
+func (d *Decoder) SkipAny() error {
+	_, err := d.readAny(0, true)
+	return err
+}
+
+func (d *Decoder) readAny(depth int, skip bool) (any, error) {
 	if depth > maxAnyDepth {
 		return nil, ErrDepthExceeded
 	}
@@ -266,21 +272,46 @@ func (d *Decoder) readAny(depth int) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if skip {
+			return nil, nil
+		}
 		return v, nil // v is already int64; preserve full precision
 	case 124:
-		return d.ReadFloat32()
+		v, err := d.ReadFloat32()
+		if skip {
+			return nil, err
+		}
+		return v, err
 	case 123:
-		return d.ReadFloat64()
+		v, err := d.ReadFloat64()
+		if skip {
+			return nil, err
+		}
+		return v, err
 	case 122:
 		v, err := d.ReadBigInt64()
 		if err != nil {
 			return nil, err
 		}
+		if skip {
+			return nil, nil
+		}
 		return BigInt(v), nil
 	case 119:
+		if skip {
+			b, err := d.ReadVarBytes()
+			if err == nil && !utf8.Valid(b) {
+				err = ErrInvalidUTF8
+			}
+			return nil, err
+		}
 		return d.ReadVarString()
 	case 116:
-		return d.ReadVarBytes()
+		b, err := d.ReadVarBytes()
+		if skip {
+			return nil, err
+		}
+		return b, err
 	case 117:
 		n, err := d.ReadVarUint()
 		if err != nil {
@@ -295,10 +326,17 @@ func (d *Decoder) readAny(depth int) (any, error) {
 		if n > uint64(d.Remaining()) {
 			return nil, ErrUnexpectedEOF
 		}
-		out := make([]any, n)
-		for i := range out {
-			if out[i], err = d.readAny(depth + 1); err != nil {
+		var out []any
+		if !skip {
+			out = make([]any, n)
+		}
+		for i := uint64(0); i < n; i++ {
+			v, err := d.readAny(depth+1, skip)
+			if err != nil {
 				return nil, err
+			}
+			if !skip {
+				out[i] = v
 			}
 		}
 		return out, nil
@@ -314,14 +352,32 @@ func (d *Decoder) readAny(depth int) (any, error) {
 		if n > uint64(d.Remaining()) {
 			return nil, ErrUnexpectedEOF
 		}
-		out := make(map[string]any, n)
+		var out map[string]any
+		if !skip {
+			out = make(map[string]any, n)
+		}
 		for range n {
-			k, err := d.ReadVarString()
+			var k string
+			if skip {
+				b, err := d.ReadVarBytes()
+				if err != nil {
+					return nil, err
+				}
+				if !utf8.Valid(b) {
+					return nil, ErrInvalidUTF8
+				}
+			} else {
+				k, err = d.ReadVarString()
+				if err != nil {
+					return nil, err
+				}
+			}
+			v, err := d.readAny(depth+1, skip)
 			if err != nil {
 				return nil, err
 			}
-			if out[k], err = d.readAny(depth + 1); err != nil {
-				return nil, err
+			if !skip {
+				out[k] = v
 			}
 		}
 		return out, nil
