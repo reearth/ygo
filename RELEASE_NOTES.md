@@ -1,4 +1,4 @@
-## v1.50.1
+## v1.51.0
 
 **Who is affected:** anyone who applies *merged* updates one at a time with
 `ApplyUpdateV1` or `ApplyUpdateV2` — for example a custom persistence adapter
