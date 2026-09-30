@@ -684,16 +684,12 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				}
 				contentLen = int(length)
 
-			case 10: // Skip struct
+			case 10: // Skip struct: withheld clocks; advance the cursor only (see V1 decodeAndPark)
 				l, err := dec.restDec.ReadVarUint()
 				if err != nil {
 					return wrapUpdateErr(err)
 				}
-				skipEnd := clock + l
-				if skipEnd > existingEnd {
-					existingEnd = skipEnd
-				}
-				clock = skipEnd
+				clock += l
 				continue
 
 			default:

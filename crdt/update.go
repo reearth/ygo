@@ -71,24 +71,26 @@ func ApplyUpdateV2(doc *Doc, update []byte, origin any) error {
 	return applyErr
 }
 
-// UpdateV1ToV2 converts a V1 update payload to real Yjs V2 format by applying
-// it to a temporary document and re-encoding in V2.
+// UpdateV1ToV2 converts a V1 update payload to real Yjs V2 format. It works at
+// the struct level, like MergeUpdatesV1, so an incremental or delete-only
+// update converts intact (integrating into a scratch doc parked such updates
+// and emitted an empty one; yjs convertUpdateFormatV1ToV2 parity).
 func UpdateV1ToV2(v1 []byte) ([]byte, error) {
-	doc := New()
-	if err := ApplyUpdateV1(doc, v1, nil); err != nil {
+	perClient, ds, store, err := buildMergeStore([][]byte{v1}, decodeStructsV1)
+	if err != nil {
 		return nil, err
 	}
-	return EncodeStateAsUpdateV2(doc, nil), nil
+	return encodeStructStoreV2(perClient, ds, StateVector{}, store), nil
 }
 
-// UpdateV2ToV1 converts a real Yjs V2 update to V1 format by applying it to a
-// temporary document and re-encoding in V1.
+// UpdateV2ToV1 converts a real Yjs V2 update to V1 format, at the struct level
+// (see UpdateV1ToV2).
 func UpdateV2ToV1(v2 []byte) ([]byte, error) {
-	doc := New()
-	if err := ApplyUpdateV2(doc, v2, nil); err != nil {
+	perClient, ds, store, err := buildMergeStore([][]byte{v2}, decodeStructsV2)
+	if err != nil {
 		return nil, err
 	}
-	return EncodeStateAsUpdateV1(doc, nil), nil
+	return encodeStructStoreV1(perClient, ds, StateVector{}, store), nil
 }
 
 // MergeUpdatesV1 and DiffUpdateV1 live in merge.go — they operate at the struct
@@ -537,17 +539,12 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 				return nil, err
 			}
 
-			// Skip structs (tag 10) are clock-range placeholders that are
-			// never stored — just advance the clock. Update existingEnd so
-			// that subsequent items in this group are not mistakenly flagged
-			// as having a clock gap (skip structs tell the receiver those
-			// clocks are intentionally absent).
+			// Skip structs (tag 10) mark clocks the sender withheld, so the
+			// receiver does NOT have them: advance the read cursor only. Items
+			// after the skip then fall into the clock-gap branch and park until
+			// the range arrives (yjs parity, #251).
 			if _, isSkip := item.Content.(*contentSkip); isSkip {
-				skipEnd := clock + uint64(item.Content.Len())
-				if skipEnd > existingEnd {
-					existingEnd = skipEnd
-				}
-				clock = skipEnd
+				clock += uint64(item.Content.Len())
 				continue
 			}
 

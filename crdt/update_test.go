@@ -521,9 +521,9 @@ func TestUnit_ApplyUpdateV1_GCThenCrossClient(t *testing.T) {
 }
 
 func TestUnit_ApplyUpdateV1_SkipStruct(t *testing.T) {
-	// Skip structs (tag 10) represent clock gaps the sender intentionally
-	// omits. Verify the V1 decoder handles them without error and that
-	// regular items after the skip decode correctly.
+	// Skip structs (tag 10) mark clocks the sender withheld, so the receiver
+	// lacks them: the string after the skip must park, not integrate. yjs
+	// 13.6.30 on these exact bytes gives "" with the struct pending (#251).
 	enc := encoding.NewEncoder()
 
 	enc.WriteVarUint(1) // 1 client group
@@ -545,7 +545,9 @@ func TestUnit_ApplyUpdateV1_SkipStruct(t *testing.T) {
 
 	doc := New(WithClientID(2))
 	require.NoError(t, ApplyUpdateV1(doc, enc.Bytes(), nil))
-	assert.Equal(t, "hello", doc.GetText("t").ToString())
+	assert.Empty(t, doc.GetText("t").ToString())
+	assert.NotNil(t, doc.store.pending, "the post-skip struct must be parked")
+	assert.Equal(t, uint64(0), doc.store.StateVector().Clock(1), "the clock must not advance over the gap")
 }
 
 func TestUnit_ContentDoc_GUID_V1RoundTrip(t *testing.T) {
