@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
+	"unicode/utf8"
 )
 
 // arraySub pairs a unique subscription ID with a YArrayEvent callback.
@@ -520,34 +522,58 @@ func (a *YArray) jsonEntriesLocked() []nestedJSONEntry {
 	return entries
 }
 
-func (m *YMap) jsonEntriesLocked() map[string]nestedJSONEntry {
-	if m.detached() {
-		entries := make(map[string]nestedJSONEntry, len(m.prelim))
-		for key, value := range m.prelim {
-			entries[key] = nestedJSONEntryForValue(value)
+func nestedJSONEntryForMapItem(item *Item) (nestedJSONEntry, bool) {
+	if item == nil || item.Deleted {
+		return nestedJSONEntry{}, false
+	}
+	switch content := item.Content.(type) {
+	case *ContentAny:
+		if len(content.Vals) > 0 {
+			return nestedJSONEntry{value: content.Vals[0]}, true
 		}
-		return entries
+	case *ContentJSON:
+		if len(content.Vals) > 0 {
+			return nestedJSONEntry{value: content.Vals[0]}, true
+		}
+	case *ContentEmbed:
+		return nestedJSONEntry{value: content.Val}, true
+	case *ContentType:
+		return nestedJSONEntryForContent(content), true
+	}
+	return nestedJSONEntry{}, false
+}
+
+func (m *YMap) jsonKeysLocked() []string {
+	if m.detached() {
+		keys := make([]string, 0, len(m.prelim))
+		for key := range m.prelim {
+			keys = append(keys, key)
+		}
+		return keys
 	}
 
-	entries := make(map[string]nestedJSONEntry, len(m.itemMap))
+	keys := make([]string, 0, len(m.itemMap))
 	for key, item := range m.itemMap {
-		if item.Deleted {
-			continue
+		if _, ok := nestedJSONEntryForMapItem(item); ok {
+			keys = append(keys, key)
 		}
-		switch content := item.Content.(type) {
-		case *ContentAny:
-			if len(content.Vals) > 0 {
-				entries[key] = nestedJSONEntry{value: content.Vals[0]}
-			}
-		case *ContentJSON:
-			if len(content.Vals) > 0 {
-				entries[key] = nestedJSONEntry{value: content.Vals[0]}
-			}
-		case *ContentEmbed:
-			entries[key] = nestedJSONEntry{value: content.Val}
-		case *ContentType:
-			entries[key] = nestedJSONEntryForContent(content)
-		}
+	}
+	return keys
+}
+
+func (m *YMap) jsonEntryLocked(key string) nestedJSONEntry {
+	if m.detached() {
+		return nestedJSONEntryForValue(m.prelim[key])
+	}
+	entry, _ := nestedJSONEntryForMapItem(m.itemMap[key])
+	return entry
+}
+
+func (m *YMap) jsonEntriesLocked() map[string]nestedJSONEntry {
+	keys := m.jsonKeysLocked()
+	entries := make(map[string]nestedJSONEntry, len(keys))
+	for _, key := range keys {
+		entries[key] = m.jsonEntryLocked(key)
 	}
 	return entries
 }
@@ -659,6 +685,109 @@ type jsonOutputFrame struct {
 	token string
 }
 
+// writeJSONString emits the same HTML-safe JSON string encoding as
+// encoding/json without allocating an encoded fragment for a valid map key.
+func writeJSONString(output *bytes.Buffer, value string) error {
+	const hex = "0123456789abcdef"
+
+	if !utf8.ValidString(value) {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		output.Write(encoded)
+		return nil
+	}
+
+	output.WriteByte('"')
+	start := 0
+	for index := 0; index < len(value); {
+		if b := value[index]; b < utf8.RuneSelf {
+			if b >= 0x20 && b != '\\' && b != '"' && b != '<' && b != '>' && b != '&' {
+				index++
+				continue
+			}
+			output.WriteString(value[start:index])
+			switch b {
+			case '\\', '"':
+				output.WriteByte('\\')
+				output.WriteByte(b)
+			case '\b':
+				output.WriteString(`\b`)
+			case '\f':
+				output.WriteString(`\f`)
+			case '\n':
+				output.WriteString(`\n`)
+			case '\r':
+				output.WriteString(`\r`)
+			case '\t':
+				output.WriteString(`\t`)
+			default:
+				output.WriteString(`\u00`)
+				output.WriteByte(hex[b>>4])
+				output.WriteByte(hex[b&0xF])
+			}
+			index++
+			start = index
+			continue
+		}
+
+		runeValue, size := utf8.DecodeRuneInString(value[index:])
+		if runeValue == '\u2028' || runeValue == '\u2029' {
+			output.WriteString(value[start:index])
+			output.WriteString(`\u202`)
+			output.WriteByte(hex[runeValue&0xF])
+			index += size
+			start = index
+			continue
+		}
+		index += size
+	}
+	output.WriteString(value[start:])
+	output.WriteByte('"')
+	return nil
+}
+
+func writeJSONValue(output *bytes.Buffer, value any) error {
+	var digits [64]byte
+
+	switch value := value.(type) {
+	case nil:
+		output.WriteString("null")
+	case string:
+		return writeJSONString(output, value)
+	case bool:
+		output.WriteString(strconv.FormatBool(value))
+	case int:
+		output.Write(strconv.AppendInt(digits[:0], int64(value), 10))
+	case int8:
+		output.Write(strconv.AppendInt(digits[:0], int64(value), 10))
+	case int16:
+		output.Write(strconv.AppendInt(digits[:0], int64(value), 10))
+	case int32:
+		output.Write(strconv.AppendInt(digits[:0], int64(value), 10))
+	case int64:
+		output.Write(strconv.AppendInt(digits[:0], value, 10))
+	case uint:
+		output.Write(strconv.AppendUint(digits[:0], uint64(value), 10))
+	case uint8:
+		output.Write(strconv.AppendUint(digits[:0], uint64(value), 10))
+	case uint16:
+		output.Write(strconv.AppendUint(digits[:0], uint64(value), 10))
+	case uint32:
+		output.Write(strconv.AppendUint(digits[:0], uint64(value), 10))
+	case uint64:
+		output.Write(strconv.AppendUint(digits[:0], value, 10))
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		output.Write(encoded)
+	}
+	return nil
+}
+
 // marshalJSONOwner serializes a CRDT shared type without handing its nested
 // ContentType tree to encoding/json's recursive reflection walk. Raw values
 // still use encoding/json, preserving its ordinary value and error behavior.
@@ -685,11 +814,9 @@ func marshalJSONOwner(owner any) ([]byte, error) {
 		case jsonOutputToken:
 			output.WriteString(frame.token)
 		case jsonOutputValue:
-			encoded, err := json.Marshal(frame.value)
-			if err != nil {
+			if err := writeJSONValue(&output, frame.value); err != nil {
 				return nil, err
 			}
-			output.Write(encoded)
 		case jsonOutputOwner:
 			switch current := frame.owner.(type) {
 			case *YArray:
@@ -703,18 +830,14 @@ func marshalJSONOwner(owner any) ([]byte, error) {
 				}
 				stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: "["})
 			case *YMap:
-				entries := current.jsonEntriesLocked()
-				keys := make([]string, 0, len(entries))
-				for key := range entries {
-					keys = append(keys, key)
-				}
+				keys := current.jsonKeysLocked()
 				sort.Strings(keys)
 				stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: "}"})
 				for index := len(keys) - 1; index >= 0; index-- {
 					if index < len(keys)-1 {
 						stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: ","})
 					}
-					pushEntry(entries[keys[index]])
+					pushEntry(current.jsonEntryLocked(keys[index]))
 					stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: ":"})
 					stack = append(stack, jsonOutputFrame{kind: jsonOutputValue, value: keys[index]})
 				}

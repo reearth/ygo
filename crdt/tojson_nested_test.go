@@ -1,12 +1,28 @@
 package crdt
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestUnit_WriteJSONString_MatchesEncodingJSON(t *testing.T) {
+	for _, input := range []string{
+		`plain`,
+		"quote\" slash\\ control\n\t<> & \u2028\u2029",
+		"\xff",
+	} {
+		want, err := json.Marshal(input)
+		require.NoError(t, err)
+
+		var got bytes.Buffer
+		require.NoError(t, writeJSONString(&got, input))
+		assert.Equal(t, string(want), got.String())
+	}
+}
 
 // Tests for issue #75 — YArray.ToJSON / YMap.ToJSON must recursively unwrap
 // nested ContentType values into their JSON representation. Pre-fix, nested

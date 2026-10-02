@@ -393,33 +393,26 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 // would see inner items as live after the outer container was deleted (Yjs JS
 // Item.delete walks content.getContent() identically; yrs Block::delete does
 // the same). See #72 vector B1.
-func (item *Item) delete(txn *Transaction) {
-	type deleteFrame struct {
-		item   *Item
-		finish bool
-	}
-
-	var inline [16]deleteFrame
-	stack := inline[:1]
-	stack[0].item = item
-	for len(stack) > 0 {
-		last := len(stack) - 1
-		frame := stack[last]
-		stack = stack[:last]
-		current := frame.item
-
-		if frame.finish {
-			if cd, ok := current.Content.(*ContentDoc); ok && cd.Doc != nil {
-				if _, added := txn.subdocsAdded[cd.Doc]; added {
-					delete(txn.subdocsAdded, cd.Doc)
-					delete(txn.subdocsLoaded, cd.Doc)
-				} else {
-					txn.addSubdocRemoved(cd.Doc)
-				}
+// nextDeleteItem finds the next live item in the root's depth-first cascade.
+func nextDeleteItem(current, root *Item) *Item {
+	for current != root {
+		for sibling := current.Right; sibling != nil; sibling = sibling.Right {
+			if !sibling.Deleted {
+				return sibling
 			}
-			continue
 		}
+		if current.Parent == nil || current.Parent.item == nil {
+			return nil
+		}
+		current = current.Parent.item
+	}
+	return nil
+}
+
+func (item *Item) delete(txn *Transaction) {
+	for current := item; current != nil; {
 		if current.Deleted {
+			current = nextDeleteItem(current, item)
 			continue
 		}
 
@@ -450,21 +443,26 @@ func (item *Item) delete(txn *Transaction) {
 			txn.addChanged(current.Parent, parentSubKey(current.ParentSub))
 		}
 
-		// Finalize a subdocument after every descendant has been deleted, as
-		// the recursive implementation did. Push children in reverse so the
-		// explicit LIFO stack retains the linked-list traversal order.
-		stack = append(stack, deleteFrame{item: current, finish: true})
-		if ct, ok := current.Content.(*ContentType); ok && ct.Type != nil {
-			childrenStart := len(stack)
-			for child := ct.Type.start; child != nil; child = child.Right {
-				if !child.Deleted {
-					stack = append(stack, deleteFrame{item: child})
-				}
-			}
-			for left, right := childrenStart, len(stack)-1; left < right; left, right = left+1, right-1 {
-				stack[left], stack[right] = stack[right], stack[left]
+		if cd, ok := current.Content.(*ContentDoc); ok && cd.Doc != nil {
+			if _, added := txn.subdocsAdded[cd.Doc]; added {
+				delete(txn.subdocsAdded, cd.Doc)
+				delete(txn.subdocsLoaded, cd.Doc)
+			} else {
+				txn.addSubdocRemoved(cd.Doc)
 			}
 		}
+
+		if ct, ok := current.Content.(*ContentType); ok && ct.Type != nil {
+			child := ct.Type.start
+			for child != nil && child.Deleted {
+				child = child.Right
+			}
+			if child != nil {
+				current = child
+				continue
+			}
+		}
+		current = nextDeleteItem(current, item)
 	}
 }
 
