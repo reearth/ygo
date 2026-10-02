@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.50.1] — 2026-10-02
+
+### Fixed
+
+- **`crdt`: transactions that delete many disjoint item ranges no longer rescan the
+  client store from its first item for every range.** Automatic garbage collection
+  now finds the first item overlapping each range with a binary search before
+  replacing its deleted content with a tombstone. This keeps a large replacement
+  from spending quadratic time in transaction-local garbage collection while
+  preserving which items are collected.
+
 ## [1.50.0] — 2026-09-10
 
 ### Added

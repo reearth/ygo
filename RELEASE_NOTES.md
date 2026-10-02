@@ -1,3 +1,17 @@
+## v1.50.1
+
+**Who is affected: applications that replace or remove many independently stored
+CRDT items in one transaction.** Small edits and documents with contiguous
+deletions are unchanged.
+
+Automatic garbage collection used to scan a client's full item store again for
+every disjoint deleted range. A transaction replacing a large, block-heavy
+document could therefore spend most of its time repeatedly passing already
+unrelated items. It now uses the store's clock ordering to find each range's
+first overlapping item with a binary search, then garbage-collects only that
+range. The document's visible result and its tombstones are unchanged; the
+transaction no longer has quadratic garbage-collection work.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a

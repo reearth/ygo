@@ -247,13 +247,16 @@ func gcTxnDeleteSet(doc *Doc, txn *Transaction) {
 		}
 		for _, r := range ranges {
 			rangeEnd := r.Clock + r.Len
-			// Skip past items whose end is before the range start.
-			for _, item := range items {
+			// Start at the first item that overlaps the range. The client store
+			// is ordered by clock, so scanning from its first item for every
+			// disjoint range makes one transaction quadratic in its delete set.
+			start := sort.Search(len(items), func(index int) bool {
+				item := items[index]
+				return item.ID.Clock+uint64(item.Content.Len()) > r.Clock
+			})
+			for _, item := range items[start:] {
 				if item.ID.Clock >= rangeEnd {
 					break
-				}
-				if item.ID.Clock+uint64(item.Content.Len()) <= r.Clock {
-					continue
 				}
 				if !item.Deleted {
 					continue // shouldn't happen for items in deleteSet, but defensive

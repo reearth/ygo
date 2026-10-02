@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -125,6 +126,49 @@ func TestUnit_RunGC_ReplacesDeletedContent(t *testing.T) {
 				_, isCD := item.Content.(*ContentDeleted)
 				assert.True(t, isCD, "deleted item content should be ContentDeleted after GC")
 			}
+		}
+	}
+}
+
+// gcTxnDeleteSet must begin each deleted range at its first overlapping item:
+// scanning from the start of the client store for every range makes alternating
+// single-item deletions quadratic in the number of ranges. The white-box setup
+// holds a 60,000-item client store with 30,000 disjoint deleted ranges; the
+// garbage collector must finish in bounded time and replace each selected item
+// with a tombstone.
+func TestUnit_GCTxnDeleteSetStartsAtEachDeletedRange(t *testing.T) {
+	const itemsPerClient = 60_000
+
+	doc := newTestDoc(1)
+	parent := newTestType(doc)
+	items := make([]*Item, itemsPerClient)
+	deletes := newDeleteSet()
+	for index := range items {
+		item := makeItem(1, uint64(index), NewContentString("x"), parent)
+		item.Deleted = true
+		items[index] = item
+		if index%2 == 0 {
+			deletes.add(item.ID, 1)
+		}
+	}
+	doc.store.clients[1] = items
+
+	txn := newTxn(doc)
+	txn.deleteSet = deletes
+	started := time.Now()
+	gcTxnDeleteSet(doc, txn)
+	elapsed := time.Since(started)
+	if elapsed > 5*time.Second {
+		t.Fatalf("GC of %d disjoint deleted ranges took %s, want under 5 s", itemsPerClient/2, elapsed)
+	}
+	t.Logf("GC of %d disjoint deleted ranges took %s", itemsPerClient/2, elapsed)
+	for index := range items {
+		_, isGC := items[index].Content.(*ContentDeleted)
+		if index%2 == 0 && !isGC {
+			t.Fatalf("deleted item at clock %d was not garbage collected", index)
+		}
+		if index%2 != 0 && isGC {
+			t.Fatalf("item outside the delete set at clock %d was garbage collected", index)
 		}
 	}
 }
