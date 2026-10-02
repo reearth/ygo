@@ -1,3 +1,15 @@
+## v1.49.6
+
+**Who is affected:** applications that accept collaborative updates or render
+documents containing deeply nested shared types. A document can grow that shape
+over many small, valid updates; deleting the outer container used to terminate
+the process instead of rejecting only that operation.
+
+- **Deep nested-type operations no longer consume the Go call stack.** Deletion
+  keeps its existing depth-first CRDT effects with an explicit stack. JSON and
+  XML reads also traverse nested shared types iteratively, so a document that
+  arrives over the network cannot crash the process by being deleted or read.
+
 ## v1.49.1
 
 **Who is affected: anyone whose documents have deletion history and who loads
