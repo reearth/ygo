@@ -21,6 +21,10 @@ jobs:
           - { pkg: "./crdt/",     func: "FuzzApplyUpdateV2" }
           - { pkg: "./sync/",     func: "FuzzApplySyncMessage" }
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:

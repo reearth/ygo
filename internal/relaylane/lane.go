@@ -96,9 +96,16 @@ func New(capacity int) *Lane {
 	return &Lane{cap: capacity, signal: make(chan struct{}, 1)}
 }
 
-// Push enqueues a payload. It NEVER blocks: an over-cap sync queue is
-// collapsed by merging, and awareness is kept latest-only. data must not be
-// mutated by the caller afterwards — the Lane retains the slice.
+// Push enqueues a payload. It NEVER blocks on CAPACITY: an over-cap sync
+// queue is collapsed by merging, and awareness is kept latest-only, so a
+// producer is never made to wait for a consumer. data must not be mutated by
+// the caller afterwards — the Lane retains the slice.
+//
+// "Never blocks" stops at capacity, though: Push takes mu, and both Push (via
+// collapseLocked) and TakeSync hold mu across crdt.MergeUpdatesV1. So a Push
+// can wait for an in-flight merge on the SAME lane, and a caller must not hold
+// a lock that other rooms need across a Push — that turns one room's merge into
+// every room's stall, the coupling a lane per room exists to remove.
 func (l *Lane) Push(kind cluster.Kind, data []byte) {
 	l.mu.Lock()
 	if kind == cluster.KindAwareness {
@@ -193,6 +200,47 @@ func (l *Lane) Empty() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.syncQ) == 0 && !l.hasAw
+}
+
+// Depth reports how many payloads the lane currently holds: every queued sync
+// blob, plus one for a pending awareness blob.
+//
+// A TEST-ASSERTION primitive, not a production signal: it lets tests state
+// "exactly this much was queued" directly, rather than inferring queue state
+// from a worker goroutine's side effects.
+//
+// A count is also the WRONG basis for a full-lane decision, since the awareness
+// slot is latest-only and never contributes to the capacity Push enforces:
+// comparing Depth() against a cap held elsewhere would report a lane full one
+// payload early whenever awareness was pending. Producers want Full(), defined
+// against the queue the cap actually governs; consumers want Empty().
+func (l *Lane) Depth() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := len(l.syncQ)
+	if l.hasAw {
+		n++
+	}
+	return n
+}
+
+// Full reports whether the next KindSync Push would push the lane past its
+// capacity and so force a coalescing merge.
+//
+// The predicate lives here, not in the caller, because the cap and the
+// threshold Push compares it against are both lane-internal: a caller
+// recomputing "depth >= my copy of the cap" duplicates two facts it does not
+// own. It is exact rather than conservative — collapseLocked triggers on
+// len(syncQ) > cap after the append, which is len(syncQ) >= cap before it.
+//
+// Advisory only: Push still never blocks and never drops, so a producer may
+// ignore Full and take the merge. It exists for a producer with something
+// CHEAPER to do — cluster/redis's stream reader declines to advance its cursor
+// and re-reads the same durable entries next cycle instead.
+func (l *Lane) Full() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.syncQ) >= l.cap
 }
 
 // Stats returns a snapshot of the degraded-path counters. Lock-free by
