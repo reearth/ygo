@@ -57,3 +57,22 @@ func MemoryPersistencePendingCount(m *MemoryPersistence, room string) int {
 func NewMemoryPersistenceForTest(adapter *persistence.LegacyAdapter) *MemoryPersistence {
 	return &MemoryPersistence{adapter: adapter, rooms: make(map[string]*compactLedger)}
 }
+
+// MemoryPersistenceBackoffState reports room's consecutive-failure count and
+// its next-attempt mark, or (0, 0) when the room has no ledger entry.
+//
+// Test-only, and the ONLY way to observe the reset-on-success: when a fold
+// succeeds and leaves nothing outstanding, dropIfIdleLocked deletes the entry
+// outright, which clears the same state incidentally. A test that asserts on
+// cadence alone therefore passes with the reset deleted (verified by
+// mutation) — the reset only does work when the ledger SURVIVES a successful
+// fold, which needs a write landing inside the fold window.
+func MemoryPersistenceBackoffState(m *MemoryPersistence, room string) (failures int, retryAt int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l := m.rooms[room]
+	if l == nil {
+		return 0, 0
+	}
+	return l.failures, l.retryAt
+}

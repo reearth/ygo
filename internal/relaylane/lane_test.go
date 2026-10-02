@@ -147,3 +147,83 @@ func TestLane_Push_Signals(t *testing.T) {
 	}
 	require.False(t, l.Empty())
 }
+
+// Depth must track what the lane actually holds, in both directions, and must
+// count the two kinds independently — a producer reading it to gauge
+// saturation is misled by either a stuck or an over-counted number.
+//
+// Real V1 blobs, and a cap well above n, so nothing here coalesces: Depth is
+// being asserted against a known queue length, not against whatever a merge
+// left behind.
+func TestLane_Depth_RisesWithPushAndFallsWithTake(t *testing.T) {
+	const n = 3
+	updates, _ := syncUpdates(t, n)
+	l := relaylane.New(n + 5)
+	require.Zero(t, l.Depth(), "a fresh lane holds nothing")
+
+	for i, u := range updates {
+		l.Push(cluster.KindSync, u)
+		require.Equal(t, i+1, l.Depth(), "each sync push adds exactly one")
+	}
+
+	// Awareness is a separate, single slot: the first push adds one, and a
+	// second replaces rather than adds.
+	l.Push(cluster.KindAwareness, []byte{0xaa})
+	require.Equal(t, n+1, l.Depth(), "a pending awareness blob counts as one")
+	l.Push(cluster.KindAwareness, []byte{0xbb})
+	require.Equal(t, n+1, l.Depth(), "awareness is latest-only, so it cannot stack")
+
+	// TakeSync drains the WHOLE sync backlog as one merged blob, so it drops
+	// the sync contribution to zero in a single call.
+	_, ok := l.TakeSync()
+	require.True(t, ok)
+	require.Equal(t, 1, l.Depth(), "only the awareness blob is left")
+
+	_, ok = l.TakeAwareness()
+	require.True(t, ok)
+	require.Zero(t, l.Depth(), "a fully drained lane holds nothing")
+}
+
+// Full must flip exactly one push before a merge would happen, so a producer
+// that respects it never pays for a coalesce, and must clear once the queue is
+// drained.
+//
+// Asserted against Stats().Coalesced rather than against an arithmetic
+// restatement of the threshold: the promise is "the next push would merge",
+// and only the merge counter can witness that.
+func TestLane_Full_PredictsTheNextMerge(t *testing.T) {
+	const capacity = 3
+	updates, _ := syncUpdates(t, capacity+1)
+	l := relaylane.New(capacity)
+
+	for i := 0; i < capacity; i++ {
+		require.False(t, l.Full(), "a lane below capacity is not full (after %d pushes)", i)
+		l.Push(cluster.KindSync, updates[i])
+	}
+	require.True(t, l.Full(), "at capacity, the next sync push must merge")
+	require.Zero(t, l.Stats().Coalesced, "nothing has merged yet")
+
+	// Awareness must not affect the verdict: it is latest-only and is not
+	// governed by the cap. Shaped to be one short of the cap on the SYNC
+	// queue with awareness also pending, so a Full() that summed the two
+	// kinds — the obvious wrong implementation, and the one this change's
+	// brief proposed — would report full here while the next sync push still
+	// would not merge.
+	l2 := relaylane.New(capacity)
+	for i := 0; i < capacity-1; i++ {
+		l2.Push(cluster.KindSync, updates[i])
+	}
+	l2.Push(cluster.KindAwareness, []byte{0xaa})
+	require.Equal(t, capacity, l2.Depth(), "the two kinds together do reach the cap")
+	require.False(t, l2.Full(), "a pending awareness blob is not sync capacity")
+	l2.Push(cluster.KindSync, updates[capacity-1])
+	require.Zero(t, l2.Stats().Coalesced, "and indeed that push did not merge")
+
+	// Taking the honest-but-ignored path proves Full was telling the truth.
+	l.Push(cluster.KindSync, updates[capacity])
+	require.NotZero(t, l.Stats().Coalesced, "the push Full warned about did merge")
+
+	_, ok := l.TakeSync()
+	require.True(t, ok)
+	require.False(t, l.Full(), "a drained lane is not full")
+}

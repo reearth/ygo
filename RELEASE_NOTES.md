@@ -1,15 +1,292 @@
-## v1.49.6
+## v1.50.1
 
-**Who is affected:** applications that accept collaborative updates or render
-documents containing deeply nested shared types. A document can grow that shape
-over many small, valid updates; deleting the outer container used to terminate
-the process instead of rejecting only that operation.
+**Who is affected: applications that accept collaborative updates or render
+documents containing deeply nested shared types.** A document can grow that
+shape over many small, valid updates. Deleting the outer container, or reading
+the document as JSON or XML, recursed once per nesting level; at sufficient
+depth that exhausted the Go stack and ended the whole process with a fatal
+error that `recover` cannot catch.
 
 - **Deep nested-type operations no longer consume the Go call stack.** Deletion
-  keeps its existing depth-first CRDT effects with an explicit stack. JSON and
-  XML reads also traverse nested shared types iteratively, so a document that
-  arrives over the network cannot crash the process by being deleted or read.
+  keeps its existing depth-first CRDT effects, in the same order, with an
+  explicit heap stack. JSON and XML reads also traverse nested shared types
+  iteratively, so a document that arrives over the network cannot crash the
+  process by being deleted or read.
 
+## v1.50.0
+
+**Who is affected: nobody, unless you choose to be.** This release adds a
+second way for `cluster/redis` to move updates between nodes. The existing way
+is the default and is unchanged — if you do not set the new
+`Config.Transport` field, your cluster behaves exactly as it did in v1.49.x,
+down to the Redis commands it issues.
+
+**What you may want to opt into.** Until now, a multi-node deployment relayed
+updates over Redis pub/sub, which is *at-most-once*: if a node cannot keep up
+with the stream of messages — a slow moment, a network blip, Redis
+disconnecting a client whose buffer overflowed — the messages it missed are
+gone. Nothing reports it. Because collaborative updates depend on each other,
+one missed update quietly parks every later edit from that same client on that
+node, and the node only catches up when the room is next loaded from storage.
+On a busy room that is never loaded again, so it never catches up.
+
+`Transport: Streams` replaces that mechanism with Redis Streams, which keep
+recent messages instead of forgetting them. A node that falls behind, restarts,
+or joins late reads what it missed instead of losing it.
+
+**What it guarantees, precisely.** Delivery is at-least-once **within the
+window Redis is asked to retain** — `min(StreamRetention, StreamMaxLen ÷ your
+publish rate)`, 60 seconds and 4096 messages per room by default. This is not a
+no-loss guarantee and we will not describe it as one: the retained history is
+trimmed at both ends, so a node that falls further behind than the window loses
+whatever was trimmed underneath it. The difference from pub/sub is not that
+loss became impossible. It is that loss became **bounded and visible** — a new
+`Relay.StreamStats()` counter, `Gaps`, goes non-zero when it happens, and a
+single `Gaps` means the window was too small for how far behind that node
+actually got. Size the window for the worst delay you intend to survive: a
+deploy rollover, a long garbage-collection pause, a node restart.
+
+One limit on that visibility, stated plainly: `Gaps` detects a jump only after
+the process has seen a baseline for the publishing node, and those baselines
+live in memory. A relay that has just restarted takes whatever sequence number
+it reads first as its baseline, so anything trimmed away **while it was down**
+leaves `Gaps` at zero. Loss over a reader's own downtime is bounded by the
+retention window rather than reported — which is the other reason to size the
+window for your restart and deploy times.
+
+**What it costs, and why pub/sub is still here.** Publishing to pub/sub costs
+Redis nothing: it hands the message to whoever is listening and forgets it.
+Writing to a stream is a real write — it replicates, it goes into your AOF/RDB
+if you have persistence on, and it holds memory proportional to
+`retention × update rate × update size` for every room on the node (roughly
+800KB per busy room at the defaults). Reading costs a small steady stream of
+commands even when nothing is happening, and that cost **grows with how many
+rooms a node holds**: each reader issues one `XREAD` per 512 stream keys, and
+each room has two, so an idle node costs `Readers × ceil(2 × rooms ÷ Readers ÷
+512) ÷ ReadBlock` commands per second — 16 per second at the defaults for a
+node under about a thousand rooms, and roughly 160 per second at ten thousand.
+Size Redis from the formula rather than from the small-cluster figure.
+
+**Size Redis for every room you have ever used, not for the rooms in use at
+once.** The retention window bounds how big each room's stream gets; it does
+not bound how many streams exist. This release sets no expiry on stream keys,
+and the trimmer only visits rooms a node currently holds, so once a room has
+gone quiet everywhere its two keys stay where they are, holding their last
+window, for as long as that Redis instance lives. If your room names are a
+bounded set of documents, that is a one-off ceiling you can multiply out. If
+they are per-session or per-tenant and unbounded, budget for the whole history
+or delete the keys from an operations job in the meantime. Expiring idle keys
+automatically is the intended fix and is tracked in #248.
+
+So pub/sub is **not deprecated and is not going away**. At-most-once is a
+legitimate choice when your rooms are hot, your Redis is sized for fan-out
+rather than for writes, and catching up from storage on reload is good enough
+for you. Choose Streams when a missed update between reloads is not acceptable
+to you, and pay for it in Redis memory and write throughput.
+
+**Migrating a live cluster without splitting it.** A mixed cluster delivers in
+one direction only. A Streams node does not publish to pub/sub, so a pub/sub
+node never sees its edits — that half is what matters, and it is why switching
+a running cluster straight over would leave half of it deaf for the length of
+the rollout. The other half crosses: this release does not gate the *receiving*
+side on the setting, so a Streams node still subscribes to its rooms' pub/sub
+channels and does apply what a pub/sub node publishes. Do not rely on that —
+it means a half-migrated cluster is one-way rather than symmetric, and it also
+means choosing Streams does not by itself remove the pub/sub connection from
+the node's Redis footprint. Gating the receiving side too is tracked
+in #249.
+
+The way through is the third setting, `Transport: Both`, which publishes to and
+reads from both mechanisms at once:
+
+1. Roll every node from the default to `Both`.
+2. Once no pub/sub-only node is left, roll every node from `Both` to `Streams`.
+
+Reverse the two steps to go back. `Both` needs no deduplication — receiving an
+update twice is harmless, because applying the same update again does nothing —
+so there is no window during the rollout where correctness depends on the order
+you restart your nodes. It does double the publish work, so it is a transition
+state rather than somewhere to stay.
+
+**Two things to know before you turn it on.**
+
+- **Redis Cluster is not supported**, and for the Streams tier that is
+  deliberate rather than unfinished. Reading many rooms in one command requires
+  every one of them to live on the same Cluster shard, and pinning them there
+  would put each node's reader count into the key names — so two nodes
+  configured slightly differently would read and write *different* streams for
+  the same room and never notice. Single-node Redis or Sentinel, as before.
+- **Leave `Config.NodeID` unset unless you have a reason not to.** By default
+  each process gets a fresh random identity, which means a restarted node
+  reads back its own last window of writes from Redis and recovers them. A
+  fixed `NodeID` makes the node recognise and skip its own messages, so its
+  own pre-restart writes have to come from storage instead.
+
+**What to watch.** `Relay.StreamStats()` is new and separate from the existing
+`Relay.Stats()`. Alert on `Gaps` **appearing at all**; alert on a sustained
+*rate* of `Stalled` (a room's local consumer cannot keep up) or `Deferred`
+(rooms being read before they are ready). `Trimmed` and `Restarts` are
+informational — the second one exists so that a node restarting is never
+miscounted as data loss. `Replayed` is a **batching gauge, not an alarm**: it
+counts the entries a reader merged into one update instead of pushing them one
+by one, so any room taking more than about four remote updates a second shows a
+permanent rate at the default read interval, and that is the tier working
+normally. Use it to watch inbound volume and to see catch-up bursts stand out
+against a room's own baseline; do not put a threshold on it.
+[docs/CLUSTERING.md](docs/CLUSTERING.md) has the full posture.
+
+**One note for anyone who ran this from the branch before release.** The stream
+key layout changed late in development — the sync/awareness marker now comes
+before the room name, so that a room whose name begins with `a:` cannot collide
+with another room's presence stream. A pre-release build's streams will not
+line up with a v1.50.0 build's. Nothing released was ever affected.
+
+**Nothing else changed.** No existing signature, default, or Redis command
+moved. Closes #206.
+## v1.49.5
+
+**Who is affected: anyone using `provider/client` with `Options.Token` against
+a server that can reject it.** If you do not set `Token`, nothing here changes
+for you.
+
+v1.49.3 fixed a rejected authentication token being sent twice. It fixed most
+of it. The client announces its token and sends its opening sync message
+without waiting, and v1.49.3 taught both of those writes to notice a rejection
+that had already arrived. But the client also *answers* the server: when the
+server asks what the client has, the client replies — and that reply is sent in
+the same instant the rejection may be arriving. When it was, the reply failed to
+send, the failure looked like an ordinary network glitch, and the client
+reconnected with the same refused token.
+
+So the symptom is the same as before, through a different door: **two failed
+authentication attempts instead of one**. As before there was no infinite
+retry, no hang, and no data loss — `Connect` still returned `ErrAuthRejected`
+and stopped. It matters if your server counts failed authentications toward
+rate-limiting or account lockout.
+
+**What changed.** The check now lives in one place that every send goes
+through, instead of being attached to two of them. There turned out to be five
+such sends, not the two the previous fix hardened — a test that simply counts
+them now fails if a new one is added without the check, which is how this
+problem reached a release twice.
+
+The same change removes a subtler problem in the previous fix: it read the
+connection directly while the client's own reader was already reading it, which
+the WebSocket library does not allow. That is also why it worked only
+sometimes — the two readers competed for the very message the check needed. It
+now asks the existing reader instead.
+
+**Present since v1.48.0**, and only narrowed by v1.49.3. It kept failing our
+own test suite intermittently after that release, which is how it was caught.
+## v1.49.4
+
+**Who is affected: anyone using the built-in `websocket.MemoryPersistence` whose
+compaction can fail.** In practice that means a corrupt stored record the merge
+cannot fold. If your folds succeed, nothing here changes for you — the healthy
+path is byte-for-byte the same cadence it always was.
+
+`MemoryPersistence` batches its housekeeping: every so many writes it folds a
+room's accumulated update records back into one. When that fold failed, it was
+retried on *every* subsequent write instead of waiting for the next batch. Each
+retry re-read and re-merged the whole log — work the previous failure had
+already shown would not succeed, over a log that only grew.
+
+The result was quadratic: with the fold failing, 800 writes cost 791 compaction
+attempts and merged 320,355 records. It is now 7 attempts and 1,270 records. The
+saving grows with the workload — 33× less merge work at 100 writes, 252× at 800.
+
+**No data was ever at risk.** A fold that fails leaves the records exactly where
+they were, and an un-folded record is still a stored record that still loads.
+This was a cost problem — wasted CPU on a store that was already unhealthy —
+not a correctness one.
+
+**What changed.** Each consecutive failure now doubles the number of writes
+before the next attempt, up to 64× the normal interval, and the first success
+puts it straight back to normal. It stays capped rather than backing off
+forever, because a fold that never runs is a log that never shrinks: a store
+that recovers has to be noticed, and the un-folded backlog has to stay bounded.
+Counting in writes rather than seconds means an idle room does not retry at all,
+and a recovered one is retried as soon as it is being used again.
+
+Explicit `Compact` calls, `LoadDoc`, and `Server.CompactEvery` are unchanged —
+they always fold on demand, and `Server.CompactEvery` already had its own
+spacing.
+
+**Present since v1.49.0.** Closes #239.
+
+Also in this release: the pure-Go SQLite driver behind `persistence/sqlite` and
+the offline client's local store moves from `modernc.org/sqlite` v1.34.5 to
+v1.39.0, picking up five minor versions of upstream fixes. That is as far as it
+can go for now — the next release requires Go 1.24 and the current one requires
+Go 1.25, against this module's Go 1.23 floor. Raising the floor would break
+consumers still on 1.23, so it stays where it is.
+
+## v1.49.3
+
+**Who is affected: anyone using `provider/client` with `Options.Token` against a
+server that can reject it.** If you do not set `Token`, nothing here changes for
+you.
+
+A rejected authentication token could be sent to the server twice instead of
+once. The client still gave up correctly after that — `Connect` returned
+`ErrAuthRejected` and stopped — so there was never an infinite retry loop, a
+hang, or any data loss. The practical impact is that a client with a bad
+credential made two failed authentication attempts, which matters if your server
+counts those toward rate-limiting or account lockout.
+
+**Why it happened.** The client announces its token and then immediately sends
+its opening sync message, without waiting for a reply. Both of the ways a
+rejection is recognised arrive on the *receiving* side. When the server rejected
+the token and closed fast enough, the client's second message failed to send, it
+never got as far as reading, and a refused credential looked like an ordinary
+network glitch — so it reconnected and tried the same token again.
+
+The rejection was not lost; it was sitting unread. A failed send does not mean
+the other side has stopped talking. The client now checks for it before deciding
+a failure was retryable.
+
+**Present since v1.48.0**, and in every release since. It surfaced as an
+intermittent CI failure that the existing test could not reproduce on demand;
+the new test forces the exact timing every run.
+
+**Upgrade notes:** none. No API change, no behaviour change for anyone not using
+`Token`.
+
+## v1.49.2
+
+**Who is affected: nobody's running code.** This release changes no library
+source — `crdt`, `provider`, `cluster`, `persistence` and `mobile` are
+byte-identical to v1.49.1. It ships one corrected benchmark file. If you are
+upgrading for a fix, you already have it.
+
+It is tagged so the corrected measurements have a version to cite.
+
+**What changed.** The benchmark suite added in #180 could not see the cost it
+was pointed at, in three separate ways, and that mattered: it agreed with the
+performance claims in #189 rather than testing them, so one proposed
+optimisation was implemented and reviewed clean before measurement showed it
+made the common path slower.
+
+- The suite's original observed-transaction benchmark is blind by construction.
+  A single client appending merges into a handful of items, so its walk is
+  effectively O(1) regardless of document size.
+- Its replacement measured a document that grew while being measured, so the
+  result described `b.N` rather than the document size it named. One figure was
+  16x artifact.
+- Its fixture was quadratic, which put realistic document sizes out of reach.
+- The delete-set benchmark sampled 1/10/100/1000 ranges and skipped 0/2/4/8/16,
+  which is where every real workload sits.
+
+**What it produced.** With a benchmark that measures the right shape, the
+performance epic went from nine asserted findings to one large measured one —
+building an observer's delta costs roughly 1000x the edit itself on a
+100k-item document — plus two rejections and three claims recorded as
+unverified. #189 now carries all of it, and #181, #184, #185 and #188 are
+closed into it.
+
+**Upgrade notes:** none. There is nothing to migrate and no behaviour change.
+
+>>>>>>> conflict 1 of 1 ends
 ## v1.49.1
 
 **Who is affected: anyone whose documents have deletion history and who loads
@@ -398,10 +675,10 @@ release only adds packages.
 Until now, ygo's networked sync story was server-only: `provider/websocket`
 answers peers, but embedding a *client* that dials it meant hand-rolling the
 WebSocket connection, the sync handshake, reconnect-with-backoff, and local
-durability yourself. `provider/client` closes that gap — this is the same
-project's own competitive comparison against Deln0r/ygo naming
-"embeddable offline-first client" as a gap the rival covered and we didn't;
-it no longer is.
+durability yourself. `provider/client` closes that gap — it was the largest
+remaining hole in the library's own coverage, named in this project's
+competitive review as the one thing a Go consumer still could not do without
+writing the client themselves.
 
 **The offline model, concretely — because "offline-first" gets read as
 vaguer than it is.** There is no offline-op queue anywhere in this package,

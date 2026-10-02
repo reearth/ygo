@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.49.6] — 2026-10-02
+## [1.50.1] — 2026-10-02
 
 ### Fixed
 
@@ -18,6 +18,265 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversion use the same approach, so reading the received tree cannot
   reintroduce the stack-overflow failure.
 
+## [1.50.0] — 2026-09-10
+
+### Added
+
+- **`cluster/redis`: an at-least-once delivery tier built on Redis Streams
+  (#206).** `Config.Transport` selects it; the zero value is `PubSub`, so every
+  existing deployment is unchanged and no new field has to be set.
+
+  Redis pub/sub is at-most-once by Redis's own definition: a subscriber that
+  cannot keep up loses the message for good, and no amount of client-side
+  buffering changes that. #187 asked for "no silent divergence on
+  backpressure" and PR #200 could only bound the damage. This tier delivers a
+  bounded version of it: each room becomes a Redis stream, and a reader that
+  stalls or restarts resumes from where it left off.
+
+  The guarantee is bounded and stated as such: **at-least-once within
+  `min(StreamRetention, StreamMaxLen / publish-rate)`** — defaults 60s and 4096
+  entries, the two enforced separately (`MAXLEN ~` inline on `XADD`, `XTRIM
+  MINID` on a `TrimInterval` sweeper), so whichever binds first is the real
+  window. 60s matches y-redis's own `REDIS_MIN_MESSAGE_LIFETIME`. It is not a
+  no-loss guarantee: a reader lagging past its room's window loses what was
+  trimmed underneath it, and `StreamStats.Gaps` makes that loss provable rather
+  than silent.
+
+  Sync streams are read from the **oldest retained entry**, not the tail. V1
+  updates are idempotent, so replay is harmless — which eliminates the race
+  between loading a snapshot and starting to read, and makes late-joiner
+  catch-up fall out for free. No cursor is persisted anywhere; a lost cursor
+  costs a replay, not a loss.
+
+  Under lane backpressure the reader declines to advance its cursor rather than
+  merging or dropping the backlog. The entries stay in the stream and are read
+  again next cycle, so backpressure toward Redis is safe here for the first
+  time — what it costs is lag, and lag past the window shows up as `Gaps`.
+
+  Awareness gets its own stream, read from the tail and never replayed. Sharing
+  the sync stream would let heartbeat traffic evict sync entries out of the
+  retention window, and replaying presence would resurrect clients that are
+  long gone. Awareness entries are excluded from gap accounting for the same
+  reason.
+
+  New `Config` fields: `Transport`, `StreamPrefix`, `StreamRetention`,
+  `StreamMaxLen`, `AwarenessMaxLen`, `AwarenessRetention`, `Readers`,
+  `TrimInterval`, `ReadBlock`. `New` **rejects** rather than silently adjusts:
+  an unknown `Transport`; a client `PoolSize` not greater than `Readers`; a
+  `TrimInterval` not less than `StreamRetention`; and a `ReadBlock` outside
+  `[1ms, 250ms]` — 250ms because a blocked `XREAD` cannot be interrupted, so
+  that value is also how long `Close` and a newly activated room may wait, and
+  1ms because go-redis truncates sub-millisecond values to `BLOCK 0`, which
+  Redis reads as "block forever". Nothing is validated in `PubSub` mode.
+
+  New `StreamStats` and `(*Relay).StreamStats()` report `Replayed`, `Gaps`,
+  `Restarts`, `Trimmed`, `Stalled` and `Deferred`. `Gaps` counts provable
+  losses via a sequence number that is monotonic per **(node, stream)** — a
+  per-node counter would report a hole every time a node published to a second
+  room — and should be alerted on by presence, not by rate. `Stalled` and
+  `Deferred` count the two reasons a cursor advance is declined and are kept
+  apart deliberately: one asks for capacity, the other is an activation bug.
+  `StreamStats` is separate from `Stats` because each type's fields are
+  permanently zero under the other tier.
+
+  Pub/sub remains **supported, not deprecated**: `PUBLISH` costs nothing, while
+  `XADD` is a write with replication, AOF/RDB, and memory proportional to
+  `retention × rate × update size`. At-most-once is a legitimate choice.
+  Migration is `Both` mode, which publishes to and reads from both tiers and
+  needs no deduplication — roll every node to `Both`, then roll every node to
+  `Streams`. Redis Cluster is deliberately unsupported: a multi-key `XREAD`
+  needs one hash slot, and forcing one would bake `Readers` into key names, so
+  a config typo would have two nodes addressing different streams for the same
+  room. See [docs/CLUSTERING.md](docs/CLUSTERING.md).
+
+  Review fixes folded into the tier before release: a sync payload pushed onto
+  a lane whose worker was retired between the reader resolving it and the push
+  no longer advances that stream's cursor, so the entries are re-read for the
+  successor residency instead of being skipped; a **negative** `ReadBlock` is
+  rejected as documented rather than defaulted to 250ms (only the unset value
+  defaults); the `XTRIM MINID` cutoff is derived from the **Redis server's**
+  clock via `TIME` rather than the application host's, so a skewed app node can
+  no longer trim entries that are still inside the window (a failed `TIME`
+  skips the sweep), and the sweep pipelines its `XTRIM`s in chunks instead of
+  one round trip per key, which the 10,000-room target needs to finish inside
+  `TrimInterval`. Three documentation overclaims were corrected with them:
+  `StreamStats.Gaps` detects jumps only after this process has observed a
+  baseline for a source (loss during a reader's own downtime is bounded by the
+  retention window, not reported), and the idle `XREAD` rate is room-dependent
+  — `Readers × ceil(2 × rooms ÷ Readers ÷ 512) ÷ ReadBlock`, i.e. ~160/s at
+  10,000 rooms, not the 16/s that holds only for a single batch per reader.
+
+## [1.49.5] — 2026-09-02
+
+### Fixed
+
+- **`provider/client`: a rejected auth token could still reach a second
+  attempt.** v1.49.3 (#238) taught the two PROACTIVE handshake writes — the
+  Auth frame and SyncStep1 — to recognise a rejection that was already sitting
+  unread when the write failed. But the client also writes in RESPONSE to the
+  server's handshake: reading the server's own SyncStep1 makes it answer with a
+  SyncStep2 reply, and that write is in the same race. When the rejection won
+  it, the reply write failed with EPIPE, surfaced as an ordinary retryable I/O
+  error, and `runReconnectLoop` dialled again with a token the server had
+  already refused.
+
+  Two of the session's FIVE write sites were covered; the SyncStep2 reply, the
+  awareness-query reply, and `flushLane`'s own write (which sends a local edit
+  queued while the handshake is still in flight) were not. The classification
+  now happens in a single place that every write site reaches.
+
+  A source-level guard, `TestUnit_EveryWriteSiteClassifiesAuthRejection`, now
+  asserts that every error-checked connection write routes through it. This bug
+  reached `main` twice by the same mechanism — a write site nobody had written
+  a behavioural test for — and a behavioural test can only ever cover the sites
+  someone thought of. The guard caught the `flushLane` site during this very
+  change, after it had already been missed once.
+
+  The fix also removes a latent contract violation introduced with #238's:
+  `classifyHandshakeWriteErr` called `ReadMessage` on the connection while the
+  read-pump goroutine was also in `ReadMessage`, which gorilla explicitly
+  forbids ("no more than one goroutine calls the read methods"). That is also
+  why it was unreliable — the pump and the classifier raced for the very frame
+  the classifier was looking for, so whichever lost saw nothing.
+  `classifyWriteErr` instead consults the pump's existing channels, which is
+  race-free: frame handlers run from `runLoop`'s own select, so there is
+  exactly one consumer at any moment.
+
+  Impact is unchanged from #238 and still limited: the connection terminated
+  correctly with `ErrAuthRejected`, so there was never an infinite retry, hang,
+  or data loss. A rejected client made two authentication attempts instead of
+  one, which matters where a server counts auth failures for rate-limiting or
+  lockout.
+
+  Present since v1.48.0, and only narrowed by v1.49.3. It kept failing
+  `TestClient_Auth_WrongTokenIsTerminal` intermittently on `main` after that
+  release — reproduced here at `authCalls=2` on run 46 of 400, reporting
+  `send sync step 2 reply: ... write: broken pipe`. The new
+  `TestClient_Auth_RejectionSurvivesSyncReplyWriteFailure` forces that timing
+  deterministically. Mutation-checked in both directions: unguarding the reply
+  site fails only the new test while #238's still passes, and unguarding the
+  proactive writes fails only #238's — so the earlier test structurally could
+  not have caught this (#240 follow-up).
+## [1.49.4] — 2026-09-02
+
+### Fixed
+
+- **`provider/websocket`: a failing `MemoryPersistence` fold was retried on every
+  write.** The adapter folds a room once it has accumulated `CompactEvery`
+  un-folded records, and the ledger's progress mark advances only on success —
+  deliberately, so records cannot pile up unnoticed behind a fold that never
+  runs. But the trigger compares the outstanding count against a fixed
+  threshold, and a failed fold leaves that count above the threshold, so the
+  fold was re-attempted on *every* subsequent write rather than once per
+  `CompactEvery` writes.
+
+  Each retry pays a full merge over a log the failed retry could not shrink, so
+  the cost is quadratic in the write count. Measured with `CompactEvery=10` and a
+  fold that fails after doing its read+merge: 800 writes cost 791 attempts and
+  320,355 merged records before, 7 attempts and 1,270 merged records after — the
+  gap widens with scale (33× fewer merged records at 100 writes, 252× at 800).
+
+  The automatic trigger now backs off: each consecutive failure doubles the
+  number of writes before the next attempt, capped at 64× the base cadence, and
+  the first success resets it. The cap is deliberate — a fold that never runs is
+  a log that never shrinks, so the retries have to continue and the un-folded
+  backlog has to stay bounded. Backing off in units of writes rather than
+  wall-clock keeps a quiet room from spinning and lets a recovered store be
+  retried on its next writes instead of after a sleep unrelated to its load.
+
+  This is safe precisely because a failed fold is not a durability event: the
+  updates are already stored, and an un-folded record is still a stored record.
+  The reasoning does not transfer to the store path.
+
+  Backoff governs only the automatic trigger. An explicit `Compact` call,
+  `LoadDoc`, and the server's `CompactableAdapter` path all still fold on
+  demand; `Server.CompactEvery` has its own damping and was never affected.
+
+  Present since v1.49.0 (#239).
+
+### Changed
+
+- **`modernc.org/sqlite` v1.34.5 → v1.39.0** (with `modernc.org/libc`,
+  `mathutil` and `memory` pulled along). Five minor versions of upstream fixes
+  for the pure-Go SQLite driver behind `persistence/sqlite` and
+  `provider/client`'s local store.
+
+  v1.39.0 is the ceiling, not the latest: v1.39.1 requires Go 1.24 and the
+  current v1.57.0 requires Go 1.25, while this module's floor is Go 1.23. Going
+  further means raising that floor, which is a breaking change for consumers and
+  a separate decision — see `.github/dependabot.yml`, where gomod version
+  updates are disabled for exactly this reason (security updates still flow).
+  The `go` directive normalises from `1.23` to `1.23.0`; the floor is unchanged
+  and no `toolchain` directive is introduced.
+
+## [1.49.3] — 2026-09-01
+
+### Fixed
+
+- **`provider/client`: a rejected auth token could be retried.** `Options.Token`
+  is documented as terminal — a server that refuses the token is reported once,
+  never retried — and `runReconnectLoop` enforces that by returning on
+  `ErrAuthRejected` before its backoff sleep. But both detectors for a rejection
+  live on the READ path: the `PermissionDenied` data frame and the 4401 close
+  code. The client writes the Auth frame and then immediately writes SyncStep1
+  without waiting for a reply, so when the server's rejection and close won that
+  race the SyncStep1 *write* failed, the read loop was never entered, and the
+  failure surfaced as an ordinary retryable I/O error. The reconnect loop then
+  dialled again with a token the server had already refused.
+
+  The rejection was not actually lost when this happened — data the peer sent
+  before closing stays readable even after the local write fails with `EPIPE` —
+  so the client was discarding evidence it already had. A handshake write
+  failure now drains the read side, bounded by 250ms and gated on
+  `Options.Token` being set, and reports `ErrAuthRejected` when it finds the
+  rejection in either form.
+
+  Present since v1.48.0. Observed as intermittent CI failures of
+  `TestClient_Auth_WrongTokenIsTerminal` with `authCalls=2` on v1.49.0's and
+  v1.49.2's `main` runs; that test could not reproduce it on demand, so the new
+  `TestClient_Auth_RejectionSurvivesHandshakeWriteFailure` forces the condition
+  deterministically with a test hook between the two handshake writes.
+
+  Impact is limited: the connection still terminates correctly with
+  `ErrAuthRejected`, so there was never an infinite retry, a hang, or data loss.
+  A rejected client made two authentication attempts instead of one, which
+  matters where a server counts auth failures for rate-limiting or lockout.
+
+## [1.49.2] — 2026-09-01
+
+### Fixed
+
+- **Benchmarks: the observed-transaction benchmark could not measure what it
+  claimed.** Test-only; no library source changed in this release. Three
+  separate flaws made the #180 suite agree with the performance claims in #189
+  instead of testing them, which let one claim survive review and
+  implementation before measurement showed it was backwards.
+  - The pre-existing `BenchmarkObservedTxn_Apply` is blind by construction: a
+    single client appending merges into a handful of `ContentString` items, so
+    its observer walk is O(items) and effectively O(1) however many characters
+    the document holds.
+  - Its replacement measured a document that grew while being measured. Every
+    iteration inserts, and Go picks `b.N` by timing progressively larger runs,
+    so the reported ns/op tracked `b.N` rather than the size named in the
+    sub-benchmark. `n=1000/observed` reported 114,392 ns/op before the fix and
+    ~7,300 ns/op after: roughly 16x of the original figure was artifact. The
+    document is now rebuilt, with the timer stopped, once it drifts 2% past
+    `n`.
+  - The fixture was O(n^2) — two encode+apply round trips per character, so 4k
+    characters took 60ms and larger sizes were untestable. It is now linear:
+    50k builds in 103ms.
+- **Benchmarks: `BenchmarkDeleteSet_IsDeleted` sampled the wrong range
+  counts.** It covered 1/10/100/1000 and skipped 0, 2, 4, 8 and 16. A
+  transaction's delete set holds one range per distinct deleted region, so
+  ordinary editing produces 0 or 1 and a pure insert produces an empty set —
+  the omitted region is where every real workload sits. `computeDelta` calls
+  `IsDeleted` once per pre-existing item, so sub-nanosecond differences there
+  are multiplied by the document's item count on every observed transaction.
+
+See #189 for the measurements this produced, including one proposed
+optimisation that was implemented, reviewed, measured, and rejected.
+
+>>>>>>> conflict 1 of 1 ends
 ## [1.49.1] — 2026-08-25
 
 ### Fixed

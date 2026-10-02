@@ -86,8 +86,9 @@ document size, just ~500× more slowly. Flat, constant-time writes are not
 achievable for this storage model — see the trade below.
 
 The trade this makes explicit: `LoadDoc` is no longer O(1). It folds whatever
-records the room still holds — bounded by `CompactEvery` — and persists that
-fold, so subsequent loads are cheap again until the log builds back up.
+records the room still holds — bounded by `CompactEvery`, or by 64×
+`CompactEvery` while folds are failing (see below) — and persists that fold, so
+subsequent loads are cheap again until the log builds back up.
 Writes are continuous and loads happen once per room residency, so the
 direction is right, but folding is inherently O(document) — there is no way
 to keep returning one V1 blob from `LoadDoc` without periodically paying for
@@ -107,6 +108,30 @@ adapter := websocket.NewMemoryPersistence()
 adapter.CompactEvery = 2000 // fold less often; more memory, fewer folds
 srv := websocket.NewServerWithPersistence(adapter)
 ```
+
+### When a fold fails
+
+A fold can fail — most realistically on a stored record the merge cannot fold,
+which fails identically every time. The records it could not fold stay
+outstanding, so nothing is lost: an un-folded record is still a stored record
+and still loads.
+
+The automatic trigger backs off rather than retrying on every write: each
+consecutive failure doubles the number of writes before the next attempt, up to
+64× `CompactEvery`, and the first success resets it. Without that, the
+outstanding count stays above the threshold and every write re-attempts a fold
+that has to re-merge the whole log — quadratic work for a fold that cannot
+succeed (#239).
+
+The cap matters as much as the backoff. A fold that never runs is a log that
+never shrinks, so retries have to continue and the un-folded backlog has to stay
+bounded — which is why this is not unbounded geometric backoff. Counting the
+wait in writes rather than wall-clock also means an idle room does not retry at
+all, and a recovered store is retried as soon as the room is written to again.
+
+Backoff applies only to the automatic trigger. An explicit `Compact` call and
+`LoadDoc` always attempt the fold, and `Server.CompactEvery` does its own
+spacing on the adapter path.
 
 ---
 
