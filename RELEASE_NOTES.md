@@ -1,3 +1,25 @@
+## v1.50.1
+
+**Who is affected: anyone who sets `provider/websocket.Server.MaxPendingItems`
+and calls `Server.BroadcastUpdate` or runs the server in a cluster.** A server
+left at the default cap behaves exactly as before.
+
+`BroadcastUpdate` validates an update by decoding it alone into a throwaway
+document. That document was built with the crdt default pending cap of
+100,000, not the server's `MaxPendingItems`. Decoded without the room's
+existing state, an incremental update parks every item that is parented on
+that state — a key set on an existing nested map, an attribute set on an
+existing element — so on a server that raised the cap, an update touching
+more than 100,000 existing items was refused with `ErrInvalidUpdate` although
+the room itself accepts it, and on a server that lowered the cap the check
+admitted more parked items than the server allows. The same check runs when a
+clustered node receives an update from another node, after the node has
+already applied it to its room, so such an update reached the room but not
+the node's own peers.
+
+The throwaway document now takes the server's own document options, the same
+ones its rooms are built with. No API or wire format changes.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a

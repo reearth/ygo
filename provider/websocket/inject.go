@@ -164,6 +164,10 @@ func (s *Server) effectiveMaxUpdateBytes() int {
 // peers joining after the broadcast receive the server's stale state
 // via sync step 2.
 //
+// The update is validated first by decoding it alone into a scratch document
+// built with the server's MaxPendingItems; bytes that fail return
+// ErrInvalidUpdate.
+//
 // Peer write failures during fan-out do not produce an error: writes
 // are dispatched in goroutines with a per-write deadline (writeTimeout),
 // matching the existing peer-broadcast path. A slow peer cannot block
@@ -197,8 +201,11 @@ func (s *Server) broadcastUpdate(ctx context.Context, room string, update []byte
 	}
 	// Validate by applying to a throwaway doc. If the bytes are
 	// malformed, peers would reject them anyway; catching at the
-	// server boundary surfaces caller bugs eagerly.
-	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+	// server boundary surfaces caller bugs eagerly. The doc takes the
+	// server's own options: decoded alone, an incremental update parks every
+	// item that leans on the room's existing state, so its pending cap must
+	// be the one MaxPendingItems sets for the rooms.
+	if err := crdt.ApplyUpdateV1(crdt.New(s.docOptions()...), update, nil); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidUpdate, err)
 	}
 	if fireHook && s.OnInject != nil {
