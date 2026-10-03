@@ -132,10 +132,16 @@ func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
 // ensuring pre-existing items (which snapshot clock boundaries reference) are
 // never modified.
 //
-// squashRuns runs only for LOCAL transactions. For remote updates (bulk decode)
-// items arrive already compacted from the sender or are left as individual
-// units — the cost of squashing 182k remote items outweighs the benefit, since
-// subsequent local edits will squash their own new items incrementally.
+// A merged item is encoded as one struct carrying the left item's Origin and
+// OriginRight, so two items are merged only when that struct still places
+// every character where it was: the right item's Origin is the last character
+// of the run and both items share an OriginRight. These are Yjs's
+// Item.mergeWith conditions. Merging items with different right origins makes
+// every later encoding move the right item's characters on decode.
+//
+// Every transaction is Local, ApplyUpdate's included (transactInternal sets
+// Local unconditionally), so this runs for remote updates too, as Yjs's
+// transaction cleanup does.
 //
 // Performance: uses a two-pointer (run) approach with strings.Builder so that
 // string concatenation is O(total_run_length) rather than O(n²), and tracks
@@ -200,6 +206,14 @@ func squashRuns(txn *Transaction) {
 					break
 				}
 				if left.Right != right {
+					break
+				}
+				// right must continue the run: inserted directly after the
+				// run's last character, toward the same right origin.
+				if right.Origin == nil || right.Origin.Client != client || right.Origin.Clock != expectedClock-1 {
+					break
+				}
+				if !originIDEquals(left.OriginRight, right.OriginRight) {
 					break
 				}
 				// right is directly adjacent and clock-contiguous: absorb it.
@@ -332,6 +346,7 @@ func tryMergeWithLefts(txn *Transaction) {
 //   - left.Right == item (still directly adjacent in the linked list)
 //   - clocks are contiguous: left.ID.Clock + left.Content.Len() == item.ID.Clock
 //   - item.Origin points to the last clock of left (Yjs origin invariant)
+//   - both items share an OriginRight (Yjs right-origin invariant)
 //   - content types match and support merging (ContentString, ContentAny,
 //     ContentJSON, ContentDeleted)
 //
@@ -371,6 +386,12 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	}
 	expectedLast := left.ID.Clock + uint64(left.Content.Len()) - 1
 	if item.Origin.Client != left.ID.Client || item.Origin.Clock != expectedLast {
+		return false
+	}
+	// The merged item keeps left's OriginRight. splitItem copies it to the
+	// right half, so a split being reversed always matches; the check keeps
+	// this merge to Yjs's Item.mergeWith conditions.
+	if !originIDEquals(left.OriginRight, item.OriginRight) {
 		return false
 	}
 

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.50.1] — 2026-10-03
+
+### Fixed
+
+- **`crdt`: re-encoding a document no longer moves text that was inserted next
+  to a same-client run toward a different right neighbour.** `ApplyUpdate`
+  merged adjacent, clock-contiguous items from one client without checking
+  that the right item was inserted directly after the left one and that both
+  had the same right origin, and `RunGC` merged tombstones the same way. The
+  merged item is encoded with the left item's right origin, so every later
+  encoding (a sync step 2 to a joining peer, a compacted state) placed the
+  right item's characters elsewhere, for ygo and Yjs alike. Items now merge
+  only under Yjs's `Item.mergeWith` conditions.
+
 ## [1.50.0] — 2026-09-10
 
 ### Added
