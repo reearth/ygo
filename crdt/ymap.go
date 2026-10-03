@@ -1,7 +1,5 @@
 package crdt
 
-import "encoding/json"
-
 // contentForValue wraps a YMap value into Content. A *Doc becomes a ContentDoc
 // (subdocument embedding, Yjs parity: ymap.set(k, new Y.Doc())); everything else
 // becomes ContentAny.
@@ -342,7 +340,7 @@ func (m *YMap) Keys() []string {
 }
 
 // Entries returns a snapshot of all live key-value pairs. Nested shared
-// types are recursively unwrapped (#75): nested YArray → []any, nested
+// types are iteratively unwrapped (#75): nested YArray → []any, nested
 // YMap → map[string]any, nested YText → string. Pre-fix these were
 // silently dropped from the output.
 //
@@ -355,42 +353,12 @@ func (m *YMap) Entries() map[string]any {
 	return m.entriesLocked()
 }
 
-// entriesLocked is the lock-free body of Entries; callers must already
-// hold the doc lock. Used by Entries (top-level) and toJSONValue (during
-// recursive unwrap of nested types).
+// entriesLocked is the lock-free body of Entries; callers must already hold
+// the doc lock.
 func (m *YMap) entriesLocked() map[string]any {
-	if m.detached() {
-		out := make(map[string]any, len(m.prelim))
-		for k, v := range m.prelim {
-			out[k] = prelimJSONValue(v)
-		}
-		return out
-	}
-	t := &m.abstractType
-	out := make(map[string]any, len(t.itemMap))
-	for k, item := range t.itemMap {
-		if item.Deleted {
-			continue
-		}
-		switch c := item.Content.(type) {
-		case *ContentAny:
-			if len(c.Vals) > 0 {
-				out[k] = c.Vals[0]
-			}
-		case *ContentJSON:
-			// ContentJSON is the legacy JSON wire variant (tag wireJSON=2);
-			// functionally equivalent to ContentAny. Without this case,
-			// keys received via JS-peer updates would be silently dropped.
-			if len(c.Vals) > 0 {
-				out[k] = c.Vals[0]
-			}
-		case *ContentEmbed:
-			out[k] = c.Val
-		case *ContentType:
-			out[k] = toJSONValue(c)
-		}
-	}
-	return out
+	value := nestedJSONValue(m)
+	entries, _ := value.(map[string]any)
+	return entries
 }
 
 // ForEach calls fn for every live (non-deleted) key-value pair in the map,
@@ -426,7 +394,11 @@ func (m *YMap) ForEach(fn func(key string, value any)) {
 // ToJSON returns the map serialised as a JSON object.
 // Must not be called from inside a Transact callback.
 func (m *YMap) ToJSON() ([]byte, error) {
-	return json.Marshal(m.Entries())
+	if doc := m.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
+	return marshalJSONOwner(m)
 }
 
 // Observe registers fn to be called after every transaction that modifies this

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.50.1] — 2026-10-02
+
+### Fixed
+
+- **`crdt`: deleting a deeply nested shared type could exhaust the Go stack and
+  terminate the host process.** A document can accumulate nested YMap, YArray,
+  YText, or XML containers through individually small updates. Deleting the
+  outer container recursively visited every descendant, so a later tiny delete
+  update could crash every room in a websocket server. Deletion now keeps the
+  same depth-first ordering with an explicit heap stack. Nested JSON and XML
+  conversion use the same approach, so reading the received tree cannot
+  reintroduce the stack-overflow failure.
+
 ## [1.50.0] — 2026-09-10
 
 ### Added

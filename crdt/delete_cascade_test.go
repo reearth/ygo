@@ -111,6 +111,29 @@ func TestUnit_Item_Delete_Cascade_PropagatesToOtherPeers(t *testing.T) {
 			"(≥3 = 1 outer + 2 nested); pre-fix only the outer arrives in the delete-set")
 }
 
+func TestUnit_Item_Delete_CascadeKeepsDepthFirstDeleteSetOrder(t *testing.T) {
+	doc := newTestDoc(1)
+	fragment := doc.GetXmlFragment("root")
+	root := NewYXmlElement("a")
+	doc.Transact(func(txn *Transaction) { fragment.InsertElement(txn, 0, root) })
+	doc.Transact(func(txn *Transaction) {
+		left := NewYXmlElement("b")
+		root.InsertElement(txn, 0, left)
+		left.InsertElement(txn, 0, NewYXmlElement("d"))
+		root.InsertElement(txn, 1, NewYXmlElement("c"))
+	})
+
+	var deleted []DeleteRange
+	unsubscribe := doc.OnAfterTransaction(func(txn *Transaction) {
+		deleted = append([]DeleteRange(nil), txn.deleteSet.clients[1]...)
+	})
+	defer unsubscribe()
+	doc.Transact(func(txn *Transaction) { fragment.Delete(txn, 0, 1) })
+
+	require.Equal(t, []DeleteRange{{Clock: 0, Len: 4}}, deleted,
+		"nested deletion must visit the root, first child, its descendants, and then the next sibling")
+}
+
 // B2 (HIGH) — DeleteSet.applyToPartial must split items at range boundaries
 // before tombstoning. Pre-fix, a partial-range delete on a locally-squashed
 // run wiped the entire item, including content outside the declared range.

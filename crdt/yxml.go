@@ -19,6 +19,112 @@ type xmlNode interface {
 	baseXMLType() *abstractType
 }
 
+type xmlRenderFrameKind uint8
+
+const (
+	xmlRenderNode xmlRenderFrameKind = iota
+	xmlRenderSibling
+	xmlRenderClose
+)
+
+type xmlRenderFrame struct {
+	kind  xmlRenderFrameKind
+	node  xmlNode
+	item  *Item
+	close string
+}
+
+func nextXMLChild(item *Item) (xmlNode, *Item) {
+	for item != nil {
+		next := item.Right
+		if !item.Deleted && item.ParentSub == nil {
+			if content, ok := item.Content.(*ContentType); ok {
+				if node, ok := content.Type.owner.(xmlNode); ok {
+					return node, next
+				}
+			}
+		}
+		item = next
+	}
+	return nil, nil
+}
+
+func appendXMLChildren(stack []xmlRenderFrame, fragment *YXmlFragment) []xmlRenderFrame {
+	if fragment.detached() {
+		for index := len(fragment.prelimChildren) - 1; index >= 0; index-- {
+			stack = append(stack, xmlRenderFrame{
+				kind: xmlRenderNode,
+				node: fragment.prelimChildren[index],
+			})
+		}
+		return stack
+	}
+
+	child, next := nextXMLChild(fragment.start)
+	if child == nil {
+		return stack
+	}
+	if next != nil {
+		stack = append(stack, xmlRenderFrame{kind: xmlRenderSibling, item: next})
+	}
+	return append(stack, xmlRenderFrame{kind: xmlRenderNode, node: child})
+}
+
+// renderXML walks XML children with an explicit stack. Remote updates can
+// accumulate arbitrary XML nesting, so serializing an element must not grow the
+// Go stack with the document depth.
+func renderXML(root xmlNode, locked bool) string {
+	var output strings.Builder
+	var inline [16]xmlRenderFrame
+	stack := inline[:1]
+	stack[0] = xmlRenderFrame{kind: xmlRenderNode, node: root}
+
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		frame := stack[last]
+		stack = stack[:last]
+
+		switch frame.kind {
+		case xmlRenderClose:
+			output.WriteString(frame.close)
+		case xmlRenderSibling:
+			child, next := nextXMLChild(frame.item)
+			if child == nil {
+				continue
+			}
+			if next != nil {
+				stack = append(stack, xmlRenderFrame{kind: xmlRenderSibling, item: next})
+			}
+			stack = append(stack, xmlRenderFrame{kind: xmlRenderNode, node: child})
+		case xmlRenderNode:
+			switch node := frame.node.(type) {
+			case *YXmlFragment:
+				stack = appendXMLChildren(stack, node)
+			case *YXmlElement:
+				attrs := node.GetAttributes()
+				output.WriteByte('<')
+				output.WriteString(node.NodeName)
+				for _, key := range xmlSortedKeys(attrs) {
+					fmt.Fprintf(&output, ` %s="%s"`, key, xmlEscapeAttr(attrs[key]))
+				}
+				output.WriteByte('>')
+				stack = append(stack, xmlRenderFrame{
+					kind:  xmlRenderClose,
+					close: "</" + node.NodeName + ">",
+				})
+				stack = appendXMLChildren(stack, &node.YXmlFragment)
+			case *YXmlText:
+				if locked {
+					output.WriteString(xmlEscapeText(node.toStringLocked()))
+				} else {
+					output.WriteString(node.ToXML())
+				}
+			}
+		}
+	}
+	return output.String()
+}
+
 // xmlSub pairs a unique subscription ID with a YXmlEvent callback.
 type xmlSub struct {
 	id uint64
@@ -212,21 +318,13 @@ func (f *YXmlFragment) Children() []xmlNode {
 
 // ToXML returns the XML serialisation of this fragment's children concatenated.
 func (f *YXmlFragment) ToXML() string {
-	var sb strings.Builder
-	for _, child := range f.Children() {
-		sb.WriteString(child.ToXML())
-	}
-	return sb.String()
+	return renderXML(f, false)
 }
 
 // toXMLLocked is the lock-free body of ToXML; safe to call from a context
 // holding the doc lock. See the xmlNode interface comment.
 func (f *YXmlFragment) toXMLLocked() string {
-	var sb strings.Builder
-	for _, child := range f.Children() {
-		sb.WriteString(child.toXMLLocked())
-	}
-	return sb.String()
+	return renderXML(f, true)
 }
 
 // Observe registers fn to be called after every transaction that modifies this
@@ -483,38 +581,13 @@ func (e *YXmlElement) GetAttributeValues() map[string]any {
 // ToXML serialises the element as <NodeName attrs>children</NodeName>.
 // Attribute keys are sorted alphabetically for deterministic output.
 func (e *YXmlElement) ToXML() string {
-	attrs := e.GetAttributes()
-	var sb strings.Builder
-	sb.WriteByte('<')
-	sb.WriteString(e.NodeName)
-	for _, k := range xmlSortedKeys(attrs) {
-		fmt.Fprintf(&sb, ` %s="%s"`, k, xmlEscapeAttr(attrs[k]))
-	}
-	sb.WriteByte('>')
-	sb.WriteString(e.YXmlFragment.ToXML())
-	sb.WriteString("</")
-	sb.WriteString(e.NodeName)
-	sb.WriteByte('>')
-	return sb.String()
+	return renderXML(e, false)
 }
 
-// toXMLLocked is the lock-free body of ToXML; calls the locked variant of
-// YXmlFragment so the recursion into YXmlText descendants doesn't re-enter
-// the doc lock. See the xmlNode interface comment.
+// toXMLLocked is the lock-free body of ToXML. See the xmlNode interface
+// comment.
 func (e *YXmlElement) toXMLLocked() string {
-	attrs := e.GetAttributes()
-	var sb strings.Builder
-	sb.WriteByte('<')
-	sb.WriteString(e.NodeName)
-	for _, k := range xmlSortedKeys(attrs) {
-		fmt.Fprintf(&sb, ` %s="%s"`, k, xmlEscapeAttr(attrs[k]))
-	}
-	sb.WriteByte('>')
-	sb.WriteString(e.YXmlFragment.toXMLLocked())
-	sb.WriteString("</")
-	sb.WriteString(e.NodeName)
-	sb.WriteByte('>')
-	return sb.String()
+	return renderXML(e, true)
 }
 
 // Observe registers fn to be called after every transaction that modifies this

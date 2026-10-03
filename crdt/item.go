@@ -388,61 +388,81 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 // item.delete under an explicitly non-local transaction.
 //
 // Cascade: when this item wraps a ContentType (nested YMap/YArray/YText/…),
-// every child item is recursively deleted so the delete-set encoded on the
-// wire includes the children's clocks. Without this, peers that held the
-// same nested type would see inner items as live after the outer container
-// was deleted (Yjs JS Item.delete walks content.getContent() identically;
-// yrs Block::delete does the same). See #72 vector B1.
-func (item *Item) delete(txn *Transaction) {
-	if item.Deleted {
-		return
-	}
-	item.Deleted = true
-	if item.Parent != nil && item.Content.IsCountable() {
-		item.Parent.length -= item.Content.Len()
-		if !txn.Local {
-			item.Parent.clearMarkers()
-		}
-	}
-	// Move-related deletes change rendered positions in ways the plain
-	// updateMarkerChanges index-shift can't model (G5): tombstoning a
-	// ContentMove stops it rendering its target at the destination (the target
-	// may re-render at its origin), and tombstoning a moved-away item removes a
-	// rendered position at the destination rather than at the item's physical
-	// slot. Either way, clear all markers — always safe, and independent of
-	// txn.Local since local move-deletes also take this path. ContentMove is
-	// non-countable, so the block above never runs for it.
-	if item.Parent != nil {
-		if _, ok := item.Content.(*ContentMove); ok {
-			item.Parent.clearMarkers()
-		} else if item.MovedBy != nil {
-			item.Parent.clearMarkers()
-		}
-	}
-	txn.deleteSet.add(item.ID, item.Content.Len())
-	if item.Parent != nil {
-		txn.addChanged(item.Parent, parentSubKey(item.ParentSub))
-	}
-
-	// Recurse into nested-type children so their clocks land in the
-	// delete-set too. Recursive call handles arbitrarily-deep nesting.
-	if ct, ok := item.Content.(*ContentType); ok && ct.Type != nil {
-		for child := ct.Type.start; child != nil; child = child.Right {
-			if !child.Deleted {
-				child.delete(txn)
+// every child item is deleted so the delete-set encoded on the wire includes
+// the children's clocks. Without this, peers that held the same nested type
+// would see inner items as live after the outer container was deleted (Yjs JS
+// Item.delete walks content.getContent() identically; yrs Block::delete does
+// the same). See #72 vector B1.
+// nextDeleteItem finds the next live item in the root's depth-first cascade.
+func nextDeleteItem(current, root *Item) *Item {
+	for current != root {
+		for sibling := current.Right; sibling != nil; sibling = sibling.Right {
+			if !sibling.Deleted {
+				return sibling
 			}
 		}
-	}
-
-	// #63 — subdocument removal. Cancel an add-in-same-txn; else mark removed.
-	// GC does not remove subdocs (matches Yjs ContentDoc: gc is a no-op).
-	if cd, ok := item.Content.(*ContentDoc); ok && cd.Doc != nil {
-		if _, added := txn.subdocsAdded[cd.Doc]; added {
-			delete(txn.subdocsAdded, cd.Doc)
-			delete(txn.subdocsLoaded, cd.Doc)
-		} else {
-			txn.addSubdocRemoved(cd.Doc)
+		if current.Parent == nil || current.Parent.item == nil {
+			return nil
 		}
+		current = current.Parent.item
+	}
+	return nil
+}
+
+func (item *Item) delete(txn *Transaction) {
+	for current := item; current != nil; {
+		if current.Deleted {
+			current = nextDeleteItem(current, item)
+			continue
+		}
+
+		current.Deleted = true
+		if current.Parent != nil && current.Content.IsCountable() {
+			current.Parent.length -= current.Content.Len()
+			if !txn.Local {
+				current.Parent.clearMarkers()
+			}
+		}
+		// Move-related deletes change rendered positions in ways the plain
+		// updateMarkerChanges index-shift can't model (G5): tombstoning a
+		// ContentMove stops it rendering its target at the destination (the target
+		// may re-render at its origin), and tombstoning a moved-away item removes a
+		// rendered position at the destination rather than at the item's physical
+		// slot. Either way, clear all markers — always safe, and independent of
+		// txn.Local since local move-deletes also take this path. ContentMove is
+		// non-countable, so the block above never runs for it.
+		if current.Parent != nil {
+			if _, ok := current.Content.(*ContentMove); ok {
+				current.Parent.clearMarkers()
+			} else if current.MovedBy != nil {
+				current.Parent.clearMarkers()
+			}
+		}
+		txn.deleteSet.add(current.ID, current.Content.Len())
+		if current.Parent != nil {
+			txn.addChanged(current.Parent, parentSubKey(current.ParentSub))
+		}
+
+		if cd, ok := current.Content.(*ContentDoc); ok && cd.Doc != nil {
+			if _, added := txn.subdocsAdded[cd.Doc]; added {
+				delete(txn.subdocsAdded, cd.Doc)
+				delete(txn.subdocsLoaded, cd.Doc)
+			} else {
+				txn.addSubdocRemoved(cd.Doc)
+			}
+		}
+
+		if ct, ok := current.Content.(*ContentType); ok && ct.Type != nil {
+			child := ct.Type.start
+			for child != nil && child.Deleted {
+				child = child.Right
+			}
+			if child != nil {
+				current = child
+				continue
+			}
+		}
+		current = nextDeleteItem(current, item)
 	}
 }
 

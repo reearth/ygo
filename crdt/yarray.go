@@ -1,8 +1,12 @@
 package crdt
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
+	"unicode/utf8"
 )
 
 // arraySub pairs a unique subscription ID with a YArrayEvent callback.
@@ -60,28 +64,6 @@ func prelimValueAt(v any) any {
 		return st.baseType().owner
 	}
 	return v
-}
-
-// prelimJSONValue renders a staged entry the way toJSONValue renders an
-// attached one, so a detached ToJSON/ToSlice/Entries unwraps nested staged
-// types recursively rather than emitting an opaque handle.
-func prelimJSONValue(v any) any {
-	switch owner := v.(type) {
-	case *YArray:
-		return owner.toSliceLocked()
-	case *YMap:
-		return owner.entriesLocked()
-	case *YText:
-		return owner.toStringLocked()
-	case *YXmlElement:
-		return owner.toXMLLocked()
-	case *YXmlText:
-		return owner.toXMLLocked()
-	// No YXmlFragment case: a fragment is only ever a named root or a decode
-	// product, so a detached one cannot be obtained to stage in the first place.
-	default:
-		return v
-	}
 }
 
 func (a *YArray) baseType() *abstractType { return &a.abstractType }
@@ -451,7 +433,7 @@ func (a *YArray) Delete(txn *Transaction, index, length int) {
 }
 
 // ToSlice returns all non-deleted elements as a new slice. Nested shared
-// types are recursively unwrapped via toJSONValue (#75): a nested YArray
+// types are iteratively unwrapped via toJSONValue (#75): a nested YArray
 // appears as []any, a nested YMap as map[string]any, a nested YText as
 // string. Pre-fix these were silently dropped from the output.
 //
@@ -464,19 +446,44 @@ func (a *YArray) ToSlice() []any {
 	return a.toSliceLocked()
 }
 
-// toSliceLocked is the lock-free body of ToSlice; callers must already
-// hold the doc lock. Used by ToSlice (top-level) and toJSONValue (during
-// recursive unwrap of nested types under #75).
+// toSliceLocked is the lock-free body of ToSlice; callers must already hold
+// the doc lock.
 func (a *YArray) toSliceLocked() []any {
-	if a.detached() {
-		out := make([]any, 0, len(a.prelim))
-		for _, v := range a.prelim {
-			out = append(out, prelimJSONValue(v))
-		}
-		return out
+	value := nestedJSONValue(a)
+	result, _ := value.([]any)
+	return result
+}
+
+type nestedJSONEntry struct {
+	value any
+	owner any
+}
+
+func nestedJSONEntryForContent(ct *ContentType) nestedJSONEntry {
+	if ct == nil || ct.Type == nil || ct.Type.owner == nil {
+		return nestedJSONEntry{}
 	}
+	return nestedJSONEntry{owner: ct.Type.owner}
+}
+
+func nestedJSONEntryForValue(value any) nestedJSONEntry {
+	if st, ok := value.(sharedType); ok {
+		return nestedJSONEntry{owner: st.baseType().owner}
+	}
+	return nestedJSONEntry{value: value}
+}
+
+func (a *YArray) jsonEntriesLocked() []nestedJSONEntry {
+	if a.detached() {
+		entries := make([]nestedJSONEntry, 0, len(a.prelim))
+		for _, value := range a.prelim {
+			entries = append(entries, nestedJSONEntryForValue(value))
+		}
+		return entries
+	}
+
 	t := &a.abstractType
-	result := make([]any, 0, t.length)
+	entries := make([]nestedJSONEntry, 0, t.length)
 	for item := t.start; item != nil; item = item.Right {
 		if item.Deleted {
 			continue
@@ -486,66 +493,379 @@ func (a *YArray) toSliceLocked() []any {
 				target := a.doc.store.Find(*cm.Target)
 				if target != nil && target.MovedBy == item && !target.Deleted {
 					if ca, ok := target.Content.(*ContentAny); ok {
-						result = append(result, ca.Vals...)
+						for _, value := range ca.Vals {
+							entries = append(entries, nestedJSONEntry{value: value})
+						}
 					}
 				}
 			}
 			continue
 		}
-		if !item.Content.IsCountable() {
+		if !item.Content.IsCountable() || item.MovedBy != nil {
 			continue
 		}
-		if item.MovedBy != nil {
-			continue
-		}
-		switch c := item.Content.(type) {
+		switch content := item.Content.(type) {
 		case *ContentAny:
-			result = append(result, c.Vals...)
+			for _, value := range content.Vals {
+				entries = append(entries, nestedJSONEntry{value: value})
+			}
 		case *ContentJSON:
-			// ContentJSON is the legacy JSON wire variant (tag wireJSON=2),
-			// functionally equivalent to ContentAny. Updates received from
-			// JS peers can land as ContentJSON items; without this case they
-			// would be silently dropped from ToSlice/ToJSON output.
-			result = append(result, c.Vals...)
+			for _, value := range content.Vals {
+				entries = append(entries, nestedJSONEntry{value: value})
+			}
 		case *ContentEmbed:
-			result = append(result, c.Val)
+			entries = append(entries, nestedJSONEntry{value: content.Val})
 		case *ContentType:
-			result = append(result, toJSONValue(c))
+			entries = append(entries, nestedJSONEntryForContent(content))
+		}
+	}
+	return entries
+}
+
+func nestedJSONEntryForMapItem(item *Item) (nestedJSONEntry, bool) {
+	if item == nil || item.Deleted {
+		return nestedJSONEntry{}, false
+	}
+	switch content := item.Content.(type) {
+	case *ContentAny:
+		if len(content.Vals) > 0 {
+			return nestedJSONEntry{value: content.Vals[0]}, true
+		}
+	case *ContentJSON:
+		if len(content.Vals) > 0 {
+			return nestedJSONEntry{value: content.Vals[0]}, true
+		}
+	case *ContentEmbed:
+		return nestedJSONEntry{value: content.Val}, true
+	case *ContentType:
+		return nestedJSONEntryForContent(content), true
+	}
+	return nestedJSONEntry{}, false
+}
+
+func (m *YMap) jsonKeysLocked() []string {
+	if m.detached() {
+		keys := make([]string, 0, len(m.prelim))
+		for key := range m.prelim {
+			keys = append(keys, key)
+		}
+		return keys
+	}
+
+	keys := make([]string, 0, len(m.itemMap))
+	for key, item := range m.itemMap {
+		if _, ok := nestedJSONEntryForMapItem(item); ok {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func (m *YMap) jsonEntryLocked(key string) nestedJSONEntry {
+	if m.detached() {
+		return nestedJSONEntryForValue(m.prelim[key])
+	}
+	entry, _ := nestedJSONEntryForMapItem(m.itemMap[key])
+	return entry
+}
+
+func (m *YMap) jsonEntriesLocked() map[string]nestedJSONEntry {
+	keys := m.jsonKeysLocked()
+	entries := make(map[string]nestedJSONEntry, len(keys))
+	for _, key := range keys {
+		entries[key] = m.jsonEntryLocked(key)
+	}
+	return entries
+}
+
+type nestedJSONSlot struct {
+	root   *any
+	array  []any
+	index  int
+	object map[string]any
+	key    string
+}
+
+func (slot nestedJSONSlot) set(value any) {
+	switch {
+	case slot.root != nil:
+		*slot.root = value
+	case slot.array != nil:
+		slot.array[slot.index] = value
+	default:
+		slot.object[slot.key] = value
+	}
+}
+
+type nestedJSONFrame struct {
+	owner any
+	slot  nestedJSONSlot
+}
+
+// nestedJSONValue traverses ContentType ownership iteratively. Remote updates
+// can construct an arbitrarily deep tree, so conversion must not consume one
+// Go stack frame for every nested shared type.
+func nestedJSONValue(owner any) any {
+	var result any
+	var inline [16]nestedJSONFrame
+	stack := inline[:1]
+	stack[0] = nestedJSONFrame{owner: owner, slot: nestedJSONSlot{root: &result}}
+
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		frame := stack[last]
+		stack = stack[:last]
+
+		switch current := frame.owner.(type) {
+		case *YArray:
+			entries := current.jsonEntriesLocked()
+			value := make([]any, len(entries))
+			frame.slot.set(value)
+			for index := len(entries) - 1; index >= 0; index-- {
+				entry := entries[index]
+				if entry.owner == nil {
+					value[index] = entry.value
+					continue
+				}
+				stack = append(stack, nestedJSONFrame{
+					owner: entry.owner,
+					slot:  nestedJSONSlot{array: value, index: index},
+				})
+			}
+		case *YMap:
+			entries := current.jsonEntriesLocked()
+			value := make(map[string]any, len(entries))
+			frame.slot.set(value)
+			for key, entry := range entries {
+				if entry.owner == nil {
+					value[key] = entry.value
+					continue
+				}
+				stack = append(stack, nestedJSONFrame{
+					owner: entry.owner,
+					slot:  nestedJSONSlot{object: value, key: key},
+				})
+			}
+		case *YText:
+			frame.slot.set(current.toStringLocked())
+		case *YXmlElement:
+			frame.slot.set(current.toXMLLocked())
+		case *YXmlFragment:
+			frame.slot.set(current.toXMLLocked())
+		case *YXmlText:
+			frame.slot.set(current.toXMLLocked())
+		default:
+			frame.slot.set(nil)
 		}
 	}
 	return result
 }
 
-// toJSONValue recursively unwraps a ContentType into its JSON-shaped value.
-// YArray → []any, YMap → map[string]any, YText → string, YXmlElement /
-// YXmlFragment / YXmlText → string (XML serialisation). Unknown nested
-// types fall back to nil. Caller must hold the doc lock. See #75.
+// toJSONValue unwraps a ContentType into its JSON-shaped value. Caller must
+// hold the doc lock.
 func toJSONValue(ct *ContentType) any {
 	if ct == nil || ct.Type == nil || ct.Type.owner == nil {
 		return nil
 	}
-	switch owner := ct.Type.owner.(type) {
-	case *YArray:
-		return owner.toSliceLocked()
-	case *YMap:
-		return owner.entriesLocked()
-	case *YText:
-		return owner.toStringLocked()
-	case *YXmlElement:
-		return owner.toXMLLocked()
-	case *YXmlFragment:
-		return owner.toXMLLocked()
-	case *YXmlText:
-		return owner.toXMLLocked()
-	default:
+	return nestedJSONValue(ct.Type.owner)
+}
+
+type jsonOutputKind uint8
+
+const (
+	jsonOutputOwner jsonOutputKind = iota
+	jsonOutputValue
+	jsonOutputToken
+)
+
+type jsonOutputFrame struct {
+	kind  jsonOutputKind
+	owner any
+	value any
+	token string
+}
+
+// writeJSONString emits the same HTML-safe JSON string encoding as
+// encoding/json without allocating an encoded fragment for a valid map key.
+func writeJSONString(output *bytes.Buffer, value string) error {
+	const hex = "0123456789abcdef"
+
+	if !utf8.ValidString(value) {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		output.Write(encoded)
 		return nil
 	}
+
+	output.WriteByte('"')
+	start := 0
+	for index := 0; index < len(value); {
+		if b := value[index]; b < utf8.RuneSelf {
+			if b >= 0x20 && b != '\\' && b != '"' && b != '<' && b != '>' && b != '&' {
+				index++
+				continue
+			}
+			output.WriteString(value[start:index])
+			switch b {
+			case '\\', '"':
+				output.WriteByte('\\')
+				output.WriteByte(b)
+			case '\b':
+				output.WriteString(`\b`)
+			case '\f':
+				output.WriteString(`\f`)
+			case '\n':
+				output.WriteString(`\n`)
+			case '\r':
+				output.WriteString(`\r`)
+			case '\t':
+				output.WriteString(`\t`)
+			default:
+				output.WriteString(`\u00`)
+				output.WriteByte(hex[b>>4])
+				output.WriteByte(hex[b&0xF])
+			}
+			index++
+			start = index
+			continue
+		}
+
+		runeValue, size := utf8.DecodeRuneInString(value[index:])
+		if runeValue == '\u2028' || runeValue == '\u2029' {
+			output.WriteString(value[start:index])
+			output.WriteString(`\u202`)
+			output.WriteByte(hex[runeValue&0xF])
+			index += size
+			start = index
+			continue
+		}
+		index += size
+	}
+	output.WriteString(value[start:])
+	output.WriteByte('"')
+	return nil
+}
+
+func writeJSONValue(output *bytes.Buffer, value any) error {
+	var digits [64]byte
+
+	switch value := value.(type) {
+	case nil:
+		output.WriteString("null")
+	case string:
+		return writeJSONString(output, value)
+	case bool:
+		output.WriteString(strconv.FormatBool(value))
+	case int:
+		output.Write(strconv.AppendInt(digits[:0], int64(value), 10))
+	case int8:
+		output.Write(strconv.AppendInt(digits[:0], int64(value), 10))
+	case int16:
+		output.Write(strconv.AppendInt(digits[:0], int64(value), 10))
+	case int32:
+		output.Write(strconv.AppendInt(digits[:0], int64(value), 10))
+	case int64:
+		output.Write(strconv.AppendInt(digits[:0], value, 10))
+	case uint:
+		output.Write(strconv.AppendUint(digits[:0], uint64(value), 10))
+	case uint8:
+		output.Write(strconv.AppendUint(digits[:0], uint64(value), 10))
+	case uint16:
+		output.Write(strconv.AppendUint(digits[:0], uint64(value), 10))
+	case uint32:
+		output.Write(strconv.AppendUint(digits[:0], uint64(value), 10))
+	case uint64:
+		output.Write(strconv.AppendUint(digits[:0], value, 10))
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		output.Write(encoded)
+	}
+	return nil
+}
+
+// marshalJSONOwner serializes a CRDT shared type without handing its nested
+// ContentType tree to encoding/json's recursive reflection walk. Raw values
+// still use encoding/json, preserving its ordinary value and error behavior.
+func marshalJSONOwner(owner any) ([]byte, error) {
+	var output bytes.Buffer
+	var inline [32]jsonOutputFrame
+	stack := inline[:1]
+	stack[0] = jsonOutputFrame{kind: jsonOutputOwner, owner: owner}
+
+	pushEntry := func(entry nestedJSONEntry) {
+		if entry.owner != nil {
+			stack = append(stack, jsonOutputFrame{kind: jsonOutputOwner, owner: entry.owner})
+			return
+		}
+		stack = append(stack, jsonOutputFrame{kind: jsonOutputValue, value: entry.value})
+	}
+
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		frame := stack[last]
+		stack = stack[:last]
+
+		switch frame.kind {
+		case jsonOutputToken:
+			output.WriteString(frame.token)
+		case jsonOutputValue:
+			if err := writeJSONValue(&output, frame.value); err != nil {
+				return nil, err
+			}
+		case jsonOutputOwner:
+			switch current := frame.owner.(type) {
+			case *YArray:
+				entries := current.jsonEntriesLocked()
+				stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: "]"})
+				for index := len(entries) - 1; index >= 0; index-- {
+					if index < len(entries)-1 {
+						stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: ","})
+					}
+					pushEntry(entries[index])
+				}
+				stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: "["})
+			case *YMap:
+				keys := current.jsonKeysLocked()
+				sort.Strings(keys)
+				stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: "}"})
+				for index := len(keys) - 1; index >= 0; index-- {
+					if index < len(keys)-1 {
+						stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: ","})
+					}
+					pushEntry(current.jsonEntryLocked(keys[index]))
+					stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: ":"})
+					stack = append(stack, jsonOutputFrame{kind: jsonOutputValue, value: keys[index]})
+				}
+				stack = append(stack, jsonOutputFrame{kind: jsonOutputToken, token: "{"})
+			case *YText:
+				stack = append(stack, jsonOutputFrame{kind: jsonOutputValue, value: current.toStringLocked()})
+			case *YXmlElement:
+				stack = append(stack, jsonOutputFrame{kind: jsonOutputValue, value: current.toXMLLocked()})
+			case *YXmlFragment:
+				stack = append(stack, jsonOutputFrame{kind: jsonOutputValue, value: current.toXMLLocked()})
+			case *YXmlText:
+				stack = append(stack, jsonOutputFrame{kind: jsonOutputValue, value: current.toXMLLocked()})
+			default:
+				stack = append(stack, jsonOutputFrame{kind: jsonOutputValue})
+			}
+		}
+	}
+	return output.Bytes(), nil
 }
 
 // ToJSON returns the array serialised as a JSON array.
 // Must not be called from inside a Transact callback.
 func (a *YArray) ToJSON() ([]byte, error) {
-	return json.Marshal(a.ToSlice())
+	if doc := a.doc; doc != nil {
+		doc.mu.RLock()
+		defer doc.mu.RUnlock()
+	}
+	return marshalJSONOwner(a)
 }
 
 // Observe registers fn to be called after every transaction that modifies this
