@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.50.1] — 2026-10-03
+
+### Fixed
+
+- **`provider/websocket`: `Server.BroadcastUpdate` checks an update under
+  `Server.MaxPendingItems`.** `BroadcastUpdate` validates an update by decoding
+  it alone into a scratch document, which it built with the crdt default
+  pending cap (100,000) whatever the server set for its rooms. Decoded without
+  the room's state, every item an incremental update parents on that state
+  parks, so a server that raised `MaxPendingItems` still refused, as
+  `ErrInvalidUpdate`, an update its rooms accept — one setting an attribute on
+  each of 150,001 existing elements, say — and a server that lowered it
+  admitted updates past its own cap. A clustered node runs the same check on
+  an update relayed from another node after applying it to the room, so such
+  an update reached the room but not that node's peers. The scratch document
+  now takes the same options as the server's rooms.
+
 ## [1.50.0] — 2026-09-10
 
 ### Added

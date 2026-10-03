@@ -1127,7 +1127,9 @@ type Server struct {
 	// MaxPendingItems caps the per-document pending-items queue depth. The
 	// queue holds items whose dependencies have not yet arrived, waiting for
 	// out-of-order delivery to resolve. Zero or negative uses the crdt default
-	// (100,000). See crdt.WithMaxPendingItems and issue #46.
+	// (100,000). See crdt.WithMaxPendingItems and issue #46. The cap applies to
+	// every room's document and to the document BroadcastUpdate decodes an
+	// update into to validate it.
 	MaxPendingItems int
 
 	// HandshakeTimeout caps how long a peer may stay connected without sending
@@ -1647,10 +1649,7 @@ func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	if s.MaxRooms > 0 && len(s.rooms) >= s.MaxRooms {
 		return nil, false, ErrTooManyRooms
 	}
-	docOpts := []crdt.DocOption{}
-	if s.MaxPendingItems > 0 {
-		docOpts = append(docOpts, crdt.WithMaxPendingItems(s.MaxPendingItems))
-	}
+	docOpts := s.docOptions()
 	aw := awareness.New(0)
 	if s.MaxAwarenessBytesPerRoom > 0 {
 		aw.SetMaxBytes(s.MaxAwarenessBytesPerRoom)
@@ -1681,6 +1680,15 @@ func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	r.mu.Unlock()
 	s.rooms[name] = r
 	return r, true, nil
+}
+
+// docOptions are the options of every document the server builds to hold or
+// decode a room's updates: its rooms, and BroadcastUpdate's validation copy.
+func (s *Server) docOptions() []crdt.DocOption {
+	if s.MaxPendingItems > 0 {
+		return []crdt.DocOption{crdt.WithMaxPendingItems(s.MaxPendingItems)}
+	}
+	return nil
 }
 
 // releaseInflight drops a room's inflight-join count. Every successful

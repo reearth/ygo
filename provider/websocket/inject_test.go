@@ -1,6 +1,7 @@
 package websocket_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -179,6 +180,71 @@ func TestUnit_BroadcastUpdate_DoesNotMutateServerDoc(t *testing.T) {
 	got, ok := serverDoc.GetMap("m").Get("k")
 	assert.False(t, ok)
 	assert.Nil(t, got)
+}
+
+// BroadcastUpdate checks an update by decoding it alone into a scratch
+// document. Decoded without the room's state, every entry an incremental
+// update parents on that state parks in the scratch document's pending queue,
+// so the check must hold the queue to the cap the server sets for its rooms
+// (MaxPendingItems) rather than the crdt default of 100,000, in either
+// direction.
+func TestUnit_BroadcastUpdate_ValidatesUnderServerMaxPendingItems(t *testing.T) {
+	cases := []struct {
+		name            string
+		maxPendingItems int
+		entries         int
+		wantErr         error
+	}{
+		{"a raised cap admits more dependent entries than the crdt default", 200_000, 100_001, nil},
+		{"a lowered cap admits as many dependent entries as it allows", 10, 10, nil},
+		{"a lowered cap refuses one dependent entry more than it allows", 10, 11, ygws.ErrInvalidUpdate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Client 1 creates a nested map; client 2 then sets tc.entries
+			// keys on it. The second update names the map as each entry's
+			// parent and does not carry it.
+			author := crdt.New(crdt.WithClientID(1))
+			root := author.GetMap("m")
+			author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
+			base := crdt.EncodeStateAsUpdateV1(author, nil)
+
+			editor := crdt.New(crdt.WithClientID(2))
+			require.NoError(t, crdt.ApplyUpdateV1(editor, base, nil))
+			v, ok := editor.GetMap("m").Get("nested")
+			require.True(t, ok)
+			nested, ok := v.(*crdt.YMap)
+			require.True(t, ok, "nested is %T, want *crdt.YMap", v)
+			editor.Transact(func(txn *crdt.Transaction) {
+				for i := range tc.entries {
+					nested.Set(txn, fmt.Sprintf("k%d", i), i)
+				}
+			})
+			update := crdt.EncodeStateAsUpdateV1(editor, author.StateVector())
+
+			srv := ygws.NewServer()
+			srv.MaxPendingItems = tc.maxPendingItems
+			httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+			t.Cleanup(httpSrv.Close)
+			conn := dial(t, httpSrv, "room")
+			drainHandshake(t, conn, crdt.New())
+			require.NoError(t, crdt.ApplyUpdateV1(srv.GetDoc("room"), base, nil))
+
+			err := srv.BroadcastUpdate(context.Background(), "room", update)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			// An admitted update reaches the room's peer.
+			for {
+				outerType, payload := readOne(t, conn, 5*time.Second)
+				if outerType == 0 && bytes.HasSuffix(payload, update) {
+					break
+				}
+			}
+		})
+	}
 }
 
 func TestUnit_Apply_MutatesBroadcastsAndPersists(t *testing.T) {
