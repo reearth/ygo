@@ -3,6 +3,7 @@ package persistence_test
 import (
 	"context"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -79,6 +80,69 @@ func TestLegacyAdapter_PluggedIntoServer(t *testing.T) {
 	connB := dialWS(t, ts, "room")
 	drainWS(t, connB, docB)
 	assert.Equal(t, "persisted", docB.GetText("t").ToString())
+}
+
+// End to end at default settings: an update the room applies reaches the store
+// and survives the room's reload, although decoded on its own every one of its
+// entries parks waiting for a parent only the room holds.
+func TestLegacyAdapter_PluggedIntoServer_StoresLargeIncrementalUpdate(t *testing.T) {
+	const entries = 100_001 // one more than crdt's default pending cap
+	base, update := nestedMapUpdates(t, entries)
+
+	store := persistence.NewMemoryPersistence()
+	srv := ygws.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
+	srv.PersistCoalesceWindow = -1
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	// Called from require.Eventually's goroutine, so it reports, never fails.
+	versions := func() int {
+		metas, err := store.ListVersions(context.Background(), "room")
+		if err != nil {
+			return -1
+		}
+		return len(metas)
+	}
+
+	connA := dialWS(t, ts, "room")
+	drainWS(t, connA, crdt.New())
+	sendV1Update(t, connA, base)
+	require.Eventually(t, func() bool { return versions() == 1 }, 5*time.Second, 20*time.Millisecond)
+	sendV1Update(t, connA, update)
+	require.Eventually(t, func() bool { return versions() == 2 }, 10*time.Second, 20*time.Millisecond,
+		"the room's update never reached the store")
+
+	require.NoError(t, srv.CloseRoom("room", true))
+	docB := crdt.New()
+	connB := dialWS(t, ts, "room")
+	drainWS(t, connB, docB)
+	v, ok := docB.GetMap("m").Get("nested")
+	require.True(t, ok, "reloaded room has no nested map")
+	nested, ok := v.(*crdt.YMap)
+	require.True(t, ok, "nested is %T", v)
+	assert.Len(t, nested.Keys(), entries)
+}
+
+// nestedMapUpdates returns a base update in which client 1 creates the map
+// "nested" under root map "m", and an incremental update in which client 2 sets
+// n keys on it.
+func nestedMapUpdates(t *testing.T, n int) (base, update []byte) {
+	t.Helper()
+	author := crdt.New(crdt.WithClientID(1))
+	root := author.GetMap("m")
+	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
+	base = crdt.EncodeStateAsUpdateV1(author, nil)
+
+	editor := crdt.New(crdt.WithClientID(2))
+	require.NoError(t, crdt.ApplyUpdateV1(editor, base, nil))
+	v, _ := editor.GetMap("m").Get("nested")
+	nested, ok := v.(*crdt.YMap)
+	require.True(t, ok, "nested is %T", v)
+	editor.Transact(func(txn *crdt.Transaction) {
+		for i := range n {
+			nested.Set(txn, "k"+strconv.Itoa(i), i)
+		}
+	})
+	return base, crdt.EncodeStateAsUpdateV1(editor, author.StateVector())
 }
 
 func TestLegacyAdapter_CompactForwardsWithKeep(t *testing.T) {

@@ -95,8 +95,10 @@ func WithCollectionID(id string) DocOption {
 }
 
 // defaultMaxPendingItems is the default cap on items parked in the per-doc
-// pending queue waiting for out-of-order dependencies. Matches the per-update
-// limit (maxV2Items) used by the decoder. See WithMaxPendingItems and #46.
+// pending queue waiting for out-of-order dependencies. It is smaller than the
+// decoder's per-update item limit (maxV2Items, 1<<20), so one legal update
+// applied to a document that lacks the state it depends on can exceed it. See
+// WithMaxPendingItems and #46.
 const defaultMaxPendingItems = 100_000
 
 // WithMaxPendingItems caps the per-doc pending queue depth — items parked
