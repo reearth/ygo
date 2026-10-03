@@ -1,3 +1,27 @@
+## v1.50.1
+
+**Who is affected: servers that set `RoomIdleTimeout` and write to rooms with
+`Apply`, or run a cluster relay.** With `RoomIdleTimeout` at zero (the
+default), nothing changes.
+
+With `RoomIdleTimeout` set, the background sweeper evicts an empty room once it
+has been idle that long, but it only considers rooms carrying an idle stamp,
+and only the last peer leaving set one. `Apply` and the relay's `Inject` clear
+the stamp while they run and never set it again. So a room that only `Apply`
+wrote to, or that a relay delivery created on a node where no peer had joined
+it, stayed in memory until the process exited, and `MaxResidentRooms` did not
+count it. Worse, a single `Apply` on a room whose last peer had already left
+wiped that room's stamp, so a server that answers reads or writes through
+`Apply` kept every room it ever touched.
+
+`Apply` and `Inject` now stamp the room idle when they return — on success, on
+`ErrNoChanges`, on any other error and when `fn` panics — if no peer is
+connected. The sweeper then evicts the room `RoomIdleTimeout` after the last
+call, flushing it durably first as it does for any idle room, and
+`MaxResidentRooms` counts it. A room is never evicted while a call on it is
+still running, and a peer that joins clears the stamp as before. No API or
+wire format changes.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a
