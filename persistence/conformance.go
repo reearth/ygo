@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -82,6 +83,53 @@ func textOf(t *testing.T, v1 []byte) string {
 		t.Fatalf("ApplyUpdateV1: %v", err)
 	}
 	return d.GetText("t").ToString()
+}
+
+// largeIncrementalEntries is one more than crdt's default pending cap (100,000).
+const largeIncrementalEntries = 100_001
+
+// dependentUpdate returns a base update in which client 1 creates the map
+// "nested" under root map "m", and an incremental update in which client 2 sets
+// n keys on it. Decoded without the base, every one of the n entries parks
+// waiting for its parent.
+func dependentUpdate(t *testing.T, n int) (base, update []byte) {
+	t.Helper()
+	author := crdt.New(crdt.WithClientID(1))
+	root := author.GetMap("m")
+	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
+	base = crdt.EncodeStateAsUpdateV1(author, nil)
+
+	editor := crdt.New(crdt.WithClientID(2))
+	if err := crdt.ApplyUpdateV1(editor, base, nil); err != nil {
+		t.Fatalf("ApplyUpdateV1(base): %v", err)
+	}
+	v, _ := editor.GetMap("m").Get("nested")
+	nested, ok := v.(*crdt.YMap)
+	if !ok {
+		t.Fatalf("nested is %T, want *crdt.YMap", v)
+	}
+	editor.Transact(func(txn *crdt.Transaction) {
+		for i := range n {
+			nested.Set(txn, "k"+strconv.Itoa(i), i)
+		}
+	})
+	return base, crdt.EncodeStateAsUpdateV1(editor, author.StateVector())
+}
+
+// nestedEntries returns how many keys the map "nested" under root map "m"
+// holds in the state v1, or -1 when it has no such map.
+func nestedEntries(t *testing.T, v1 []byte) int {
+	t.Helper()
+	d := crdt.New()
+	if err := crdt.ApplyUpdateV1(d, v1, nil); err != nil {
+		t.Fatalf("ApplyUpdateV1: %v", err)
+	}
+	v, _ := d.GetMap("m").Get("nested")
+	nested, ok := v.(*crdt.YMap)
+	if !ok {
+		return -1
+	}
+	return len(nested.Keys())
 }
 
 // runCrashSafePrune appends 5 updates, materializes the rolled-back head at
@@ -585,6 +633,36 @@ func RunConformance(t *testing.T, factory func() VersionedPersistence) {
 		}
 		if lr.Version != 0 {
 			t.Fatalf("after delete Load version = %d, want 0", lr.Version)
+		}
+	})
+
+	// Decoded without the state it was made against, an incremental update
+	// parks every item that depends on that state. A store must keep such an
+	// update however many items it parks there: the room has already applied
+	// it, and refusing it loses the edit.
+	t.Run("AppendUpdateAcceptsLargeIncrementalUpdate", func(t *testing.T) {
+		p := factory()
+		ctx := context.Background()
+		base, update := dependentUpdate(t, largeIncrementalEntries)
+		for _, u := range [][]byte{base, update} {
+			if _, err := p.AppendUpdate(ctx, "room", u); err != nil {
+				t.Fatalf("AppendUpdate: %v", err)
+			}
+		}
+		// The check still refuses an update that does not decode, and the
+		// refusal takes no version.
+		if _, err := p.AppendUpdate(ctx, "room", []byte{0xff, 0xff, 0xff}); err == nil {
+			t.Fatalf("AppendUpdate accepted a malformed update")
+		}
+		lr, err := p.Load(ctx, "room")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if lr.Version != 2 {
+			t.Fatalf("Load version = %d, want 2", lr.Version)
+		}
+		if got := nestedEntries(t, lr.Update); got != largeIncrementalEntries {
+			t.Fatalf("Load holds %d nested entries, want %d", got, largeIncrementalEntries)
 		}
 	})
 }

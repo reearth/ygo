@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/internal/updatecheck"
 )
 
 // FilePersistence is a directory-backed VersionedPersistence. Layout:
@@ -267,7 +268,7 @@ func (f *FilePersistence) AppendUpdate(ctx context.Context, room string, update 
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+	if err := updatecheck.ValidateV1(update); err != nil {
 		return 0, err
 	}
 	f.mu.Lock()

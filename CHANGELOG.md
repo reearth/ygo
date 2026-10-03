@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.50.1] — 2026-10-03
+
+### Fixed
+
+- **`persistence`: the bundled stores keep a large incremental update instead of
+  refusing it.** `MemoryPersistence`, `FilePersistence` and `sqlite.Store`
+  check an update in `AppendUpdate` by decoding it alone into a scratch
+  document, which took the crdt default pending cap of 100,000. Decoded without
+  the room's stored state, an incremental update parks every item that depends
+  on that state, so an update touching more than 100,000 existing items — 100,001
+  keys set on an existing map, say — was refused with `crdt: invalid update`
+  although the room had applied it. The websocket server logged the failed
+  write, and once the room closed, its next load came back without the edit.
+  The scratch document now has no pending cap; it is discarded after
+  the one decode, and the decoder's per-update item limit already bounds what
+  it can park. Updates that do not decode are still refused. The three stores
+  share the check (`internal/updatecheck`), and `RunConformance` gains a
+  subtest for it.
+- **`crdt`: the comment on the default pending cap no longer says it matches
+  the decoder's per-update limit.** It is 100,000; the per-update limit is
+  2^20.
+
 ## [1.50.0] — 2026-09-10
 
 ### Added

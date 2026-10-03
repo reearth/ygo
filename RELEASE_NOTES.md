@@ -1,3 +1,25 @@
+## v1.50.1
+
+**Who is affected: anyone who stores a room with `persistence.MemoryPersistence`,
+`persistence.FilePersistence` or `persistence/sqlite`, for example through
+`NewServerWithPersistence(persistence.NewLegacyAdapter(...))`.** Custom
+adapters are not changed.
+
+Each of these stores checks an update before writing it by decoding it on its
+own into a throwaway document. That document had the crdt default pending cap
+of 100,000. Decoded without the room's stored state, an incremental update
+parks every item that depends on that state, so an edit touching more than
+100,000 existing items — 100,001 keys set on a map that already exists, for
+instance — was refused with `crdt: invalid update`, although the room had
+applied it. The server logged the failed write; the edit never reached
+storage, and once the room closed, its next load came back without it.
+
+The throwaway document now has no pending cap: it lives for one decode, and the
+decoder's own per-update item limit already bounds what one update can park.
+Updates that do not decode are still refused. `RunConformance` gains a subtest
+that appends such an update, so an external adapter that validates the same
+way finds out from its conformance run. No API or wire format changes.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a
