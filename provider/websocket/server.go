@@ -1854,6 +1854,13 @@ func (s *Server) failRoomLoad(r *room, name string, loadErr error) {
 // ServeHTTP upgrades the request to WebSocket and runs the peer sync loop.
 // Room name is taken from the {room} path variable (Go 1.22 ServeMux) or
 // falls back to the last path segment.
+//
+// Cancelling the request context ends the connection. If the context was
+// cancelled with a cause (context.WithCancelCause) that implements
+// CloseCode() (int, string), ServeHTTP first sends the peer a close frame
+// with that code and reason, so an embedder can end one session with an
+// application close code (4000–4999) such as "session revoked". Any other
+// cause closes the socket without a close frame, as before.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Authorize (issue #59) takes precedence over AuthFunc when both are set: it
 	// both accepts/rejects and reports per-connection config (read-only). AuthFunc
@@ -2042,6 +2049,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		select {
 		case <-ctx.Done():
+			// #4175 spike patch: if the embedder cancelled with a cause that names a WS close
+			// code, send it before closing. gorilla allows WriteControl concurrently with the
+			// writer goroutine, so this needs no coordination with runWriter.
+			if cc, ok := context.Cause(ctx).(interface{ CloseCode() (int, string) }); ok {
+				code, reason := cc.CloseCode()
+				_ = ws.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(code, reason), time.Now().Add(writeTimeout))
+			}
 			_ = ws.Close() // close errors during teardown are expected; not logged
 		case <-s.shutdownCh:
 			_ = ws.Close() // close errors during teardown are expected; not logged

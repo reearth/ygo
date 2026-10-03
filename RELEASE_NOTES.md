@@ -1,3 +1,24 @@
+## v1.51.0
+
+**Who is affected: nobody, unless you choose to be.** If your server never
+cancels a request context with a cause of its own, nothing changes.
+
+**What is new.** A server that embeds `provider/websocket` can now end a single
+peer's session with an application close code. Cancel that peer's request
+context with `context.WithCancelCause`, passing a cause that implements
+`CloseCode() (int, string)`. The peer then receives a close frame with that code
+and reason instead of the connection simply dropping.
+
+This is for cases where the client needs to know *why* it was disconnected —
+for example, a user whose access was revoked while their document was open.
+Without a close code, the client sees an abnormal closure (1006), which looks
+like a network failure, so it reconnects. With one (say 4001, "session
+revoked"), the client can stop and tell the user what happened.
+
+**What stays the same.** A context cancelled with any other cause — or with no
+cause — closes the socket exactly as before, with no close frame. No exported
+API was added. Closes #264.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a

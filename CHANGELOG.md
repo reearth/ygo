@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.51.0] — 2026-10-03
+
+### Added
+
+- **`provider/websocket`: close a peer with an application close code (#264).**
+  When the request context passed to `(*Server).ServeHTTP` is cancelled with a
+  cause (`context.WithCancelCause`) that implements `CloseCode() (int, string)`,
+  the server now sends the peer a close frame with that code and reason before
+  closing the socket. An embedder can end one session with a code in the
+  4000–4999 range (for example "session revoked") that a client can tell apart
+  from a network drop. Any other cause closes the socket exactly as before,
+  with no close frame (abnormal closure, 1006).
+
 ## [1.50.0] — 2026-09-10
 
 ### Added
