@@ -276,7 +276,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See #189 for the measurements this produced, including one proposed
 optimisation that was implemented, reviewed, measured, and rejected.
 
->>>>>>> conflict 1 of 1 ends
 ## [1.49.1] — 2026-08-25
 
 ### Fixed

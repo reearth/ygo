@@ -286,7 +286,6 @@ closed into it.
 
 **Upgrade notes:** none. There is nothing to migrate and no behaviour change.
 
->>>>>>> conflict 1 of 1 ends
 ## v1.49.1
 
 **Who is affected: anyone whose documents have deletion history and who loads
