@@ -1,3 +1,26 @@
+## v1.50.1
+
+**Who is affected: anyone who loads a document from updates and encodes it
+again** — a server answering a joining peer's sync step 1, a persistence layer
+that compacts a log into one state, an application that calls `RunGC` and then
+encodes. Documents that are only edited and never re-encoded are unchanged.
+
+Applying an update merged adjacent items from one client into a single item
+whenever their clocks were contiguous and nothing sat between them. Yjs merges
+two items only when the right one was inserted directly after the left one and
+both were inserted toward the same right neighbour (its right origin), because
+the merged item is written to the wire with the left item's origins. ygo did
+not check the right origins, so a document with concurrent inserts could read
+correctly in memory and still encode a right origin that one of its items
+never had: a peer decoding that state — ygo or Yjs — put that item's
+characters elsewhere. `RunGC`'s tombstone merge had the same gap and could
+move live text whose origin was inside the second tombstone.
+
+Both merges now require the right item's origin to be the left item's last
+character and the two right origins to be equal, as `Item.mergeWith` does.
+Items that do not qualify stay separate, so such a document keeps a few more
+items than before; no wire format or API changes.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a
