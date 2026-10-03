@@ -1,3 +1,17 @@
+## v1.50.1
+
+**Who is affected:** anyone reading ygo's record of live items
+(`InsertSetFromDoc`, the delete set, encoded state size) after concurrent
+edits. Document content is unchanged; `ToJSON` and `ToXML` already matched Yjs.
+
+**What changed.** When one peer deletes a nested type while another is still
+writing into it, Yjs discards the late write. ygo kept it as a live item that
+nothing could reach. It now discards it too, in V1 and V2, whether or not the
+deleted container has been garbage collected.
+
+**Do I need to do anything?** No. Documents saved by earlier versions load as
+before.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.50.1] — 2026-10-04
+
+### Fixed
+
+- **`crdt`: a write into a nested type that a concurrent peer deleted no
+  longer stays live.** Yjs drops it: `Item.integrate` deletes an item whose
+  parent is deleted, and an item whose parent was collected becomes a GC
+  struct. ygo kept it live, so `InsertSetFromDoc`, the delete set and encoded
+  state differed from Yjs while `ToJSON`/`ToXML` matched. Both paths now store
+  the item as deleted, in V1 and V2. Covered by new Yjs fixtures in
+  `crdt/testdata/stranded_yjs_fixtures.json`.
+
 ## [1.50.0] — 2026-09-10
 
 ### Added

@@ -735,6 +735,9 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 					txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
 					mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
 				} else {
+					// Yjs integrates an item whose parent was collected as a GC struct, so
+					// it is stored deleted rather than live.
+					item.Deleted = true
 					txn.doc.store.Append(item)
 				}
 			}
@@ -1369,7 +1372,9 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 			// A keyed item still unresolved here is a genuine orphan (its
 			// container/origin was deleted and GC'd). Yjs drops it on every
 			// peer; do NOT graft it onto an arbitrary map by scanning the store,
-			// which diverges by integration order (#156). Orphan-store it.
+			// which diverges by integration order (#156). Orphan-store it,
+			// deleted, as Yjs integrates it as a GC struct.
+			item.Deleted = true
 			store.Append(item)
 			return true
 		}
