@@ -765,6 +765,9 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		// in use.
 		defer s.releaseInflight(rm)
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
+		// Restamp on return if no local peer is connected, so the sweeper
+		// reclaims a room only the relay touched (see markIdleIfEmpty).
+		defer s.markIdleIfEmpty(rm)
 		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, s.relaySentinel); err != nil {
 			return err
 		}
@@ -784,6 +787,8 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		// KindSync case above.
 		defer s.releaseInflight(rm)
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
+		// Restamp on return if no local peer is connected (see the KindSync case).
+		defer s.markIdleIfEmpty(rm)
 		if err := rm.awareness.ApplyUpdate(in.Data, s.relaySentinel); err != nil {
 			return err
 		}
