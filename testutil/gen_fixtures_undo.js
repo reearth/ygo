@@ -129,6 +129,43 @@ const fixtures = [
       um.undo()
     }
   ),
+  authored(
+    'nested_edit_merged_undo',
+    'A nested map edit merged between two captured pushes is undone with them, restoring the overwritten value.',
+    'a', 'array',
+    (doc, arr, um) => {
+      const m = new Y.Map()
+      m.set('k', 1)
+      arr.push([m])
+      um.stopCapturing()
+      arr.push([5])
+      m.set('k', 2)
+      arr.push([6])
+      um.undo()
+    }
+  ),
+  authored(
+    'fresh_doc_merged_pushes_undo',
+    'Two merged pushes on a fresh doc are both undone.',
+    'a', 'array',
+    (doc, arr, um) => {
+      arr.push(['x'])
+      arr.insert(0, ['y'])
+      um.undo()
+    }
+  ),
+  authored(
+    'insert_then_delete_merged_undo',
+    'An element inserted and deleted within one capture interval stays deleted on undo.',
+    'a', 'array',
+    (doc, arr, um) => {
+      arr.push(['base'])
+      um.stopCapturing()
+      arr.insert(0, ['x'])
+      arr.delete(0, 1)
+      um.undo()
+    }
+  ),
 ]
 
 const out = path.join(__dirname, '..', 'crdt', 'testdata', 'undo_yjs_fixtures.json')

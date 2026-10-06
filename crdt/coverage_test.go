@@ -1657,9 +1657,11 @@ func TestUnit_UndoManager_Undo_GCdItems(t *testing.T) {
 	RunGC(doc)
 
 	// Undo the deletion: applyStackItem tries to restore the GC'd items but
-	// finds ContentDeleted (isGC == true) and skips them.
+	// finds ContentDeleted (isGC == true) and skips them. Both stack items are
+	// then no-ops, so Undo discards them and reports no change.
 	ok := um.Undo()
-	require.True(t, ok)
+	require.False(t, ok)
+	require.Equal(t, 0, um.UndoStackSize())
 	// Text remains empty because the items were GC'd and can't be restored.
 	assert.Equal(t, 0, txt.Len())
 }

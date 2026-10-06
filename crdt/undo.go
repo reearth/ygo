@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"sort"
 	"sync"
 	"time"
 )
@@ -13,13 +14,11 @@ import (
 // It captures what was inserted and what was deleted by a set of consecutive
 // local transactions so that Undo / Redo can invert those changes.
 type StackItem struct {
-	// beforeState is the document state vector before the captured transaction(s).
-	// Items with clocks in [beforeState[c], afterState[c]) were inserted.
-	beforeState StateVector
-	// afterState is the document state vector after the captured transaction(s).
-	afterState StateVector
+	// insertions records the clocks each captured transaction inserted, so
+	// remote items landing between merged transactions are never undone.
+	insertions DeleteSet
 	// deletions records items deleted by the captured transaction(s).
-	// These are restored (un-deleted) when this item is applied.
+	// These are restored (re-inserted) when this item is applied.
 	deletions DeleteSet
 
 	// Meta holds arbitrary user data attached to this stack item.
@@ -121,7 +120,8 @@ type UndoManager struct {
 
 // NewUndoManager creates an UndoManager that tracks the listed shared types.
 // scope must not be empty. Multiple types can be tracked simultaneously; any
-// local transaction that touches at least one scope type is captured.
+// local transaction that touches a scope type, or a type nested in one, is
+// captured.
 func NewUndoManager(doc *Doc, scope []SharedType, opts ...UndoManagerOption) *UndoManager {
 	u := &UndoManager{
 		doc:            doc,
@@ -193,52 +193,53 @@ func (u *UndoManager) RedoStackSize() int {
 	return len(u.redoStack)
 }
 
-// Undo inverts the most recently captured local change. Returns true if an
-// item was popped and applied; false if the undo stack is empty.
+// Undo inverts the most recently captured local change. Stack items that
+// no longer change anything (e.g. their insertions were already deleted) are
+// discarded and the next one is tried, as in Yjs. Returns true if a change
+// was applied; false if the undo stack ran out first.
 func (u *UndoManager) Undo() bool {
-	u.mu.Lock()
-	if len(u.undoStack) == 0 {
-		u.mu.Unlock()
-		return false
-	}
-	item := u.undoStack[len(u.undoStack)-1]
-	u.undoStack = u.undoStack[:len(u.undoStack)-1]
-	u.mu.Unlock()
-
-	redoItem := u.applyStackItem(item)
-
-	u.mu.Lock()
-	if redoItem != nil {
-		u.redoStack = append(u.redoStack, redoItem)
-		u.fireOnStackItemAdded(redoItem, true)
-	}
-	u.mu.Unlock()
-
-	return true
+	return u.pop(false)
 }
 
-// Redo re-applies the most recently undone change. Returns true if an item
-// was popped and applied; false if the redo stack is empty.
+// Redo re-applies the most recently undone change, skipping no-op stack
+// items like Undo. Returns true if a change was applied; false if the redo
+// stack ran out first.
 func (u *UndoManager) Redo() bool {
-	u.mu.Lock()
-	if len(u.redoStack) == 0 {
+	return u.pop(true)
+}
+
+// pop applies the top of the undo (or redo) stack, pushing its inverse onto
+// the opposite stack, until one item performs a change.
+func (u *UndoManager) pop(redo bool) bool {
+	for {
+		u.mu.Lock()
+		stack := &u.undoStack
+		if redo {
+			stack = &u.redoStack
+		}
+		if len(*stack) == 0 {
+			u.mu.Unlock()
+			return false
+		}
+		item := (*stack)[len(*stack)-1]
+		*stack = (*stack)[:len(*stack)-1]
+		others := slices.Concat(u.undoStack, u.redoStack)
 		u.mu.Unlock()
-		return false
+
+		inverse := u.applyStackItem(item, others)
+		if inverse == nil {
+			continue
+		}
+		u.mu.Lock()
+		if redo {
+			u.undoStack = append(u.undoStack, inverse)
+		} else {
+			u.redoStack = append(u.redoStack, inverse)
+		}
+		u.fireOnStackItemAdded(inverse, !redo)
+		u.mu.Unlock()
+		return true
 	}
-	item := u.redoStack[len(u.redoStack)-1]
-	u.redoStack = u.redoStack[:len(u.redoStack)-1]
-	u.mu.Unlock()
-
-	undoItem := u.applyStackItem(item)
-
-	u.mu.Lock()
-	if undoItem != nil {
-		u.undoStack = append(u.undoStack, undoItem)
-		u.fireOnStackItemAdded(undoItem, false)
-	}
-	u.mu.Unlock()
-
-	return true
 }
 
 // UndoContext is the context-aware variant of Undo. If ctx is already
@@ -302,9 +303,8 @@ func (u *UndoManager) captureTransaction(txn *Transaction) {
 	}
 
 	item := &StackItem{
-		beforeState: txn.beforeState.Clone(),
-		afterState:  txn.afterState.Clone(),
-		deletions:   cloneDeleteSet(txn.deleteSet),
+		insertions: insertedRanges(txn.beforeState, txn.afterState),
+		deletions:  cloneDeleteSet(txn.deleteSet),
 	}
 
 	u.mu.Lock()
@@ -312,9 +312,12 @@ func (u *UndoManager) captureTransaction(txn *Transaction) {
 
 	now := time.Now()
 	if len(u.undoStack) > 0 && !u.lastTxnTime.IsZero() && now.Sub(u.lastTxnTime) <= u.captureTimeout {
-		// Merge: extend the top stack item to cover this transaction too.
+		// Copy-on-write: a concurrent Undo may be reading top.deletions.
 		top := u.undoStack[len(u.undoStack)-1]
-		mergeStackItems(top, item)
+		top.insertions.Merge(item.insertions)
+		merged := cloneDeleteSet(top.deletions)
+		merged.Merge(item.deletions)
+		top.deletions = merged
 	} else {
 		u.undoStack = append(u.undoStack, item)
 		u.fireOnStackItemAdded(item, false)
@@ -327,33 +330,24 @@ func (u *UndoManager) captureTransaction(txn *Transaction) {
 
 // applyStackItem executes the inverse of item as a new local transaction and
 // returns a new StackItem representing what that inversion did (for the
-// opposite stack). Returns nil if no changes were made (e.g. all referenced
-// items were GC'd).
-func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
+// opposite stack). Returns nil if it changed nothing (e.g. every referenced
+// item was already deleted or GC'd). others are the remaining stack items,
+// consulted by the map-key conflict check.
+func (u *UndoManager) applyStackItem(item *StackItem, others []*StackItem) *StackItem {
 	var resultItem *StackItem
 
 	u.doc.Transact(func(txn *Transaction) {
-		// Step 1: delete items that were inserted by the captured transaction
-		// (items with clocks in [beforeState[c], afterState[c])).
+		// Step 1: delete items that were inserted by the captured transaction(s).
 		// An inserted item whose deletion was later undone lives on as its redone
 		// copy, which is what must be deleted (Yjs followRedone).
 		var toDelete []*Item
-		for client, afterClock := range item.afterState {
-			beforeClock := item.beforeState.Clock(client)
-			if afterClock <= beforeClock {
-				continue
-			}
-			for _, storeItem := range u.doc.store.clients[client] {
-				if storeItem.ID.Clock < beforeClock || storeItem.ID.Clock >= afterClock {
-					continue
-				}
-				toDelete = append(toDelete, storeItem)
-			}
-		}
+		u.iterateItems(txn, item.insertions, func(it *Item) { toDelete = append(toDelete, it) })
+		performed := false
 		for _, it := range toDelete {
 			it = u.followRedone(txn, it)
 			if it != nil && !it.Deleted && u.itemInScope(it) {
 				it.delete(txn)
+				performed = true
 			}
 		}
 
@@ -363,34 +357,29 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 		// propagated and a back-sync from a peer (which still had the tombstone)
 		// re-deleted it locally. Re-inserting makes undo a real, convergent insert.
 		// Collect targets first, then redo (integrate appends new items to the
-		// store, which we must not visit as restore targets).
-		// Clients are visited in ascending order so redo clocks are deterministic.
-		clients := make([]ClientID, 0, len(item.deletions.clients))
-		for client := range item.deletions.clients {
-			clients = append(clients, client)
-		}
-		slices.Sort(clients)
+		// store, which we must not visit as restore targets). Items inserted in
+		// the same stack item were created and deleted within it, so they stay
+		// deleted (Yjs popStackItem).
 		var toRedo []*Item
 		redoSet := make(map[*Item]struct{})
-		for _, client := range clients {
-			ranges := item.deletions.clients[client]
-			for _, storeItem := range u.doc.store.clients[client] {
-				if _, seen := redoSet[storeItem]; seen || !inDeleteRanges(ranges, storeItem.ID.Clock) {
-					continue
-				}
-				if !storeItem.Deleted || !u.itemInScope(storeItem) {
-					continue
-				}
-				// Content freed by GC cannot be restored.
-				if _, isGC := storeItem.Content.(*ContentDeleted); isGC {
-					continue
-				}
-				toRedo = append(toRedo, storeItem)
-				redoSet[storeItem] = struct{}{}
+		u.iterateItems(txn, item.deletions, func(it *Item) {
+			if !it.Deleted || !u.itemInScope(it) || item.insertions.IsDeleted(it.ID) {
+				return
+			}
+			// Content freed by GC cannot be restored.
+			if _, isGC := it.Content.(*ContentDeleted); isGC {
+				return
+			}
+			toRedo = append(toRedo, it)
+			redoSet[it] = struct{}{}
+		})
+		for _, it := range toRedo {
+			if u.redoItem(txn, it, redoSet, item.insertions, others) != nil {
+				performed = true
 			}
 		}
-		for _, it := range toRedo {
-			u.redoItem(txn, it, redoSet)
+		if !performed {
+			return
 		}
 
 		// The item.delete calls above bypass deleteRange's marker shift, so
@@ -400,15 +389,10 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 			t.clearMarkers()
 		}
 
+		// txn.afterState is only set at commit, so read the live store to
+		// record what this inversion re-inserted (redoItem).
 		resultItem = &StackItem{
-			beforeState: txn.beforeState.Clone(),
-			// Capture afterState from the live store: txn.afterState is only set
-			// at commit (after this closure), so it is nil here. The inverse
-			// stack item must record items this inversion INSERTED — e.g. the
-			// re-inserted content from undoing a deletion (redoItem) — so the
-			// opposite operation can delete them. Reading the store now reflects
-			// those inserts; txn.beforeState (set at txn start) is the lower bound.
-			afterState: u.doc.store.StateVector(),
+			insertions: insertedRanges(txn.beforeState, u.doc.store.StateVector()),
 			deletions:  cloneDeleteSet(txn.deleteSet),
 		}
 	}, u) // origin = u so captureTransaction skips this txn
@@ -425,7 +409,7 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 // nested type is placed into the type's redone copy, redoing the container
 // first when it is in redoSet. Mirrors Yjs redoItem.
 // Returns the new item, or nil if it cannot be placed.
-func (u *UndoManager) redoItem(txn *Transaction, item *Item, redoSet map[*Item]struct{}) *Item {
+func (u *UndoManager) redoItem(txn *Transaction, item *Item, redoSet map[*Item]struct{}, insertions DeleteSet, others []*StackItem) *Item {
 	if item.redone != nil {
 		return u.doc.store.getItemCleanStart(txn, *item.redone)
 	}
@@ -435,7 +419,7 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, redoSet map[*Item]s
 	}
 	if pi := parent.item; pi != nil && pi.Deleted {
 		if pi.redone == nil {
-			if _, ok := redoSet[pi]; !ok || u.redoItem(txn, pi, redoSet) == nil {
+			if _, ok := redoSet[pi]; !ok || u.redoItem(txn, pi, redoSet, insertions, others) == nil {
 				return nil
 			}
 		}
@@ -486,12 +470,20 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, redoSet map[*Item]s
 			}
 			right = right.Right
 		}
-	} else {
-		// Map entry: chain after the key's current entry (integrate's per-key LWW
-		// then picks the highest-clock winner). right stays nil.
-		if existing, ok := parent.itemMap[*item.ParentSub]; ok {
-			left = existing
+	} else if nextSameKey(item) != nil {
+		// Map entry since overwritten: walk past values this undo deletes or
+		// that are undo/redo history; any other later value is a remote edit,
+		// which undo must not overwrite (Yjs redoItem).
+		left = item
+		for r := nextSameKey(left); r != nil && (r.redone != nil || insertions.IsDeleted(r.ID) || deletedByStacks(others, r.ID)); r = nextSameKey(left) {
+			left = u.followRedone(txn, r)
 		}
+		if left == nil || nextSameKey(left) != nil {
+			return nil
+		}
+	} else if existing, ok := parent.itemMap[*item.ParentSub]; ok {
+		// Map entry: chain after the key's current entry. right stays nil.
+		left = existing
 	}
 
 	origin, originRight := neighbourOrigins(left, right)
@@ -510,6 +502,28 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, redoSet map[*Item]s
 	return ni
 }
 
+// nextSameKey returns the next item to the right holding the same map key
+// (Yjs's item.right; ygo interleaves keys in one list).
+func nextSameKey(item *Item) *Item {
+	for r := item.Right; r != nil; r = r.Right {
+		if parentSubEqual(r.ParentSub, item.ParentSub) {
+			return r
+		}
+	}
+	return nil
+}
+
+// deletedByStacks reports whether any stack item deleted id (Yjs
+// isDeletedByUndoStack).
+func deletedByStacks(stacks []*StackItem, id ID) bool {
+	for _, s := range stacks {
+		if s.deletions.IsDeleted(id) {
+			return true
+		}
+	}
+	return false
+}
+
 // followRedone returns the end of item's redone chain (item itself when
 // it was never redone).
 func (u *UndoManager) followRedone(txn *Transaction, item *Item) *Item {
@@ -519,14 +533,44 @@ func (u *UndoManager) followRedone(txn *Transaction, item *Item) *Item {
 	return item
 }
 
-// inDeleteRanges reports whether clock falls inside any of ranges.
-func inDeleteRanges(ranges []DeleteRange, clock uint64) bool {
-	for _, r := range ranges {
-		if clock >= r.Clock && clock < r.Clock+r.Len {
-			return true
+// iterateItems calls fn for every store item inside ds, splitting items at
+// range boundaries (Yjs iterateDeletedStructs). Clients are visited in
+// ascending order so redo clocks are deterministic.
+func (u *UndoManager) iterateItems(txn *Transaction, ds DeleteSet, fn func(*Item)) {
+	store := u.doc.store
+	clients := ds.Clients()
+	slices.Sort(clients)
+	for _, client := range clients {
+		for _, r := range ds.clients[client] {
+			if r.Len == 0 || store.Find(ID{Client: client, Clock: r.Clock}) == nil {
+				continue
+			}
+			end := r.Clock + r.Len
+			store.getItemCleanStart(txn, ID{Client: client, Clock: r.Clock})
+			store.getItemCleanEnd(txn, client, end-1)
+			items := store.clients[client]
+			i := sort.Search(len(items), func(i int) bool { return items[i].ID.Clock >= r.Clock })
+			// Collect first: fn may append to the store.
+			var span []*Item
+			for ; i < len(items) && items[i].ID.Clock < end; i++ {
+				span = append(span, items[i])
+			}
+			for _, it := range span {
+				fn(it)
+			}
 		}
 	}
-	return false
+}
+
+// insertedRanges returns the clocks inserted between before and after.
+func insertedRanges(before, after StateVector) DeleteSet {
+	ds := newDeleteSet()
+	for client, end := range after {
+		if start := before.Clock(client); end > start {
+			ds.add(ID{Client: client, Clock: start}, int(end-start))
+		}
+	}
+	return ds
 }
 
 // neighbourOrigins computes the Origin / OriginRight IDs for a new item placed
@@ -548,13 +592,15 @@ func neighbourOrigins(left, right *Item) (origin, originRight *ID) {
 	return
 }
 
-// txnAffectsScope reports whether txn touched at least one tracked type.
+// txnAffectsScope reports whether txn changed a tracked type or a live type
+// nested in one (Yjs changedParentTypes).
 func (u *UndoManager) txnAffectsScope(txn *Transaction) bool {
 	for t := range txn.changed {
-		for _, s := range u.scope {
-			if t == s {
-				return true
-			}
+		if t.item != nil && t.item.Deleted {
+			continue
+		}
+		if u.typeInScope(t) {
+			return true
 		}
 	}
 	return false
@@ -563,7 +609,12 @@ func (u *UndoManager) txnAffectsScope(txn *Transaction) bool {
 // itemInScope reports whether item lives (at any depth) inside a tracked
 // type, so a nested type's children are restored with it (Yjs isParentOf).
 func (u *UndoManager) itemInScope(item *Item) bool {
-	for p := item.Parent; p != nil; {
+	return item.Parent != nil && u.typeInScope(item.Parent)
+}
+
+// typeInScope reports whether t is a tracked type or nested in one.
+func (u *UndoManager) typeInScope(t *abstractType) bool {
+	for p := t; p != nil; {
 		for _, s := range u.scope {
 			if p == s {
 				return true
@@ -577,32 +628,15 @@ func (u *UndoManager) itemInScope(item *Item) bool {
 	return false
 }
 
-// mergeStackItems extends dst to cover the time range of src by taking the
-// earliest beforeState and latest afterState, and merging the deletion sets.
-func mergeStackItems(dst, src *StackItem) {
-	// beforeState: keep the minimum clock per client (earliest starting point).
-	for client, srcClock := range src.beforeState {
-		if dstClock, ok := dst.beforeState[client]; !ok || srcClock < dstClock {
-			dst.beforeState[client] = srcClock
-		}
-	}
-	// afterState: keep the maximum clock per client (latest ending point).
-	for client, srcClock := range src.afterState {
-		if dstClock, ok := dst.afterState[client]; !ok || srcClock > dstClock {
-			dst.afterState[client] = srcClock
-		}
-	}
-	// Merge deletion sets.
-	dst.deletions.Merge(src.deletions)
-}
-
-// cloneDeleteSet returns a deep copy of ds.
+// cloneDeleteSet returns a sorted, compacted deep copy of ds (a cascade
+// delete appends ranges out of clock order).
 func cloneDeleteSet(ds DeleteSet) DeleteSet {
 	out := newDeleteSet()
 	for client, ranges := range ds.clients {
 		cp := make([]DeleteRange, len(ranges))
 		copy(cp, ranges)
 		out.clients[client] = cp
+		out.sortAndCompact(client)
 	}
 	return out
 }

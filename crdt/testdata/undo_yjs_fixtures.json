@@ -44,6 +44,33 @@
       "kind": "map",
       "updateV1": "0106effdb6f50d002701016d0174020400effdb6f50d000548656c6c6fa7effdb6f50d00020400effdb6f50d060548656c6c6fa7effdb6f50d06020400effdb6f50d0c0548656c6c6f01effdb6f50d010012",
       "expectedJSON": "{}"
+    },
+    {
+      "name": "nested_edit_merged_undo",
+      "description": "A nested map edit merged between two captured pushes is undone with them, restoring the overwritten value.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0106effdb6f50d0007010161012800effdb6f50d00016b017d0188effdb6f50d00017d05a8effdb6f50d01017d0288effdb6f50d02017d06a8effdb6f50d03017d0101effdb6f50d010104",
+      "expectedJSON": "[{\"k\":1}]"
+    },
+    {
+      "name": "fresh_doc_merged_pushes_undo",
+      "description": "Two merged pushes on a fresh doc are both undone.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0102effdb6f50d00080101610177017848effdb6f50d000177017901effdb6f50d010002",
+      "expectedJSON": "[]"
+    },
+    {
+      "name": "insert_then_delete_merged_undo",
+      "description": "An element inserted and deleted within one capture interval stays deleted on undo.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0102effdb6f50d00080101610177046261736548effdb6f50d000177017801effdb6f50d010002",
+      "expectedJSON": "[]"
     }
   ]
 }

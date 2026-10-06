@@ -111,6 +111,34 @@ var undoBuilders = map[string]func(*Doc, SharedType, *UndoManager){
 		um.Undo()
 		um.Undo()
 	},
+	"nested_edit_merged_undo": func(doc *Doc, st SharedType, um *UndoManager) {
+		arr := st.(*YArray)
+		doc.Transact(func(txn *Transaction) {
+			m := NewMapPrelim()
+			m.Set(txn, "k", 1)
+			arr.PushType(txn, m)
+		})
+		m := arr.Get(0).(*YMap)
+		um.StopCapturing()
+		doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{5}) })
+		doc.Transact(func(txn *Transaction) { m.Set(txn, "k", 2) })
+		doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{6}) })
+		um.Undo()
+	},
+	"fresh_doc_merged_pushes_undo": func(doc *Doc, st SharedType, um *UndoManager) {
+		arr := st.(*YArray)
+		doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"x"}) })
+		doc.Transact(func(txn *Transaction) { arr.Insert(txn, 0, []any{"y"}) })
+		um.Undo()
+	},
+	"insert_then_delete_merged_undo": func(doc *Doc, st SharedType, um *UndoManager) {
+		arr := st.(*YArray)
+		doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"base"}) })
+		um.StopCapturing()
+		doc.Transact(func(txn *Transaction) { arr.Insert(txn, 0, []any{"x"}) })
+		doc.Transact(func(txn *Transaction) { arr.Delete(txn, 0, 1) })
+		um.Undo()
+	},
 }
 
 func undoFixtureRoot(doc *Doc, f undoFixture) (SharedType, func() ([]byte, error)) {
