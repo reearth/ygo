@@ -362,6 +362,10 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if left.MovedBy != item.MovedBy {
 		return false
 	}
+	// A merge would drop the right half's redone link (Yjs mergeWith parity).
+	if left.redone != nil || item.redone != nil {
+		return false
+	}
 	// item.Origin must reference the last clock of left for the split to be
 	// reversible. (splitItem always sets Origin this way; foreign updates may
 	// set Origin differently, in which case we leave the items split.)

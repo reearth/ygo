@@ -236,8 +236,53 @@ type ContentType struct{ Type *abstractType }
 func NewContentType(t *abstractType) *ContentType { return &ContentType{t} }
 func (c *ContentType) Len() int                   { return 1 }
 func (c *ContentType) IsCountable() bool          { return true }
-func (c *ContentType) Copy() Content              { return &ContentType{c.Type} }
 func (c *ContentType) Splice(_ int) Content       { panic("crdt: ContentType is not splittable") }
+
+// Copy wraps a FRESH, empty type of the same kind: a type's item back-pointer
+// and child list are single-valued, so a re-inserted copy must not alias the
+// original. Mirrors Yjs ContentType.copy; UndoManager.redoItem re-inserts the
+// children itself.
+func (c *ContentType) Copy() Content {
+	if c.Type == nil {
+		return &ContentType{nil}
+	}
+	return &ContentType{c.Type.emptyCopy()}
+}
+
+// emptyCopy returns a new detached type of the same concrete kind as t.
+func (t *abstractType) emptyCopy() *abstractType {
+	var at *abstractType
+	switch v := t.owner.(type) {
+	case *YArray:
+		a := &YArray{}
+		a.owner = a
+		at = &a.abstractType
+	case *YMap:
+		m := &YMap{}
+		m.owner = m
+		at = &m.abstractType
+	case *YText:
+		x := &YText{}
+		x.owner = x
+		at = &x.abstractType
+	case *YXmlElement:
+		at = &NewYXmlElement(v.NodeName).abstractType
+	case *YXmlFragment:
+		f := &YXmlFragment{}
+		f.owner = f
+		at = &f.abstractType
+	case *YXmlText:
+		at = &NewYXmlText().abstractType
+	default:
+		r := &rawType{}
+		r.owner = r
+		at = &r.abstractType
+	}
+	if at.itemMap == nil {
+		at.itemMap = make(map[string]*Item)
+	}
+	return at
+}
 
 // ContentDoc holds a reference to a subdocument.
 type ContentDoc struct{ Doc *Doc }

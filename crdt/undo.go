@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 )
@@ -334,6 +335,9 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 	u.doc.Transact(func(txn *Transaction) {
 		// Step 1: delete items that were inserted by the captured transaction
 		// (items with clocks in [beforeState[c], afterState[c])).
+		// An inserted item whose deletion was later undone lives on as its redone
+		// copy, which is what must be deleted (Yjs followRedone).
+		var toDelete []*Item
 		for client, afterClock := range item.afterState {
 			beforeClock := item.beforeState.Clock(client)
 			if afterClock <= beforeClock {
@@ -343,9 +347,13 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 				if storeItem.ID.Clock < beforeClock || storeItem.ID.Clock >= afterClock {
 					continue
 				}
-				if !storeItem.Deleted && u.itemInScope(storeItem) {
-					storeItem.delete(txn)
-				}
+				toDelete = append(toDelete, storeItem)
+			}
+		}
+		for _, it := range toDelete {
+			it = u.followRedone(txn, it)
+			if it != nil && !it.Deleted && u.itemInScope(it) {
+				it.delete(txn)
 			}
 		}
 
@@ -356,26 +364,33 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 		// re-deleted it locally. Re-inserting makes undo a real, convergent insert.
 		// Collect targets first, then redo (integrate appends new items to the
 		// store, which we must not visit as restore targets).
+		// Clients are visited in ascending order so redo clocks are deterministic.
+		clients := make([]ClientID, 0, len(item.deletions.clients))
+		for client := range item.deletions.clients {
+			clients = append(clients, client)
+		}
+		slices.Sort(clients)
 		var toRedo []*Item
-		for client, ranges := range item.deletions.clients {
-			for _, r := range ranges {
-				for _, storeItem := range u.doc.store.clients[client] {
-					if storeItem.ID.Clock < r.Clock || storeItem.ID.Clock >= r.Clock+r.Len {
-						continue
-					}
-					if !storeItem.Deleted || !u.itemInScope(storeItem) {
-						continue
-					}
-					// Content freed by GC cannot be restored.
-					if _, isGC := storeItem.Content.(*ContentDeleted); isGC {
-						continue
-					}
-					toRedo = append(toRedo, storeItem)
+		redoSet := make(map[*Item]struct{})
+		for _, client := range clients {
+			ranges := item.deletions.clients[client]
+			for _, storeItem := range u.doc.store.clients[client] {
+				if _, seen := redoSet[storeItem]; seen || !inDeleteRanges(ranges, storeItem.ID.Clock) {
+					continue
 				}
+				if !storeItem.Deleted || !u.itemInScope(storeItem) {
+					continue
+				}
+				// Content freed by GC cannot be restored.
+				if _, isGC := storeItem.Content.(*ContentDeleted); isGC {
+					continue
+				}
+				toRedo = append(toRedo, storeItem)
+				redoSet[storeItem] = struct{}{}
 			}
 		}
 		for _, it := range toRedo {
-			u.redoItem(txn, it)
+			u.redoItem(txn, it, redoSet)
 		}
 
 		resultItem = &StackItem{
@@ -399,22 +414,32 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 // in-place tombstone flip, which never syncs). The new item is positioned via
 // the original's neighbours, following redone chains across already-restored
 // neighbours; for root and live-nested parents this reduces to the original
-// (now-tombstoned) neighbours, which preserves order. Mirrors Yjs redoItem.
+// (now-tombstoned) neighbours, which preserves order. A child of a deleted
+// nested type is placed into the type's redone copy, redoing the container
+// first when it is in redoSet. Mirrors Yjs redoItem.
 // Returns the new item, or nil if it cannot be placed.
-func (u *UndoManager) redoItem(txn *Transaction, item *Item) *Item {
+func (u *UndoManager) redoItem(txn *Transaction, item *Item, redoSet map[*Item]struct{}) *Item {
 	if item.redone != nil {
-		return u.doc.store.Find(*item.redone)
+		return u.doc.store.getItemCleanStart(txn, *item.redone)
 	}
 	parent := item.Parent
 	if parent == nil {
 		return nil
 	}
-	// If the containing type was itself deleted (a nested type that was removed),
-	// the parent must be redone first. ygo does not yet track that chain, so skip
-	// rather than mis-place — undoing a delete of items inside a deleted nested
-	// type is a known gap (rare; the common root/live-nested cases work).
-	if parent.item != nil && parent.item.Deleted {
-		return nil
+	if pi := parent.item; pi != nil && pi.Deleted {
+		if pi.redone == nil {
+			if _, ok := redoSet[pi]; !ok || u.redoItem(txn, pi, redoSet) == nil {
+				return nil
+			}
+		}
+		if pi = u.followRedone(txn, pi); pi == nil {
+			return nil
+		}
+		ct, ok := pi.Content.(*ContentType)
+		if !ok || ct.Type == nil {
+			return nil
+		}
+		parent = ct.Type
 	}
 
 	var left, right *Item
@@ -478,6 +503,25 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item) *Item {
 	return ni
 }
 
+// followRedone returns the end of item's redone chain (item itself when
+// it was never redone).
+func (u *UndoManager) followRedone(txn *Transaction, item *Item) *Item {
+	for item != nil && item.redone != nil {
+		item = u.doc.store.getItemCleanStart(txn, *item.redone)
+	}
+	return item
+}
+
+// inDeleteRanges reports whether clock falls inside any of ranges.
+func inDeleteRanges(ranges []DeleteRange, clock uint64) bool {
+	for _, r := range ranges {
+		if clock >= r.Clock && clock < r.Clock+r.Len {
+			return true
+		}
+	}
+	return false
+}
+
 // neighbourOrigins computes the Origin / OriginRight IDs for a new item placed
 // immediately between left and right. The origin is left's LAST clock — left's
 // own ID clock for a single-unit item (most items, incl. format markers, occupy
@@ -509,15 +553,19 @@ func (u *UndoManager) txnAffectsScope(txn *Transaction) bool {
 	return false
 }
 
-// itemInScope reports whether item's parent type is in the tracked scope.
+// itemInScope reports whether item lives (at any depth) inside a tracked
+// type, so a nested type's children are restored with it (Yjs isParentOf).
 func (u *UndoManager) itemInScope(item *Item) bool {
-	if item.Parent == nil {
-		return false
-	}
-	for _, s := range u.scope {
-		if item.Parent == s {
-			return true
+	for p := item.Parent; p != nil; {
+		for _, s := range u.scope {
+			if p == s {
+				return true
+			}
 		}
+		if p.item == nil {
+			return false
+		}
+		p = p.item.Parent
 	}
 	return false
 }

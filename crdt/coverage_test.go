@@ -92,8 +92,15 @@ func TestUnit_ContentType_CopyAndSplice(t *testing.T) {
 	assert.Equal(t, 1, c.Len())
 	assert.True(t, c.IsCountable())
 
-	cp := c.Copy()
-	assert.Equal(t, at, cp.(*ContentType).Type)
+	// Copy wraps a fresh empty type of the same kind, never the original.
+	cp := c.Copy().(*ContentType).Type
+	assert.NotSame(t, at, cp)
+	assert.Nil(t, cp.start)
+
+	m := NewMapPrelim()
+	assert.IsType(t, &YMap{}, NewContentType(&m.abstractType).Copy().(*ContentType).Type.owner)
+	e := NewYXmlElement("p")
+	assert.Equal(t, "p", NewContentType(&e.abstractType).Copy().(*ContentType).Type.owner.(*YXmlElement).NodeName)
 
 	assert.Panics(t, func() { c.Splice(0) })
 }

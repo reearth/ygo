@@ -460,6 +460,9 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 		Content:     rightContent,
 		Deleted:     item.Deleted,
 	}
+	if item.redone != nil {
+		right.redone = &ID{Client: item.redone.Client, Clock: item.redone.Clock + uint64(offset)}
+	}
 	if right.Right != nil {
 		right.Right.Left = right
 	}

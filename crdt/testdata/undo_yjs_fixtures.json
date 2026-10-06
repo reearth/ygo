@@ -1,0 +1,49 @@
+{
+  "fixtures": [
+    {
+      "name": "map_key_text_undo_delete",
+      "description": "Undo the delete of a map key holding a Y.Text restores the text content.",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0104effdb6f50d002701016d0174020400effdb6f50d000548656c6c6fa7effdb6f50d00020400effdb6f50d060548656c6c6f01effdb6f50d010006",
+      "expectedJSON": "{\"t\":\"Hello\"}"
+    },
+    {
+      "name": "array_nested_map_children_undo_delete",
+      "description": "Undo the delete of an array element holding a Y.Map restores its entries, including a nested Y.Text.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "010aeffdb6f50d00080101610177017887effdb6f50d00012800effdb6f50d01016b017701762700effdb6f50d0103737263020400effdb6f50d03046465657088effdb6f50d0101770179c7effdb6f50d00effdb6f50d01012800effdb6f50d09016b017701762700effdb6f50d0903737263020400effdb6f50d0b046465657001effdb6f50d010107",
+      "expectedJSON": "[\"x\",{\"k\":\"v\",\"src\":\"deep\"},\"y\"]"
+    },
+    {
+      "name": "nested_in_nested_undo_delete",
+      "description": "Undo the delete of a map that holds a map that holds a Y.Text and a Y.Array.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "010eeffdb6f50d0007010161012700effdb6f50d0005696e6e6572012700effdb6f50d010474657874020400effdb6f50d02046c6561662700effdb6f50d01046c697374000800effdb6f50d070277036f6e65770374776f2800effdb6f50d00037461670177016f47effdb6f50d00012700effdb6f50d0b05696e6e6572012700effdb6f50d0c0474657874020400effdb6f50d0d046c6561662700effdb6f50d0c046c697374000800effdb6f50d120277036f6e65770374776f2800effdb6f50d0b037461670177016f01effdb6f50d01000b",
+      "expectedJSON": "[{\"inner\":{\"text\":\"leaf\",\"list\":[\"one\",\"two\"]},\"tag\":\"o\"}]"
+    },
+    {
+      "name": "map_key_text_undo_redo_undo",
+      "description": "Undo, redo, then undo again the delete of a map key holding a Y.Text.",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0106effdb6f50d002701016d0174020400effdb6f50d000548656c6c6fa7effdb6f50d00020400effdb6f50d060548656c6c6fa7effdb6f50d06020400effdb6f50d0c0548656c6c6f01effdb6f50d01000c",
+      "expectedJSON": "{\"t\":\"Hello\"}"
+    },
+    {
+      "name": "map_key_text_full_unwind",
+      "description": "After undo/redo/undo of the delete, undoing the original set removes the twice-restored text.",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0106effdb6f50d002701016d0174020400effdb6f50d000548656c6c6fa7effdb6f50d00020400effdb6f50d060548656c6c6fa7effdb6f50d06020400effdb6f50d0c0548656c6c6f01effdb6f50d010012",
+      "expectedJSON": "{}"
+    }
+  ]
+}
