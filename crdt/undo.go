@@ -521,6 +521,10 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, redoSet map[*Item]s
 // nextSameKey returns the next item to the right holding the same map key
 // (Yjs's item.right; ygo interleaves keys in one list).
 func nextSameKey(item *Item) *Item {
+	// itemMap holds the key's rightmost item, so nothing follows it.
+	if item.Parent.itemMap[*item.ParentSub] == item {
+		return nil
+	}
 	for r := item.Right; r != nil; r = r.Right {
 		if parentSubEqual(r.ParentSub, item.ParentSub) {
 			return r
