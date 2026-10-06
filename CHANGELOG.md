@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.51.1] — 2026-10-06
+
+### Fixed
+
+- **`crdt`: undo restored a deleted nested type empty.** `ContentType.Copy`
+  shared the original type, whose children were all tombstoned, and
+  `UndoManager` never collected a nested type's children for redo. Deleting a
+  map key holding `YText("Hello")` and undoing gave `""`. Undo now redoes the
+  container first and re-inserts its children into a fresh copy, matching
+  yjs's `redoItem`; undo → redo → undo unwinds fully.
+
+- **`crdt`: `UndoManager` could revert or lose other peers' edits.** A stack
+  item stored one state-vector span, and merging two captured transactions
+  widened it over every clock in between, so a remote insert that landed
+  between them was undone too. Undo also overwrote a map key a remote peer had
+  set since. Stack items now record each captured transaction's own
+  insertions and deletions, as yjs does, and map redo keeps a newer remote
+  value. Related fixes found on the way: two merged first edits on a fresh doc
+  lost the first one; an item inserted and deleted within one capture window
+  came back on undo; edits inside a nested type were not captured, so undo
+  removed them without restoring what they overwrote; and an edit made right
+  after an undo merged into the older stack item, so the next undo reverted
+  both. Where yjs's own redo drops a value restored into a redone nested map,
+  ygo keeps it, so every peer converges.
+
+- **`crdt`: `YArray.Get` could panic or return the wrong element after undo,
+  redo or `Move`.** Four causes, found by a new random undo/redo/move harness:
+  undo/redo did not shift search markers (`index out of range [-1]`); a
+  `Move` left a stale insert hint behind; undoing a `Move` left its target
+  pointing at the dead move, so the element counted in `Len` but rendered
+  nowhere; and `ToSlice` dropped a moved nested type that `Get` returned.
+  Deleting the winning move now hands the target to the next live move by the
+  same rule integration uses, once per parent at commit.
+
+- **`crdt`: V1 updates carrying `ContentJSON` were unreadable by yjs, and yjs's
+  were unreadable by ygo.** ygo wrote and read V1 `ContentJSON` values as lib0
+  `Any`; yjs writes one `JSON.stringify` string per value. V1 now matches yjs
+  (V2 already did), and still reads the old `Any` form, which re-encodes in
+  the new one. `YArray.Get`/`Slice`/`ForEach` and `YMap.Get`/`ForEach` also
+  skipped `ContentJSON` values that `ToJSON` showed. Embed and format values
+  are no longer HTML-escaped when encoded, matching `JSON.stringify`.
+
+- **`crdt`: `Transaction.Local` was `true` for every transaction.** Applying a
+  remote update now reports `false`, as documented and as in yjs, and a
+  default `UndoManager` no longer captures remote updates.
+
+- **`crdt`: staging a detached type into its own staged content crashed with a
+  stack overflow.** `YMap.Set`, `YArray.PushType`/`InsertType` and
+  `YXmlFragment.Insert` now panic at the call site when the result would
+  contain itself, like the existing double-staging check.
+
+### Changed
+
+- `Transaction.Local` is `false` inside `ApplyUpdate`, `ApplyUpdateV1` and
+  `ApplyUpdateV2`. Observers that read it now see `false` for remote changes.
+- `UndoManager` never captures remote updates, even with
+  `WithTrackedOrigins` naming the remote origin (yjs would capture them).
+- `UndoManager` captures edits nested inside a tracked type.
+- `Undo`/`Redo` discard stack items that would change nothing and apply the
+  next one, so one call can undo an older step; they return `false` when
+  nothing changed, even if the stack was not empty.
+- An item inserted and deleted within one capture window stays deleted on
+  undo. Call `StopCapturing` between the two to undo them separately.
+- ygo 1.51.0 and older cannot read V1 updates carrying `ContentJSON` written
+  by this version or by yjs. V2 is unaffected.
+- A yjs `undefined` inside `ContentJSON` re-encodes as `null`, as it already
+  did for `ContentAny`.
+
 ## [1.51.0] — 2026-10-06
 
 ### Fixed

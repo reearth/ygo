@@ -1,3 +1,44 @@
+## v1.51.1
+
+**Who is affected:** anyone using `UndoManager` or `YArray.Move`, and anyone
+exchanging V1 updates with yjs peers that carry legacy JSON content.
+
+**Undo no longer touches other people's edits.** Undo groups edits made close
+together into one step. That step used to cover every change in its time
+span, including a collaborator's insert that arrived in between, so pressing
+undo could delete their work. It could also overwrite a map entry a
+collaborator had changed since. Undo now tracks exactly which edits it
+recorded, as yjs does, and leaves everything else alone. Every transaction
+also claimed to be local, so a default `UndoManager` recorded remote updates
+as your own; `Transaction.Local` is now `false` for applied updates.
+
+**Undo restores nested content.** Deleting an entry that held a nested text,
+map or array and pressing undo brought it back empty. It now comes back with
+its contents. Edits inside nested types are now recorded for undo too, and
+undoing two quick edits on a fresh document no longer leaves the first behind.
+
+**`YArray.Get` no longer panics after undo, redo or a move.** Reads could
+crash with an index out of range, or return the wrong element. Undoing a move
+could also make the element disappear from reads while still counting in
+`Len`.
+
+**V1 legacy JSON content is readable both ways.** Older yjs content stored as
+JSON failed to decode in the V1 format, in either direction. It now matches
+yjs, and data an older ygo stored in its previous format still loads.
+
+**Staging a type into itself panics instead of crashing later.**
+
+**Upgrading.** No API change, but check these behaviour changes:
+
+- Observers reading `Transaction.Local` now see `false` for remote changes.
+- `Undo`/`Redo` skip steps that would no longer change anything, so one call
+  may undo an older step, and they return `false` when nothing changed.
+- Something inserted and deleted within one undo step stays deleted on undo.
+  Call `StopCapturing` between the two if you want separate steps.
+- **Rolling upgrades:** ygo 1.51.0 and older cannot read V1 updates carrying
+  legacy JSON content written by this version. Upgrade all nodes before
+  relaying such documents in V1, or use V2.
+
 ## v1.51.0
 
 **Who is affected:** anyone who applies *merged* updates one at a time with
