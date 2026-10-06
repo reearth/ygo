@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -121,4 +122,82 @@ func TestUnit_Item_SplitAndMerge_PreserveRedone(t *testing.T) {
 	require.NotNil(t, right.redone)
 	require.Equal(t, ID{Client: 7, Clock: 42}, *right.redone)
 	require.Same(t, right, orig.Right, "commit must not re-merge redone halves")
+}
+
+// requireConverged asserts that a full sync with b, b itself and a fresh doc
+// rebuilt from a's state all keep a's current reading.
+func requireConverged(t *testing.T, a, b *Doc, read func(*Doc) string) {
+	t.Helper()
+	want := read(a)
+	syncTo(t, a, b)
+	syncTo(t, b, a)
+	require.Equal(t, want, read(a), "sync changed the local state")
+	require.Equal(t, want, read(b), "peer diverged")
+	fresh := newTestDoc(9)
+	require.NoError(t, ApplyUpdateV1(fresh, EncodeStateAsUpdateV1(a, nil), nil))
+	require.Equal(t, want, read(fresh), "reload diverged")
+}
+
+func mapJSON(name string) func(*Doc) string {
+	return func(d *Doc) string {
+		b, _ := d.GetMap(name).ToJSON()
+		return string(b)
+	}
+}
+
+func arrayJSON(name string) func(*Doc) string {
+	return func(d *Doc) string {
+		b, _ := d.GetArray(name).ToJSON()
+		return string(b)
+	}
+}
+
+// An entry overwritten inside a container that the same undo re-creates must
+// be restored into the redone container, not chained after its old value in
+// the deleted one (where peers and a reload would place it).
+func TestInteg_UndoManager_OverwrittenEntryInRedoneMap_Converges(t *testing.T) {
+	docA, docB := newTestDoc(1), newTestDoc(2)
+	m := docA.GetMap("m")
+	um := NewUndoManager(docA, []SharedType{m}, WithCaptureTimeout(time.Hour))
+	docA.Transact(func(txn *Transaction) {
+		n := NewMapPrelim()
+		n.Set(txn, "k", 4)
+		m.Set(txn, "k3", n)
+	})
+	syncTo(t, docA, docB)
+	um.StopCapturing()
+	v, _ := m.Get("k3")
+	inner := v.(*YMap)
+	docA.Transact(func(txn *Transaction) { inner.Set(txn, "k", 6) })
+	docA.Transact(func(txn *Transaction) { m.Set(txn, "k3", 7) })
+
+	require.True(t, um.Undo())
+	require.Equal(t, `{"k3":{"k":4}}`, mapJSON("m")(docA))
+	requireConverged(t, docA, docB, mapJSON("m"))
+
+	require.True(t, um.Redo())
+	require.True(t, um.Undo())
+	require.Equal(t, `{"k3":{"k":4}}`, mapJSON("m")(docA))
+	requireConverged(t, docA, docB, mapJSON("m"))
+}
+
+// Same, for a map element of an array.
+func TestInteg_UndoManager_OverwrittenEntryInRedoneArrayElement_Converges(t *testing.T) {
+	docA, docB := newTestDoc(1), newTestDoc(2)
+	arr := docA.GetArray("a")
+	um := NewUndoManager(docA, []SharedType{arr}, WithCaptureTimeout(time.Hour))
+	docA.Transact(func(txn *Transaction) {
+		n := NewMapPrelim()
+		n.Set(txn, "k", 2)
+		arr.InsertType(txn, 0, n)
+	})
+	syncTo(t, docA, docB)
+	um.StopCapturing()
+	inner := arr.Get(0).(*YMap)
+	docA.Transact(func(txn *Transaction) { inner.Set(txn, "k", 6) })
+	docA.Transact(func(txn *Transaction) { arr.Delete(txn, 0, 1) })
+
+	require.True(t, um.Undo())
+	require.Equal(t, `[{"k":2}]`, arrayJSON("a")(docA))
+	requireConverged(t, docA, docB, arrayJSON("a"))
 }

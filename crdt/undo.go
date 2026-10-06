@@ -481,6 +481,11 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, redoSet map[*Item]s
 		if left == nil || nextSameKey(left) != nil {
 			return nil
 		}
+		// The walk ran in the deleted container; chain after the key's entry in
+		// its redone copy, since peers derive the parent from the origin.
+		if left.Parent != parent {
+			left = parent.itemMap[*item.ParentSub]
+		}
 	} else if existing, ok := parent.itemMap[*item.ParentSub]; ok {
 		// Map entry: chain after the key's current entry. right stays nil.
 		left = existing
