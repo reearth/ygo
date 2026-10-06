@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -376,7 +377,8 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 		vals := ct.Vals[offset:]
 		enc.WriteVarUint(uint64(len(vals)))
 		for _, v := range vals {
-			enc.WriteAny(v)
+			// Yjs writes JSON text per value in V1 too, not lib0 Any.
+			enc.WriteVarString(fmtValToJSON(v))
 		}
 	case *ContentBinary:
 		enc.WriteVarBytes(ct.Data)
@@ -1051,7 +1053,11 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		}
 		vals := make([]any, n)
 		for i := range vals {
-			if vals[i], err = dec.ReadAny(); err != nil {
+			js, err := dec.ReadVarString()
+			if err != nil {
+				return nil, err
+			}
+			if vals[i], err = fmtValFromJSON(js); err != nil {
 				return nil, err
 			}
 		}
@@ -1284,22 +1290,25 @@ func wrapUpdateErr(err error) error {
 	return fmt.Errorf("%w: %v", ErrInvalidUpdate, err)
 }
 
-// fmtValToJSON serialises a ContentFormat attribute value as a JSON string,
-// matching Yjs's ContentFormat.write() which calls encoder.writeJSON(value).
+// fmtValToJSON serialises a ContentFormat/ContentEmbed/ContentJSON value as
+// JSON text, matching Yjs's JSON.stringify. HTML escaping is off because
+// JSON.stringify never escapes <, > or &.
 func fmtValToJSON(v any) string {
 	if v == nil {
 		return "null"
 	}
-	b, err := json.Marshal(v)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		return "null"
 	}
-	return string(b)
+	return string(bytes.TrimSuffix(buf.Bytes(), []byte("\n")))
 }
 
-// fmtValFromJSON deserialises a ContentFormat attribute value from a JSON
-// string, matching Yjs's ContentFormat.read() which calls decoder.readJSON().
-// Numbers decode as float64, booleans as bool, null as nil.
+// fmtValFromJSON parses JSON text written by fmtValToJSON or Yjs's
+// JSON.stringify, with Yjs's 'undefined' marker as nil. Numbers decode as
+// float64, booleans as bool, null as nil.
 func fmtValFromJSON(s string) (any, error) {
 	if s == "undefined" {
 		return nil, nil

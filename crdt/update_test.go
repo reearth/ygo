@@ -389,6 +389,9 @@ func FuzzApplyUpdateV1(f *testing.F) {
 	for _, s := range fuzzSeedsV1() {
 		f.Add(s)
 	}
+	for _, s := range contentJSONFuzzSeeds(false) {
+		f.Add(s)
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		d := New()
 		_ = ApplyUpdateV1(d, data, nil) // must not panic regardless of input
@@ -408,6 +411,9 @@ func FuzzApplyUpdateV2(f *testing.F) {
 	tc := d.GetText("c")
 	d.Transact(func(txn *Transaction) { tc.Insert(txn, 0, "hello", nil) })
 	f.Add(EncodeStateAsUpdateV2(d, nil))
+	for _, s := range contentJSONFuzzSeeds(true) {
+		f.Add(s)
+	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		d := New()

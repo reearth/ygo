@@ -298,11 +298,11 @@ func (m *YMap) Get(key string) (any, bool) {
 	if ct, ok := item.Content.(*ContentType); ok {
 		return ct.Type.owner, ct.Type.owner != nil
 	}
-	ca, ok := item.Content.(*ContentAny)
-	if !ok || len(ca.Vals) == 0 {
+	vals, ok := plainVals(item.Content)
+	if !ok || len(vals) == 0 {
 		return nil, false
 	}
-	return ca.Vals[0], true
+	return vals[0], true
 }
 
 // Has reports whether key has a live (non-deleted) entry.
@@ -418,8 +418,8 @@ func (m *YMap) ForEach(fn func(key string, value any)) {
 		if item.Deleted {
 			continue
 		}
-		if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-			fn(k, ca.Vals[0])
+		if vals, ok := plainVals(item.Content); ok && len(vals) > 0 {
+			fn(k, vals[0])
 		}
 	}
 }

@@ -414,9 +414,10 @@ func (a *YArray) Get(index int) any {
 	if _, _, renderAt := t.renderedStep(item); renderAt != nil {
 		valItem = renderAt
 	}
+	if vals, ok := plainVals(valItem.Content); ok {
+		return vals[index-start]
+	}
 	switch c := valItem.Content.(type) {
-	case *ContentAny:
-		return c.Vals[index-start]
 	case *ContentType:
 		return c.Type.owner
 	}
@@ -485,8 +486,8 @@ func (a *YArray) toSliceLocked() []any {
 			if a.doc != nil {
 				target := a.doc.store.Find(*cm.Target)
 				if target != nil && target.MovedBy == item && !target.Deleted {
-					if ca, ok := target.Content.(*ContentAny); ok {
-						result = append(result, ca.Vals...)
+					if vals, ok := plainVals(target.Content); ok {
+						result = append(result, vals...)
 					}
 				}
 			}
@@ -646,7 +647,7 @@ func (a *YArray) Slice(start, end int) []any {
 		if renderAt != nil {
 			valItem = renderAt
 		}
-		ca, ok := valItem.Content.(*ContentAny)
+		vals, ok := plainVals(valItem.Content)
 		if !ok {
 			// Countable but not a plain-value item (e.g. a nested ContentType):
 			// advance the rendered cursor by its full contribution without
@@ -655,7 +656,7 @@ func (a *YArray) Slice(start, end int) []any {
 			counted += n
 			continue
 		}
-		for _, v := range ca.Vals {
+		for _, v := range vals {
 			if counted >= start && counted < end {
 				result = append(result, v)
 			}
@@ -702,8 +703,8 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 		if renderAt != nil {
 			valItem = renderAt
 		}
-		if ca, ok := valItem.Content.(*ContentAny); ok {
-			for _, v := range ca.Vals {
+		if vals, ok := plainVals(valItem.Content); ok {
+			for _, v := range vals {
 				fn(index, v)
 				index++
 			}

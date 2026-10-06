@@ -191,6 +191,18 @@ func (c *ContentJSON) Splice(offset int) Content {
 	return right
 }
 
+// plainVals returns the values of a plain-value item: ContentAny, or the
+// legacy ContentJSON that every reader must treat identically.
+func plainVals(c Content) ([]any, bool) {
+	switch ct := c.(type) {
+	case *ContentAny:
+		return ct.Vals, true
+	case *ContentJSON:
+		return ct.Vals, true
+	}
+	return nil, false
+}
+
 // ContentEmbed holds a single embedded object (e.g. an image or formula in rich text).
 type ContentEmbed struct{ Val any }
 

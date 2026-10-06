@@ -1091,14 +1091,8 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 			if err != nil {
 				return nil, err
 			}
-			if s == "undefined" {
-				vals[i] = nil
-			} else {
-				v, err := fmtValFromJSON(s)
-				if err != nil {
-					return nil, err
-				}
-				vals[i] = v
+			if vals[i], err = fmtValFromJSON(s); err != nil {
+				return nil, err
 			}
 		}
 		return NewContentJSON(vals...), nil
