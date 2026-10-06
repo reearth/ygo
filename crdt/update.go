@@ -1051,15 +1051,28 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if n > uint64(dec.Remaining()) {
 			return nil, ErrInvalidUpdate
 		}
-		vals := make([]any, n)
-		for i := range vals {
-			js, err := dec.ReadVarString()
+		if n == 0 || !isAnyTag(dec.RemainingBytes()[0]) {
+			vals, err := readJSONVals(dec, n)
 			if err != nil {
 				return nil, err
 			}
-			if vals[i], err = fmtValFromJSON(js); err != nil {
-				return nil, err
+			return NewContentJSON(vals...), nil
+		}
+		// ygo ≤1.51.0 wrote lib0 Any per value, always starting with a tag
+		// 116–127, as does a 116–127-byte JSON text. One encoder writes the
+		// whole item, so try JSON text for all values, else Any for all.
+		// JSON text (Yjs) wins input valid both ways.
+		rem := dec.RemainingBytes()
+		sub := encoding.NewDecoder(rem)
+		vals, jsonErr := readJSONVals(sub, n)
+		if jsonErr == nil {
+			for range len(rem) - sub.Remaining() {
+				_, _ = dec.ReadUint8()
 			}
+			return NewContentJSON(vals...), nil
+		}
+		if vals, err = readLegacyAnyVals(dec, n); err != nil {
+			return nil, jsonErr
 		}
 		return NewContentJSON(vals...), nil
 
@@ -1318,6 +1331,57 @@ func fmtValFromJSON(s string) (any, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+// isAnyTag reports whether b is a lib0 Any type tag.
+func isAnyTag(b byte) bool { return b >= 116 && b <= 127 }
+
+// readJSONVals reads n ContentJSON values in Yjs's JSON-text form.
+func readJSONVals(dec *encoding.Decoder, n uint64) ([]any, error) {
+	vals := make([]any, n)
+	for i := range vals {
+		js, err := dec.ReadVarString()
+		if err != nil {
+			return nil, err
+		}
+		if vals[i], err = fmtValFromJSON(js); err != nil {
+			return nil, err
+		}
+	}
+	return vals, nil
+}
+
+// readLegacyAnyVals reads n ContentJSON values in ygo ≤1.51.0's lib0 Any
+// form, with numbers widened to float64 as the JSON form decodes them.
+func readLegacyAnyVals(dec *encoding.Decoder, n uint64) ([]any, error) {
+	vals := make([]any, n)
+	for i := range vals {
+		v, err := dec.ReadAny()
+		if err != nil {
+			return nil, err
+		}
+		vals[i] = jsonNumbers(v)
+	}
+	return vals, nil
+}
+
+// jsonNumbers widens lib0 Any's float32 and int64 to float64, recursively.
+func jsonNumbers(v any) any {
+	switch x := v.(type) {
+	case float32:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case []any:
+		for i := range x {
+			x[i] = jsonNumbers(x[i])
+		}
+	case map[string]any:
+		for k := range x {
+			x[k] = jsonNumbers(x[k])
+		}
+	}
+	return v
 }
 
 // tryIntegrate attempts to integrate item into the doc store. Returns

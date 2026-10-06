@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"encoding/hex"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -391,6 +392,11 @@ func FuzzApplyUpdateV1(f *testing.F) {
 	}
 	for _, s := range contentJSONFuzzSeeds(false) {
 		f.Add(s)
+	}
+	for _, h := range legacyContentJSONV1Fixtures {
+		if b, err := hex.DecodeString(h); err == nil {
+			f.Add(b)
+		}
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		d := New()
