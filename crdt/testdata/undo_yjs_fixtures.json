@@ -71,6 +71,15 @@
       "kind": "array",
       "updateV1": "0102effdb6f50d00080101610177046261736548effdb6f50d000177017801effdb6f50d010002",
       "expectedJSON": "[]"
+    },
+    {
+      "name": "edit_after_undo_starts_new_item",
+      "description": "An edit right after an undo is not merged into the next-older stack item (undo stops capturing).",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0103effdb6f50d002801016d0161017d012801016d0162017d022801016d0163017d0301effdb6f50d010102",
+      "expectedJSON": "{\"a\":1}"
     }
   ]
 }

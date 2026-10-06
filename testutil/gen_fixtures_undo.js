@@ -166,6 +166,19 @@ const fixtures = [
       um.undo()
     }
   ),
+  authored(
+    'edit_after_undo_starts_new_item',
+    'An edit right after an undo is not merged into the next-older stack item (undo stops capturing).',
+    'm', 'map',
+    (doc, m, um) => {
+      m.set('a', 1)
+      um.stopCapturing()
+      m.set('b', 2)
+      um.undo()
+      m.set('c', 3)
+      um.undo()
+    }
+  ),
 ]
 
 const out = path.join(__dirname, '..', 'crdt', 'testdata', 'undo_yjs_fixtures.json')

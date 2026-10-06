@@ -242,6 +242,9 @@ func (u *UndoManager) pop(redo bool) bool {
 			u.undoStack = append(u.undoStack, inverse)
 		} else {
 			u.redoStack = append(u.redoStack, inverse)
+			// The next edit must not merge into the next-older item (Yjs stops
+			// capturing after an undo, not a redo).
+			u.lastTxnTime = time.Time{}
 		}
 		u.fireOnStackItemAdded(inverse, !redo)
 		u.mu.Unlock()

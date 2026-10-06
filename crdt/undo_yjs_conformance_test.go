@@ -139,6 +139,15 @@ var undoBuilders = map[string]func(*Doc, SharedType, *UndoManager){
 		doc.Transact(func(txn *Transaction) { arr.Delete(txn, 0, 1) })
 		um.Undo()
 	},
+	"edit_after_undo_starts_new_item": func(doc *Doc, st SharedType, um *UndoManager) {
+		m := st.(*YMap)
+		doc.Transact(func(txn *Transaction) { m.Set(txn, "a", 1) })
+		um.StopCapturing()
+		doc.Transact(func(txn *Transaction) { m.Set(txn, "b", 2) })
+		um.Undo()
+		doc.Transact(func(txn *Transaction) { m.Set(txn, "c", 3) })
+		um.Undo()
+	},
 }
 
 func undoFixtureRoot(doc *Doc, f undoFixture) (SharedType, func() ([]byte, error)) {

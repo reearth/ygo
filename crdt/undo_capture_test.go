@@ -325,3 +325,21 @@ func TestInteg_UndoManager_ConcurrentCaptureAndUndo(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// Undo stops capturing, so an edit right after it starts a new stack item
+// instead of merging into the next-older one (Yjs afterTransactionHandler).
+func TestUnit_UndoManager_EditAfterUndoStartsNewItem(t *testing.T) {
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	txt := doc.GetText("t")
+	um := NewUndoManager(doc, []SharedType{m, txt}, WithCaptureTimeout(time.Hour))
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "ba", nil) })
+	um.StopCapturing()
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "ea", nil) })
+	require.True(t, um.Undo())
+	doc.Transact(func(txn *Transaction) { m.Set(txn, "k2", 14) })
+
+	require.True(t, um.Undo())
+	require.Equal(t, "ba", txt.ToString())
+	require.False(t, m.Has("k2"))
+}
