@@ -393,6 +393,13 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 			u.redoItem(txn, it, redoSet)
 		}
 
+		// The item.delete calls above bypass deleteRange's marker shift, so
+		// cached positions after a deleted item would overshoot (Yjs
+		// popStackItem clears _searchMarker the same way).
+		for t := range txn.changed {
+			t.clearMarkers()
+		}
+
 		resultItem = &StackItem{
 			beforeState: txn.beforeState.Clone(),
 			// Capture afterState from the live store: txn.afterState is only set

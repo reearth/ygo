@@ -479,27 +479,17 @@ func (a *YArray) toSliceLocked() []any {
 	t := &a.abstractType
 	result := make([]any, 0, t.length)
 	for item := t.start; item != nil; item = item.Right {
-		if item.Deleted {
+		// renderedStep (shared with Get) also expands a winning move to its
+		// target, whatever the target's content kind.
+		countable, _, renderAt := t.renderedStep(item)
+		if !countable {
 			continue
 		}
-		if cm, ok := item.Content.(*ContentMove); ok {
-			if a.doc != nil {
-				target := a.doc.store.Find(*cm.Target)
-				if target != nil && target.MovedBy == item && !target.Deleted {
-					if vals, ok := plainVals(target.Content); ok {
-						result = append(result, vals...)
-					}
-				}
-			}
-			continue
+		valItem := item
+		if renderAt != nil {
+			valItem = renderAt
 		}
-		if !item.Content.IsCountable() {
-			continue
-		}
-		if item.MovedBy != nil {
-			continue
-		}
-		switch c := item.Content.(type) {
+		switch c := valItem.Content.(type) {
 		case *ContentAny:
 			result = append(result, c.Vals...)
 		case *ContentJSON:

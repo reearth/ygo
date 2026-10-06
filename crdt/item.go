@@ -207,17 +207,18 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// markers before it — so a subsequent nearby lookup still gets a cache hit.
 	// For hintless middle insertions (remote applies, where the rendered index
 	// is not known here) we conservatively clear all markers.
+	// The hint is one-shot for whichever item integrates next: a non-countable
+	// insert (ContentMove) must not leave it for a later, unrelated insert.
+	hint := item.Parent.insertHint
+	item.Parent.insertHint = 0
 	if !item.Deleted && item.Content.IsCountable() {
 		item.Parent.length += item.Content.Len()
 		if item.Right != nil {
-			if hint := item.Parent.insertHint; hint > 0 {
-				item.Parent.insertHint = 0
+			if hint > 0 {
 				item.Parent.updateMarkerChanges(hint, item.Content.Len())
 			} else {
 				item.Parent.clearMarkers()
 			}
-		} else {
-			item.Parent.insertHint = 0 // end-append: markers before the end stay valid.
 		}
 	}
 
@@ -411,8 +412,9 @@ func (item *Item) delete(txn *Transaction) {
 	// txn.Local since local move-deletes also take this path. ContentMove is
 	// non-countable, so the block above never runs for it.
 	if item.Parent != nil {
-		if _, ok := item.Content.(*ContentMove); ok {
+		if cm, ok := item.Content.(*ContentMove); ok {
 			item.Parent.clearMarkers()
+			rearbitrateMove(txn, item, cm)
 		} else if item.MovedBy != nil {
 			item.Parent.clearMarkers()
 		}
@@ -496,6 +498,32 @@ func originIDEquals(a, b *ID) bool {
 		return false
 	}
 	return a.Client == b.Client && a.Clock == b.Clock
+}
+
+// rearbitrateMove hands a target whose winning move was just tombstoned to the
+// next live move by the integrate rule (lowest ClientID, then earliest clock),
+// or back to its origin when none remains. Without this the target kept
+// MovedBy pointing at a dead move: still counted in length, rendered nowhere.
+// The O(n) scan only runs when the deleted move was the winner.
+func rearbitrateMove(txn *Transaction, move *Item, cm *ContentMove) {
+	if cm.Target == nil {
+		return
+	}
+	target := txn.doc.store.Find(*cm.Target)
+	if target == nil || target.MovedBy != move {
+		return
+	}
+	target.MovedBy = nil
+	for it := move.Parent.start; it != nil; it = it.Right {
+		c, ok := it.Content.(*ContentMove)
+		if !ok || it.Deleted || c.Target == nil || txn.doc.store.Find(*c.Target) != target {
+			continue
+		}
+		if w := target.MovedBy; w == nil || it.ID.Client < w.ID.Client ||
+			(it.ID.Client == w.ID.Client && it.ID.Clock < w.ID.Clock) {
+			target.MovedBy = it
+		}
+	}
 }
 
 // resolveMovedItem finds the item at targetID and ensures it covers exactly
