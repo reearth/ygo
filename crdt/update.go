@@ -48,6 +48,7 @@ func EncodeStateAsUpdateV1(doc *Doc, sv StateVector) []byte {
 func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 	var applyErr error
 	doc.Transact(func(txn *Transaction) {
+		txn.Local = false // Yjs readUpdate: transact(..., local=false)
 		applyErr = applyV1Txn(txn, update)
 	}, origin)
 	return applyErr
@@ -95,6 +96,7 @@ func withParked(doc *Doc, sv StateVector, state []byte,
 func ApplyUpdateV2(doc *Doc, update []byte, origin any) error {
 	var applyErr error
 	doc.Transact(func(txn *Transaction) {
+		txn.Local = false // Yjs readUpdate: transact(..., local=false)
 		applyErr = applyV2Txn(txn, update)
 	}, origin)
 	return applyErr

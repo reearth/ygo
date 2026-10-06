@@ -39,7 +39,8 @@ func WithCaptureTimeout(d time.Duration) UndoManagerOption {
 
 // WithTrackedOrigins restricts the UndoManager to only capture transactions
 // whose Origin matches one of the provided values. By default (no option set)
-// all local transactions are captured regardless of origin.
+// all local transactions are captured regardless of origin. Applied remote
+// updates (txn.Local == false) are never captured, even with a tracked origin.
 //
 // This is useful for multi-user documents where each user has a distinct
 // origin tag and should only be able to undo their own changes.
@@ -87,7 +88,8 @@ func WithTrackedOrigins(origins ...any) UndoManagerOption {
 
 // UndoManager tracks local transactions on one or more shared types and
 // provides Undo / Redo operations. Only transactions originating on this
-// peer (txn.Local == true) are captured; remote updates are ignored.
+// peer (txn.Local == true) are captured; applied remote updates are ignored
+// whatever their origin. (Yjs gates on trackedOrigins alone.)
 //
 // Undo inverts the most recent captured change: insertions are deleted and
 // deletions are restored. Redo re-applies the most recently undone change.

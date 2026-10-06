@@ -12,7 +12,7 @@ import (
 type Transaction struct {
 	doc         *Doc
 	Origin      any  // user-supplied tag forwarded to update observers
-	Local       bool // true when the change originated on this peer
+	Local       bool // true when the change originated on this peer; false while applying a remote update
 	deleteSet   DeleteSet
 	beforeState StateVector
 	afterState  StateVector
@@ -132,17 +132,16 @@ func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
 // ensuring pre-existing items (which snapshot clock boundaries reference) are
 // never modified.
 //
-// squashRuns runs only for LOCAL transactions. For remote updates (bulk decode)
-// items arrive already compacted from the sender or are left as individual
-// units — the cost of squashing 182k remote items outweighs the benefit, since
-// subsequent local edits will squash their own new items incrementally.
+// squashRuns runs for remote applies too (Yjs merges structs after every
+// transaction): a peer's per-keystroke history then loads as one item per run
+// rather than one per keystroke.
 //
 // Performance: uses a two-pointer (run) approach with strings.Builder so that
 // string concatenation is O(total_run_length) rather than O(n²), and tracks
 // the expected next-clock without calling left.Content.Len() on the growing
 // merged string. Store compaction is a single O(n) filter pass per client.
 func squashRuns(txn *Transaction) {
-	if !txn.Local || len(txn.newItems) == 0 {
+	if len(txn.newItems) == 0 {
 		return
 	}
 

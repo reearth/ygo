@@ -145,10 +145,9 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 				}
 				item.delete(txn)
 				// Search-marker invalidation for the remote delete-apply path
-				// (the v1.31.6 stale-cache class, #181). Remote applies run with
-				// txn.Local==true (transactInternal hardcodes it), so
-				// item.delete's own marker invalidation (guarded on !txn.Local)
-				// is dead here. The rendered index of the tombstoned item is not
+				// (the v1.31.6 stale-cache class, #181). item.delete clears only
+				// when !txn.Local, and Local is a caller-writable field, so do
+				// not rely on it here. The rendered index of the tombstoned item is not
 				// tracked by this delete-set walk, so a precise
 				// updateMarkerChanges(index, -len) is not available — we clear all
 				// markers, which is always safe (the next lookup repopulates via a

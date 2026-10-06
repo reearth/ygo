@@ -381,11 +381,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 // know the rendered position of the deleted item. For local transactions the
 // caller (deleteRange) performs the precise updateMarkerChanges(index, -len)
 // once, after tombstoning the range, so we skip any per-item work here (also
-// avoiding O(n²) clears across a multi-item delete). NOTE: transactInternal
-// hardcodes txn.Local=true even for remote applies, so this branch is dead on
-// the ApplyUpdate path — the remote delete-apply invalidation lives in
-// delete_set.go (applyToPartial). This branch only fires for the rare direct
-// item.delete under an explicitly non-local transaction.
+// avoiding O(n²) clears across a multi-item delete). applyToPartial in
+// delete_set.go also clears after each remote delete, so a caller-set Local
+// cannot leave stale markers.
 //
 // Cascade: when this item wraps a ContentType (nested YMap/YArray/YText/…),
 // every child item is recursively deleted so the delete-set encoded on the
