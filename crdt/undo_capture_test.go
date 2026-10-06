@@ -1,6 +1,8 @@
 package crdt
 
 import (
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -289,4 +291,37 @@ func TestUnit_UndoManager_MapRestorePastUndoneValue(t *testing.T) {
 	require.False(t, m.Has("k"))
 	require.True(t, um.Redo())
 	require.Equal(t, "R", get())
+}
+
+// Capture merges into the top stack item after the doc unlocks, while a
+// concurrent Undo consults the other stack items' deletions; run under -race.
+func TestInteg_UndoManager_ConcurrentCaptureAndUndo(t *testing.T) {
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	um := NewUndoManager(doc, []SharedType{m}, WithCaptureTimeout(time.Hour))
+	for i := 0; i < 200; i++ {
+		doc.Transact(func(txn *Transaction) { m.Set(txn, "k", i) })
+		if i%3 == 0 {
+			um.StopCapturing()
+		}
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 300; i++ {
+			doc.Transact(func(txn *Transaction) {
+				m.Set(txn, "k"+strconv.Itoa(i%3), i)
+				m.Delete(txn, "k")
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 300; i++ {
+			um.Undo()
+			um.Redo()
+		}
+	}()
+	wg.Wait()
 }

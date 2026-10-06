@@ -223,7 +223,14 @@ func (u *UndoManager) pop(redo bool) bool {
 		}
 		item := (*stack)[len(*stack)-1]
 		*stack = (*stack)[:len(*stack)-1]
-		others := slices.Concat(u.undoStack, u.redoStack)
+		// Snapshot the deletions under u.mu: capture replaces them (copy-on-write)
+		// once the doc unlocks.
+		others := make([]DeleteSet, 0, len(u.undoStack)+len(u.redoStack))
+		for _, st := range [][]*StackItem{u.undoStack, u.redoStack} {
+			for _, s := range st {
+				others = append(others, s.deletions)
+			}
+		}
 		u.mu.Unlock()
 
 		inverse := u.applyStackItem(item, others)
@@ -312,7 +319,8 @@ func (u *UndoManager) captureTransaction(txn *Transaction) {
 
 	now := time.Now()
 	if len(u.undoStack) > 0 && !u.lastTxnTime.IsZero() && now.Sub(u.lastTxnTime) <= u.captureTimeout {
-		// Copy-on-write: a concurrent Undo may be reading top.deletions.
+		// Copy-on-write: a concurrent Undo may be reading a snapshot of
+		// top.deletions.
 		top := u.undoStack[len(u.undoStack)-1]
 		top.insertions.Merge(item.insertions)
 		merged := cloneDeleteSet(top.deletions)
@@ -331,9 +339,9 @@ func (u *UndoManager) captureTransaction(txn *Transaction) {
 // applyStackItem executes the inverse of item as a new local transaction and
 // returns a new StackItem representing what that inversion did (for the
 // opposite stack). Returns nil if it changed nothing (e.g. every referenced
-// item was already deleted or GC'd). others are the remaining stack items,
-// consulted by the map-key conflict check.
-func (u *UndoManager) applyStackItem(item *StackItem, others []*StackItem) *StackItem {
+// item was already deleted or GC'd). others are the remaining stack items'
+// deletions, consulted by the map-key conflict check.
+func (u *UndoManager) applyStackItem(item *StackItem, others []DeleteSet) *StackItem {
 	var resultItem *StackItem
 
 	u.doc.Transact(func(txn *Transaction) {
@@ -409,7 +417,7 @@ func (u *UndoManager) applyStackItem(item *StackItem, others []*StackItem) *Stac
 // nested type is placed into the type's redone copy, redoing the container
 // first when it is in redoSet. Mirrors Yjs redoItem.
 // Returns the new item, or nil if it cannot be placed.
-func (u *UndoManager) redoItem(txn *Transaction, item *Item, redoSet map[*Item]struct{}, insertions DeleteSet, others []*StackItem) *Item {
+func (u *UndoManager) redoItem(txn *Transaction, item *Item, redoSet map[*Item]struct{}, insertions DeleteSet, others []DeleteSet) *Item {
 	if item.redone != nil {
 		return u.doc.store.getItemCleanStart(txn, *item.redone)
 	}
@@ -518,11 +526,11 @@ func nextSameKey(item *Item) *Item {
 	return nil
 }
 
-// deletedByStacks reports whether any stack item deleted id (Yjs
+// deletedByStacks reports whether any stack item's deletions include id (Yjs
 // isDeletedByUndoStack).
-func deletedByStacks(stacks []*StackItem, id ID) bool {
-	for _, s := range stacks {
-		if s.deletions.IsDeleted(id) {
+func deletedByStacks(stacks []DeleteSet, id ID) bool {
+	for _, ds := range stacks {
+		if ds.IsDeleted(id) {
 			return true
 		}
 	}
