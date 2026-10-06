@@ -172,12 +172,12 @@ func TestInteg_UndoManager_OverwrittenEntryInRedoneMap_Converges(t *testing.T) {
 	docA.Transact(func(txn *Transaction) { m.Set(txn, "k3", 7) })
 
 	require.True(t, um.Undo())
-	require.Equal(t, `{"k3":{"k":4}}`, mapJSON("m")(docA))
+	require.JSONEq(t, `{"k3":{"k":4}}`, mapJSON("m")(docA))
 	requireConverged(t, docA, docB, mapJSON("m"))
 
 	require.True(t, um.Redo())
 	require.True(t, um.Undo())
-	require.Equal(t, `{"k3":{"k":4}}`, mapJSON("m")(docA))
+	require.JSONEq(t, `{"k3":{"k":4}}`, mapJSON("m")(docA))
 	requireConverged(t, docA, docB, mapJSON("m"))
 }
 
