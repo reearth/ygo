@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"encoding/base64"
 	"sort"
 	"testing"
 
@@ -108,4 +109,109 @@ func fmtKeys(ks []string) string {
 		out += k
 	}
 	return out
+}
+
+// Reported on PR #257: an application compacting its stored update log. Rows
+// are one client's V1 updates in storage order — clocks 0-4, 5-6, 10-11 (a
+// nested map "nested" holding key "k"), then 7-9.
+var compactionRows = []string{
+	"AQFlAAQBAXQFIGNlY2gA",
+	"AQJlBQcBAWEBKABlBQF2AXcDaGJmAA==",
+	"AQJlCicBAW0GbmVzdGVkASgAZQoBawF3BWdmYWhlAA==",
+	"AQFlB8RlAWUCA2JmZwA=",
+}
+
+func readCompaction(t *testing.T, d *Doc) string {
+	t.Helper()
+	m, err := d.GetMap("m").ToJSON()
+	require.NoError(t, err)
+	return d.GetText("t").ToString() + " " + string(m)
+}
+
+const compactionWant = ` cbfgech {"nested":{"k":"gfahe"}}`
+
+func TestUnit_ApplyUpdate_CompactedLogThenFiller(t *testing.T) {
+	for _, f := range skipGapFormats {
+		t.Run(f.name, func(t *testing.T) {
+			rows := make([][]byte, len(compactionRows))
+			for i, s := range compactionRows {
+				v1, err := base64.StdEncoding.DecodeString(s)
+				require.NoError(t, err)
+				rows[i], err = f.conv(v1)
+				require.NoError(t, err)
+			}
+			merged, err := f.merge(rows[0], rows[1], rows[2])
+			require.NoError(t, err)
+			d := New()
+			require.NoError(t, f.apply(d, merged, nil))
+			require.NoError(t, f.apply(d, rows[3], nil))
+			require.Equal(t, compactionWant, readCompaction(t, d))
+		})
+	}
+}
+
+// EncodeStateAsUpdate must carry structs and deletions still parked on a
+// missing dependency, as Yjs encodeStateAsUpdate includes pendingStructs and
+// pendingDs. Otherwise a snapshot taken while anything is parked loses it for
+// good once the filler arrives.
+func TestUnit_EncodeStateAsUpdate_IncludesParked(t *testing.T) {
+	encodes := []struct {
+		name   string
+		encode func(*Doc, StateVector) []byte
+		apply  func(*Doc, []byte, any) error
+	}{
+		{"V1", EncodeStateAsUpdateV1, ApplyUpdateV1},
+		{"V2", EncodeStateAsUpdateV2, ApplyUpdateV2},
+	}
+	rows := make([][]byte, len(compactionRows))
+	for i, s := range compactionRows {
+		var err error
+		rows[i], err = base64.StdEncoding.DecodeString(s)
+		require.NoError(t, err)
+	}
+	for _, e := range encodes {
+		t.Run(e.name+"/structs", func(t *testing.T) {
+			d := New()
+			for _, r := range rows[:3] { // row 2 parks on the 7-9 gap
+				require.NoError(t, ApplyUpdateV1(d, r, nil))
+			}
+			fresh := New()
+			require.NoError(t, e.apply(fresh, e.encode(d, nil), nil))
+			require.NoError(t, ApplyUpdateV1(fresh, rows[3], nil))
+			require.Equal(t, compactionWant, readCompaction(t, fresh))
+		})
+		t.Run(e.name+"/structs-diff", func(t *testing.T) {
+			d := New()
+			for _, r := range rows[:3] {
+				require.NoError(t, ApplyUpdateV1(d, r, nil))
+			}
+			peer := New()
+			require.NoError(t, ApplyUpdateV1(peer, rows[0], nil))
+			require.NoError(t, e.apply(peer, e.encode(d, peer.StateVector()), nil))
+			require.NoError(t, ApplyUpdateV1(peer, rows[3], nil))
+			require.Equal(t, compactionWant, readCompaction(t, peer))
+		})
+		t.Run(e.name+"/deletes", func(t *testing.T) {
+			ups := threeUpdates(t, func(doc *Doc, i int) {
+				doc.Transact(func(txn *Transaction) {
+					txt := txn.GetText("t")
+					switch i {
+					case 0:
+						txt.Insert(txn, 0, "abc", nil)
+					case 1:
+						txt.Insert(txn, 3, "d", nil)
+					case 2:
+						txt.Delete(txn, 3, 1)
+					}
+				})
+			})
+			d := New()
+			require.NoError(t, ApplyUpdateV1(d, ups[0], nil))
+			require.NoError(t, ApplyUpdateV1(d, ups[2], nil)) // delete of "d" parks
+			fresh := New()
+			require.NoError(t, e.apply(fresh, e.encode(d, nil), nil))
+			require.NoError(t, ApplyUpdateV1(fresh, ups[1], nil))
+			require.Equal(t, "abc", fresh.GetText("t").ToString())
+		})
+	}
 }

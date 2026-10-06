@@ -41,7 +41,7 @@ var ErrInvalidUpdate = errors.New("crdt: invalid update")
 func EncodeStateAsUpdateV1(doc *Doc, sv StateVector) []byte {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
-	return encodeV1Locked(doc, sv)
+	return withParked(doc, sv, encodeV1Locked(doc, sv), encodeStructStoreV1, MergeUpdatesV1)
 }
 
 // ApplyUpdateV1 decodes and integrates a V1 binary update into doc.
@@ -59,7 +59,36 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 func EncodeStateAsUpdateV2(doc *Doc, sv StateVector) []byte {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
-	return encodeV2Locked(doc, sv)
+	return withParked(doc, sv, encodeV2Locked(doc, sv), encodeStructStoreV2, MergeUpdatesV2)
+}
+
+// withParked merges structs and deletions still parked on a missing
+// dependency into an encoded state, as Yjs encodeStateAsUpdate does with
+// pendingStructs and pendingDs; a snapshot that dropped them would lose them
+// once the filler arrives. Kept out of encodeV1Locked so OnUpdate payloads
+// stay transaction-only, as in Yjs.
+func withParked(doc *Doc, sv StateVector, state []byte,
+	encode func(map[ClientID][]*Item, DeleteSet, StateVector, *StructStore) []byte,
+	merge func(...[]byte) ([]byte, error)) []byte {
+	s := doc.store
+	if s.pending == nil && len(s.pendingDs.clients) == 0 {
+		return state
+	}
+	updates := [][]byte{state}
+	if s.pending != nil {
+		// One update per item: parked items may overlap, and merge dedups.
+		for _, it := range s.pending.items {
+			updates = append(updates, encode(map[ClientID][]*Item{it.ID.Client: {it}}, newDeleteSet(), sv, s))
+		}
+	}
+	if len(s.pendingDs.clients) > 0 {
+		updates = append(updates, encode(nil, s.pendingDs, sv, s))
+	}
+	merged, err := merge(updates...)
+	if err != nil {
+		return state
+	}
+	return merged
 }
 
 // ApplyUpdateV2 decodes and integrates a Yjs V2 binary update into doc.

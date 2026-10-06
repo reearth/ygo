@@ -5,14 +5,16 @@
 that replays its stored log on load, or a peer that receives the output of
 `MergeUpdatesV1` / yjs `mergeUpdates`. If your adapter rebuilds documents by
 merging its whole log first (every adapter bundled with ygo does), you were not
-affected on load.
+affected on load. Applications that compact a stored log by merging rows were
+affected, and so were yjs clients loading a snapshot such a document produced.
 
 **What went wrong.** Merging two updates from the same client that are not
 consecutive — say its 1st and 3rd edits — produces an update with a marker
 saying "clocks withheld here". ygo read that marker the wrong way round, as
 "the receiver already has these". So when the 2nd edit arrived, ygo believed it
 already had it and threw it away. Nothing reported an error; the document was
-just missing that edit, permanently.
+just missing that edit, permanently. Worse, a snapshot of that document
+(`EncodeStateAsUpdateV1`) was malformed, and yjs threw a `TypeError` loading it.
 
 The websocket server can produce these merges itself: it batches persistence
 writes, and when several goroutines commit to one room concurrently their
@@ -31,6 +33,13 @@ ordinary incremental edit, or an update that only deletes — came back as an
 empty update, with no error. If you convert updates between formats at an edge
 (for example to talk to a V2 client), those edits never reached the other side.
 Both now produce exactly the bytes yjs's own converters do.
+
+**Also fixed: snapshots taken while an update is waiting.** When an update
+arrives before one it depends on, ygo holds it until the missing one shows up.
+`EncodeStateAsUpdateV1`/`V2` used to leave held updates out, so a snapshot
+taken in that window — a compaction, or a sync reply to a new peer — lost them
+for good. Snapshots now include them, byte for byte as yjs does. Thanks to
+@sjawhar for the report and reproduction.
 
 ## v1.50.0
 
