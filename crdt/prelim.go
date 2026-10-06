@@ -73,7 +73,7 @@ func NewArrayPrelim() *YArray {
 // A shared type attaches once: PushType panics if st is already attached,
 // already staged on this array, or staged on any other container (#222).
 // Deleting it from its staging container first makes it stageable again. It
-// also panics if st is a itself or holds a in its staged content (a cycle).
+// also panics if st is the receiver itself or holds it in its staged content (a cycle).
 //
 // Placement mirrors Push: anchor after the last PHYSICAL item, tombstones
 // included, matching Yjs's typeListPushGenerics.
@@ -184,7 +184,7 @@ func releaseStaged(v any) {
 //
 // A shared type attaches once: InsertType panics if st is already attached,
 // already staged on this array, or staged on any other container (#222),
-// and if st is a itself or holds a in its staged content (a cycle).
+// and if st is the receiver itself or holds it in its staged content (a cycle).
 //
 // Placement mirrors Insert: leftNeighbourAt uses LIVE-index semantics (it
 // skips tombstones), splitting the neighbour when the index falls inside it,

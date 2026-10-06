@@ -132,9 +132,9 @@ func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
 // ensuring pre-existing items (which snapshot clock boundaries reference) are
 // never modified.
 //
-// squashRuns runs for remote applies too (Yjs merges structs after every
-// transaction): a peer's per-keystroke history then loads as one item per run
-// rather than one per keystroke.
+// squashRuns runs for remote applies too, so a peer's per-keystroke history
+// loads as one item per run. Its adjacency test is looser than Yjs mergeWith,
+// which also compares Origin and OriginRight.
 //
 // Performance: uses a two-pointer (run) approach with strings.Builder so that
 // string concatenation is O(total_run_length) rather than O(n²), and tracks
