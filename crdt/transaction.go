@@ -27,6 +27,9 @@ type Transaction struct {
 	// transient (no item was inserted between them). Mirrors Yjs JS's
 	// `_mergeStructs` and powers gap #78 H2.
 	mergeStructs []*Item
+	// rearbitrate queues, per parent, move targets whose winning ContentMove
+	// was tombstoned; rearbitrateMoves resolves them in one pass at commit.
+	rearbitrate map[*abstractType]map[*Item]struct{}
 	// subdocsAdded/subdocsRemoved/subdocsLoaded track subdocument lifecycle
 	// changes made during this transaction (#63). Populated by Item.integrate
 	// and Item.delete when the item's Content is a *ContentDoc. Reconciled

@@ -649,6 +649,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 
 	retErr = fn(txn)
 
+	rearbitrateMoves(txn)
 	txn.afterState = d.store.StateVector()
 
 	squashRuns(txn)

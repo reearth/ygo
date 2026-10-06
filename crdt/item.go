@@ -500,11 +500,9 @@ func originIDEquals(a, b *ID) bool {
 	return a.Client == b.Client && a.Clock == b.Clock
 }
 
-// rearbitrateMove hands a target whose winning move was just tombstoned to the
-// next live move by the integrate rule (lowest ClientID, then earliest clock),
-// or back to its origin when none remains. Without this the target kept
+// rearbitrateMove releases a target whose winning move was just tombstoned and
+// queues it for rearbitrateMoves at commit. Without this the target kept
 // MovedBy pointing at a dead move: still counted in length, rendered nowhere.
-// The O(n) scan only runs when the deleted move was the winner.
 func rearbitrateMove(txn *Transaction, move *Item, cm *ContentMove) {
 	if cm.Target == nil {
 		return
@@ -514,15 +512,45 @@ func rearbitrateMove(txn *Transaction, move *Item, cm *ContentMove) {
 		return
 	}
 	target.MovedBy = nil
-	for it := move.Parent.start; it != nil; it = it.Right {
-		c, ok := it.Content.(*ContentMove)
-		if !ok || it.Deleted || c.Target == nil || txn.doc.store.Find(*c.Target) != target {
+	if txn.rearbitrate == nil {
+		txn.rearbitrate = make(map[*abstractType]map[*Item]struct{})
+	}
+	set := txn.rearbitrate[move.Parent]
+	if set == nil {
+		set = make(map[*Item]struct{})
+		txn.rearbitrate[move.Parent] = set
+	}
+	set[target] = struct{}{}
+}
+
+// rearbitrateMoves hands each queued target to its next live move by the
+// integrate rule (lowest ClientID, then earliest clock), or back to its
+// origin when none remains. One pass per parent keeps a delete of many
+// winning moves linear rather than one list scan per move; a deleted parent
+// (a cascade) renders nothing, so it is skipped.
+func rearbitrateMoves(txn *Transaction) {
+	for parent, targets := range txn.rearbitrate {
+		if pi := parent.item; pi != nil && pi.Deleted {
 			continue
 		}
-		if w := target.MovedBy; w == nil || it.ID.Client < w.ID.Client ||
-			(it.ID.Client == w.ID.Client && it.ID.Clock < w.ID.Clock) {
-			target.MovedBy = it
+		for target := range targets {
+			target.MovedBy = nil
 		}
+		for it := parent.start; it != nil; it = it.Right {
+			c, ok := it.Content.(*ContentMove)
+			if !ok || it.Deleted || c.Target == nil {
+				continue
+			}
+			target := txn.doc.store.Find(*c.Target)
+			if _, queued := targets[target]; !queued {
+				continue
+			}
+			if w := target.MovedBy; w == nil || it.ID.Client < w.ID.Client ||
+				(it.ID.Client == w.ID.Client && it.ID.Clock < w.ID.Clock) {
+				target.MovedBy = it
+			}
+		}
+		parent.clearMarkers()
 	}
 }
 
