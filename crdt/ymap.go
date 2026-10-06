@@ -174,8 +174,9 @@ func extractMapValue(item *Item) any {
 // A DETACHED shared type passed as value is staged (or attached, if this map
 // is live) as a nested type. A shared type attaches once: Set panics if the
 // value is already attached, staged under another key of this map, or staged
-// on any other container (#222). Overwriting or deleting a staged entry
-// releases its handle, making it stageable elsewhere.
+// on any other container (#222), and if it is m itself or holds m in its
+// staged content (a cycle). Overwriting or deleting a staged entry releases
+// its handle, making it stageable elsewhere.
 func (m *YMap) Set(txn *Transaction, key string, value any) {
 	checkUTF8("YMap.Set", "key", key)
 	checkAnyUTF8("YMap.Set", "value", value)
