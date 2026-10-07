@@ -83,7 +83,7 @@
     },
     {
       "name": "merged_run_undo_delete_then_remote_insert",
-      "description": "Two pushes Yjs holds as one struct are restored as one item, so a concurrent insert lands after both (#278).",
+      "description": "Two pushes Yjs holds as one struct are restored as one item, so a concurrent insert lands after both.",
       "clientID": 3735928559,
       "root": "a",
       "kind": "array",
@@ -93,7 +93,7 @@
     },
     {
       "name": "merged_run_redo_then_remote_insert",
-      "description": "Redoing two merged pushes re-inserts them as one item ahead of a concurrent insert (#278).",
+      "description": "Redoing two merged pushes re-inserts them as one item ahead of a concurrent insert.",
       "clientID": 3735928559,
       "root": "a",
       "kind": "array",
@@ -103,7 +103,7 @@
     },
     {
       "name": "map_restore_follows_delete_order",
-      "description": "Restored values sharing a key are replayed in first-delete order, so the last-deleted client wins (#278).",
+      "description": "Restored values sharing a key are replayed in first-delete order, so the last-deleted client wins.",
       "clientID": 3735928559,
       "root": "m",
       "kind": "map",
@@ -113,7 +113,7 @@
     },
     {
       "name": "nested_key_restored_over_collected_remote_set",
-      "description": "A remote set inside a map deleted here reaches us collected; undoing the delete restores the old value (#278).",
+      "description": "A remote set inside a map deleted here reaches us collected; undoing the delete restores the old value.",
       "clientID": 3735928559,
       "root": "a",
       "kind": "array",

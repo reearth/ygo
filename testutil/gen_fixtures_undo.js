@@ -203,7 +203,7 @@ const fixtures = [
   ),
   authored(
     'merged_run_undo_delete_then_remote_insert',
-    'Two pushes Yjs holds as one struct are restored as one item, so a concurrent insert lands after both (#278).',
+    'Two pushes Yjs holds as one struct are restored as one item, so a concurrent insert lands after both.',
     'a', 'array',
     (doc, arr, um) => {
       const r = remoteDoc()
@@ -219,7 +219,7 @@ const fixtures = [
   ),
   authored(
     'merged_run_redo_then_remote_insert',
-    'Redoing two merged pushes re-inserts them as one item ahead of a concurrent insert (#278).',
+    'Redoing two merged pushes re-inserts them as one item ahead of a concurrent insert.',
     'a', 'array',
     (doc, arr, um) => {
       const r = remoteDoc()
@@ -234,7 +234,7 @@ const fixtures = [
   ),
   authored(
     'map_restore_follows_delete_order',
-    'Restored values sharing a key are replayed in first-delete order, so the last-deleted client wins (#278).',
+    'Restored values sharing a key are replayed in first-delete order, so the last-deleted client wins.',
     'm', 'map',
     (doc, m, um) => {
       const r = remoteDoc()
@@ -256,7 +256,7 @@ const fixtures = [
   ),
   authored(
     'nested_key_restored_over_collected_remote_set',
-    'A remote set inside a map deleted here reaches us collected; undoing the delete restores the old value (#278).',
+    'A remote set inside a map deleted here reaches us collected; undoing the delete restores the old value.',
     'a', 'array',
     (doc, arr, um) => {
       const r = remoteDoc()
