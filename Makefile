@@ -55,6 +55,7 @@ fixtures:
 	node testutil/gen_fixtures_prelim.js
 	node testutil/gen_fixtures_gc.js
 	node testutil/gen_fixtures_undo.js
+	node testutil/gen_fixtures_stranded.js
 	node testutil/gen_fixtures_ywebsocket_envelope.js
 	node testutil/gen_fixtures_contentjson.js
 	node testutil/gen_fixtures_multivalue.js

@@ -857,6 +857,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 					txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
 					mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
 				} else {
+					item.markGCOrphan()
 					txn.doc.store.Append(item)
 				}
 			}

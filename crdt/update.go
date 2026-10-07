@@ -228,6 +228,21 @@ func (item *Item) isGCOrphan() bool {
 	return item.Parent == nil && item.Origin == nil && item.OriginRight == nil && item.parentID == nil
 }
 
+// markGCOrphan turns an item whose parent cannot be resolved into the GC struct
+// Yjs integrates it as: deleted, length-only content, and no parent or origins.
+// It then encodes as a GC struct, and nothing can resolve a parent through it,
+// so children that arrive later are orphaned too instead of integrating into a
+// detached type.
+func (item *Item) markGCOrphan() {
+	item.Deleted = true
+	item.Content = NewContentDeleted(item.Content.Len())
+	item.Parent = nil
+	item.ParentSub = nil
+	item.parentID = nil
+	item.Origin = nil
+	item.OriginRight = nil
+}
+
 func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStore) {
 	// Orphaned items (no parent) came from GC wire format where the parent
 	// type name is lost. Encode them as GC structs so receivers get valid
@@ -766,6 +781,7 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 					txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
 					mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
 				} else {
+					item.markGCOrphan()
 					txn.doc.store.Append(item)
 				}
 			}
@@ -1434,6 +1450,17 @@ func jsonNumbers(v any) any {
 // Used by the inline retry loop to drain pending items that may now
 // be integrable. Parallels the normal decode-loop path but with items
 // that have already been decoded.
+// appendTrimmed stores an item without integrating it, dropping the prefix the
+// store already has for its client. existingEnd must be at least the item's
+// clock.
+func appendTrimmed(store *StructStore, item *Item, existingEnd uint64) {
+	if offset := int(existingEnd - item.ID.Clock); offset > 0 {
+		item.ID.Clock += uint64(offset)
+		item.Content = item.Content.Splice(offset)
+	}
+	store.Append(item)
+}
+
 func tryIntegrate(txn *Transaction, item *Item) bool {
 	store := txn.doc.store
 
@@ -1460,11 +1487,7 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	// contiguous per-client list. The guards above leave clock <= existingEnd
 	// here, so the offset is never negative.
 	if item.Parent == nil && item.Deleted {
-		if offset := int(existingEnd - item.ID.Clock); offset > 0 {
-			item.ID.Clock += uint64(offset)
-			item.Content = item.Content.Splice(offset)
-		}
-		store.Append(item)
+		appendTrimmed(store, item, existingEnd)
 		return true
 	}
 
@@ -1511,8 +1534,10 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 			// A keyed item still unresolved here is a genuine orphan (its
 			// container/origin was deleted and GC'd). Yjs drops it on every
 			// peer; do NOT graft it onto an arbitrary map by scanning the store,
-			// which diverges by integration order (#156). Orphan-store it.
-			store.Append(item)
+			// which diverges by integration order (#156). Store it as the GC
+			// struct Yjs integrates it as.
+			item.markGCOrphan()
+			appendTrimmed(store, item, existingEnd)
 			return true
 		}
 	}

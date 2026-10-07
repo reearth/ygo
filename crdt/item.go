@@ -366,6 +366,12 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		}
 	}
 
+	// Yjs Item.integrate deletes an item whose parent is already deleted: a
+	// write into a nested type that a concurrent peer removed is never live.
+	if item.Parent != nil && item.Parent.item != nil && item.Parent.item.Deleted && !item.Deleted {
+		item.delete(txn)
+	}
+
 	if item.Parent != nil {
 		txn.addChanged(item.Parent, parentSubKey(item.ParentSub))
 	}
