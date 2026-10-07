@@ -1309,7 +1309,7 @@ func wrapUpdateErr(err error) error {
 // JSON.stringify never escapes <, > or &.
 //
 // A non-finite number is written as null in place, as JSON.stringify does.
-// Any other unencodable value bypassed checkJSONValue and panics, as WriteAny
+// Any other unencodable value bypassed checkTextValue and panics, as WriteAny
 // does (#283).
 func fmtValToJSON(v any) string {
 	if v == nil {
@@ -1359,57 +1359,6 @@ func nullNonFinite(v any) any {
 		return out
 	}
 	return v
-}
-
-// jsonValueErr reports why v cannot be written as JSON text: a value
-// json.Marshal rejects (func, chan, complex, ...). A non-finite float is
-// accepted, since a Yjs peer can send one; fmtValToJSON writes it as null.
-func jsonValueErr(v any) error {
-	switch t := v.(type) {
-	case nil, bool, string, int, int64, float64, float32:
-		return nil
-	case sharedType:
-		return errSharedTypeValue
-	case []any:
-		for _, e := range t {
-			if err := jsonValueErr(e); err != nil {
-				return err
-			}
-		}
-		return nil
-	case map[string]any:
-		for _, e := range t {
-			if err := jsonValueErr(e); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	_, err := encodeJSONText(v)
-	return err
-}
-
-// errSharedTypeValue rejects a Y type as a text value: YText holds it as
-// ContentType, which ygo does not insert, and as a plain value V1 would
-// write it as {}.
-var errSharedTypeValue = errors.New("a shared type cannot be embedded in YText")
-
-// checkJSONValue panics if v, a value V1 writes as JSON text (an embed or a
-// format attribute), has no JSON form, rather than letting it reach the wire
-// as null (#283).
-func checkJSONValue(op, what string, v any) {
-	if err := jsonValueErr(v); err != nil {
-		panic(fmt.Sprintf("crdt: %s: %s: not JSON-encodable: %v", op, what, err))
-	}
-}
-
-// checkAttrsJSON is checkJSONValue for every formatting attribute value.
-func checkAttrsJSON(op string, attrs Attributes) {
-	for k, v := range attrs {
-		if err := jsonValueErr(v); err != nil {
-			panic(fmt.Sprintf("crdt: %s: attribute %q: not JSON-encodable: %v", op, k, err))
-		}
-	}
 }
 
 // fmtValFromJSON parses JSON text written by fmtValToJSON or Yjs's

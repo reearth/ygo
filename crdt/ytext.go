@@ -317,8 +317,8 @@ func (txt *YText) Len() int { return txt.length }
 // markers (empty diff = no work).
 func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attributes) {
 	checkUTF8("YText.Insert", "text", text)
+	attrs = checkTextAttrs("YText.Insert", attrs)
 	checkAttrsUTF8("YText.Insert", attrs)
-	checkAttrsJSON("YText.Insert", attrs)
 	if text == "" {
 		return
 	}
@@ -535,18 +535,18 @@ func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 // attrs may carry inline attributes that apply ONLY to this embed item.
 // They are emitted as opening + closing ContentFormat markers around the
 // embed so subsequent inserts are unaffected. Pass nil for an unstyled embed.
-// Like attribute values, embed must be JSON-encodable or InsertEmbed panics;
-// a NaN or ±Inf in it is written as null by V1. A shared type (YMap, YText,
-// ...) cannot be embedded and panics too.
+// Like attribute values, embed is stored in the form V1 and V2 both encode
+// (see Attributes) and InsertEmbed panics on a value with none, such as a
+// shared type (YMap, YText, ...).
 //
 // Must be called from inside a Transact callback.
 //
 // Added in v1.12.0 (#76).
 func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attributes) {
+	embed = checkTextValue("YText.InsertEmbed", "embed", embed)
 	checkAnyUTF8("YText.InsertEmbed", "embed", embed)
-	checkJSONValue("YText.InsertEmbed", "embed", embed)
+	attrs = checkTextAttrs("YText.InsertEmbed", attrs)
 	checkAttrsUTF8("YText.InsertEmbed", attrs)
-	checkAttrsJSON("YText.InsertEmbed", attrs)
 	if txt.detached() {
 		attrs := cloneAttributes(attrs)
 		txt.buffer(func(txn *Transaction) { txt.InsertEmbed(txn, index, embed, attrs) })
@@ -793,8 +793,8 @@ func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *
 // removal marker before the source marker when both share the same origin.
 // Full concurrent attribute removal is tracked as a follow-up improvement.
 func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) {
+	attrs = checkTextAttrs("YText.Format", attrs)
 	checkAttrsUTF8("YText.Format", attrs)
-	checkAttrsJSON("YText.Format", attrs)
 	if len(attrs) == 0 || length <= 0 {
 		return
 	}
@@ -1299,14 +1299,15 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 	// op-by-op inside the loop below would let delta[0], delta[1], ... commit
 	// before a panic on delta[2] — a partial write with observers already
 	// fired (#209).
+	normalised := make([]Delta, len(delta))
 	for i, d := range delta {
+		d.Insert = checkTextValue("YText.ApplyDelta", fmt.Sprintf("delta[%d].Insert", i), d.Insert)
 		checkAnyUTF8("YText.ApplyDelta", fmt.Sprintf("delta[%d].Insert", i), d.Insert)
-		if err := jsonValueErr(d.Insert); err != nil {
-			panic(fmt.Sprintf("crdt: YText.ApplyDelta: delta[%d].Insert: not JSON-encodable: %v", i, err))
-		}
+		d.Attributes = checkTextAttrs("YText.ApplyDelta", d.Attributes)
 		checkAttrsUTF8("YText.ApplyDelta", d.Attributes)
-		checkAttrsJSON("YText.ApplyDelta", d.Attributes)
+		normalised[i] = d
 	}
+	delta = normalised
 	if txt.detached() {
 		delta := cloneDelta(delta)
 		txt.buffer(func(txn *Transaction) { txt.ApplyDelta(txn, delta) })
