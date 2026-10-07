@@ -253,3 +253,32 @@ func TestInteg_YText_Insert_WithAttrs_CrossPeerConvergence(t *testing.T) {
 	assert.Equal(t, deltaA, deltaB,
 		"docA and docB must produce identical ToDelta after sync")
 }
+
+// A formatted insert's markers and content all keep the cursor's right
+// neighbour as originRight, as Yjs's insertText does.
+func TestUnit_YText_FormattedInsert_KeepsRightOrigin(t *testing.T) {
+	for name, insert := range map[string]func(*YText, *Transaction){
+		"Insert":      func(txt *YText, txn *Transaction) { txt.Insert(txn, 1, "x", Attributes{"bold": true}) },
+		"InsertEmbed": func(txt *YText, txn *Transaction) { txt.InsertEmbed(txn, 1, 7, Attributes{"bold": true}) },
+		"ApplyDelta": func(txt *YText, txn *Transaction) {
+			txt.ApplyDelta(txn, []Delta{{Op: DeltaOpRetain, Retain: 1}, {Op: DeltaOpInsert, Insert: "x", Attributes: Attributes{"bold": true}}})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := newTestDoc(1)
+			st := src.GetText("t")
+			src.Transact(func(txn *Transaction) { st.Insert(txn, 0, "ab", nil) })
+			doc := newTestDoc(2)
+			require.NoError(t, ApplyUpdateV1(doc, EncodeStateAsUpdateV1(src, nil), nil))
+			txt := doc.GetText("t")
+			doc.Transact(func(txn *Transaction) { insert(txt, txn) })
+			b := ID{Client: 1, Clock: 1}
+			items := doc.store.clients[2]
+			require.Len(t, items, 3) // opener, content, closer
+			for _, it := range items {
+				require.NotNil(t, it.OriginRight, "%T", it.Content)
+				assert.Equal(t, b, *it.OriginRight, "%T", it.Content)
+			}
+		})
+	}
+}

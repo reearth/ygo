@@ -396,7 +396,9 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 
 	clock := txn.doc.store.NextClock(txn.doc.clientID)
 
-	// Opening markers — one per key whose value needs to change.
+	// Opening markers — one per key whose value needs to change. Markers and
+	// the text all keep the cursor's right neighbour as originRight, as Yjs's
+	// insertText does.
 	for _, d := range diff {
 		fmtItem := &Item{
 			ID:          ID{Client: txn.doc.clientID, Clock: clock},
@@ -409,7 +411,6 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 		fmtItem.integrate(txn, 0)
 		left = fmtItem
 		origin = &ID{Client: fmtItem.ID.Client, Clock: fmtItem.ID.Clock}
-		originRight = nil
 		clock = txn.doc.store.NextClock(txn.doc.clientID)
 	}
 
@@ -469,7 +470,6 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 			closeItem.integrate(txn, 0)
 			left = closeItem
 			origin = &ID{Client: closeItem.ID.Client, Clock: closeItem.ID.Clock}
-			originRight = nil
 			clock = txn.doc.store.NextClock(txn.doc.clientID)
 		}
 	}
@@ -590,7 +590,6 @@ func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attr
 			fmtItem.integrate(txn, 0)
 			left = fmtItem
 			origin = &ID{Client: fmtItem.ID.Client, Clock: fmtItem.ID.Clock}
-			originRight = nil
 			clock = txn.doc.store.NextClock(txn.doc.clientID)
 		}
 	}
@@ -636,7 +635,6 @@ func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attr
 			closeItem.integrate(txn, 0)
 			left = closeItem
 			origin = &ID{Client: closeItem.ID.Client, Clock: closeItem.ID.Clock}
-			originRight = nil
 			clock = txn.doc.store.NextClock(txn.doc.clientID)
 		}
 	}
@@ -1431,7 +1429,6 @@ func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, ins 
 		fmtItem.integrate(txn, 0)
 		left = fmtItem
 		origin = &ID{Client: fmtItem.ID.Client, Clock: fmtItem.ID.Clock}
-		originRight = nil
 		clock = txn.doc.store.NextClock(txn.doc.clientID)
 	}
 
@@ -1486,7 +1483,6 @@ func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, ins 
 			closeItem.integrate(txn, 0)
 			left = closeItem
 			origin = &ID{Client: closeItem.ID.Client, Clock: closeItem.ID.Clock}
-			originRight = nil
 			clock = txn.doc.store.NextClock(txn.doc.clientID)
 		}
 	}
