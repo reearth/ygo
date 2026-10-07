@@ -318,6 +318,7 @@ func (txt *YText) Len() int { return txt.length }
 func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attributes) {
 	checkUTF8("YText.Insert", "text", text)
 	checkAttrsUTF8("YText.Insert", attrs)
+	checkAttrsJSON("YText.Insert", attrs)
 	if text == "" {
 		return
 	}
@@ -534,13 +535,16 @@ func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 // attrs may carry inline attributes that apply ONLY to this embed item.
 // They are emitted as opening + closing ContentFormat markers around the
 // embed so subsequent inserts are unaffected. Pass nil for an unstyled embed.
+// Like attribute values, embed must be JSON-encodable or InsertEmbed panics.
 //
 // Must be called from inside a Transact callback.
 //
 // Added in v1.12.0 (#76).
 func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attributes) {
 	checkAnyUTF8("YText.InsertEmbed", "embed", embed)
+	checkJSONValue("YText.InsertEmbed", "embed", embed)
 	checkAttrsUTF8("YText.InsertEmbed", attrs)
+	checkAttrsJSON("YText.InsertEmbed", attrs)
 	if txt.detached() {
 		attrs := cloneAttributes(attrs)
 		txt.buffer(func(txn *Transaction) { txt.InsertEmbed(txn, index, embed, attrs) })
@@ -788,6 +792,7 @@ func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *
 // Full concurrent attribute removal is tracked as a follow-up improvement.
 func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) {
 	checkAttrsUTF8("YText.Format", attrs)
+	checkAttrsJSON("YText.Format", attrs)
 	if len(attrs) == 0 || length <= 0 {
 		return
 	}
@@ -1293,7 +1298,11 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 	// fired (#209).
 	for i, d := range delta {
 		checkAnyUTF8("YText.ApplyDelta", fmt.Sprintf("delta[%d].Insert", i), d.Insert)
+		if err := jsonValueErr(d.Insert); err != nil {
+			panic(fmt.Sprintf("crdt: YText.ApplyDelta: delta[%d].Insert: not JSON-encodable: %v", i, err))
+		}
 		checkAttrsUTF8("YText.ApplyDelta", d.Attributes)
+		checkAttrsJSON("YText.ApplyDelta", d.Attributes)
 	}
 	if txt.detached() {
 		delta := cloneDelta(delta)
