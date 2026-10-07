@@ -612,8 +612,9 @@ func (p *redoPass) movesOf(store *StructStore, target *Item) []*Item {
 // redoMove gives target, the restored copy of mv's deleted target, a new move
 // right after mv (#277). Called for each of the original's live moves in
 // rising priority, so the copies rank as the originals did and undoing one
-// hands the copy to the next. mv.redone points at the new move although mv
-// stays live, so undoing mv's insertion deletes the new move.
+// hands the copy to the next. mv, inert once its target is deleted, is
+// tombstoned and redone as the new move, so undoing mv's insertion deletes
+// that and a redone link never sits on a live item.
 func (u *UndoManager) redoMove(txn *Transaction, mv, target *Item) {
 	origin, originRight := neighbourOrigins(mv, mv.Right)
 	m := &Item{
@@ -624,11 +625,10 @@ func (u *UndoManager) redoMove(txn *Transaction, mv, target *Item) {
 		Parent:      mv.Parent,
 		Content:     NewContentMove(&target.ID, mv.Content.(*ContentMove).TargetLen),
 	}
-	if mv.redone == nil {
-		mid := m.ID
-		mv.redone = &mid
-	}
+	mid := m.ID
+	mv.redone = &mid
 	m.integrate(txn, 0)
+	mv.delete(txn)
 }
 
 // yjsMergeable reports whether Yjs would hold left and right as one struct
