@@ -86,7 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from yjs (two sets of one key in one transaction, then a delete), a writer
   with a lower client ID than the run's author kept the value locally, but every
   other peer and yjs dropped it. `Set` and XML `SetAttribute` now take the
-  entry's last ID, as yjs does.
+  entry's last ID, as yjs does, and a split entry keeps its key pointing at the
+  last unit (yjs `splitItem`), so this also holds for runs a pre-1.51.1 ygo
+  peer has already split.
 
 - **`crdt`: `YText.ApplyDelta` dropped embeds,** so copying a text with
   `ApplyDelta(ToDelta())` or forwarding observer deltas lost every embed and its
@@ -95,7 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`crdt`: values JSON cannot encode were silently written as `null`** in
   embeds and text attributes (#283). Functions, channels and complex numbers
   now panic at the call. Non-finite numbers are kept (a yjs peer can send them)
-  and written as `null` individually in V1, as `JSON.stringify` does.
+  and written as `null` individually in V1, as `JSON.stringify` does. Values
+  are normalised to the lib0 `Any` form at the call (`json.Number`, typed
+  slices and maps, structs, pointers), so a value that encoded in V1 can no
+  longer make every later V2 encode of the doc panic.
 
 - **`crdt`: undoing the delete of a re-moved element** now steps back through
   each of its moves.
@@ -104,10 +109,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `YXmlFragment.Insert` (and `InsertElement`/`InsertText`) panic when a node
   is already attached, staged on another parent, or passed twice.
-- `YText.Insert`, `InsertEmbed`, `Format` and `ApplyDelta` panic on values JSON
-  cannot encode (functions, channels, complex numbers) and on shared types
-  passed as embed or attribute values, which previously wrote `{}` in V1 and
-  failed V2 encoding.
+- `YText.Insert`, `InsertEmbed`, `Format` and `ApplyDelta` store values in
+  normalised form (an `int32` reads back as `int64`, a struct as
+  `map[string]any` using its JSON tags), and panic on functions, channels,
+  complex numbers, nesting deeper than 100 levels, and shared types or `*Doc`
+  anywhere in a value (previously written as `{}` in V1, failing V2).
+- When another client's restored copy of a moved element owns its moves, a
+  later move by a third client can win where the original mover's would have.
+  Every peer still agrees.
 - Reusing a child of a detached XML node that was never attached in another
   parent now panics; the node is still staged on its first parent. Delete it
   from that parent first.
