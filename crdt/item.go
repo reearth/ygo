@@ -371,6 +371,17 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	}
 }
 
+// lastID is the ID of the item's last clock unit, Yjs's item.lastId: a
+// successor's origin, since a merged run's first ID would place it before the
+// run's later units.
+func (item *Item) lastID() ID {
+	id := item.ID
+	if n := item.Content.Len(); n > 0 {
+		id.Clock += uint64(n) - 1
+	}
+	return id
+}
+
 // delete marks this item as a tombstone. The item stays in the linked list so
 // that position references from other items (via Origin) remain valid.
 //

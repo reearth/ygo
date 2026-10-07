@@ -222,7 +222,7 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 	var origin *ID
 	if existing, ok := t.itemMap[key]; ok {
 		left = existing
-		id := existing.ID
+		id := existing.lastID()
 		origin = &id
 	}
 

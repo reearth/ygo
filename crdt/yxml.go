@@ -416,7 +416,7 @@ func (e *YXmlElement) setAttributeValue(op string, txn *Transaction, key string,
 	var origin *ID
 	if existing, ok := t.itemMap[key]; ok {
 		left = existing
-		id := existing.ID
+		id := existing.lastID()
 		origin = &id
 	}
 	item := &Item{

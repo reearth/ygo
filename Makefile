@@ -57,6 +57,7 @@ fixtures:
 	node testutil/gen_fixtures_undo.js
 	node testutil/gen_fixtures_ywebsocket_envelope.js
 	node testutil/gen_fixtures_contentjson.js
+	node testutil/gen_fixtures_multivalue.js
 
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
