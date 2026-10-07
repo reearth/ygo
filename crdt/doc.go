@@ -582,7 +582,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		doc:         d,
 		Origin:      orig,
 		Local:       true,
-		deleteSet:   newDeleteSet(),
+		deleteSet:   newOrderedDeleteSet(),
 		beforeState: d.store.StateVector(),
 		// Pre-size changed to common-case capacity (#54 A): most transactions
 		// touch 1-3 types, and the zero-hint alloc forces immediate rehashing

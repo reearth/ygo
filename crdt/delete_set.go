@@ -1,6 +1,9 @@
 package crdt
 
-import "sort"
+import (
+	"slices"
+	"sort"
+)
 
 // DeleteRange is a contiguous range of deleted clocks for a single client.
 type DeleteRange struct {
@@ -12,16 +15,28 @@ type DeleteRange struct {
 // ranges per client. This compact representation is what travels on the wire.
 type DeleteSet struct {
 	clients map[ClientID][]DeleteRange
+	// order, when non-nil, lists clients in first-add order (Yjs DeleteSet's
+	// Map order), which UndoManager replays in. Only transaction and undo
+	// stack sets keep it, so sets built from the store compare equal.
+	order []ClientID
 }
 
 func newDeleteSet() DeleteSet {
 	return DeleteSet{clients: make(map[ClientID][]DeleteRange)}
 }
 
+// newOrderedDeleteSet returns a set that records client first-add order.
+func newOrderedDeleteSet() DeleteSet {
+	return DeleteSet{clients: make(map[ClientID][]DeleteRange), order: []ClientID{}}
+}
+
 // add records that item (client, clock) with the given length has been deleted.
 // Adjacent ranges are merged eagerly to keep the set compact.
 func (ds *DeleteSet) add(id ID, length int) {
-	ranges := ds.clients[id.Client]
+	ranges, seen := ds.clients[id.Client]
+	if !seen && ds.order != nil {
+		ds.order = append(ds.order, id.Client)
+	}
 	if len(ranges) > 0 {
 		last := &ranges[len(ranges)-1]
 		if last.Clock+last.Len == id.Clock {
@@ -46,8 +61,16 @@ func (ds *DeleteSet) IsDeleted(id ID) bool {
 	return false
 }
 
-// Merge incorporates all ranges from other into ds.
+// Merge incorporates all ranges from other into ds, appending other's new
+// clients after ds's (Yjs mergeDeleteSets order).
 func (ds *DeleteSet) Merge(other DeleteSet) {
+	if ds.order != nil {
+		for _, client := range other.orderedClients() {
+			if _, ok := ds.clients[client]; !ok {
+				ds.order = append(ds.order, client)
+			}
+		}
+	}
 	for client, ranges := range other.clients {
 		ds.clients[client] = append(ds.clients[client], ranges...)
 	}
@@ -86,6 +109,29 @@ func (ds *DeleteSet) Clients() []ClientID {
 		out = append(out, c)
 	}
 	return out
+}
+
+// orderedClients returns ds's clients in first-add order, then any set
+// without add (decoded sets) in ascending order. order holds each client at
+// most once, and only clients present in ds.clients.
+func (ds *DeleteSet) orderedClients() []ClientID {
+	out := make([]ClientID, len(ds.order), len(ds.clients))
+	copy(out, ds.order)
+	if len(out) == len(ds.clients) {
+		return out
+	}
+	listed := make(map[ClientID]struct{}, len(out))
+	for _, c := range out {
+		listed[c] = struct{}{}
+	}
+	var rest []ClientID
+	for c := range ds.clients {
+		if _, ok := listed[c]; !ok {
+			rest = append(rest, c)
+		}
+	}
+	slices.Sort(rest)
+	return append(out, rest...)
 }
 
 // applyToPartial applies delete-set entries whose target items are
