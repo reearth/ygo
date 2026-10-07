@@ -623,6 +623,14 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			phase2 = buildPhase2(d, txn)
 		}
 
+		// Yjs cleans up the format markers a remote change left redundant in
+		// a follow-up local transaction; run it before GC drops the
+		// deleted content it inspects.
+		var cleanupPhase2 func()
+		if r == nil && needsFormattingCleanup(txn) {
+			cleanupPhase2 = d.formattingCleanupLocked(txn)
+		}
+
 		// #78 H1 — Auto-GC at transaction commit. Runs AFTER buildPhase2 so
 		// the observer Deltas have already been computed against the original
 		// content; runs BEFORE Unlock so other goroutines never see partially-
@@ -647,6 +655,9 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 
 		if phase2 != nil {
 			phase2()
+		}
+		if cleanupPhase2 != nil {
+			cleanupPhase2()
 		}
 
 		if r != nil {

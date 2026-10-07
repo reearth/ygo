@@ -710,19 +710,41 @@ func updateAttr(attrs Attributes, cf *ContentFormat) {
 // is the live neighbour from leftNeighbourAt (nil = document head); the returned
 // anchor is the last adjacent tombstone (or the original left when none).
 //
-// Only deleted items are skipped: an inheriting Insert has no cursor
-// attributes to compare markers against. Inserts with attributes go through
-// insertText, whose minimizeAttributeChanges also skips matching markers.
+// In formatted text it also skips live markers that restate the attribute in
+// effect at left, as minimizeAttributeChanges does with an inheriting insert's
+// attributes. That value is looked up only for such a marker, by walking left
+// to the nearest live marker of its key, so typing between content stays O(1).
 func (t *abstractType) skipDeletedForTextAnchor(left *Item) *Item {
+	anchor := left
 	next := t.start
 	if left != nil {
 		next = left.Right
 	}
-	for next != nil && next.Deleted {
+	for next != nil {
+		if !next.Deleted {
+			if !t.hasFormatting {
+				break
+			}
+			cf, ok := next.Content.(*ContentFormat)
+			if !ok || !attrEqual(attrInEffect(anchor, cf.Key), cf.Val) {
+				break
+			}
+		}
 		left = next
 		next = next.Right
 	}
 	return left
+}
+
+// attrInEffect returns key's value just after item (nil when unset): that of
+// the nearest live marker for key at or before item.
+func attrInEffect(item *Item, key string) any {
+	for ; item != nil; item = item.Left {
+		if cf, ok := item.Content.(*ContentFormat); ok && !item.Deleted && cf.Key == key {
+			return cf.Val
+		}
+	}
+	return nil
 }
 
 // findTextPos returns a cursor at logical position index, splitting the
