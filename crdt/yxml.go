@@ -83,14 +83,16 @@ func (f *YXmlFragment) Len() int {
 //
 // While the fragment/element is detached the nodes are only buffered
 // (prelimChildren) and materialised when the subtree attaches — see
-// prelimFlusher. (#yxml-wire) Buffering a node that is f itself, or that
-// buffers f in its subtree, panics: the tree would contain itself.
+// prelimFlusher. (#yxml-wire)
+//
+// A node attaches once: Insert panics if a node is already attached, staged
+// on any parent (#279), or passed twice, and if it is f itself or buffers f
+// in its subtree (a cycle). Deleting a buffered node from its detached parent
+// makes it stageable again.
 func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 	t := &f.abstractType
+	claimXMLNodes(t, nodes)
 	if t.detached() {
-		for _, n := range nodes {
-			rejectXMLCycle(t, n)
-		}
 		if index < 0 || index > len(f.prelimChildren) {
 			index = len(f.prelimChildren)
 		}
@@ -173,41 +175,61 @@ func (f *YXmlFragment) Delete(txn *Transaction, index, length int) {
 			return
 		}
 		end := min(index+length, len(f.prelimChildren))
+		for _, n := range f.prelimChildren[index:end] {
+			n.baseXMLType().stagedOn = nil // re-stageable once removed
+		}
 		f.prelimChildren = append(f.prelimChildren[:index], f.prelimChildren[end:]...)
 		return
 	}
 	deleteChildRange(&f.abstractType, txn, index, length)
 }
 
-// rejectXMLCycle panics when node is t or buffers t somewhere in its detached
-// subtree: the staged tree would contain itself and every recursive read of it
-// would overflow the stack. XML nodes carry no staging owner pointer, so this
-// walks node's buffered subtree (fragments and elements) without recursion;
-// seen keeps a node buffered under several parents from being walked twice.
-func rejectXMLCycle(t *abstractType, node xmlNode) {
-	stack := []xmlNode{node}
-	seen := make(map[*YXmlFragment]struct{})
-	for len(stack) > 0 {
-		n := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if n.baseXMLType() == t {
-			panic("crdt: Insert: staging this node here would create a cycle (a node cannot contain itself)")
+// claimXMLNodes validates every node before claiming any, so a rejected call
+// leaves no partial buffer or claim. A node attaches once (#279): it must be
+// detached, passed once, and not staged on another parent (nor already on t,
+// while t is staging). Staging also rejects a cycle — t must not be the node
+// or buffered under it — by walking t's stagedOn chain in O(depth), as
+// claimForStage does; every buffered node now carries that owner pointer.
+func claimXMLNodes(t *abstractType, nodes []xmlNode) {
+	staging := t.detached()
+	var seen map[*abstractType]struct{}
+	if len(nodes) > 1 {
+		seen = make(map[*abstractType]struct{}, len(nodes))
+	}
+	for _, n := range nodes {
+		bt := n.baseXMLType()
+		if staging {
+			for c := t; c != nil; c = c.stagedOn {
+				if c == bt {
+					panic("crdt: Insert: staging this node here would create a cycle (a node cannot contain itself)")
+				}
+			}
 		}
-		var f *YXmlFragment
-		switch c := n.(type) {
-		case *YXmlFragment:
-			f = c
-		case *YXmlElement:
-			f = &c.YXmlFragment
+		if !bt.detached() {
+			panic("crdt: Insert requires a detached node (use NewYXmlElement/NewYXmlText)")
 		}
-		if f == nil || len(f.prelimChildren) == 0 {
-			continue
+		switch {
+		case staging && bt.stagedOn == t:
+			panic("crdt: Insert: this node is already staged on this parent (a node attaches once)")
+		case staging && bt.stagedOn != nil:
+			panic("crdt: Insert: this node is already staged on another parent (a node attaches once; Delete it there first to move it)")
+		case !staging && bt.stagedOn != nil && bt.stagedOn != t:
+			// t's own flushPrelim re-enters Insert with its staged children.
+			panic("crdt: Insert: this node is staged on another parent (a node attaches once; Delete it there first to move it)")
 		}
-		if _, dup := seen[f]; dup {
-			continue
+		if seen != nil {
+			if _, dup := seen[bt]; dup {
+				panic("crdt: Insert: a node is passed twice (a node attaches once)")
+			}
+			seen[bt] = struct{}{}
 		}
-		seen[f] = struct{}{}
-		stack = append(stack, f.prelimChildren...)
+	}
+	var owner *abstractType
+	if staging {
+		owner = t
+	}
+	for _, n := range nodes {
+		n.baseXMLType().stagedOn = owner
 	}
 }
 
@@ -224,10 +246,7 @@ func (f *YXmlFragment) flushPrelim(txn *Transaction) {
 // Children returns all non-deleted child XML nodes in document order. A
 // DETACHED fragment/element returns a copy of its buffered prelim children (the
 // same node values that were inserted), so iteration and ToXML reflect the
-// subtree before it attaches. As everywhere in this package, buffer only FRESH
-// nodes into a detached parent: inserting an already-attached node is the usual
-// re-parenting misuse, and reading the detached parent's ToXML would then
-// recurse into that attached child's lock-taking serialisation. (#yxml-wire)
+// subtree before it attaches. (#yxml-wire)
 func (f *YXmlFragment) Children() []xmlNode {
 	if f.detached() {
 		return append([]xmlNode(nil), f.prelimChildren...)
