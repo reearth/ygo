@@ -79,7 +79,9 @@ func moveDeleteTimes(t testing.TB, n int) (local, remote, undo time.Duration) {
 
 // Tombstoning many winning moves must not scan the parent list once per move.
 func TestPerf_DeletingWinningMovesIsLinear(t *testing.T) {
-	if testing.Short() {
+	// Instrumented builds distort the ratio and run for minutes; the
+	// benchmark below tracks this in CI.
+	if testing.Short() || raceEnabled || testing.CoverMode() != "" {
 		t.Skip("timing test")
 	}
 	// Summed over runs: the remote apply's client order is randomised.
