@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -548,9 +549,7 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 	}
 
 	origin, originRight := neighbourOrigins(left, right)
-	for _, r := range rest {
-		content = appendContent(content, r.Content)
-	}
+	content = appendContents(content, rest)
 	ni := &Item{
 		ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
 		Origin:      origin,
@@ -658,16 +657,33 @@ func yjsMergeable(left, right *Item) bool {
 	return false
 }
 
-// appendContent returns dst extended by a copy of src; both are the same
-// mergeable kind (yjsMergeable).
-func appendContent(dst, src Content) Content {
+// appendContents returns dst, an item's content copy, extended by the content
+// of rest, all of dst's mergeable kind (yjsMergeable). Linear in the run.
+func appendContents(dst Content, rest []*Item) Content {
+	if len(rest) == 0 {
+		return dst
+	}
 	switch d := dst.(type) {
 	case *ContentAny:
-		return &ContentAny{Vals: append(d.Vals, src.Copy().(*ContentAny).Vals...)}
+		for _, r := range rest {
+			d.Vals = append(d.Vals, r.Content.(*ContentAny).Vals...)
+		}
 	case *ContentString:
-		return NewContentString(d.Str + src.(*ContentString).Str)
+		var b strings.Builder
+		n := len(d.Str)
+		for _, r := range rest {
+			n += len(r.Content.(*ContentString).Str)
+		}
+		b.Grow(n)
+		b.WriteString(d.Str)
+		for _, r := range rest {
+			b.WriteString(r.Content.(*ContentString).Str)
+		}
+		return NewContentString(b.String())
 	case *ContentJSON:
-		return &ContentJSON{Vals: append(d.Vals, src.Copy().(*ContentJSON).Vals...)}
+		for _, r := range rest {
+			d.Vals = append(d.Vals, r.Content.(*ContentJSON).Vals...)
+		}
 	}
 	return dst
 }
