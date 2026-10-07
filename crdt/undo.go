@@ -779,16 +779,11 @@ func insertedRanges(before, after StateVector) DeleteSet {
 }
 
 // neighbourOrigins computes the Origin / OriginRight IDs for a new item placed
-// immediately between left and right. The origin is left's LAST clock — left's
-// own ID clock for a single-unit item (most items, incl. format markers, occupy
-// one clock slot), or ID.Clock + Len - 1 for a multi-unit run.
+// immediately between left and right: left's last ID and right's first.
 func neighbourOrigins(left, right *Item) (origin, originRight *ID) {
 	if left != nil {
-		clock := left.ID.Clock
-		if n := left.Content.Len(); n > 0 {
-			clock += uint64(n) - 1
-		}
-		origin = &ID{Client: left.ID.Client, Clock: clock}
+		id := left.lastID()
+		origin = &id
 	}
 	if right != nil {
 		id := right.ID

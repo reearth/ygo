@@ -343,8 +343,7 @@ func RunGC(doc *Doc) {
 
 // gcMergeable reports whether RunGC may absorb tombstone item into prev beyond
 // adjacency and clock contiguity (Yjs Item.mergeWith). A key's itemMap entry
-// is never absorbed: Set links after it and takes its ID as origin, so it must
-// stay an on-list node whose ID is its last clock.
+// is never absorbed, so it stays the on-list node Set links after.
 func gcMergeable(prev, item *Item) bool {
 	if prev.Parent != item.Parent || !parentSubEqual(prev.ParentSub, item.ParentSub) ||
 		prev.MovedBy != item.MovedBy || prev.redone != nil || item.redone != nil {
