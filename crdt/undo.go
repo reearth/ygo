@@ -403,13 +403,14 @@ func (u *UndoManager) applyStackItem(item *StackItem, others []DeleteSet) *Stack
 		// Group runs Yjs holds as one merged struct before any redo splices
 		// between them: Yjs restores such a run as one item, which places a
 		// concurrent insert differently than per-item copies would.
+		// A restored move redoes its target first; that target ends its run.
 		merged := make([]bool, len(toRedo))
 		for i := 1; i < len(toRedo); i++ {
 			merged[i] = yjsMergeable(toRedo[i-1], toRedo[i])
 		}
 		for i := 0; i < len(toRedo); {
 			j := i + 1
-			for j < len(toRedo) && merged[j] {
+			for toRedo[i].redone == nil && j < len(toRedo) && merged[j] && toRedo[j].redone == nil {
 				j++
 			}
 			if u.redoItem(txn, toRedo[i], toRedo[i+1:j], redoSet, item.insertions, others) != nil {
@@ -473,6 +474,21 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, redoS
 		parent = ct.Type
 	}
 
+	content := item.Content.Copy()
+	if cm, ok := content.(*ContentMove); ok && cm.Target != nil {
+		// A restored move targets its target's restored copy, redoing that first
+		// when this undo restores it too.
+		if t := u.doc.store.Find(*cm.Target); t != nil {
+			if _, ok := redoSet[t]; ok && t.redone == nil {
+				u.redoItem(txn, t, nil, redoSet, insertions, others)
+			}
+			if t = u.followRedone(txn, t); t != nil && t.ID != *cm.Target {
+				// The copy may hold a merged run; TargetLen trims it.
+				content = NewContentMove(&t.ID, cm.TargetLen)
+			}
+		}
+	}
+
 	var left, right *Item
 	if item.ParentSub == nil {
 		// Sequence element: position between the original left neighbour and the
@@ -532,7 +548,6 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, redoS
 	}
 
 	origin, originRight := neighbourOrigins(left, right)
-	content := item.Content.Copy()
 	for _, r := range rest {
 		content = appendContent(content, r.Content)
 	}
@@ -553,7 +568,30 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, redoS
 		off += uint64(r.Content.Len())
 	}
 	ni.integrate(txn, 0)
+	if mv := item.MovedBy; mv != nil && !mv.Deleted && mv.Parent == parent {
+		u.redoMove(txn, mv, ni)
+	}
 	return ni
+}
+
+// redoMove moves target, the restored copy of mv's deleted target, to where
+// mv rendered it (#277): a new move right after mv. mv.redone points at it
+// although mv stays live, so undoing mv's insertion deletes the new move.
+func (u *UndoManager) redoMove(txn *Transaction, mv, target *Item) {
+	origin, originRight := neighbourOrigins(mv, mv.Right)
+	m := &Item{
+		ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
+		Origin:      origin,
+		OriginRight: originRight,
+		Left:        mv,
+		Parent:      mv.Parent,
+		Content:     NewContentMove(&target.ID, mv.Content.(*ContentMove).TargetLen),
+	}
+	if mv.redone == nil {
+		mid := m.ID
+		mv.redone = &mid
+	}
+	m.integrate(txn, 0)
 }
 
 // yjsMergeable reports whether Yjs would hold left and right as one struct
