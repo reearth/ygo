@@ -2,13 +2,12 @@ package crdt
 
 // Attributes is a map of rich-text formatting attribute name → value.
 //
-// V1 writes values as JSON text and V2 as lib0 values, so the YText entry
-// points store each value in the form both encode: typed slices and maps
-// become []any and map[string]any, integers int64, a json.Number a number,
-// and a struct or other JSON marshaler its json.Marshal form. They panic on a
-// value with no such form (func, chan, complex, a shared type or Doc, or
-// nesting deeper than 100 levels) rather than store null (#283). A NaN or
-// ±Inf is accepted and written as null by V1, as JSON.stringify does.
+// YText entry points store each value in a form both V1 (JSON text) and V2
+// (lib0 Any) encode: typed slices and maps become []any and map[string]any,
+// integers int64, and a json.Number, struct or other marshaler its JSON form.
+// They panic on a value with no such form (func, chan, complex, a shared type
+// or Doc, or nesting deeper than 100 levels). A NaN or ±Inf is accepted; V1
+// writes it as null, as JSON.stringify does.
 type Attributes map[string]any
 
 // DeltaOp is the kind of operation in a rich-text Delta.

@@ -16,9 +16,8 @@ import (
 const maxTextValueDepth = 100
 
 var (
-	// errSharedTypeValue rejects a Y type as a text value: YText holds it as
-	// ContentType, which ygo does not insert, and as a plain value V1 would
-	// write it as {}.
+	// errSharedTypeValue rejects a Y type as a text value: ygo does not insert
+	// it as ContentType, and as a plain value V1 would write it as {}.
 	errSharedTypeValue = errors.New("a shared type cannot be embedded in YText")
 	errDocValue        = errors.New("a Doc cannot be embedded in YText")
 	errTextValueDepth  = fmt.Errorf("nested deeper than %d levels", maxTextValueDepth)
@@ -27,12 +26,10 @@ var (
 	docPtrT     = reflect.TypeOf((*Doc)(nil))
 )
 
-// textValue returns v in the lib0-Any form that V1 (as JSON text) and V2 (via
-// WriteAny) both encode: typed slices and maps become []any and
-// map[string]any, integers int64, a json.Number a number, and a struct,
-// marshaler or non-string-keyed map its json.Marshal form. A NaN or
-// ±Inf is kept, since a Yjs peer can send one; V1 writes it as null. It errors
-// for a value with no such form: a shared type, Doc, func, chan or complex.
+// textValue returns v in the lib0-Any form both V1 and V2 encode, converting
+// as Attributes documents; a non-string-keyed map also takes its json.Marshal
+// form. It keeps a NaN or ±Inf, since a Yjs peer can send one, and errors for
+// a shared type, Doc, func, chan or complex.
 func textValue(v any) (any, error) { return textValueAt(v, 0) }
 
 func textValueAt(v any, depth int) (any, error) {
@@ -198,8 +195,7 @@ func findSharedValue(rv reflect.Value, depth int) error {
 }
 
 // checkTextValue returns textValue(v), panicking if v has no lib0-Any form
-// rather than letting it reach the wire as null (#283) or panic every V2
-// encode after.
+// rather than letting V1 write it as null or every later V2 encode panic.
 func checkTextValue(op, what string, v any) any {
 	out, err := textValue(v)
 	if err != nil {

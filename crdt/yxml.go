@@ -86,8 +86,8 @@ func (f *YXmlFragment) Len() int {
 // prelimFlusher. (#yxml-wire)
 //
 // A node attaches once: Insert panics if a node is already attached, staged
-// on any parent (#279), or passed twice, and if it is f itself or buffers f
-// in its subtree (a cycle). Deleting a buffered node from its detached parent
+// on any parent, or passed twice, and if it is f itself or buffers f in its
+// subtree (a cycle). Deleting a buffered node from its detached parent
 // makes it stageable again.
 func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 	t := &f.abstractType
@@ -184,12 +184,9 @@ func (f *YXmlFragment) Delete(txn *Transaction, index, length int) {
 	deleteChildRange(&f.abstractType, txn, index, length)
 }
 
-// claimXMLNodes validates every node before claiming any, so a rejected call
-// leaves no partial buffer or claim. A node attaches once (#279): it must be
-// detached, passed once, and not staged on another parent (nor already on t,
-// while t is staging). Staging also rejects a cycle — t must not be the node
-// or buffered under it — by walking t's stagedOn chain in O(depth), as
-// claimForStage does; every buffered node now carries that owner pointer.
+// claimXMLNodes enforces Insert's attach-once and cycle rules, validating
+// every node before claiming any so a rejected call leaves no partial claim.
+// The cycle check walks t's stagedOn chain in O(depth), as claimForStage does.
 func claimXMLNodes(t *abstractType, nodes []xmlNode) {
 	staging := t.detached()
 	var seen map[*abstractType]struct{}

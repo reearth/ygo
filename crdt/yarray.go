@@ -120,8 +120,7 @@ func (a *YArray) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 // A plain item renders at its own slot while live and not moved away; a
 // ContentMove renders its target's values while it is the target's winning
 // move. The "before" render reads the pre-transaction MovedBy recorded by
-// setMovedBy, so undoing a move, a re-arbitration to another move, and
-// deleting a moved element all surface at the right slots.
+// setMovedBy.
 func (a *YArray) computeDelta(txn *Transaction) []Delta {
 	var ops []Delta
 	retain := 0

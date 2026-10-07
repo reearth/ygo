@@ -63,7 +63,7 @@ func newDeltaMirror(arr *YArray) *deltaMirror {
 	return m
 }
 
-// #275: undoing a Move must emit the element's return to its origin.
+// Undoing a Move must emit the element's return to its origin.
 func TestUnit_YArrayEvent_UndoMove_EmitsDelta(t *testing.T) {
 	doc := newTestDoc(1)
 	arr := doc.GetArray("a")
@@ -85,7 +85,7 @@ func TestUnit_YArrayEvent_UndoMove_EmitsDelta(t *testing.T) {
 	require.Equal(t, arr.ToSlice(), m.vals)
 }
 
-// #275: a remote delete of the winning move hands the target to the next
+// A remote delete of the winning move hands the target to the next
 // live move; the delta must show it leaving one destination for the other.
 func TestInteg_YArrayEvent_RemoteDeleteOfWinningMove_EmitsDelta(t *testing.T) {
 	docA, docB := newTestDoc(1), newTestDoc(2)
@@ -107,7 +107,7 @@ func TestInteg_YArrayEvent_RemoteDeleteOfWinningMove_EmitsDelta(t *testing.T) {
 	require.Equal(t, arrB.ToSlice(), m.vals)
 }
 
-// #275: deleting a moved element removes it at its rendered destination.
+// Deleting a moved element removes it at its rendered destination.
 func TestUnit_YArrayEvent_DeleteMovedElement_EmitsDelta(t *testing.T) {
 	doc := newTestDoc(1)
 	arr := doc.GetArray("a")
@@ -134,7 +134,7 @@ const (
 
 // TestMoveDeltaMirrorSweep drives random local edits, moves, undo/redo and
 // remote applies into A and asserts a mirror built only from A's deltas always
-// equals A.ToSlice() (#275), then that A, B and fresh V1/V2 reloads converge.
+// equals A.ToSlice(), then that A, B and fresh V1/V2 reloads converge.
 func TestMoveDeltaMirrorSweep(t *testing.T) {
 	for seed := 0; seed < moveDeltaSeeds(); seed++ {
 		if err := runMoveDeltaSeed(uint64(seed)); err != nil {

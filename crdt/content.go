@@ -203,8 +203,8 @@ func plainVals(c Content) ([]any, bool) {
 	return nil, false
 }
 
-// lastPlainVal returns the value a map entry (YMap key, XML attribute) holds:
-// the LAST value of a plain-value item, as Yjs reads getContent()[length-1].
+// lastPlainVal returns a map entry's value: the last value of a plain-value
+// item, as Yjs reads getContent()[length-1].
 func lastPlainVal(c Content) (any, bool) {
 	vals, ok := plainVals(c)
 	if !ok || len(vals) == 0 {
@@ -323,9 +323,8 @@ func (c *ContentDoc) Splice(_ int) Content { panic("crdt: ContentDoc is not spli
 // instead of at its original position. ContentMove is non-countable (it does
 // not contribute to the array's logical length) and occupies one clock slot.
 //
-// When two ContentMove items target the same item, the one with the lower
-// ClientID wins; between one client's moves the latest wins (deterministic
-// convergence). The losing ContentMove stays in the linked list but renders
+// When two ContentMove items target the same item, the lower ClientID wins,
+// and between one client's moves the latest wins. The losing ContentMove stays in the linked list but renders
 // nothing because target.MovedBy points to the winning item.
 //
 // TargetLen is the expected length of the target item (always 1 for

@@ -111,9 +111,9 @@ func (ds *DeleteSet) Clients() []ClientID {
 	return out
 }
 
-// orderedClients returns ds's clients in first-add order, then any set
-// without add (decoded sets) in ascending order. order holds each client at
-// most once, and only clients present in ds.clients.
+// orderedClients returns ds's clients in first-add order, then any unordered
+// ones (all of a decoded set's) ascending. order holds each client of
+// ds.clients at most once.
 func (ds *DeleteSet) orderedClients() []ClientID {
 	out := make([]ClientID, len(ds.order), len(ds.clients))
 	copy(out, ds.order)

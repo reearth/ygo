@@ -401,10 +401,10 @@ func (u *UndoManager) applyStackItem(item *StackItem, others []DeleteSet) *Stack
 			toRedo = append(toRedo, it)
 			pass.set[it] = struct{}{}
 		})
-		// Group runs Yjs holds as one merged struct before any redo splices
-		// between them: Yjs restores such a run as one item, which places a
-		// concurrent insert differently than per-item copies would.
-		// A restored move redoes its target first; that target ends its run.
+		// Yjs restores a run it holds as one struct as one item, which places a
+		// concurrent insert differently than per-item copies, so group runs
+		// before any redo splices between them. A restored move redoes its
+		// target first; that target ends its run.
 		merged := make([]bool, len(toRedo))
 		for i := 1; i < len(toRedo); i++ {
 			merged[i] = yjsMergeable(toRedo[i-1], toRedo[i])
@@ -609,11 +609,10 @@ func (p *redoPass) movesOf(store *StructStore, target *Item) []*Item {
 }
 
 // redoMove gives target, the restored copy of mv's deleted target, a new move
-// right after mv (#277). Called for each of the original's live moves in
-// rising priority, so the copies rank as the originals did and undoing one
-// hands the copy to the next. mv, inert once its target is deleted, is
-// tombstoned and redone as the new move, so undoing mv's insertion deletes
-// that and a redone link never sits on a live item.
+// right after mv. Callers pass the original's live moves in rising priority,
+// so the copies rank as the originals did. mv is tombstoned and redone as the
+// new move, so undoing mv's insertion deletes that and a redone link never
+// sits on a live item.
 func (u *UndoManager) redoMove(txn *Transaction, mv, target *Item) {
 	origin, originRight := neighbourOrigins(mv, mv.Right)
 	m := &Item{

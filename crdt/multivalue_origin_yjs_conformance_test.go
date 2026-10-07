@@ -77,8 +77,8 @@ func multiValueUpdate(t *testing.T, u []byte, canonical bool) string {
 // history is one merged multi-value struct, from a clientID below and above
 // the author's: ygo must emit Yjs's bytes (origin = the run's last id), and a
 // fresh peer must read the new value, not lose the key. The split variant
-// first applies a pre-fix ygo write whose origin splits the run, after which
-// the key must track the run's right half.
+// first applies a write whose origin is the run's first id, splitting it;
+// the key must then track the run's right half.
 func TestConformance_MultiValueEntry_SetOrigin(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "multivalue_yjs_fixtures.json"))
 	if err != nil {

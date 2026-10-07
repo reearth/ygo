@@ -8,11 +8,9 @@ import (
 	"testing"
 )
 
-// #283: V1 writes format attributes and embeds as JSON text. A value JSON
-// cannot encode used to be written as "null", silently. Go values with no
-// JSON form (func, chan, complex) are rejected at the call; a non-finite
-// number is accepted, since a Yjs peer can send one, and V1 writes it as
-// JSON.stringify does: null in place.
+// V1 writes format attributes and embeds as JSON text: values with no JSON
+// form panic at the call, and a non-finite number is written as null, as
+// JSON.stringify does.
 
 func TestUnit_JSONValue_TextEntryPointsReject(t *testing.T) {
 	for _, c := range []struct {

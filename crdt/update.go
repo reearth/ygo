@@ -1308,9 +1308,8 @@ func wrapUpdateErr(err error) error {
 // JSON text, matching Yjs's JSON.stringify. HTML escaping is off because
 // JSON.stringify never escapes <, > or &.
 //
-// A non-finite number is written as null in place, as JSON.stringify does.
-// Any other unencodable value bypassed checkTextValue and panics, as WriteAny
-// does (#283).
+// A non-finite number is written as null, as JSON.stringify does; any other
+// unencodable value (one that bypassed checkTextValue) panics, as WriteAny does.
 func fmtValToJSON(v any) string {
 	if v == nil {
 		return "null"

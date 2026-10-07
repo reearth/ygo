@@ -7,7 +7,7 @@ import (
 )
 
 // Stack items replay clients in first-delete order (Yjs DeleteSet Map
-// order), across Merge and clone (#278).
+// order), across Merge and clone.
 func TestUnit_DeleteSet_OrderedClients(t *testing.T) {
 	a := newOrderedDeleteSet()
 	a.add(ID{Client: 9, Clock: 0}, 1)

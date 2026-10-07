@@ -371,8 +371,8 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	}
 }
 
-// lastID is the ID of the item's last clock unit, Yjs's item.lastId: a
-// successor's origin, since a merged run's first ID would place it before the
+// lastID is the ID of the item's last clock unit (Yjs item.lastId), the
+// origin a successor needs: a merged run's first ID would place it before the
 // run's later units.
 func (item *Item) lastID() ID {
 	id := item.ID
@@ -478,7 +478,7 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 	}
 	item.Right = right
 	txn.doc.store.insertItem(right)
-	// The key's entry is its rightmost unit, so Set's origin (lastID) stays the run's end.
+	// A key's entry is its rightmost unit, so Set's origin stays the run's end.
 	if item.ParentSub != nil && item.Parent != nil && item.Parent.itemMap[*item.ParentSub] == item {
 		item.Parent.itemMap[*item.ParentSub] = right
 	}
@@ -548,9 +548,8 @@ func rearbitrateMove(txn *Transaction, move *Item, cm *ContentMove) {
 }
 
 // moveBeats reports whether move m takes its target from the current winner
-// w. The lowest ClientID wins across clients; within one client the latest
-// move (highest clock) wins, so re-moving an element takes effect (#276). A
-// total order over live moves, so every peer picks the same winner.
+// w: the lowest ClientID wins, and within one client the latest move. This is
+// a total order over live moves, so every peer picks the same winner.
 func moveBeats(m, w *Item) bool {
 	if w == nil {
 		return true

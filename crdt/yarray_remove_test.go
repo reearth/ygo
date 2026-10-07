@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// #276: a client's later move of an element supersedes its earlier one.
+// A client's later move of an element supersedes its earlier one.
 func TestUnit_YArray_ReMove_SameClientTakesEffect(t *testing.T) {
 	doc := newTestDoc(1)
 	arr := doc.GetArray("a")
@@ -30,7 +30,7 @@ func TestUnit_YArray_ReMove_SameClientTakesEffect(t *testing.T) {
 	requireArrayConsistent(t, fresh.GetArray("a"), []any{"b", "c", "a", "d"})
 }
 
-// #276: undoing a re-move returns the element to its previous destination.
+// Undoing a re-move returns the element to its previous destination.
 func TestUnit_UndoManager_UndoReMove_RestoresPreviousMove(t *testing.T) {
 	doc := newTestDoc(1)
 	arr := doc.GetArray("a")
@@ -74,7 +74,7 @@ func modelMove(s []any, from, to int) []any {
 }
 
 // TestMoveModelSweep checks a single peer's inserts, deletes and (re-)moves
-// against a plain-slice model, so a move that silently does nothing fails.
+// against a plain-slice model, so a move with no effect fails.
 func TestMoveModelSweep(t *testing.T) {
 	for seed := 0; seed < moveDeltaSeeds(); seed++ {
 		r := rand.New(rand.NewPCG(uint64(seed), 0x276))

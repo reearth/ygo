@@ -84,7 +84,7 @@ func genLocalOp(r *rand.Rand, n int, root string, kind TypeKind, opts GenOpts, l
 			st.Op, st.JSONVal = OpPush, randScalarJSON(r)
 		case 2:
 			st.Op, st.PosHint, st.LenHint = OpDelete, r.Intn(50), 1+r.Intn(3)
-		default: // move; half re-move this peer's last moved element (#276)
+		default: // move; half re-move this peer's last moved element
 			st.Op, st.PosHint, st.ToHint = OpMove, r.Intn(50), r.Intn(50)
 			if last := lastTo[st.Peer]; last >= 0 && r.Intn(2) == 0 {
 				st.PosHint = last

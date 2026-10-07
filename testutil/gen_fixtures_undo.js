@@ -15,7 +15,8 @@
  * replays the identical sequence and must produce byte-identical V1 bytes, so
  * the redone container AND its re-inserted children land at the same clocks
  * with the same origins as in Yjs. Fixtures with a second peer are jsonOnly:
- * the Go replay must match Yjs's resulting JSON.
+ * only the JSON can match, since ygo orders clients, merges structs and
+ * encodes collected children differently.
  */
 const Y = require('yjs')
 const fs = require('fs')
@@ -41,8 +42,6 @@ const remoteDoc = () => {
 const sync = (from, to) =>
   Y.applyUpdate(to, Y.encodeStateAsUpdate(from, Y.encodeStateVector(to)), 'remote')
 
-// Two-peer fixtures are jsonOnly: their bytes cannot match, since ygo orders
-// clients, merges structs and encodes collected children differently.
 function authored(name, description, root, kind, build) {
   const doc = new Y.Doc()
   doc.clientID = CLIENT_ID

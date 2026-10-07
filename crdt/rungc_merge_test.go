@@ -8,7 +8,7 @@ import (
 
 // A key's tombstoned value chain merged by RunGC must not leave the map's
 // per-key entry pointing at the absorbed item: a later Set on that key would
-// link after an off-list node and lose a concurrent same-key conflict (#282).
+// link after an off-list node and lose a concurrent same-key conflict.
 func TestInteg_RunGC_MapKeyEntryAfterMerge(t *testing.T) {
 	a := New(WithClientID(20), WithGC(true))
 	m := a.GetMap("m")
@@ -42,7 +42,7 @@ func TestInteg_RunGC_MapKeyEntryAfterMerge(t *testing.T) {
 // Tombstones of different keys can sit adjacent with contiguous clocks: a
 // first-time Set has no origin and its conflict scan can stop after another
 // key's item. Merging them re-keys the right half, and a later Set whose
-// origin is that half decodes under the wrong key (#282).
+// origin is that half would decode under the wrong key.
 func TestInteg_RunGC_NoMergeAcrossMapKeys(t *testing.T) {
 	b := New(WithClientID(10))
 	bm := b.GetMap("m")

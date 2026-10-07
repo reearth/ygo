@@ -6,9 +6,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Undoing the delete of a moved element restores it where it was seen, the
-// move destination, and the move's own undo/redo still applies to the copy
-// (#277).
+// Undoing the delete of a moved element restores it at the move destination,
+// and the move's own undo/redo still applies to the copy.
 func TestUnit_UndoManager_UndoDeleteOfMovedElement_RestoresAtDestination(t *testing.T) {
 	doc := newTestDoc(1)
 	arr := doc.GetArray("a")

@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// #280: a map entry (YMap key or XML attribute) held by a multi-value item
-// reads its LAST value, as Yjs's content.getContent()[length-1] does. Yjs's
-// API never writes one, but its decoder accepts them, so every read path must
-// agree.
+// A map entry (YMap key or XML attribute) held by a multi-value item reads
+// its last value on every read path, as Yjs's getContent()[length-1] does;
+// Yjs's API never writes one, but its decoder accepts them.
 
 // integrateMapEntry writes content under key as one raw item.
 func integrateMapEntry(txn *Transaction, parent *abstractType, key string, c Content) {

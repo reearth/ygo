@@ -2,9 +2,9 @@ package crdt
 
 import "testing"
 
-// #279: an XML node attaches once. Staging it into two detached parents, twice
-// into one, or integrating a node that is attached or staged elsewhere fails at
-// the call, as it does for maps and arrays (#222).
+// An XML node attaches once, as maps and arrays do: staging it into two
+// detached parents, twice into one, or integrating a node attached or staged
+// elsewhere fails at the call.
 
 func TestUnit_XMLStage_TwoDetachedParents_PanicsAtSecondCall(t *testing.T) {
 	doc := newTestDoc(1)

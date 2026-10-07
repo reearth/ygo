@@ -47,7 +47,7 @@ type abstractType struct {
 	// stagedOn is the container whose staged (prelim) content currently holds
 	// this DETACHED type, nil otherwise. It exists so the staging entry points
 	// (PushType/InsertType/YMap.Set/YXmlFragment.Insert) can reject a handle
-	// already staged on a DIFFERENT container at the call site (#222, #279) — without it,
+	// already staged on a DIFFERENT container at the call site — without it,
 	// both stagings succeeded and the loser's attach later panicked inside
 	// flushPrelim, blaming a function the caller never used. Set when a handle
 	// enters a container's staged content, cleared when it leaves it (map
