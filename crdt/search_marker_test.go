@@ -795,10 +795,9 @@ func TestSearchMarker_Format_MatchesCold(t *testing.T) {
 	}
 }
 
-// TestSearchMarker_CurrentAttributesAt_MatchesCold exercises
-// YText.currentAttributesAt's !hasFormatting short-circuit (returns empty
-// without walking, ytext.go) together with its ordinary full-walk fallback
-// once formatting exists — both are consulted by Insert whenever attrs is
+// TestSearchMarker_CurrentAttributesAt_MatchesCold exercises findTextPos's
+// !hasFormatting fast path (ytext.go) together with its full walk once
+// formatting exists — both resolve Insert's cursor whenever attrs is
 // non-empty. Attrs-carrying inserts happen before, at the hasFormatting
 // transition, and after, on a large document.
 func TestSearchMarker_CurrentAttributesAt_MatchesCold(t *testing.T) {
@@ -815,7 +814,7 @@ func TestSearchMarker_CurrentAttributesAt_MatchesCold(t *testing.T) {
 				txt.Insert(tr, txt.Len(), "a", nil)
 			}
 			// First attrs-carrying insert: hasFormatting is still false when
-			// currentAttributesAt is consulted here (it flips true only once
+			// findTextPos is consulted here (it flips true only once
 			// this call's own opening marker integrates).
 			txt.Insert(tr, txt.Len(), "BOLD", Attributes{"bold": true})
 			for i := 0; i < 500; i++ {
@@ -1296,5 +1295,60 @@ func TestSearchMarker_ConcurrentReadersNoRace(t *testing.T) {
 	// t.markers could plausibly desync these even though nothing panicked.
 	if got, want := len(arr.ToSlice()), arr.Len(); got != want {
 		t.Fatalf("post-race inconsistency: len(ToSlice())=%d Len()=%d", got, want)
+	}
+}
+
+// An insert just after a live format marker must not mis-shift a search marker
+// sitting on that format marker: random formatted edits keep every marker at
+// its item's rendered start and read back as on a cold (marker-free) text.
+func TestSearchMarker_FormattedInserts_MatchCold(t *testing.T) {
+	for seed := uint64(0); seed < 300; seed++ {
+		hot, cold := New(WithClientID(1)), New(WithClientID(1))
+		cold.GetText("t").baseType().disableMarkers = true
+		r := rand.New(rand.NewSource(int64(seed)))
+		for step := 0; step < 60; step++ {
+			n := hot.GetText("t").Len()
+			i := r.Intn(n + 1)
+			k := r.Intn(6)
+			l := 1 + r.Intn(3)
+			var v any = true
+			if r.Intn(2) == 0 {
+				v = nil
+			}
+			for _, d := range []*Doc{hot, cold} {
+				txt := d.GetText("t")
+				d.Transact(func(txn *Transaction) {
+					switch {
+					case k == 0:
+						txt.Insert(txn, i, "xy", nil)
+					case k == 1:
+						txt.Insert(txn, i, "z", Attributes{"bold": true})
+					case k == 2 && i < n:
+						txt.Format(txn, i, min(l, n-i), Attributes{"bold": v})
+					case k == 3 && i < n:
+						txt.Delete(txn, i, min(l, n-i))
+					case k == 4:
+						txt.InsertEmbed(txn, i, 1, nil)
+					default:
+						txt.ApplyDelta(txn, []Delta{{Op: DeltaOpRetain, Retain: i}, {Op: DeltaOpInsert, Insert: "q"}})
+					}
+				})
+			}
+			ht := hot.GetText("t").baseType()
+			for _, m := range ht.markers {
+				idx := 0
+				for it := ht.start; it != nil && it != m.item; it = it.Right {
+					if c, n, _ := ht.renderedStep(it); c {
+						idx += n
+					}
+				}
+				if idx != m.index {
+					t.Fatalf("seed %d step %d op %d: marker on %T at %d, rendered at %d", seed, step, k, m.item.Content, m.index, idx)
+				}
+			}
+			if got, want := hot.GetText("t").ToDelta(), cold.GetText("t").ToDelta(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("seed %d step %d op %d i=%d l=%d: markers %v, cold %v", seed, step, k, i, l, got, want)
+			}
+		}
 	}
 }

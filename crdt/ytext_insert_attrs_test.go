@@ -15,8 +15,9 @@ import (
 // Yjs JS's insertText:
 //   - computes currentAttributes by walking left from the cursor
 //   - if caller passed nil/empty attrs, the new text inherits currentAttributes
-//   - if caller passed explicit attrs, opens markers for the diff, inserts,
-//     then emits negating markers to revert to currentAttributes after
+//   - if caller passed explicit attrs, clears every current attribute attrs
+//     does not name, opens markers for the diff, inserts, then emits negating
+//     markers to revert to currentAttributes after
 //
 // Pre-fix ygo Insert only emitted opening markers when attrs was non-empty,
 // and never emitted closing/negating markers — so formatting bled rightward.
@@ -186,51 +187,28 @@ func TestUnit_YText_Insert_NonComparableAttrValue_DifferentValues_DiffsCorrectly
 		"different non-comparable values must take the diff path and emit new markers")
 }
 
-// Regression for the `anchor == nil` early-exit in currentAttributesAt
-// (Copilot review comment #1). Without the early-exit, the walk runs to
-// the END of the document and returns end-state attrs — so an Insert at
-// position 0 with explicit attrs would compute a diff against the wrong
-// baseline (the doc's later state instead of the empty start state),
-// potentially skipping marker emission.
+// An Insert at position 0 with explicit attrs must use the start state, not
+// the doc's later state. Before a matching opener it reuses that opener rather
+// than emitting its own pair, as Yjs's minimizeAttributeChanges does.
 func TestUnit_YText_Insert_AtStart_ExplicitAttrs_DoesNotInheritFromEndOfDoc(t *testing.T) {
 	doc := newTestDoc(1)
 	txt := doc.GetText("t")
-	// Build a doc with bold formatting LATER in the text.
 	doc.Transact(func(txn *Transaction) {
 		txt.Insert(txn, 0, "later", Attributes{"bold": true})
+		txt.Insert(txn, 5, "plain", Attributes{"italic": true})
 	})
-
-	// Now Insert AT POSITION 0 (before the bold span) with explicit
-	// {bold: true}. The currentAttributes anchor here is nil — the cursor is
-	// before any item. With the early-exit, currentAttrs = {} (start state).
-	// effective {bold: true} vs current {} → diff has bold:true → emit
-	// opener + closer for the new insert.
-	//
-	// Without the early-exit, currentAttributesAt(nil) would walk the entire
-	// doc and return the end-state attrs (which happen to be {} here because
-	// the bold span has a closer, but in a more complex doc the bug would
-	// produce wrong results). We assert the correct behavior via marker
-	// count: the new insert MUST contribute its own opener+closer pair, not
-	// rely on a phantom-shared opener with the later span.
 	beforeMarkers := countLiveContentFormat(doc)
 	doc.Transact(func(txn *Transaction) {
 		txt.Insert(txn, 0, "X", Attributes{"bold": true})
+		txt.Insert(txn, 0, "Y", Attributes{"italic": true})
 	})
-	assert.Equal(t, beforeMarkers+2, countLiveContentFormat(doc),
-		"Insert(0, ..., bold:true) must emit its own opener+closer pair "+
-			"independent of formatting later in the doc (anchor==nil early-exit)")
-
-	// Sanity: the inserted X must actually be bold in ToDelta. With Yjs-faithful
-	// delta coalescing, the X run merges with the equally-bold "later" into a
-	// single op (X's opener + closer net-cancel between the two runs), so the
-	// first op is "Xlater". The marker-count assertion above is what proves X
-	// carries its OWN opener+closer pair rather than phantom-sharing one.
-	delta := txt.ToDelta()
-	require.NotEmpty(t, delta)
-	first := delta[0]
-	require.Equal(t, "Xlater", first.Insert)
-	assert.Equal(t, Attributes{"bold": true}, first.Attributes,
-		"X must be bold via its OWN marker pair, not by accident")
+	// X reuses "later"'s opener; Y needs its own pair.
+	assert.Equal(t, beforeMarkers+2, countLiveContentFormat(doc))
+	assert.Equal(t, []Delta{
+		{Op: DeltaOpInsert, Insert: "Y", Attributes: Attributes{"italic": true}},
+		{Op: DeltaOpInsert, Insert: "Xlater", Attributes: Attributes{"bold": true}},
+		{Op: DeltaOpInsert, Insert: "plain", Attributes: Attributes{"italic": true}},
+	}, txt.ToDelta())
 }
 
 // A3 — Cross-peer convergence: docB receives docA's Insert-with-attrs and
@@ -280,5 +258,52 @@ func TestUnit_YText_FormattedInsert_KeepsRightOrigin(t *testing.T) {
 				assert.Equal(t, b, *it.OriginRight, "%T", it.Content)
 			}
 		})
+	}
+}
+
+// An insert given attributes carries exactly those, clearing the ones around
+// it, while Insert without attributes inherits them, as in Yjs's insertText.
+func TestUnit_YText_InsertAttrs_ClearUnnamed(t *testing.T) {
+	bold := Attributes{"bold": true}
+	run := func(insert func(*YText, *Transaction)) []Delta {
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "abcd", bold) })
+		doc.Transact(func(txn *Transaction) { insert(txt, txn) })
+		return txt.ToDelta()
+	}
+	split := func(mid Delta) []Delta {
+		return []Delta{{Op: DeltaOpInsert, Insert: "ab", Attributes: bold}, mid, {Op: DeltaOpInsert, Insert: "cd", Attributes: bold}}
+	}
+	for name, tc := range map[string]struct {
+		insert func(*YText, *Transaction)
+		want   []Delta
+	}{
+		"Insert/nil": {
+			func(txt *YText, txn *Transaction) { txt.Insert(txn, 2, "x", nil) },
+			[]Delta{{Op: DeltaOpInsert, Insert: "abxcd", Attributes: bold}},
+		},
+		"Insert/other": {
+			func(txt *YText, txn *Transaction) { txt.Insert(txn, 2, "x", Attributes{"italic": true}) },
+			split(Delta{Op: DeltaOpInsert, Insert: "x", Attributes: Attributes{"italic": true}}),
+		},
+		"InsertEmbed/nil": {
+			func(txt *YText, txn *Transaction) { txt.InsertEmbed(txn, 2, 7, nil) },
+			split(Delta{Op: DeltaOpInsert, Insert: int64(7)}),
+		},
+		"ApplyDelta/nil": {
+			func(txt *YText, txn *Transaction) {
+				txt.ApplyDelta(txn, []Delta{{Op: DeltaOpRetain, Retain: 2}, {Op: DeltaOpInsert, Insert: "x"}})
+			},
+			split(Delta{Op: DeltaOpInsert, Insert: "x"}),
+		},
+		"ApplyDelta/embed": {
+			func(txt *YText, txn *Transaction) {
+				txt.ApplyDelta(txn, []Delta{{Op: DeltaOpRetain, Retain: 2}, {Op: DeltaOpInsert, Insert: 7, Attributes: Attributes{"italic": true}}})
+			},
+			split(Delta{Op: DeltaOpInsert, Insert: int64(7), Attributes: Attributes{"italic": true}}),
+		},
+	} {
+		t.Run(name, func(t *testing.T) { assert.Equal(t, tc.want, run(tc.insert)) })
 	}
 }

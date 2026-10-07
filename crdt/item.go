@@ -215,6 +215,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		item.Parent.length += item.Content.Len()
 		if item.Right != nil {
 			if hint > 0 {
+				if l := item.Left; l != nil && (l.Deleted || !l.Content.IsCountable()) {
+					item.Parent.dropUncountedMarkersAt(hint)
+				}
 				item.Parent.updateMarkerChanges(hint, item.Content.Len())
 			} else {
 				item.Parent.clearMarkers()
