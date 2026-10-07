@@ -18,7 +18,7 @@ func moveUndoSeeds() int {
 			return n
 		}
 	}
-	return 100
+	return raceSeeds(100)
 }
 
 // Peers with their own UndoManagers insert, delete, move, re-move, undo and

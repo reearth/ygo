@@ -104,7 +104,7 @@ func (s *gcFuzzSide) op(r *rand.Rand, n int) {
 // and a synced peer, across array/move/map/text edits and undo/redo.
 // FUZZ_ITER overrides the seed count.
 func TestFuzzRunGCMerge(t *testing.T) {
-	seeds := 300
+	seeds := raceSeeds(300)
 	if v := os.Getenv("FUZZ_ITER"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			seeds = n

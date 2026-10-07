@@ -19,7 +19,7 @@ func moveDeltaSeeds() int {
 			return n
 		}
 	}
-	return 300
+	return raceSeeds(300)
 }
 
 // applyArrayDelta replays one YArrayEvent delta onto a plain slice.
