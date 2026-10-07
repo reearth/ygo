@@ -56,8 +56,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `YXmlFragment.Insert` now panic at the call site when the result would
   contain itself, like the existing double-staging check.
 
+- **`crdt`: a `YArray.Move` could be lost or rendered in the wrong place.**
+  A client moving an element it had already moved did nothing, because the
+  new move lost arbitration to its own earlier one; the latest move by a client
+  now wins, by one rule applied at integration, pending-move resolution and
+  re-arbitration (#276). Undoing the delete of a moved element restored it at
+  its pre-move position; it now returns to the move destination (#277).
+  `YArrayEvent.Delta` now reports undoing a move, a target passing to another
+  move, and deleting a moved element (#275).
+
+- **`crdt`: `RunGC` could make peers diverge on maps.** Its tombstone merge
+  pass merged items of different map keys and left a key's map entry pointing
+  at an absorbed item, so a later concurrent `Set` diverged. Merges now require
+  the same parent, key and move owner, as yjs's `mergeWith` does (#282).
+
+- **`crdt`: remaining `UndoManager` differences from yjs.** Restored map values
+  now compete in yjs's first-delete client order, runs yjs would merge are
+  restored as one item (so a concurrent insert no longer lands inside them),
+  and a remote tombstone inside a deleted map no longer blocks restoring the
+  key (#278).
+
+- **`crdt`: one detached XML node could be staged into two parents** (#279),
+  **XML attributes stored as `ContentJSON` read as missing, and map reads
+  returned the first value of a multi-value item** where yjs returns the last
+  (#280).
+
+- **`crdt`: values JSON cannot encode were silently written as `null`** in
+  embeds and text attributes (#283).
+
 ### Changed
 
+- `YXmlFragment.Insert` (and `InsertElement`/`InsertText`) panic when a node
+  is already attached, staged on another parent, or passed twice.
+- `YText.Insert`, `InsertEmbed`, `Format` and `ApplyDelta` panic on values JSON
+  cannot encode (NaN, ±Inf, functions, channels, complex numbers). A
+  non-finite number received from a V2 peer is written as `null` on its own
+  when re-encoded as V1, as `JSON.stringify` does.
+- When the same client moves an element twice, the second move wins.
 - `Transaction.Local` is `false` inside `ApplyUpdate`, `ApplyUpdateV1` and
   `ApplyUpdateV2`. Observers that read it now see `false` for remote changes.
 - `UndoManager` never captures remote updates, even with

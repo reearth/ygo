@@ -28,6 +28,22 @@ yjs, and data an older ygo stored in its previous format still loads.
 
 **Staging a type into itself panics instead of crashing later.**
 
+**`YArray.Move` fixes.** Moving an element you already moved now takes effect,
+undoing the delete of a moved element puts it back where you moved it, and
+array change events now report undone moves, so an editor bound to the events
+stays in step.
+
+**`RunGC` no longer makes maps diverge.** Garbage collection could merge
+deleted entries belonging to different keys, after which peers disagreed on a
+key's value.
+
+**Undo matches yjs more closely**, including which value wins when two
+collaborators' restored values compete for one key.
+
+**XML and JSON edge cases.** An XML node can no longer be put into two parents
+at once, legacy JSON attributes read correctly, and values that JSON cannot
+represent are rejected instead of silently becoming `null`.
+
 **Upgrading.** No API change, but check these behaviour changes:
 
 - Observers reading `Transaction.Local` now see `false` for remote changes.
@@ -35,6 +51,9 @@ yjs, and data an older ygo stored in its previous format still loads.
   may undo an older step, and they return `false` when nothing changed.
 - Something inserted and deleted within one undo step stays deleted on undo.
   Call `StopCapturing` between the two if you want separate steps.
+- XML `Insert` panics on a node that is already attached or staged elsewhere,
+  and text inserts panic on values like `NaN` or functions. Both used to be
+  accepted and corrupted the document.
 - **Rolling upgrades:** ygo 1.51.0 and older cannot read V1 updates carrying
   legacy JSON content written by this version. Upgrade all nodes before
   relaying such documents in V1, or use V2.
