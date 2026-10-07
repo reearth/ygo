@@ -168,3 +168,28 @@ func TestUnit_StageCycle_XML_DeletedChildMayHostItsOldParent(t *testing.T) {
 		t.Fatalf("ToXML = %q, want %q", got, want)
 	}
 }
+
+// A detached fragment staged inside an element must not hide a cycle.
+func TestUnit_StageCycle_XML_ThroughNestedFragment(t *testing.T) {
+	newFrag := func() *YXmlFragment {
+		f := &YXmlFragment{}
+		f.itemMap = make(map[string]*Item)
+		f.owner = f
+		return f
+	}
+	doc := newTestDoc(1)
+	doc.Transact(func(txn *Transaction) {
+		a, f := NewYXmlElement("a"), newFrag()
+		a.Insert(txn, 0, f)
+		mustPanicContaining(t, "Insert: staging this node here would create a cycle",
+			func() { f.Insert(txn, 0, a) })
+		if f.Len() != 0 {
+			t.Fatalf("rejected insert was buffered: Len=%d", f.Len())
+		}
+
+		outer, inner := newFrag(), newFrag()
+		outer.Insert(txn, 0, inner)
+		mustPanicContaining(t, "Insert: staging this node here would create a cycle",
+			func() { inner.Insert(txn, 0, outer) })
+	})
+}
