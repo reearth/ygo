@@ -90,7 +90,7 @@ func textValueAt(v any, depth int) (any, error) {
 		if u := rv.Uint(); u <= math.MaxInt64 {
 			return int64(u), nil
 		}
-		return rv.Uint(), nil
+		return float64(rv.Uint()), nil // WriteAny's form above int64
 	case reflect.Float32:
 		return float32(rv.Float()), nil
 	case reflect.Float64:

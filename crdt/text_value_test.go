@@ -68,6 +68,8 @@ func TestUnit_TextValue_NormalisedForV1AndV2(t *testing.T) {
 		{"json.Number overflow", json.Number("1e400"), math.Inf(1)},
 		{"int32", int32(3), int64(3)},
 		{"uint8", uint8(4), int64(4)},
+		{"uint64 above int64", uint64(1<<63 | 1<<39), float64(1<<63 | 1<<39)},
+		{"[]uint64 above int64", []uint64{1<<63 | 1<<39}, []any{float64(1<<63 | 1<<39)}},
 		{"named string in map", map[string]textValueColor{"c": "red"}, map[string]any{"c": "red"}},
 		{"map[string]string", map[string]string{"a": "b"}, map[string]any{"a": "b"}},
 		{"[]string", []string{"a", "b"}, []any{"a", "b"}},
