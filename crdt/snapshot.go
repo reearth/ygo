@@ -124,6 +124,48 @@ func EqualSnapshots(a, b *Snapshot) bool {
 	return true
 }
 
+// SnapshotContainsUpdateV1 reports whether snap already holds everything the
+// V1 update carries: every struct in update lies below snap's state vector,
+// and every deletion in it is in snap's delete set, so applying update to the
+// document snap was taken from would change nothing. update is decoded
+// without being integrated; one that does not decode returns an error
+// wrapping ErrInvalidUpdate. Matches Yjs snapshotContainsUpdate.
+func SnapshotContainsUpdateV1(snap *Snapshot, update []byte) (bool, error) {
+	structs, ds, err := decodeStructsV1(New(), update)
+	if err != nil {
+		return false, err
+	}
+	for client, items := range structs {
+		held := snap.StateVector.Clock(client)
+		for _, item := range items {
+			if item.ID.Clock+uint64(item.Content.Len()) > held {
+				return false, nil
+			}
+		}
+	}
+	for client, ranges := range ds.clients {
+		for _, r := range ranges {
+			if !deleteSetCovers(snap.DeleteSet, client, r) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+// deleteSetCovers reports whether ds marks every clock in r deleted for
+// client. It relies on ds being sorted and compacted (sortAndCompact), as every
+// DeleteSet buildDeleteSet or decodeDeleteSet returns is, so a covered range
+// lies inside a single one of ds's ranges.
+func deleteSetCovers(ds DeleteSet, client ClientID, r DeleteRange) bool {
+	if r.Len == 0 {
+		return true
+	}
+	ranges := ds.clients[client]
+	i := sort.Search(len(ranges), func(i int) bool { return ranges[i].Clock+ranges[i].Len > r.Clock })
+	return i < len(ranges) && ranges[i].Clock <= r.Clock && r.Clock+r.Len <= ranges[i].Clock+ranges[i].Len
+}
+
 // CreateDocFromSnapshot reconstructs the document state captured by snap into a
 // new, independent Doc — the Go equivalent of Yjs JS's createDocFromSnapshot.
 // Items inserted after the snapshot are excluded, and only deletions present in

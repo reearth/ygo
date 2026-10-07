@@ -1,3 +1,39 @@
+## v1.52.0
+
+**Who is affected: servers that set `HocuspocusFraming` for
+`@hocuspocus/provider` clients.** Connections on plain y-websocket framing are
+unchanged.
+
+`@hocuspocus/provider` counts the edits it has sent and lowers the count only
+when the server answers one with a `SyncStatus` (tag 8) message, which
+`@hocuspocus/server` sends after every SyncStep2 or Update. ygo defined the tag
+but never sent it, so against ygo the provider's `hasUnsyncedChanges` stayed
+true for as long as the connection lived, and an editor could never tell its
+edits had reached the server.
+
+With `HocuspocusFraming` set, ygo now answers every SyncStep2 or Update, under
+Sync (tag 0) or SyncReply (tag 4), with exactly one `SyncStatus`, in the order
+the frames arrived, so a client can pair each answer with the frame it sent:
+
+| The client sends | The room | `SyncStatus` |
+|---|---|---|
+| a SyncStep2 or Update | applies it | 1 |
+| a SyncStep2 or Update | refuses it (it overflows `MaxPendingItems`, say) | 0 |
+| an Update, read-only | does not take it | 0 |
+| a SyncStep2, read-only | already holds everything in it | 1 |
+| a SyncStep2, read-only | lacks something in it, and does not take it | 0 |
+| a sync frame that does not decode | closes the connection with 1002 | none |
+
+One answer differs from `@hocuspocus/server`: it answers an update the room
+refuses with 1, because y-protocols swallows the apply error, which tells the
+client the room holds an edit it does not. ygo answers 0 and keeps the
+connection, so the client keeps the edit and the next good update on the same
+connection is answered 1.
+
+`crdt.SnapshotContainsUpdateV1` is new: it reports whether a snapshot already
+holds everything a V1 update carries, as Yjs `snapshotContainsUpdate` does. The
+read-only SyncStep2 answer uses it.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a

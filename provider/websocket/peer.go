@@ -76,27 +76,24 @@ func (p *peer) handleMessage(data []byte) {
 	case msgSync:
 		// Sync payload follows directly (no VarBytes wrapper).
 		payload := dec.RemainingBytes()
-		if p.readOnly {
-			// Read-only peers may still request state (SyncStep1 → we reply with
-			// SyncStep2), but must not push changes: drop SyncStep2/Update without
-			// applying or broadcasting (#59). A malformed frame is dropped too.
-			if subType, _, e := ygsync.ReadSyncMessage(payload); e != nil || subType != ygsync.MsgSyncStep1 {
-				return
-			}
+		subType, update, err := ygsync.ReadSyncMessage(payload)
+		if err != nil {
+			p.discardMalformedSync(err)
+			return
 		}
+		if subType != ygsync.MsgSyncStep1 {
+			p.applySyncUpdate(subType, update, payload)
+			return
+		}
+		// Peer sent step-1 — send step-2 reply only to them. Read-only peers
+		// may still request state (#59).
 		reply, err := ygsync.ApplySyncMessage(p.room.doc, payload, p)
 		if err != nil {
 			p.server.log().Debug("discarded unappliable sync message",
 				"room", p.roomName, "err", err)
 			return
 		}
-		if reply != nil {
-			// Peer sent step-1 — send step-2 reply only to them.
-			p.sendSync(reply)
-		} else {
-			// Peer sent step-2 or update — broadcast to all other peers.
-			p.broadcastSync(payload)
-		}
+		p.sendSync(reply)
 
 	case msgAwareness:
 		if p.readOnly {
@@ -131,10 +128,19 @@ func (p *peer) handleMessage(data []byte) {
 		// back, which would cause an infinite ping-pong on noisy links.
 		// Apply locally and broadcast updates, but never reply with our
 		// own step-1.
-		if p.readOnly {
-			return // #59: SyncReply carries a SyncStep2 write; drop it for read-only peers.
-		}
 		payload := dec.RemainingBytes()
+		subType, update, err := ygsync.ReadSyncMessage(payload)
+		if err != nil {
+			p.discardMalformedSync(err)
+			return
+		}
+		if subType != ygsync.MsgSyncStep1 {
+			p.applySyncUpdate(subType, update, payload)
+			return
+		}
+		if p.readOnly {
+			return // #59: read-only peers' SyncReply frames are dropped.
+		}
 		if _, err := ygsync.ApplySyncMessage(p.room.doc, payload, p); err != nil {
 			p.server.log().Debug("discarded unappliable sync(reply) message",
 				"room", p.roomName, "err", err)
@@ -195,9 +201,9 @@ func (p *peer) handleMessage(data []byte) {
 
 	case msgSyncStatus:
 		// Hocuspocus tag 8 (#55). Server→client ack carrying a single
-		// VarUint flag (1 = applied, 0 = rejected). If a client sends it
-		// to us, consume the payload silently — we don't track per-update
-		// delivery confirmations.
+		// VarUint flag (1 = applied, 0 = not applied), which applySyncUpdate
+		// sends for every SyncStep2 or Update. If a client sends one to us,
+		// consume the payload silently.
 		_, _ = dec.ReadVarUint()
 
 	case msgPing:
@@ -213,6 +219,79 @@ func (p *peer) handleMessage(data []byte) {
 		// Hocuspocus tag 10 (#55). Reply to a server-sent Ping. ygo does
 		// not currently send Pings, so this is a no-op pass-through that
 		// just keeps the dispatcher from dropping the frame.
+	}
+}
+
+// applySyncUpdate handles a SyncStep2 or Update (update, the sync payload's
+// content) that a peer sent under Sync (tag 0) or SyncReply (tag 4): it applies
+// the update to the room and broadcasts payload to the room's other peers. A
+// read-only peer's update is neither applied nor broadcast (#59).
+//
+// On a connection using Hocuspocus framing it answers every such frame with
+// exactly one SyncStatus (tag 8), in the order the frames arrived, so a client
+// can pair each answer with the frame it sent. As @hocuspocus/server answers:
+// 1 once the room applied the update; for a read-only peer, 0 for an Update,
+// and for a SyncStep2 1 when the room already holds everything in it and 0
+// otherwise. One difference: an update the room refuses (it does not decode,
+// or it overflows MaxPendingItems) is answered 0, where @hocuspocus/server
+// answers 1 because y-protocols swallows the apply error; 1 would tell the
+// client the room holds an edit it does not.
+func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
+	if p.readOnly {
+		if p.hocuspocusFraming {
+			p.sendSyncStatus(subType == ygsync.MsgSyncStep2 && p.roomHolds(update))
+		}
+		return
+	}
+	if err := crdt.ApplyUpdateV1(p.room.doc, update, p); err != nil {
+		p.server.log().Debug("discarded unappliable sync message",
+			"room", p.roomName, "err", err)
+		p.sendSyncStatus(false)
+		return
+	}
+	p.broadcastSync(payload)
+	p.sendSyncStatus(true)
+}
+
+// roomHolds reports whether the room's document already holds everything the
+// V1 update carries. An update that does not decode is not held.
+func (p *peer) roomHolds(update []byte) bool {
+	held, err := crdt.SnapshotContainsUpdateV1(crdt.CaptureSnapshot(p.room.doc), update)
+	if err != nil {
+		p.server.log().Debug("read-only sync message does not decode",
+			"room", p.roomName, "err", err)
+		return false
+	}
+	return held
+}
+
+// sendSyncStatus writes a SyncStatus (tag 8) frame carrying 1 when applied is
+// true and 0 otherwise, on a connection using Hocuspocus framing only:
+// y-websocket clients do not know tag 8.
+func (p *peer) sendSyncStatus(applied bool) {
+	if !p.hocuspocusFraming {
+		return
+	}
+	var flag uint64
+	if applied {
+		flag = 1
+	}
+	p.write(encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgSyncStatus)
+		enc.WriteVarUint(flag)
+	}))
+}
+
+// discardMalformedSync drops a Sync or SyncReply frame whose sync message
+// does not decode. On a connection using Hocuspocus framing it also closes
+// the connection with 1002 (protocol error) and sends no SyncStatus, as
+// @hocuspocus/server closes a connection whose message throws: the frame can
+// be paired with no answer, so the client's pairing ends with the connection.
+func (p *peer) discardMalformedSync(err error) {
+	p.server.log().Debug("discarded malformed sync message",
+		"room", p.roomName, "err", err)
+	if p.hocuspocusFraming {
+		p.enqueueClose(gws.CloseProtocolError, "malformed sync message")
 	}
 }
 
