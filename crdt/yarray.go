@@ -685,6 +685,8 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 //     up at its respective destination.
 //   - Two peers moving THE SAME element: the ContentMove with the lower ClientID
 //     wins; the element appears at the winner's destination.
+//   - One peer moving an element again: its latest move wins, and undoing it
+//     returns the element to the previous move's destination.
 //
 // physPos formula: after splitting the target element into its own item, the
 // ContentMove is placed at physical position toIndex+1 when fromIndex < toIndex

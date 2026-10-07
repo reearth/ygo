@@ -313,10 +313,10 @@ func (c *ContentDoc) Splice(_ int) Content { panic("crdt: ContentDoc is not spli
 // instead of at its original position. ContentMove is non-countable (it does
 // not contribute to the array's logical length) and occupies one clock slot.
 //
-// When two ContentMove items target the same item concurrently, the one with
-// the lower ClientID wins (deterministic convergence). The losing ContentMove
-// stays in the linked list but renders nothing because target.MovedBy points
-// to the winning item.
+// When two ContentMove items target the same item, the one with the lower
+// ClientID wins; between one client's moves the latest wins (deterministic
+// convergence). The losing ContentMove stays in the linked list but renders
+// nothing because target.MovedBy points to the winning item.
 //
 // TargetLen is the expected length of the target item (always 1 for
 // single-element moves). It is stored in the wire format so that receivers can

@@ -253,14 +253,11 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 
 	// ContentMove priority arbitration: resolve the target item (splitting if
 	// needed so it covers exactly TargetLen elements) and claim it if we are the
-	// winning move. Lower ClientID wins for concurrent moves from different peers;
-	// for same-client sequential moves the earlier (lower-clock) move stays as
-	// winner so that re-moves are not silently ignored — callers should delete
-	// the old ContentMove first when they want to supersede it.
+	// winning move under moveBeats.
 	if cm, ok := item.Content.(*ContentMove); ok && !item.Deleted && cm.Target != nil {
 		target := resolveMovedItem(txn, cm.Target, cm.TargetLen)
 		if target != nil {
-			if target.MovedBy == nil || item.ID.Client < target.MovedBy.ID.Client {
+			if moveBeats(item, target.MovedBy) {
 				txn.setMovedBy(target, item)
 			}
 		} else {
@@ -535,11 +532,24 @@ func rearbitrateMove(txn *Transaction, move *Item, cm *ContentMove) {
 	set[target] = struct{}{}
 }
 
-// rearbitrateMoves hands each queued target to its next live move by the
-// integrate rule (lowest ClientID, then earliest clock), or back to its
-// origin when none remains. One pass per parent keeps a delete of many
-// winning moves linear rather than one list scan per move; a deleted parent
-// (a cascade) renders nothing, so it is skipped.
+// moveBeats reports whether move m takes its target from the current winner
+// w. The lowest ClientID wins across clients; within one client the latest
+// move (highest clock) wins, so re-moving an element takes effect (#276). A
+// total order over live moves, so every peer picks the same winner.
+func moveBeats(m, w *Item) bool {
+	if w == nil {
+		return true
+	}
+	if m.ID.Client != w.ID.Client {
+		return m.ID.Client < w.ID.Client
+	}
+	return m.ID.Clock > w.ID.Clock
+}
+
+// rearbitrateMoves hands each queued target to its next live move by
+// moveBeats, or back to its origin when none remains. One pass per parent
+// keeps a delete of many winning moves linear rather than one list scan per
+// move; a deleted parent (a cascade) renders nothing, so it is skipped.
 func rearbitrateMoves(txn *Transaction) {
 	for parent, targets := range txn.rearbitrate {
 		if pi := parent.item; pi != nil && pi.Deleted {
@@ -557,8 +567,7 @@ func rearbitrateMoves(txn *Transaction) {
 			if _, queued := targets[target]; !queued {
 				continue
 			}
-			if w := target.MovedBy; w == nil || it.ID.Client < w.ID.Client ||
-				(it.ID.Client == w.ID.Client && it.ID.Clock < w.ID.Clock) {
+			if moveBeats(it, target.MovedBy) {
 				txn.setMovedBy(target, it)
 			}
 		}
