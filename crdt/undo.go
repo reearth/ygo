@@ -388,7 +388,7 @@ func (u *UndoManager) applyStackItem(item *StackItem, others []DeleteSet) *Stack
 		// the same stack item were created and deleted within it, so they stay
 		// deleted (Yjs popStackItem).
 		var toRedo []*Item
-		redoSet := make(map[*Item]struct{})
+		pass := &redoPass{set: make(map[*Item]struct{}), insertions: item.insertions, others: others}
 		u.iterateItems(txn, item.deletions, func(it *Item) {
 			if !it.Deleted || !u.itemInScope(it) || item.insertions.IsDeleted(it.ID) {
 				return
@@ -398,7 +398,7 @@ func (u *UndoManager) applyStackItem(item *StackItem, others []DeleteSet) *Stack
 				return
 			}
 			toRedo = append(toRedo, it)
-			redoSet[it] = struct{}{}
+			pass.set[it] = struct{}{}
 		})
 		// Group runs Yjs holds as one merged struct before any redo splices
 		// between them: Yjs restores such a run as one item, which places a
@@ -413,7 +413,7 @@ func (u *UndoManager) applyStackItem(item *StackItem, others []DeleteSet) *Stack
 			for toRedo[i].redone == nil && j < len(toRedo) && merged[j] && toRedo[j].redone == nil {
 				j++
 			}
-			if u.redoItem(txn, toRedo[i], toRedo[i+1:j], redoSet, item.insertions, others) != nil {
+			if u.redoItem(txn, toRedo[i], toRedo[i+1:j], pass) != nil {
 				performed = true
 			}
 			i = j
@@ -450,7 +450,7 @@ func (u *UndoManager) applyStackItem(item *StackItem, others []DeleteSet) *Stack
 // first when it is in redoSet. Mirrors Yjs redoItem.
 // rest are items following item that Yjs holds merged with it; their content
 // is appended to the copy. Returns the new item, or nil if it cannot be placed.
-func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, redoSet map[*Item]struct{}, insertions DeleteSet, others []DeleteSet) *Item {
+func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *redoPass) *Item {
 	if item.redone != nil {
 		return u.doc.store.getItemCleanStart(txn, *item.redone)
 	}
@@ -460,7 +460,7 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, redoS
 	}
 	if pi := parent.item; pi != nil && pi.Deleted {
 		if pi.redone == nil {
-			if _, ok := redoSet[pi]; !ok || u.redoItem(txn, pi, nil, redoSet, insertions, others) == nil {
+			if _, ok := p.set[pi]; !ok || u.redoItem(txn, pi, nil, p) == nil {
 				return nil
 			}
 		}
@@ -479,8 +479,8 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, redoS
 		// A restored move targets its target's restored copy, redoing that first
 		// when this undo restores it too.
 		if t := u.doc.store.Find(*cm.Target); t != nil {
-			if _, ok := redoSet[t]; ok && t.redone == nil {
-				u.redoItem(txn, t, nil, redoSet, insertions, others)
+			if _, ok := p.set[t]; ok && t.redone == nil {
+				u.redoItem(txn, t, nil, p)
 			}
 			if t = u.followRedone(txn, t); t != nil && t.ID != *cm.Target {
 				// The copy may hold a merged run; TargetLen trims it.
@@ -531,7 +531,7 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, redoS
 		// that are undo/redo history; any other later value is a remote edit,
 		// which undo must not overwrite (Yjs redoItem).
 		left = item
-		for r := nextSameKey(left); r != nil && (r.redone != nil || insertions.IsDeleted(r.ID) || deletedByStacks(others, r.ID) || collectedWithParent(r)); r = nextSameKey(left) {
+		for r := nextSameKey(left); r != nil && (r.redone != nil || p.insertions.IsDeleted(r.ID) || deletedByStacks(p.others, r.ID) || collectedWithParent(r)); r = nextSameKey(left) {
 			left = u.followRedone(txn, r)
 		}
 		if left == nil || nextSameKey(left) != nil {
@@ -568,15 +568,52 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, redoS
 		off += uint64(r.Content.Len())
 	}
 	ni.integrate(txn, 0)
-	if mv := item.MovedBy; mv != nil && !mv.Deleted && mv.Parent == parent {
-		u.redoMove(txn, mv, ni)
+	if item.MovedBy != nil && item.Parent == parent {
+		for _, mv := range p.movesOf(u.doc.store, item) {
+			u.redoMove(txn, mv, ni)
+		}
 	}
 	return ni
 }
 
-// redoMove moves target, the restored copy of mv's deleted target, to where
-// mv rendered it (#277): a new move right after mv. mv.redone points at it
-// although mv stays live, so undoing mv's insertion deletes the new move.
+// redoPass is the state one applyStackItem shares across its redoItem calls.
+type redoPass struct {
+	set        map[*Item]struct{} // items this undo restores
+	insertions DeleteSet          // the stack item's insertions
+	others     []DeleteSet        // the other stack items' deletions
+	moves      map[*abstractType]map[*Item][]*Item
+}
+
+// movesOf returns the live moves of target in its parent, lowest priority
+// (moveBeats) first. Each parent is indexed once per pass.
+func (p *redoPass) movesOf(store *StructStore, target *Item) []*Item {
+	parent := target.Parent
+	idx, ok := p.moves[parent]
+	if !ok {
+		idx = make(map[*Item][]*Item)
+		for it := parent.start; it != nil; it = it.Right {
+			if cm, ok := it.Content.(*ContentMove); ok && !it.Deleted && cm.Target != nil {
+				if t := store.Find(*cm.Target); t != nil {
+					idx[t] = append(idx[t], it)
+				}
+			}
+		}
+		for _, ms := range idx {
+			sort.Slice(ms, func(i, j int) bool { return moveBeats(ms[j], ms[i]) })
+		}
+		if p.moves == nil {
+			p.moves = make(map[*abstractType]map[*Item][]*Item)
+		}
+		p.moves[parent] = idx
+	}
+	return idx[target]
+}
+
+// redoMove gives target, the restored copy of mv's deleted target, a new move
+// right after mv (#277). Called for each of the original's live moves in
+// rising priority, so the copies rank as the originals did and undoing one
+// hands the copy to the next. mv.redone points at the new move although mv
+// stays live, so undoing mv's insertion deletes the new move.
 func (u *UndoManager) redoMove(txn *Transaction, mv, target *Item) {
 	origin, originRight := neighbourOrigins(mv, mv.Right)
 	m := &Item{
