@@ -478,6 +478,10 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 	}
 	item.Right = right
 	txn.doc.store.insertItem(right)
+	// The key's entry is its rightmost unit, so Set's origin (lastID) stays the run's end.
+	if item.ParentSub != nil && item.Parent != nil && item.Parent.itemMap[*item.ParentSub] == item {
+		item.Parent.itemMap[*item.ParentSub] = right
+	}
 	// A split does not move any rendered position — the two halves occupy exactly
 	// the range the original item did, and a marker pointing at the original
 	// (now-left) half keeps a correct rendered start (renderedStep recomputes its

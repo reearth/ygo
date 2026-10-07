@@ -417,7 +417,10 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		return false
 	}
 
-	// Splice item out of the linked list.
+	// Splice item out of the linked list; a key entry moves to the merged item.
+	if item.ParentSub != nil && item.Parent != nil && item.Parent.itemMap[*item.ParentSub] == item {
+		item.Parent.itemMap[*item.ParentSub] = left
+	}
 	left.Right = item.Right
 	if item.Right != nil {
 		item.Right.Left = left
