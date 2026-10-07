@@ -343,3 +343,44 @@ func TestUnit_UndoManager_EditAfterUndoStartsNewItem(t *testing.T) {
 	require.Equal(t, "ba", txt.ToString())
 	require.False(t, m.Has("k2"))
 }
+
+// An edit that commits between an undo's apply and its stack update must
+// still invalidate redo, and an edit racing a redo must stay on top of the
+// undo stack.
+func TestInteg_UndoManager_EditRacingUndoOrRedo(t *testing.T) {
+	setup := func() (*Doc, *YArray, *UndoManager, *bool) {
+		doc := newTestDoc(1)
+		arr := doc.GetArray("a")
+		um := NewUndoManager(doc, []SharedType{arr})
+		race := new(bool)
+		// Runs after the undo/redo transaction commits, before pop relocks u.mu.
+		doc.OnAfterTransaction(func(txn *Transaction) {
+			if txn.Origin == um && *race {
+				*race = false
+				doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"edit"}) })
+			}
+		})
+		doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{"x"}) })
+		um.StopCapturing()
+		return doc, arr, um, race
+	}
+
+	t.Run("undo", func(t *testing.T) {
+		_, arr, um, race := setup()
+		*race = true
+		require.True(t, um.Undo())
+		require.Equal(t, []any{"edit"}, arr.ToSlice())
+		require.False(t, um.Redo(), "the edit invalidates redo")
+		require.Equal(t, []any{"edit"}, arr.ToSlice())
+	})
+
+	t.Run("redo", func(t *testing.T) {
+		_, arr, um, race := setup()
+		require.True(t, um.Undo())
+		*race = true
+		require.True(t, um.Redo())
+		require.Equal(t, []any{"x", "edit"}, arr.ToSlice())
+		require.True(t, um.Undo())
+		require.Equal(t, []any{"x"}, arr.ToSlice(), "the later edit undoes first")
+	})
+}

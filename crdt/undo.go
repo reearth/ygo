@@ -109,6 +109,9 @@ type UndoManager struct {
 	unsubscribe    func()
 	captureTimeout time.Duration
 	lastTxnTime    time.Time
+	// captures counts captured transactions, so pop can tell whether an edit
+	// committed while its stack item was being applied.
+	captures uint64
 
 	// trackedOrigins, when non-nil, limits capture to transactions whose
 	// Origin matches one of the keys. When nil, all local transactions are
@@ -231,6 +234,12 @@ func (u *UndoManager) pop(redo bool) bool {
 				others = append(others, s.deletions)
 			}
 		}
+		if !redo {
+			// The next edit must not merge into the next-older item (Yjs stops
+			// capturing after an undo, not a redo).
+			u.lastTxnTime = time.Time{}
+		}
+		captures, undoLen := u.captures, len(u.undoStack)
 		u.mu.Unlock()
 
 		inverse := u.applyStackItem(item, others)
@@ -238,13 +247,20 @@ func (u *UndoManager) pop(redo bool) bool {
 			continue
 		}
 		u.mu.Lock()
-		if redo {
+		raced := u.captures != captures
+		switch {
+		case redo && raced:
+			// Edits captured during the apply came after it: keep them on top.
+			at := min(undoLen, len(u.undoStack))
+			u.undoStack = append(u.undoStack[:at], append([]*StackItem{inverse}, u.undoStack[at:]...)...)
+		case redo:
 			u.undoStack = append(u.undoStack, inverse)
-		} else {
+		case raced:
+			// An edit captured during the apply invalidated redo.
+			u.mu.Unlock()
+			return true
+		default:
 			u.redoStack = append(u.redoStack, inverse)
-			// The next edit must not merge into the next-older item (Yjs stops
-			// capturing after an undo, not a redo).
-			u.lastTxnTime = time.Time{}
 		}
 		u.fireOnStackItemAdded(inverse, !redo)
 		u.mu.Unlock()
@@ -334,6 +350,7 @@ func (u *UndoManager) captureTransaction(txn *Transaction) {
 		u.fireOnStackItemAdded(item, false)
 	}
 	u.lastTxnTime = now
+	u.captures++
 
 	// Any new local edit invalidates the redo stack.
 	u.redoStack = u.redoStack[:0]
