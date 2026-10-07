@@ -261,7 +261,7 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		target := resolveMovedItem(txn, cm.Target, cm.TargetLen)
 		if target != nil {
 			if target.MovedBy == nil || item.ID.Client < target.MovedBy.ID.Client {
-				target.MovedBy = item
+				txn.setMovedBy(target, item)
 			}
 		} else {
 			// The target has not been integrated yet — common on a fresh peer
@@ -500,6 +500,18 @@ func originIDEquals(a, b *ID) bool {
 	return a.Client == b.Client && a.Clock == b.Clock
 }
 
+// setMovedBy reassigns target's winning move, remembering the pre-transaction
+// winner the first time so computeDelta can tell where the target rendered.
+func (txn *Transaction) setMovedBy(target, move *Item) {
+	if _, seen := txn.movedBefore[target]; !seen {
+		if txn.movedBefore == nil {
+			txn.movedBefore = make(map[*Item]*Item)
+		}
+		txn.movedBefore[target] = target.MovedBy
+	}
+	target.MovedBy = move
+}
+
 // rearbitrateMove releases a target whose winning move was just tombstoned and
 // queues it for rearbitrateMoves at commit. Without this the target kept
 // MovedBy pointing at a dead move: still counted in length, rendered nowhere.
@@ -511,7 +523,7 @@ func rearbitrateMove(txn *Transaction, move *Item, cm *ContentMove) {
 	if target == nil || target.MovedBy != move {
 		return
 	}
-	target.MovedBy = nil
+	txn.setMovedBy(target, nil)
 	if txn.rearbitrate == nil {
 		txn.rearbitrate = make(map[*abstractType]map[*Item]struct{})
 	}
@@ -534,7 +546,7 @@ func rearbitrateMoves(txn *Transaction) {
 			continue
 		}
 		for target := range targets {
-			target.MovedBy = nil
+			txn.setMovedBy(target, nil)
 		}
 		for it := parent.start; it != nil; it = it.Right {
 			c, ok := it.Content.(*ContentMove)
@@ -547,7 +559,7 @@ func rearbitrateMoves(txn *Transaction) {
 			}
 			if w := target.MovedBy; w == nil || it.ID.Client < w.ID.Client ||
 				(it.ID.Client == w.ID.Client && it.ID.Clock < w.ID.Clock) {
-				target.MovedBy = it
+				txn.setMovedBy(target, it)
 			}
 		}
 		parent.clearMarkers()

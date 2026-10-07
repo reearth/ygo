@@ -30,6 +30,9 @@ type Transaction struct {
 	// rearbitrate queues, per parent, move targets whose winning ContentMove
 	// was tombstoned; rearbitrateMoves resolves them in one pass at commit.
 	rearbitrate map[*abstractType]map[*Item]struct{}
+	// movedBefore holds each move target's MovedBy as it was before this
+	// transaction first changed it, so YArray deltas can diff the old render.
+	movedBefore map[*Item]*Item
 	// subdocsAdded/subdocsRemoved/subdocsLoaded track subdocument lifecycle
 	// changes made during this transaction (#63). Populated by Item.integrate
 	// and Item.delete when the item's Content is a *ContentDoc. Reconciled

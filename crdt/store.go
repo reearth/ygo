@@ -174,7 +174,7 @@ func (s *StructStore) resolvePendingMoves(txn *Transaction, client ClientID) {
 			continue
 		}
 		if target.MovedBy == nil || mv.ID.Client < target.MovedBy.ID.Client {
-			target.MovedBy = mv
+			txn.setMovedBy(target, mv)
 			// Setting MovedBy re-renders the target at the move's destination and
 			// blanks its original slot, so any cached position marker is stale.
 			if mv.Parent != nil {
