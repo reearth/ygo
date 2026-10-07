@@ -1,37 +1,38 @@
 package crdt
 
 import (
+	"encoding/hex"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
 )
 
 // #283: V1 writes format attributes and embeds as JSON text. A value JSON
-// cannot encode used to be written as "null", silently. The text entry points
-// now reject it at the call; a non-finite number that arrives from a V2 peer
-// re-encodes as JSON.stringify does, null in place.
+// cannot encode used to be written as "null", silently. Go values with no
+// JSON form (func, chan, complex) are rejected at the call; a non-finite
+// number is accepted, since a Yjs peer can send one, and V1 writes it as
+// JSON.stringify does: null in place.
 
 func TestUnit_JSONValue_TextEntryPointsReject(t *testing.T) {
-	nan := math.NaN()
 	for _, c := range []struct {
 		name string
 		call func(txt *YText, txn *Transaction)
 	}{
-		{"Insert attr NaN", func(x *YText, txn *Transaction) { x.Insert(txn, 0, "a", Attributes{"w": nan}) }},
-		{"Insert attr nested Inf", func(x *YText, txn *Transaction) {
-			x.Insert(txn, 0, "a", Attributes{"w": map[string]any{"k": []any{1, math.Inf(1)}}})
+		{"Insert attr func", func(x *YText, txn *Transaction) { x.Insert(txn, 0, "a", Attributes{"w": func() {}}) }},
+		{"Insert attr nested chan", func(x *YText, txn *Transaction) {
+			x.Insert(txn, 0, "a", Attributes{"w": map[string]any{"k": []any{1, make(chan int)}}})
 		}},
-		{"InsertEmbed NaN", func(x *YText, txn *Transaction) { x.InsertEmbed(txn, 0, nan, nil) }},
-		{"InsertEmbed float32 Inf", func(x *YText, txn *Transaction) { x.InsertEmbed(txn, 0, float32(math.Inf(-1)), nil) }},
 		{"InsertEmbed func", func(x *YText, txn *Transaction) { x.InsertEmbed(txn, 0, map[string]any{"f": func() {}}, nil) }},
 		{"InsertEmbed chan", func(x *YText, txn *Transaction) { x.InsertEmbed(txn, 0, make(chan int), nil) }},
-		{"InsertEmbed attr", func(x *YText, txn *Transaction) { x.InsertEmbed(txn, 0, "img", Attributes{"w": nan}) }},
-		{"Format", func(x *YText, txn *Transaction) { x.Format(txn, 0, 1, Attributes{"w": nan}) }},
+		{"InsertEmbed complex", func(x *YText, txn *Transaction) { x.InsertEmbed(txn, 0, complex(1, 2), nil) }},
+		{"InsertEmbed attr", func(x *YText, txn *Transaction) { x.InsertEmbed(txn, 0, "img", Attributes{"w": func() {}}) }},
+		{"Format", func(x *YText, txn *Transaction) { x.Format(txn, 0, 1, Attributes{"w": make(chan int)}) }},
 		{"ApplyDelta embed", func(x *YText, txn *Transaction) {
-			x.ApplyDelta(txn, []Delta{{Op: DeltaOpInsert, Insert: "ok"}, {Op: DeltaOpInsert, Insert: nan}})
+			x.ApplyDelta(txn, []Delta{{Op: DeltaOpInsert, Insert: "ok"}, {Op: DeltaOpInsert, Insert: func() {}}})
 		}},
 		{"ApplyDelta attr", func(x *YText, txn *Transaction) {
-			x.ApplyDelta(txn, []Delta{{Op: DeltaOpInsert, Insert: "ok", Attributes: Attributes{"w": nan}}})
+			x.ApplyDelta(txn, []Delta{{Op: DeltaOpInsert, Insert: "ok", Attributes: Attributes{"w": complex(1, 0)}}})
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -61,6 +62,104 @@ func TestUnit_JSONValue_FiniteAndPlainValuesAccepted(t *testing.T) {
 		txt.InsertEmbed(txn, 1, map[string]any{"src": "x.png", "w": float32(2)}, nil)
 		txt.Format(txn, 0, 1, Attributes{"bold": nil})
 	})
+}
+
+// Non-finite numbers are accepted at every text entry point; V2 keeps them
+// and V1 writes each as null, so a V1 peer reads what Yjs's would.
+func TestUnit_JSONValue_NonFiniteAccepted(t *testing.T) {
+	nan, inf := math.NaN(), math.Inf(1)
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *Transaction) {
+		txt.Insert(txn, 0, "abcd", Attributes{"w": nan})
+		txt.Format(txn, 1, 1, Attributes{"h": map[string]any{"k": []any{1, math.Inf(-1)}}})
+		txt.InsertEmbed(txn, 4, float32(inf), Attributes{"e": nan})
+		txt.ApplyDelta(txn, []Delta{{Op: DeltaOpRetain, Retain: 5}, {Op: DeltaOpInsert, Insert: "z", Attributes: Attributes{"d": []any{float32(nan)}}}})
+	})
+	prelim := NewTextPrelim()
+	prelim.Insert(nil, 0, "p", Attributes{"w": nan})
+	prelim.InsertEmbed(nil, 1, map[string]any{"v": inf}, nil)
+
+	v2 := New()
+	if err := ApplyUpdateV2(v2, EncodeStateAsUpdateV2(doc, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprint(v2.GetText("t").ToDelta()), fmt.Sprint(txt.ToDelta()); got != want {
+		t.Errorf("V2 reload\n got=%s\nwant=%s", got, want)
+	}
+	v1 := New()
+	if err := ApplyUpdateV1(v1, EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	// A null attribute is no attribute, as for a Yjs V1 peer.
+	want := []Delta{
+		{Op: DeltaOpInsert, Insert: "a"},
+		{Op: DeltaOpInsert, Insert: "b", Attributes: Attributes{"h": map[string]any{"k": []any{float64(1), nil}}}},
+		{Op: DeltaOpInsert, Insert: "cd"},
+		{Op: DeltaOpInsert, Insert: nil},
+		{Op: DeltaOpInsert, Insert: "z", Attributes: Attributes{"d": []any{nil}}},
+	}
+	if got := v1.GetText("t").ToDelta(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("V1 reload\n got=%v\nwant=%v", got, want)
+	}
+}
+
+// yjsNaNText is Yjs 13.6 (clientID 7) after t.insert(0, 'hello');
+// t.format(0, 2, {x: NaN}); t.insertEmbed(5, {v: Infinity}), as V2 and V1.
+const (
+	yjsNaNTextV2 = "000200020247040302000602000409040084004600c600850e087468656c6c6f78780102034100010100000105007b7ff80000000000007e760101767c7f80000000"
+	yjsNaNTextV1 = "0105070004010174026865840701036c6c6f4607000178046e756c6cc6070107020178046e756c6c8507040a7b2276223a6e756c6c7d00"
+)
+
+// A Yjs peer's non-finite format and embed values decode, mirror into another
+// text via ToDelta or an observer's delta, and re-encode as V1 byte for byte
+// like Yjs.
+func TestUnit_JSONValue_RemoteNonFiniteMirrors(t *testing.T) {
+	u, _ := hex.DecodeString(yjsNaNTextV2)
+	src := New(WithClientID(1))
+	st := src.GetText("t")
+	var deltas [][]Delta
+	st.Observe(func(e YTextEvent) { deltas = append(deltas, e.Delta) })
+	if err := ApplyUpdateV2(src, u, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprint(st.ToDelta())
+	if want != fmt.Sprint([]Delta{
+		{Op: DeltaOpInsert, Insert: "he", Attributes: Attributes{"x": math.NaN()}},
+		{Op: DeltaOpInsert, Insert: "llo"},
+		{Op: DeltaOpInsert, Insert: map[string]any{"v": math.Inf(1)}},
+	}) {
+		t.Fatalf("decoded delta = %s", want)
+	}
+	if got := hex.EncodeToString(EncodeStateAsUpdateV1(src, nil)); got != yjsNaNTextV1 {
+		t.Errorf("V1 re-encode\n got=%s\nwant=%s", got, yjsNaNTextV1)
+	}
+
+	copied := New(WithClientID(2))
+	ct := copied.GetText("t")
+	copied.Transact(func(txn *Transaction) { ct.ApplyDelta(txn, st.ToDelta()) })
+	forwarded := New(WithClientID(3))
+	ft := forwarded.GetText("t")
+	for _, d := range deltas {
+		forwarded.Transact(func(txn *Transaction) { ft.ApplyDelta(txn, d) })
+	}
+	// Only text runs: ApplyDelta does not insert embeds at all yet.
+	want = fmt.Sprint(textRuns(st.ToDelta()))
+	for name, txt := range map[string]*YText{"ToDelta copy": ct, "observer forward": ft} {
+		if got := fmt.Sprint(textRuns(txt.ToDelta())); got != want {
+			t.Errorf("%s\n got=%s\nwant=%s", name, got, want)
+		}
+	}
+}
+
+func textRuns(d []Delta) []Delta {
+	var out []Delta
+	for _, op := range d {
+		if _, ok := op.Insert.(string); ok {
+			out = append(out, op)
+		}
+	}
+	return out
 }
 
 func TestUnit_FmtValToJSON_NonFiniteAsJSONStringify(t *testing.T) {

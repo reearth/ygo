@@ -535,7 +535,8 @@ func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 // attrs may carry inline attributes that apply ONLY to this embed item.
 // They are emitted as opening + closing ContentFormat markers around the
 // embed so subsequent inserts are unaffected. Pass nil for an unstyled embed.
-// Like attribute values, embed must be JSON-encodable or InsertEmbed panics.
+// Like attribute values, embed must be JSON-encodable or InsertEmbed panics;
+// a NaN or ±Inf in it is written as null by V1.
 //
 // Must be called from inside a Transact callback.
 //
