@@ -536,7 +536,8 @@ func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 // They are emitted as opening + closing ContentFormat markers around the
 // embed so subsequent inserts are unaffected. Pass nil for an unstyled embed.
 // Like attribute values, embed must be JSON-encodable or InsertEmbed panics;
-// a NaN or ±Inf in it is written as null by V1.
+// a NaN or ±Inf in it is written as null by V1. A shared type (YMap, YText,
+// ...) cannot be embedded and panics too.
 //
 // Must be called from inside a Transact callback.
 //
@@ -1284,7 +1285,8 @@ func (txt *YText) Observe(fn func(YTextEvent)) func() {
 
 // ApplyDelta applies a Quill-compatible delta to the text within the given
 // transaction. Each Delta must have exactly one of Op set:
-//   - DeltaOpInsert: inserts d.Insert at the current cursor position with optional d.Attributes
+//   - DeltaOpInsert: inserts d.Insert at the current cursor position with optional d.Attributes;
+//     a string is text, any other non-nil value an embed, as InsertEmbed takes it
 //   - DeltaOpDelete: deletes d.Delete UTF-16 code units at the current cursor position
 //   - DeltaOpRetain: advances the cursor by d.Retain UTF-16 code units; if d.Attributes is
 //     non-nil, applies formatting to the retained range
@@ -1325,8 +1327,8 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 	for _, d := range delta {
 		switch d.Op {
 		case DeltaOpInsert:
-			if s, ok := d.Insert.(string); ok {
-				t.applyDeltaInsert(txn, pos, s, d.Attributes)
+			if d.Insert != nil {
+				t.applyDeltaInsert(txn, pos, d.Insert, d.Attributes)
 			}
 		case DeltaOpDelete:
 			t.applyDeltaDelete(txn, pos, d.Delete)
@@ -1340,7 +1342,8 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 	}
 }
 
-// applyDeltaInsert inserts text at the cursor pos, mirroring YText.Insert's
+// applyDeltaInsert inserts text, or any other value as an embed (Yjs
+// applyDelta parity), at the cursor pos, mirroring YText.Insert's
 // item construction (attribute open/close markers, tombstone-skipping
 // anchor) exactly — but sourcing the "current attributes" diff input from
 // pos.cur (already tracked incrementally by the cursor) instead of a fresh
@@ -1350,9 +1353,16 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 // the net effect on the ambient format state — and therefore on pos.cur — is
 // zero: leaving pos.cur untouched here is equivalent to (and cheaper than)
 // walking it past the new markers. Advances pos past the inserted run.
-func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, text string, attrs Attributes) {
-	if text == "" {
-		return
+func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, ins any, attrs Attributes) {
+	var content Content
+	n := 1
+	if text, ok := ins.(string); ok {
+		if text == "" {
+			return
+		}
+		content, n = NewContentString(text), utf16Len(text)
+	} else {
+		content = NewContentEmbed(ins)
 	}
 
 	// Anchor after any adjacent tombstones (Yjs text-insert parity, #160),
@@ -1430,7 +1440,7 @@ func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, text
 		OriginRight: originRight,
 		Left:        left,
 		Parent:      t,
-		Content:     NewContentString(text),
+		Content:     content,
 	}
 	if pos.index > 0 {
 		t.insertHint = pos.index
@@ -1481,7 +1491,7 @@ func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, text
 	}
 
 	pos.left = left
-	pos.index += utf16Len(text)
+	pos.index += n
 }
 
 // applyDeltaDelete deletes length countable units starting at the cursor pos,

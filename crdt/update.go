@@ -1368,6 +1368,8 @@ func jsonValueErr(v any) error {
 	switch t := v.(type) {
 	case nil, bool, string, int, int64, float64, float32:
 		return nil
+	case sharedType:
+		return errSharedTypeValue
 	case []any:
 		for _, e := range t {
 			if err := jsonValueErr(e); err != nil {
@@ -1386,6 +1388,11 @@ func jsonValueErr(v any) error {
 	_, err := encodeJSONText(v)
 	return err
 }
+
+// errSharedTypeValue rejects a Y type as a text value: YText holds it as
+// ContentType, which ygo does not insert, and as a plain value V1 would
+// write it as {}.
+var errSharedTypeValue = errors.New("a shared type cannot be embedded in YText")
 
 // checkJSONValue panics if v, a value V1 writes as JSON text (an embed or a
 // format attribute), has no JSON form, rather than letting it reach the wire

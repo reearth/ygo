@@ -143,23 +143,11 @@ func TestUnit_JSONValue_RemoteNonFiniteMirrors(t *testing.T) {
 	for _, d := range deltas {
 		forwarded.Transact(func(txn *Transaction) { ft.ApplyDelta(txn, d) })
 	}
-	// Only text runs: ApplyDelta does not insert embeds at all yet.
-	want = fmt.Sprint(textRuns(st.ToDelta()))
 	for name, txt := range map[string]*YText{"ToDelta copy": ct, "observer forward": ft} {
-		if got := fmt.Sprint(textRuns(txt.ToDelta())); got != want {
+		if got := fmt.Sprint(txt.ToDelta()); got != want {
 			t.Errorf("%s\n got=%s\nwant=%s", name, got, want)
 		}
 	}
-}
-
-func textRuns(d []Delta) []Delta {
-	var out []Delta
-	for _, op := range d {
-		if _, ok := op.Insert.(string); ok {
-			out = append(out, op)
-		}
-	}
-	return out
 }
 
 func TestUnit_FmtValToJSON_NonFiniteAsJSONStringify(t *testing.T) {
