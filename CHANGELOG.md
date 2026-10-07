@@ -81,17 +81,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned the first value of a multi-value item** where yjs returns the last
   (#280).
 
+- **`crdt`: `YMap.Set` could silently lose a write.** It used the replaced
+  entry's first ID as the new item's origin. When the entry was a merged run
+  from yjs (two sets of one key in one transaction, then a delete), a writer
+  with a lower client ID than the run's author kept the value locally, but every
+  other peer and yjs dropped it. `Set` and XML `SetAttribute` now take the
+  entry's last ID, as yjs does.
+
+- **`crdt`: `YText.ApplyDelta` dropped embeds,** so copying a text with
+  `ApplyDelta(ToDelta())` or forwarding observer deltas lost every embed and its
+  formatting. Embeds are now inserted, byte-identical to yjs's `applyDelta`.
+
 - **`crdt`: values JSON cannot encode were silently written as `null`** in
-  embeds and text attributes (#283).
+  embeds and text attributes (#283). Functions, channels and complex numbers
+  now panic at the call. Non-finite numbers are kept (a yjs peer can send them)
+  and written as `null` individually in V1, as `JSON.stringify` does.
+
+- **`crdt`: undoing the delete of a re-moved element** now steps back through
+  each of its moves.
 
 ### Changed
 
 - `YXmlFragment.Insert` (and `InsertElement`/`InsertText`) panic when a node
   is already attached, staged on another parent, or passed twice.
 - `YText.Insert`, `InsertEmbed`, `Format` and `ApplyDelta` panic on values JSON
-  cannot encode (NaN, ±Inf, functions, channels, complex numbers). A
-  non-finite number received from a V2 peer is written as `null` on its own
-  when re-encoded as V1, as `JSON.stringify` does.
+  cannot encode (functions, channels, complex numbers) and on shared types
+  passed as embed or attribute values, which previously wrote `{}` in V1 and
+  failed V2 encoding.
+- Reusing a child of a detached XML node that was never attached in another
+  parent now panics; the node is still staged on its first parent. Delete it
+  from that parent first.
 - When the same client moves an element twice, the second move wins.
 - `Transaction.Local` is `false` inside `ApplyUpdate`, `ApplyUpdateV1` and
   `ApplyUpdateV2`. Observers that read it now see `false` for remote changes.
