@@ -134,7 +134,7 @@ const (
 
 // TestMoveDeltaMirrorSweep drives random local edits, moves, undo/redo and
 // remote applies into A and asserts a mirror built only from A's deltas always
-// equals A.ToSlice() (#275).
+// equals A.ToSlice() (#275), then that A, B and fresh V1/V2 reloads converge.
 func TestMoveDeltaMirrorSweep(t *testing.T) {
 	for seed := 0; seed < moveDeltaSeeds(); seed++ {
 		if err := runMoveDeltaSeed(uint64(seed)); err != nil {
@@ -145,7 +145,13 @@ func TestMoveDeltaMirrorSweep(t *testing.T) {
 
 func runMoveDeltaSeed(seed uint64) (err error) {
 	r := rand.New(rand.NewPCG(seed, 0x275))
-	docA, docB := newTestDoc(1+seed%2), newTestDoc(2-seed%2)
+	// Client IDs come from their own stream so each seed's ops stay fixed.
+	ids := rand.New(rand.NewPCG(seed, 0x1d))
+	idA, idB := ids.Uint64N(1<<32), ids.Uint64N(1<<32)
+	for idB == idA {
+		idB = ids.Uint64N(1 << 32)
+	}
+	docA, docB := newTestDoc(idA), newTestDoc(idB)
 	arrA, arrB := docA.GetArray("a"), docB.GetArray("a")
 	m := newDeltaMirror(arrA)
 	um := NewUndoManager(docA, []SharedType{arrA}, WithTrackedOrigins("local"))
@@ -203,6 +209,29 @@ func runMoveDeltaSeed(seed uint64) (err error) {
 		}
 		if got := arrA.ToSlice(); !reflect.DeepEqual(normaliseInts(got), normaliseInts(m.vals)) {
 			return fmt.Errorf("mirror %v != ToSlice %v after %v", m.vals, got, log)
+		}
+	}
+	if e := ApplyUpdateV1(docB, EncodeStateAsUpdateV1(docA, docB.StateVector()), nil); e != nil {
+		return e
+	}
+	if e := ApplyUpdateV1(docA, EncodeStateAsUpdateV1(docB, docA.StateVector()), nil); e != nil {
+		return e
+	}
+	want := normaliseInts(arrA.ToSlice())
+	if got := normaliseInts(arrB.ToSlice()); !reflect.DeepEqual(got, want) {
+		return fmt.Errorf("ids %d/%d: A %v != B %v after %v", idA, idB, want, got, log)
+	}
+	for _, rt := range []struct {
+		name  string
+		bytes []byte
+		apply func(*Doc, []byte, any) error
+	}{{"V1", EncodeStateAsUpdateV1(docA, nil), ApplyUpdateV1}, {"V2", EncodeStateAsUpdateV2(docA, nil), ApplyUpdateV2}} {
+		fresh := New()
+		if e := rt.apply(fresh, rt.bytes, nil); e != nil {
+			return e
+		}
+		if got := normaliseInts(fresh.GetArray("a").ToSlice()); !reflect.DeepEqual(got, want) {
+			return fmt.Errorf("ids %d/%d: fresh %s reload %v != A %v after %v", idA, idB, rt.name, got, want, log)
 		}
 	}
 	return nil
