@@ -491,10 +491,7 @@ func (e *YXmlElement) GetAttributeValue(key string) (any, bool) {
 	if !ok || item.Deleted {
 		return nil, false
 	}
-	if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-		return ca.Vals[0], true
-	}
-	return nil, false
+	return lastPlainVal(item.Content)
 }
 
 // GetAttributes returns all live attributes as a string-keyed map. Non-string
@@ -528,8 +525,8 @@ func (e *YXmlElement) GetAttributeValues() map[string]any {
 		if item.Deleted {
 			continue
 		}
-		if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-			result[k] = ca.Vals[0]
+		if v, ok := lastPlainVal(item.Content); ok {
+			result[k] = v
 		}
 	}
 	return result

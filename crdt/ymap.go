@@ -151,15 +151,10 @@ func (m *YMap) computeKeys(txn *Transaction, keysChanged map[string]struct{}) ma
 // when computing KeyChange.OldValue. Matches the unwrap rules in
 // entriesLocked so consumers see consistent shapes.
 func extractMapValue(item *Item) any {
+	if v, ok := lastPlainVal(item.Content); ok {
+		return v
+	}
 	switch c := item.Content.(type) {
-	case *ContentAny:
-		if len(c.Vals) > 0 {
-			return c.Vals[0]
-		}
-	case *ContentJSON:
-		if len(c.Vals) > 0 {
-			return c.Vals[0]
-		}
 	case *ContentEmbed:
 		return c.Val
 	case *ContentType:
@@ -298,11 +293,7 @@ func (m *YMap) Get(key string) (any, bool) {
 	if ct, ok := item.Content.(*ContentType); ok {
 		return ct.Type.owner, ct.Type.owner != nil
 	}
-	vals, ok := plainVals(item.Content)
-	if !ok || len(vals) == 0 {
-		return nil, false
-	}
-	return vals[0], true
+	return lastPlainVal(item.Content)
 }
 
 // Has reports whether key has a live (non-deleted) entry.
@@ -373,18 +364,12 @@ func (m *YMap) entriesLocked() map[string]any {
 		if item.Deleted {
 			continue
 		}
+		// ContentJSON (legacy wire tag 2) reads like ContentAny.
+		if v, ok := lastPlainVal(item.Content); ok {
+			out[k] = v
+			continue
+		}
 		switch c := item.Content.(type) {
-		case *ContentAny:
-			if len(c.Vals) > 0 {
-				out[k] = c.Vals[0]
-			}
-		case *ContentJSON:
-			// ContentJSON is the legacy JSON wire variant (tag wireJSON=2);
-			// functionally equivalent to ContentAny. Without this case,
-			// keys received via JS-peer updates would be silently dropped.
-			if len(c.Vals) > 0 {
-				out[k] = c.Vals[0]
-			}
 		case *ContentEmbed:
 			out[k] = c.Val
 		case *ContentType:
@@ -418,8 +403,8 @@ func (m *YMap) ForEach(fn func(key string, value any)) {
 		if item.Deleted {
 			continue
 		}
-		if vals, ok := plainVals(item.Content); ok && len(vals) > 0 {
-			fn(k, vals[0])
+		if v, ok := lastPlainVal(item.Content); ok {
+			fn(k, v)
 		}
 	}
 }

@@ -84,9 +84,12 @@ func rootJSON(t *testing.T, d *Doc, kind string) any {
 	t.Helper()
 	var j []byte
 	var err error
-	if kind == "map" {
+	switch kind {
+	case "map":
 		j, err = d.GetMap("m").ToJSON()
-	} else {
+	case "xml":
+		j, err = json.Marshal(d.GetXmlFragment("x").ToXML())
+	default:
 		j, err = d.GetArray("a").ToJSON()
 	}
 	if err != nil {
@@ -320,9 +323,26 @@ func TestUnit_ContentJSON_ReadAccessors(t *testing.T) {
 	for _, fx := range loadContentJSONFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
 			d := applyBoth(t, fx)["v1"]
+			if fx.Kind == "xml" {
+				p := d.GetXmlFragment("x").Children()[0].(*YXmlElement)
+				want := map[string]any{"a": "new", "b": "one"}
+				if got := p.GetAttributeValues(); !reflect.DeepEqual(got, want) {
+					t.Errorf("GetAttributeValues = %#v, want %#v", got, want)
+				}
+				if got := p.GetAttributes(); !reflect.DeepEqual(got, map[string]string{"a": "new", "b": "one"}) {
+					t.Errorf("GetAttributes = %#v", got)
+				}
+				if v, ok := p.GetAttribute("a"); !ok || v != "new" {
+					t.Errorf("GetAttribute(a) = %q, %v; want new", v, ok)
+				}
+				return
+			}
 			if fx.Kind == "map" {
 				m := d.GetMap("m")
-				want := m.Entries()
+				var want map[string]any
+				if err := json.Unmarshal(fx.Expected, &want); err != nil {
+					t.Fatal(err)
+				}
 				got := map[string]any{}
 				m.ForEach(func(k string, v any) { got[k] = v })
 				if !reflect.DeepEqual(got, want) {

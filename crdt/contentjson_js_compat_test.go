@@ -92,7 +92,7 @@ for (const j of jobs) {
     try {
       const d = new Y.Doc();
       apply(d, u8(j.full[i]));
-      const got = norm((j.kind === 'map' ? d.getMap('m') : d.getArray('a')).toJSON());
+      const got = norm({ map: d.getMap('m'), array: d.getArray('a'), xml: d.getXmlFragment('x') }[j.kind].toJSON());
       if (!isDeepStrictEqual(got, j.expected)) throw new Error('full: ' + JSON.stringify(got));
       if (j.diffClock != null) {
         const vals = decode(u8(j.diff[i])).structs.flatMap((s) => s.content.getContent());

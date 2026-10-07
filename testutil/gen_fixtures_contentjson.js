@@ -43,7 +43,7 @@ function one (name, kind, exact, build, diffClock) {
 	const d = new Y.Doc()
 	d.clientID = CLIENT
 	build(d)
-	const t = kind === 'map' ? d.getMap('m') : d.getArray('a')
+	const t = { map: d.getMap('m'), array: d.getArray('a'), xml: d.getXmlFragment('x') }[kind]
 	const row = {
 		name,
 		kind,
@@ -89,6 +89,17 @@ const rows = [
 	}),
 	one('map_value_undefined', 'map', false, (d) => {
 		insertJSON(d, d.getMap('m'), [undefined], 'undef')
+	}),
+	// A map entry reads the LAST value of a multi-value item.
+	one('map_multi_value', 'map', true, (d) => {
+		insertJSON(d, d.getMap('m'), ['first', 2, 'last'], 'multi')
+	}),
+	// XML attributes are map entries too: ContentJSON, last value wins.
+	one('xml_attributes', 'xml', true, (d) => {
+		const p = new Y.XmlElement('p')
+		d.getXmlFragment('x').insert(0, [p])
+		insertJSON(d, p, ['old', 'new'], 'a')
+		insertJSON(d, p, ['one'], 'b')
 	}),
 	// Semantics only: Go sorts object keys and escapes U+2028, and has no
 	// undefined (it re-encodes as null), so ygo's bytes differ but must parse

@@ -203,6 +203,16 @@ func plainVals(c Content) ([]any, bool) {
 	return nil, false
 }
 
+// lastPlainVal returns the value a map entry (YMap key, XML attribute) holds:
+// the LAST value of a plain-value item, as Yjs reads getContent()[length-1].
+func lastPlainVal(c Content) (any, bool) {
+	vals, ok := plainVals(c)
+	if !ok || len(vals) == 0 {
+		return nil, false
+	}
+	return vals[len(vals)-1], true
+}
+
 // ContentEmbed holds a single embedded object (e.g. an image or formula in rich text).
 type ContentEmbed struct{ Val any }
 
