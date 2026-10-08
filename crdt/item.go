@@ -304,6 +304,7 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// so their deletes skip the walk entirely (#86 final fix).
 	if _, ok := item.Content.(*ContentFormat); ok && item.Parent != nil {
 		item.Parent.hasFormatting = true
+		item.Parent.fmtGen++
 	}
 
 	// If this item wraps a nested type, set the back-pointer so the type
@@ -408,6 +409,9 @@ func (item *Item) delete(txn *Transaction) {
 		return
 	}
 	item.Deleted = true
+	if _, ok := item.Content.(*ContentFormat); ok && item.Parent != nil {
+		item.Parent.fmtGen++
+	}
 	if item.Parent != nil && item.Content.IsCountable() {
 		item.Parent.length -= item.Content.Len()
 		if !txn.Local {

@@ -3,7 +3,9 @@ package crdt
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -334,7 +336,7 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 		// left is now the left half; left.Right is the right half.
 	}
 	// Anchor after any adjacent tombstones (Yjs text-insert parity, #160).
-	left = t.skipDeletedForTextAnchor(left)
+	left, cur := t.skipDeletedForTextAnchor(left)
 	origin, originRight := itemOrigins(left, t)
 	item := &Item{
 		ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
@@ -350,6 +352,9 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 		t.insertHint = index
 	}
 	item.integrate(txn, 0)
+	if cur != nil {
+		t.cacheAttrsAfter(item, *cur)
+	}
 }
 
 // InsertEmbed inserts an embedded object (image, formula, video metadata, or
@@ -673,6 +678,14 @@ func (s *attrState) del(key string) {
 	}
 }
 
+func (s *attrState) clone() attrState {
+	c := attrState{keys: slices.Clone(s.keys)}
+	if len(s.vals) > 0 {
+		c.vals = maps.Clone(s.vals)
+	}
+	return c
+}
+
 // apply passes a live marker: a nil value clears the key.
 func (s *attrState) apply(cf *ContentFormat) {
 	if cf.Val == nil {
@@ -758,12 +771,14 @@ func updateAttr(attrs Attributes, cf *ContentFormat) {
 // is the live neighbour from leftNeighbourAt (nil = document head); the returned
 // anchor is the last adjacent tombstone (or the original left when none).
 //
-// In formatted text it also skips live markers that restate the attribute in
+// In formatted text it also skips live markers that restate the attributes in
 // effect at left, as minimizeAttributeChanges does with an inheriting insert's
-// attributes. That value is looked up only for such a marker, by walking left
-// to the nearest live marker of its key, so typing between content stays O(1).
-func (t *abstractType) skipDeletedForTextAnchor(left *Item) *Item {
+// attributes, and then returns those attributes (nil when it needed none).
+// They come from attrsAfter, so only the first keystroke after a format change
+// next to a marker walks the text.
+func (t *abstractType) skipDeletedForTextAnchor(left *Item) (*Item, *attrState) {
 	anchor := left
+	var attrs *attrState
 	next := t.start
 	if left != nil {
 		next = left.Right
@@ -774,25 +789,70 @@ func (t *abstractType) skipDeletedForTextAnchor(left *Item) *Item {
 				break
 			}
 			cf, ok := next.Content.(*ContentFormat)
-			if !ok || !attrEqual(attrInEffect(anchor, cf.Key), cf.Val) {
+			if !ok {
+				break
+			}
+			if attrs == nil {
+				s := t.attrsAfter(anchor)
+				attrs = &s
+			}
+			if v, _ := attrs.get(cf.Key); !attrEqual(v, cf.Val) {
 				break
 			}
 		}
 		left = next
 		next = next.Right
 	}
-	return left
+	return left, attrs
 }
 
-// attrInEffect returns key's value just after item (nil when unset): that of
-// the nearest live marker for key at or before item.
-func attrInEffect(item *Item, key string) any {
-	for ; item != nil; item = item.Left {
-		if cf, ok := item.Content.(*ContentFormat); ok && !item.Deleted && cf.Key == key {
-			return cf.Val
+// attrsAfterCache holds the attributes in effect just after the live
+// countable item containing id, as of format generation gen. No marker lies
+// inside an item, so a split or merge of that item leaves them unchanged.
+type attrsAfterCache struct {
+	id    ID
+	gen   uint64
+	ok    bool
+	attrs attrState
+}
+
+// cachedAttrsAfter returns a copy of the attributes in effect just after item,
+// a live countable item, when the cache holds them.
+func (t *abstractType) cachedAttrsAfter(item *Item) (attrState, bool) {
+	c := &t.attrCache
+	if item == nil || !c.ok || c.gen != t.fmtGen || c.id.Client != item.ID.Client ||
+		c.id.Clock < item.ID.Clock || c.id.Clock >= item.ID.Clock+uint64(item.Content.Len()) {
+		return attrState{}, false
+	}
+	return c.attrs.clone(), true
+}
+
+// cacheAttrsAfter records attrs, which the caller no longer mutates, as the
+// attributes in effect just after item, a live countable item. Cold texts
+// keep no cache, so they stay a cache-free oracle.
+func (t *abstractType) cacheAttrsAfter(item *Item, attrs attrState) {
+	if !t.disableMarkers {
+		t.attrCache = attrsAfterCache{id: item.ID, gen: t.fmtGen, ok: true, attrs: attrs}
+	}
+}
+
+// attrsAfter returns the attributes in effect just after item, a live
+// countable item or nil for the start, walking from the start on a cache miss.
+func (t *abstractType) attrsAfter(item *Item) attrState {
+	if item == nil {
+		return attrState{}
+	}
+	if s, ok := t.cachedAttrsAfter(item); ok {
+		return s
+	}
+	var s attrState
+	for it := t.start; it != nil && it != item; it = it.Right {
+		if cf, ok := it.Content.(*ContentFormat); ok && !it.Deleted {
+			s.apply(cf)
 		}
 	}
-	return nil
+	t.cacheAttrsAfter(item, s.clone())
+	return s
 }
 
 // findTextPos returns a cursor at logical position index, splitting the

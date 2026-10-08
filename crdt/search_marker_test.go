@@ -1352,3 +1352,68 @@ func TestSearchMarker_FormattedInserts_MatchCold(t *testing.T) {
 		}
 	}
 }
+
+// Formatted edits resolve the attributes at the cursor from a cache when they
+// can; with local and remote format changes interleaved, and edits clustered
+// around a moving cursor as typing is, every item must stay identical to a
+// cold (marker- and cache-free) text's.
+func TestSearchMarker_FormattedEdits_CachedAttrsMatchCold(t *testing.T) {
+	attrSets := []Attributes{nil, {}, {"bold": true}, {"italic": true}, {"bold": nil}, {"bold": true, "color": "red"}}
+	for seed := uint64(0); seed < 300; seed++ {
+		hot, cold, peer := New(WithClientID(1)), New(WithClientID(1)), New(WithClientID(2))
+		cold.GetText("t").baseType().disableMarkers = true
+		r := rand.New(rand.NewSource(int64(seed)))
+		edit := func(d *Doc, k, i, l int, a Attributes) (end int) {
+			txt := d.GetText("t")
+			n := txt.Len()
+			i = min(i, n)
+			l = min(l, n-i)
+			end = i
+			d.Transact(func(txn *Transaction) {
+				switch {
+				case k < 3:
+					txt.Insert(txn, i, "xy"[:1+k%2], a)
+					end += 1 + k%2
+				case k == 3:
+					txt.InsertEmbed(txn, i, 1, a)
+					end++
+				case k == 4 && l > 0 && len(a) > 0:
+					txt.Format(txn, i, l, a)
+				case k == 5 && l > 0:
+					txt.Delete(txn, i, l)
+				default:
+					txt.ApplyDelta(txn, []Delta{{Op: DeltaOpRetain, Retain: i}, {Op: DeltaOpInsert, Insert: "q", Attributes: a}})
+					end++
+				}
+			})
+			return end
+		}
+		cursor := 0
+		for step := 0; step < 80; step++ {
+			k, i, l, a := r.Intn(7), r.Intn(40), 1+r.Intn(3), attrSets[r.Intn(len(attrSets))]
+			if r.Intn(2) == 0 {
+				i = max(0, cursor-1+r.Intn(3))
+			}
+			switch r.Intn(5) {
+			case 0:
+				edit(peer, k, i, l, a)
+			case 1:
+				u := EncodeStateAsUpdateV1(peer, hot.StateVector())
+				for _, d := range []*Doc{hot, cold} {
+					if err := ApplyUpdateV1(d, u, nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := ApplyUpdateV1(peer, EncodeStateAsUpdateV1(hot, peer.StateVector()), nil); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				cursor = edit(hot, k, i, l, a)
+				edit(cold, k, i, l, a)
+			}
+			if got, want := EncodeStateAsUpdateV1(hot, nil), EncodeStateAsUpdateV1(cold, nil); !sameUpdate(t, got, want) {
+				t.Fatalf("seed %d step %d (op %d at %d): cached\n%v\ncold\n%v", seed, step, k, i, textFormatUnits(t, got), textFormatUnits(t, want))
+			}
+		}
+	}
+}

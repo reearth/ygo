@@ -85,6 +85,11 @@ type abstractType struct {
 	// workloads in plain-text documents. Once true, stays true.
 	hasFormatting bool
 
+	// fmtGen counts integrations and deletions of this type's format
+	// markers; attrCache is valid only for the generation it was taken at.
+	fmtGen    uint64
+	attrCache attrsAfterCache
+
 	// markers is a small cache of (rendered index → *Item) search markers,
 	// modelled on Yjs's ArraySearchMarker, replacing the old posCache. Capped
 	// at maxSearchMarker entries. The write path (findMarkerMut, called from
