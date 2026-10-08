@@ -1,7 +1,5 @@
 package crdt
 
-import "encoding/json"
-
 // contentForValue wraps a YMap value into Content. A *Doc becomes a ContentDoc
 // (subdocument embedding, Yjs parity: ymap.set(k, new Y.Doc())); everything else
 // becomes ContentAny.
@@ -334,7 +332,7 @@ func (m *YMap) Keys() []string {
 }
 
 // Entries returns a snapshot of all live key-value pairs. Nested shared
-// types are recursively unwrapped (#75): nested YArray → []any, nested
+// types are iteratively unwrapped (#75): nested YArray → []any, nested
 // YMap → map[string]any, nested YText → string. Pre-fix these were
 // silently dropped from the output.
 //
@@ -347,36 +345,12 @@ func (m *YMap) Entries() map[string]any {
 	return m.entriesLocked()
 }
 
-// entriesLocked is the lock-free body of Entries; callers must already
-// hold the doc lock. Used by Entries (top-level) and toJSONValue (during
-// recursive unwrap of nested types).
+// entriesLocked is the lock-free body of Entries; callers must already hold
+// the doc lock.
 func (m *YMap) entriesLocked() map[string]any {
-	if m.detached() {
-		out := make(map[string]any, len(m.prelim))
-		for k, v := range m.prelim {
-			out[k] = prelimJSONValue(v)
-		}
-		return out
-	}
-	t := &m.abstractType
-	out := make(map[string]any, len(t.itemMap))
-	for k, item := range t.itemMap {
-		if item.Deleted {
-			continue
-		}
-		// ContentJSON (legacy wire tag 2) reads like ContentAny.
-		if v, ok := lastPlainVal(item.Content); ok {
-			out[k] = v
-			continue
-		}
-		switch c := item.Content.(type) {
-		case *ContentEmbed:
-			out[k] = c.Val
-		case *ContentType:
-			out[k] = toJSONValue(c)
-		}
-	}
-	return out
+	value := nestedJSONValue(m)
+	entries, _ := value.(map[string]any)
+	return entries
 }
 
 // ForEach calls fn for every live (non-deleted) key-value pair in the map,
@@ -409,10 +383,15 @@ func (m *YMap) ForEach(fn func(key string, value any)) {
 	}
 }
 
-// ToJSON returns the map serialised as a JSON object.
+// ToJSON returns the map serialised as a JSON object with sorted keys: the
+// bytes json.Marshal(m.Entries()) would produce, without recursing once per
+// nested shared type. Nested types, strings, numbers, booleans and nil are
+// written under the document's read lock; any other value (a map, a slice, an
+// embed, a json.Marshaler) is marshalled by encoding/json after the lock is
+// released, so a MarshalJSON method may read or write the document.
 // Must not be called from inside a Transact callback.
 func (m *YMap) ToJSON() ([]byte, error) {
-	return json.Marshal(m.Entries())
+	return marshalSharedJSON(m.doc, m)
 }
 
 // Observe registers fn to be called after every transaction that modifies this

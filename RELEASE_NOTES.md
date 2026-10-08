@@ -1,3 +1,25 @@
+## v1.51.3
+
+**Who is affected:** servers that apply updates from peers they do not trust,
+and code that deletes nested shared types or reads documents with `ToJSON`,
+`ToSlice`, `Entries` or `ToXML`.
+
+**A very deep document can no longer crash the process.** Deleting a nested
+shared type, or reading a document as JSON or XML, used one goroutine stack
+frame per nesting level. A peer could build a document millions of levels deep
+through many small updates, and deleting or reading it then ended the whole
+process, every room on a server included, with a fatal stack overflow that
+`recover` cannot catch. Building such a document takes tens of megabytes of
+updates and gigabytes of heap at Go's default stack limit. These operations no
+longer grow the goroutine stack with depth, and give the same results in the
+same order.
+
+**`ToJSON` uses less memory.** `YArray.ToJSON` and `YMap.ToJSON` write JSON
+directly instead of building intermediate slices and maps. The output bytes are
+unchanged.
+
+**Upgrading.** No API change.
+
 ## v1.51.2
 
 **Who is affected:** servers and clients that call `GetText`, `GetArray`,

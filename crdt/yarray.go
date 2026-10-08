@@ -1,9 +1,6 @@
 package crdt
 
-import (
-	"encoding/json"
-	"fmt"
-)
+import "fmt"
 
 // arraySub pairs a unique subscription ID with a YArrayEvent callback.
 type arraySub struct {
@@ -60,28 +57,6 @@ func prelimValueAt(v any) any {
 		return st.baseType().owner
 	}
 	return v
-}
-
-// prelimJSONValue renders a staged entry the way toJSONValue renders an
-// attached one, so a detached ToJSON/ToSlice/Entries unwraps nested staged
-// types recursively rather than emitting an opaque handle.
-func prelimJSONValue(v any) any {
-	switch owner := v.(type) {
-	case *YArray:
-		return owner.toSliceLocked()
-	case *YMap:
-		return owner.entriesLocked()
-	case *YText:
-		return owner.toStringLocked()
-	case *YXmlElement:
-		return owner.toXMLLocked()
-	case *YXmlText:
-		return owner.toXMLLocked()
-	// No YXmlFragment case: a fragment is only ever a named root or a decode
-	// product, so a detached one cannot be obtained to stage in the first place.
-	default:
-		return v
-	}
 }
 
 func (a *YArray) baseType() *abstractType { return &a.abstractType }
@@ -421,7 +396,7 @@ func (a *YArray) Delete(txn *Transaction, index, length int) {
 }
 
 // ToSlice returns all non-deleted elements as a new slice. Nested shared
-// types are recursively unwrapped via toJSONValue (#75): a nested YArray
+// types are iteratively unwrapped via toJSONValue (#75): a nested YArray
 // appears as []any, a nested YMap as map[string]any, a nested YText as
 // string. Pre-fix these were silently dropped from the output.
 //
@@ -434,78 +409,23 @@ func (a *YArray) ToSlice() []any {
 	return a.toSliceLocked()
 }
 
-// toSliceLocked is the lock-free body of ToSlice; callers must already
-// hold the doc lock. Used by ToSlice (top-level) and toJSONValue (during
-// recursive unwrap of nested types under #75).
+// toSliceLocked is the lock-free body of ToSlice; callers must already hold
+// the doc lock.
 func (a *YArray) toSliceLocked() []any {
-	if a.detached() {
-		out := make([]any, 0, len(a.prelim))
-		for _, v := range a.prelim {
-			out = append(out, prelimJSONValue(v))
-		}
-		return out
-	}
-	t := &a.abstractType
-	result := make([]any, 0, t.length)
-	for item := t.start; item != nil; item = item.Right {
-		// renderedStep (shared with Get) also expands a winning move to its
-		// target, whatever the target's content kind.
-		countable, _, renderAt := t.renderedStep(item)
-		if !countable {
-			continue
-		}
-		valItem := item
-		if renderAt != nil {
-			valItem = renderAt
-		}
-		switch c := valItem.Content.(type) {
-		case *ContentAny:
-			result = append(result, c.Vals...)
-		case *ContentJSON:
-			// ContentJSON is the legacy JSON wire variant (tag wireJSON=2),
-			// functionally equivalent to ContentAny. Updates received from
-			// JS peers can land as ContentJSON items; without this case they
-			// would be silently dropped from ToSlice/ToJSON output.
-			result = append(result, c.Vals...)
-		case *ContentEmbed:
-			result = append(result, c.Val)
-		case *ContentType:
-			result = append(result, toJSONValue(c))
-		}
-	}
+	value := nestedJSONValue(a)
+	result, _ := value.([]any)
 	return result
 }
 
-// toJSONValue recursively unwraps a ContentType into its JSON-shaped value.
-// YArray → []any, YMap → map[string]any, YText → string, YXmlElement /
-// YXmlFragment / YXmlText → string (XML serialisation). Unknown nested
-// types fall back to nil. Caller must hold the doc lock. See #75.
-func toJSONValue(ct *ContentType) any {
-	if ct == nil || ct.Type == nil || ct.Type.owner == nil {
-		return nil
-	}
-	switch owner := ct.Type.owner.(type) {
-	case *YArray:
-		return owner.toSliceLocked()
-	case *YMap:
-		return owner.entriesLocked()
-	case *YText:
-		return owner.toStringLocked()
-	case *YXmlElement:
-		return owner.toXMLLocked()
-	case *YXmlFragment:
-		return owner.toXMLLocked()
-	case *YXmlText:
-		return owner.toXMLLocked()
-	default:
-		return nil
-	}
-}
-
-// ToJSON returns the array serialised as a JSON array.
+// ToJSON returns the array serialised as a JSON array: the bytes
+// json.Marshal(a.ToSlice()) would produce, without recursing once per nested
+// shared type. Nested types, strings, numbers, booleans and nil are written
+// under the document's read lock; any other value (a map, a slice, an embed,
+// a json.Marshaler) is marshalled by encoding/json after the lock is released,
+// so a MarshalJSON method may read or write the document.
 // Must not be called from inside a Transact callback.
 func (a *YArray) ToJSON() ([]byte, error) {
-	return json.Marshal(a.ToSlice())
+	return marshalSharedJSON(a.doc, a)
 }
 
 // Observe registers fn to be called after every transaction that modifies this
