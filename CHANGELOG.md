@@ -9,14 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`crdt`: deleting a deeply nested shared type could exhaust the Go stack and
-  terminate the host process.** A document can accumulate nested YMap, YArray,
-  YText, or XML containers through individually small updates. Deleting the
-  outer container recursively visited every descendant, so a later tiny delete
-  update could crash every room in a websocket server. Deletion now keeps the
-  same depth-first ordering with an explicit heap stack. Nested JSON and XML
-  conversion use the same approach, so reading the received tree cannot
-  reintroduce the stack-overflow failure.
+- **`crdt`: deleting or reading a deeply nested shared type used one stack frame
+  per nesting level.** A peer can build a document of any depth through many
+  small, valid updates. Deleting the outer container, or reading the document
+  with `ToJSON`, `ToSlice`, `Entries` or `ToXML`, recursed once per level, so a
+  deep enough document ended the process with a fatal stack overflow that
+  `recover` cannot catch. At Go's default stack limit that takes millions of
+  levels, tens of megabytes of updates and gigabytes of heap, so this was a
+  costly denial of service rather than a small-payload crash. Deletion now
+  walks the subtree through parent links in the same depth-first order, and
+  the readers walk nested types with an explicit stack. `YArray.ToJSON` and
+  `YMap.ToJSON` write the same bytes as before and use less memory, since they
+  no longer build intermediate slices and maps.
 
 ## [1.51.2] — 2026-10-08
 

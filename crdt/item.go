@@ -399,23 +399,10 @@ func (item *Item) lastID() ID {
 // the children's clocks. Without this, peers that held the same nested type
 // would see inner items as live after the outer container was deleted (Yjs JS
 // Item.delete walks content.getContent() identically; yrs Block::delete does
-// the same). See #72 vector B1.
-// nextDeleteItem finds the next live item in the root's depth-first cascade.
-func nextDeleteItem(current, root *Item) *Item {
-	for current != root {
-		for sibling := current.Right; sibling != nil; sibling = sibling.Right {
-			if !sibling.Deleted {
-				return sibling
-			}
-		}
-		if current.Parent == nil || current.Parent.item == nil {
-			return nil
-		}
-		current = current.Parent.item
-	}
-	return nil
-}
-
+// the same). See #72 vector B1. The cascade visits items depth-first, in the
+// order a recursive walk would, but moves between them through parent links
+// (nextDeleteItem), so a remotely built tree of any depth deletes without
+// growing the goroutine stack.
 func (item *Item) delete(txn *Transaction) {
 	for current := item; current != nil; {
 		if current.Deleted {
@@ -451,6 +438,8 @@ func (item *Item) delete(txn *Transaction) {
 			txn.addChanged(current.Parent, parentSubKey(current.ParentSub))
 		}
 
+		// #63 — subdocument removal. Cancel an add-in-same-txn; else mark removed.
+		// GC does not remove subdocs (matches Yjs ContentDoc: gc is a no-op).
 		if cd, ok := current.Content.(*ContentDoc); ok && cd.Doc != nil {
 			if _, added := txn.subdocsAdded[cd.Doc]; added {
 				delete(txn.subdocsAdded, cd.Doc)
@@ -472,6 +461,24 @@ func (item *Item) delete(txn *Transaction) {
 		}
 		current = nextDeleteItem(current, item)
 	}
+}
+
+// nextDeleteItem returns the item after current in root's depth-first cascade:
+// the next live sibling of current or of its nearest ancestor below root, or
+// nil once the walk is back at root.
+func nextDeleteItem(current, root *Item) *Item {
+	for current != root {
+		for sibling := current.Right; sibling != nil; sibling = sibling.Right {
+			if !sibling.Deleted {
+				return sibling
+			}
+		}
+		if current.Parent == nil || current.Parent.item == nil {
+			return nil
+		}
+		current = current.Parent.item
+	}
+	return nil
 }
 
 // splitItem splits item at offset, returning the new right half.

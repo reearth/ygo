@@ -1,17 +1,24 @@
 ## v1.51.3
 
-**Who is affected: applications that accept collaborative updates or render
-documents containing deeply nested shared types.** A document can grow that
-shape over many small, valid updates. Deleting the outer container, or reading
-the document as JSON or XML, recursed once per nesting level; at sufficient
-depth that exhausted the Go stack and ended the whole process with a fatal
-error that `recover` cannot catch.
+**Who is affected:** servers that apply updates from peers they do not trust,
+and code that deletes nested shared types or reads documents with `ToJSON`,
+`ToSlice`, `Entries` or `ToXML`.
 
-- **Deep nested-type operations no longer consume the Go call stack.** Deletion
-  keeps its existing depth-first CRDT effects, in the same order, with an
-  explicit heap stack. JSON and XML reads also traverse nested shared types
-  iteratively, so a document that arrives over the network cannot crash the
-  process by being deleted or read.
+**A very deep document can no longer crash the process.** Deleting a nested
+shared type, or reading a document as JSON or XML, used one goroutine stack
+frame per nesting level. A peer could build a document millions of levels deep
+through many small updates, and deleting or reading it then ended the whole
+process, every room on a server included, with a fatal stack overflow that
+`recover` cannot catch. Building such a document takes tens of megabytes of
+updates and gigabytes of heap at Go's default stack limit. These operations no
+longer grow the goroutine stack with depth, and give the same results in the
+same order.
+
+**`ToJSON` uses less memory.** `YArray.ToJSON` and `YMap.ToJSON` write JSON
+directly instead of building intermediate slices and maps. The output bytes are
+unchanged.
+
+**Upgrading.** No API change.
 
 ## v1.51.2
 
