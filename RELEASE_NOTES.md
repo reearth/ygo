@@ -1,3 +1,17 @@
+## v1.51.2
+
+**Who is affected:** servers and clients that call `GetText`, `GetArray`,
+`GetMap` or `GetXmlFragment` only after applying updates, for example after a
+sync step.
+
+**Edits that arrived out of order could vanish.** If an update for a document
+root arrived before an edit it depends on, and the code then accessed that root
+for the first time before the missing edit arrived, the waiting update was
+attached to a placeholder and never showed up. That peer stayed different from
+everyone else for good. Accessing a root now picks up waiting updates too.
+
+**Upgrading.** No API change.
+
 ## v1.51.1
 
 **Who is affected:** anyone using `UndoManager` or `YArray.Move`, and anyone
