@@ -51,3 +51,21 @@ func applyAndRenderDeepXML() {
 		panic("empty XML result")
 	}
 }
+
+// renderXML pushes a detached element's buffered children in reverse so that
+// it pops them in document order.
+func TestUnit_YXmlElement_ToXML_DetachedChildrenInOrder(t *testing.T) {
+	list := NewYXmlElement("ul")
+	for i, name := range []string{"a", "b", "c"} {
+		item := NewYXmlElement(name)
+		item.Insert(nil, 0, NewYXmlElement(name+"1"), NewYXmlElement(name+"2"))
+		list.Insert(nil, i, item)
+	}
+	const want = "<ul><a><a1></a1><a2></a2></a><b><b1></b1><b2></b2></b><c><c1></c1><c2></c2></c></ul>"
+	if got := list.ToXML(); got != want {
+		t.Errorf("ToXML() = %q, want %q", got, want)
+	}
+	if got := list.toXMLLocked(); got != want {
+		t.Errorf("toXMLLocked() = %q, want %q", got, want)
+	}
+}

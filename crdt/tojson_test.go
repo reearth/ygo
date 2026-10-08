@@ -175,6 +175,48 @@ func TestUnit_AppendJSONString_MatchesEncodingJSON(t *testing.T) {
 	assert.Equal(t, string(want), string(got))
 }
 
+// encoding/json writes map keys in bytewise order, which ToJSON must keep now
+// that it writes objects itself. The insertion order below matches no sort.
+// The comparisons are on exact bytes: JSONEq ignores key order.
+func TestUnit_YMap_ToJSON_KeysInEncodingJSONOrder(t *testing.T) {
+	keys := []string{"é", "b", "aa", "B", "a", "c"}
+	const want = `{"B":"B","a":"a","aa":"aa","b":"b","c":"c","nested":{"x":"x","y":"y"},"é":"é"}`
+	check := func(name string, got []byte, err error) {
+		t.Helper()
+		require.NoError(t, err)
+		if string(got) != want {
+			t.Errorf("%s = %s, want %s", name, got, want)
+		}
+	}
+
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	doc.Transact(func(txn *Transaction) {
+		for _, key := range keys {
+			m.Set(txn, key, key)
+		}
+		nested := NewMapPrelim()
+		m.Set(txn, "nested", nested)
+		nested.Set(txn, "y", "y")
+		nested.Set(txn, "x", "x")
+	})
+	got, err := m.ToJSON()
+	check("ToJSON", got, err)
+	got, err = json.Marshal(m.Entries())
+	check("json.Marshal(Entries())", got, err)
+
+	detached := NewMapPrelim()
+	for _, key := range keys {
+		detached.Set(nil, key, key)
+	}
+	nested := NewMapPrelim()
+	nested.Set(nil, "y", "y")
+	nested.Set(nil, "x", "x")
+	detached.Set(nil, "nested", nested)
+	got, err = detached.ToJSON()
+	check("detached ToJSON", got, err)
+}
+
 // Moves render a target at the move's position, nested types included.
 func TestUnit_YArray_ToJSON_NestedAndMovedMatchesEncodingJSON(t *testing.T) {
 	doc := newTestDoc(1)
