@@ -9,15 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`crdt`: re-encoding a document no longer moves text that was inserted next
-  to a same-client run toward a different right neighbour.** `ApplyUpdate`
+- **`crdt`: applying an update no longer merges same-client items that were
+  inserted toward different right neighbours.** `ApplyUpdate`
   merged adjacent, clock-contiguous items from one client without checking
   that the right item was inserted directly after the left one and that both
   had the same right origin, and `RunGC` merged tombstones the same way. The
-  merged item is encoded with the left item's right origin, so every later
-  encoding (a sync step 2 to a joining peer, a compacted state) placed the
-  right item's characters elsewhere, for ygo and Yjs alike. Items now merge
-  only under Yjs's `Item.mergeWith` conditions.
+  merged item kept only the left item's right origin. A peer that received
+  the items in one apply (a late joiner, an offline client catching up, a
+  server loading a stored state) then placed the next concurrent insert inside
+  that run differently from the peers that received the items one by one, and
+  every later encoding of its state (a sync step 2, a compacted state) gave
+  the right item's characters the wrong right origin, for ygo and Yjs alike.
+  Items now merge only under Yjs's `Item.mergeWith` conditions. States that
+  were already encoded with the merged items keep the wrong right origins.
 
 ## [1.51.2] — 2026-10-08
 

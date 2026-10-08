@@ -1,25 +1,34 @@
 ## v1.51.3
 
-**Who is affected: anyone who loads a document from updates and encodes it
-again** — a server answering a joining peer's sync step 1, a persistence layer
-that compacts a log into one state, an application that calls `RunGC` and then
-encodes. Documents that are only edited and never re-encoded are unchanged.
+**Who is affected:** anyone whose documents get concurrent text inserts, once
+a peer receives several of one client's inserts in a single apply: a late
+joiner's sync step 2, an offline client catching up, a server loading a stored
+state. Any state that peer then encodes (a sync step 2 it answers, a compacted
+log, `RunGC` followed by an encode) passes the problem to every peer that
+loads it.
 
+**Concurrent inserts could end up in different places on different peers.**
 Applying an update merged adjacent items from one client into a single item
 whenever their clocks were contiguous and nothing sat between them. Yjs merges
 two items only when the right one was inserted directly after the left one and
-both were inserted toward the same right neighbour (its right origin), because
-the merged item is written to the wire with the left item's origins. ygo did
-not check the right origins, so a document with concurrent inserts could read
-correctly in memory and still encode a right origin that one of its items
-never had: a peer decoding that state — ygo or Yjs — put that item's
-characters elsewhere. `RunGC`'s tombstone merge had the same gap and could
-move live text whose origin was inside the second tombstone.
+both were inserted toward the same right neighbour (their right origin),
+because the merged item keeps only the left item's origins. ygo did not check
+the right origins. The peer that merged them then placed the next concurrent
+insert inside that run differently from the peers that had received the items
+one at a time, and any state it encoded gave the right item's characters a
+right origin they never had, so ygo and Yjs alike decoded them elsewhere.
+`RunGC`'s tombstone merge had the same gap and could move live text whose
+origin was inside the second tombstone.
 
 Both merges now require the right item's origin to be the left item's last
 character and the two right origins to be equal, as `Item.mergeWith` does.
 Items that do not qualify stay separate, so such a document keeps a few more
-items than before; no wire format or API changes.
+items than before.
+
+**Upgrading.** No API or wire format change. A state that an earlier version
+already encoded or compacted keeps its merged items and their wrong right
+origins: this release stops new ones from being written but does not repair
+stored ones.
 
 ## v1.51.2
 

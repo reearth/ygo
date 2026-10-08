@@ -143,7 +143,9 @@ func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
 // every character where it was: the right item's Origin is the last character
 // of the run and both items share an OriginRight. These are Yjs's
 // Item.mergeWith conditions. Merging items with different right origins makes
-// every later encoding move the right item's characters on decode.
+// every later encoding move the right item's characters on decode, and makes
+// a later insert whose origin is inside the run split it with the wrong
+// right origin.
 //
 // squashRuns runs for remote applies too, so a peer's per-keystroke history
 // loads as one item per run, as Yjs's transaction cleanup does.
