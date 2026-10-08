@@ -118,6 +118,53 @@ func TestUnit_ApplyUpdate_FoldedLogKeepsItsOrderThroughALaterUpdate(t *testing.T
 	require.Equal(t, "hc  chb", doc.GetText("t").ToString())
 }
 
+// laterInsertFork follows one document on two peers that never re-encode it.
+// Client 5 inserts "c", client 3 inserts "b" after it, and client 5 inserts "Z"
+// between them ("cZb"), each in its own transaction, so client 5 never merges
+// "c" and "Z". The peer receives client 5's state in one apply, where they are
+// both new. Client 4, which has seen only "c", then inserts "X" after it, and
+// both documents apply that. The client ids order the tie-breaks: "Z" (5) and
+// "X" (4) share an origin, so "X" is placed by comparing right origins.
+func laterInsertFork(t *testing.T, f updateFormat) (author, peer *crdt.Doc) {
+	t.Helper()
+	author = crdt.New(crdt.WithClientID(5))
+	t5 := author.GetText("t")
+	author.Transact(func(txn *crdt.Transaction) { t5.Insert(txn, 0, "c", nil) })
+	onlyC := f.encode(author, nil)
+
+	d3 := crdt.New(crdt.WithClientID(3))
+	require.NoError(t, f.apply(d3, onlyC, nil))
+	t3 := d3.GetText("t")
+	d3.Transact(func(txn *crdt.Transaction) { t3.Insert(txn, 1, "b", nil) })
+	require.NoError(t, f.apply(author, f.encode(d3, nil), nil))
+	author.Transact(func(txn *crdt.Transaction) { t5.Insert(txn, 1, "Z", nil) })
+	require.Equal(t, "cZb", t5.ToString())
+
+	peer = crdt.New()
+	require.NoError(t, f.apply(peer, f.encode(author, nil), nil))
+	require.Equal(t, "cZb", peer.GetText("t").ToString())
+
+	d4 := crdt.New(crdt.WithClientID(4))
+	require.NoError(t, f.apply(d4, onlyC, nil))
+	t4 := d4.GetText("t")
+	d4.Transact(func(txn *crdt.Transaction) { t4.Insert(txn, 1, "X", nil) })
+	x := f.encode(d4, nil)
+	require.NoError(t, f.apply(author, x, nil))
+	require.NoError(t, f.apply(peer, x, nil))
+	return author, peer
+}
+
+func TestUnit_ApplyUpdate_OneApplyPlacesALaterConcurrentInsertAsTheAuthorDoes(t *testing.T) {
+	for _, f := range updateFormats {
+		t.Run(f.name, func(t *testing.T) {
+			author, peer := laterInsertFork(t, f)
+			require.Equal(t, "cZbX", author.GetText("t").ToString())
+			require.Equal(t, "cZbX", peer.GetText("t").ToString(),
+				"a peer that received c and Z in one apply must place X where client 5 does")
+		})
+	}
+}
+
 // gcFork builds "cZQb" on client 2's own document, where client 3 inserted "Q"
 // with origin "Z" (2:1), then deletes "c" and "Z". The two tombstones are
 // adjacent and clock-contiguous, but "Z" has right origin "b" and "c" has none.
@@ -157,12 +204,17 @@ func TestCompat_MergeRightOrigin_YjsReadsReencodedStates(t *testing.T) {
 		Reencoded []byte `json:"reencoded"`
 		Last      []byte `json:"last,omitempty"`
 	}
-	pairs := make([]pair, 0, len(updateFormats)+2)
+	pairs := make([]pair, 0, 2*len(updateFormats)+2)
 	for _, f := range updateFormats {
 		source := f.encode(rightOriginFork(t), nil)
 		pairs = append(pairs, pair{
 			Name: "one apply " + f.name, V2: f.name == "V2",
 			Source: source, Reencoded: reencodeAfterOneApply(t, f, source),
+		})
+		author, peer := laterInsertFork(t, f)
+		pairs = append(pairs, pair{
+			Name: "later concurrent insert " + f.name, V2: f.name == "V2",
+			Source: f.encode(author, nil), Reencoded: f.encode(peer, nil),
 		})
 	}
 	gc := gcFork(t)
