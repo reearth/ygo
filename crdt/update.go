@@ -47,6 +47,9 @@ func EncodeStateAsUpdateV1(doc *Doc, sv StateVector) []byte {
 }
 
 // ApplyUpdateV1 decodes and integrates a V1 binary update into doc.
+// When it changes formatted text, a local transaction with a nil origin may
+// follow it to clean up the format markers it left redundant, as in Yjs,
+// with its own update and observer callbacks.
 func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 	var applyErr error
 	doc.Transact(func(txn *Transaction) {
@@ -95,6 +98,9 @@ func withParked(doc *Doc, sv StateVector, state []byte,
 }
 
 // ApplyUpdateV2 decodes and integrates a Yjs V2 binary update into doc.
+// When it changes formatted text, a local transaction with a nil origin may
+// follow it to clean up the format markers it left redundant, as in Yjs,
+// with its own update and observer callbacks.
 func ApplyUpdateV2(doc *Doc, update []byte, origin any) error {
 	var applyErr error
 	doc.Transact(func(txn *Transaction) {

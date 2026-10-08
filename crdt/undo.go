@@ -89,7 +89,10 @@ func WithTrackedOrigins(origins ...any) UndoManagerOption {
 // UndoManager tracks local transactions on one or more shared types and
 // provides Undo / Redo operations. Only transactions originating on this
 // peer (txn.Local == true) are captured; applied remote updates are ignored
-// whatever their origin. (Yjs gates on trackedOrigins alone.)
+// whatever their origin. (Yjs gates on trackedOrigins alone.) With the
+// default tracked origins it does capture the local, nil-origin transaction
+// that cleans up format markers after a remote edit to formatted text, as
+// Yjs's UndoManager does.
 //
 // Undo inverts the most recent captured change: insertions are deleted and
 // deletions are restored. Redo re-applies the most recently undone change.

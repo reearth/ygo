@@ -66,6 +66,32 @@ func TestUnit_YText_FormatCleanup_IsLocalFollowUpTxn(t *testing.T) {
 	assert.Equal(t, 1, countLiveContentFormat(c))
 }
 
+// An UndoManager with the default tracked origins captures the cleanup, as
+// Yjs's does; one tracking other origins does not.
+func TestUnit_YText_FormatCleanup_UndoCapture(t *testing.T) {
+	for _, tracked := range []bool{false, true} {
+		a, b := newTestDoc(1), newTestDoc(2)
+		at, bt := a.GetText("t"), b.GetText("t")
+		a.Transact(func(txn *Transaction) { at.Insert(txn, 0, "abc", nil) })
+		syncText(t, a, b, nil)
+		a.Transact(func(txn *Transaction) { at.Delete(txn, 0, 3) })
+		b.Transact(func(txn *Transaction) { bt.Format(txn, 2, 1, Attributes{"bold": true}) })
+		var opts []UndoManagerOption
+		if tracked {
+			opts = append(opts, WithTrackedOrigins("user"))
+		}
+		um := NewUndoManager(b, []SharedType{bt}, opts...)
+		syncText(t, a, b, nil)
+		require.Equal(t, 1, countLiveContentFormat(b))
+		want := 1
+		if tracked {
+			want = 0
+		}
+		assert.Equal(t, want, um.UndoStackSize(), "tracked origins: %t", tracked)
+		um.Destroy()
+	}
+}
+
 // Plain text and local edits never start a cleanup transaction.
 func TestUnit_YText_FormatCleanup_SkipsPlainAndLocal(t *testing.T) {
 	a, b := newTestDoc(1), newTestDoc(2)
