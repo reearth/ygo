@@ -1,24 +1,34 @@
 ## v1.51.3
 
-**Who is affected: anyone who stores a room with `persistence.MemoryPersistence`,
-`persistence.FilePersistence` or `persistence/sqlite`, for example through
-`NewServerWithPersistence(persistence.NewLegacyAdapter(...))`.** Custom
+**Who is affected: anyone who stores rooms with `persistence.MemoryPersistence`,
+`persistence.FilePersistence` or `persistence/sqlite` (for example through
+`NewServerWithPersistence(persistence.NewLegacyAdapter(...))`), and anyone who
+calls `Server.BroadcastUpdate` or runs a cluster relay.** Custom persistence
 adapters are not changed.
 
-Each of these stores checks an update before writing it by decoding it on its
-own into a throwaway document. That document had the crdt default pending cap
-of 100,000. Decoded without the room's stored state, an incremental update
-parks every item that depends on that state, so an edit touching more than
-100,000 existing items — 100,001 keys set on a map that already exists, for
-instance — was refused with `crdt: invalid update`, although the room had
-applied it. The server logged the failed write; the edit never reached
-storage, and once the room closed, its next load came back without it.
+**Large edits are stored, and so is everything after them.** These
+stores check each update before writing it by decoding it on its own, and that
+check held at most 100,000 structs waiting for state it did not have. Decoded
+on its own, an update from a client whose earlier edits are already stored is
+missing everything it builds on, so all of its structs wait. Any such update
+of more than 100,000 structs, or a batch of smaller ones the server coalesced
+past that count, was refused with `crdt: invalid update` although the room had
+applied it. With the default write coalescing, the refused batch stayed queued
+and each later edit joined it, so nothing more in that room was stored: the
+room stayed in memory after its last peer left, and every edit since the
+refused one was lost when it closed. The check now has no such limit. Updates
+that do not decode are still refused.
 
-The throwaway document now has no pending cap: it lives for one decode, and the
-decoder's own per-update item limit already bounds what one update can park.
-Updates that do not decode are still refused. `RunConformance` gains a subtest
-that appends such an update, so an external adapter that validates the same
-way finds out from its conformance run. No API or wire format changes.
+**Large relayed updates reach every peer.** `BroadcastUpdate` ran the same
+check, so it refused such an update with `ErrInvalidUpdate` after the room had
+applied it, and a clustered node that received one from another node applied
+it to its room but never sent it to its own peers. It now uses the stores'
+check. `MaxPendingItems` still caps each room's document.
+
+**Custom adapters.** A `VersionedPersistence` that checks updates by applying
+them to a bare `crdt.New()` refuses the same updates; the `AppendUpdate` godoc
+shows how to build the scratch document instead. No API or wire format
+changes.
 
 ## v1.51.2
 
