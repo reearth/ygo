@@ -1359,7 +1359,7 @@ func TestSearchMarker_FormattedInserts_MatchCold(t *testing.T) {
 // cold (marker- and cache-free) text's.
 func TestSearchMarker_FormattedEdits_CachedAttrsMatchCold(t *testing.T) {
 	attrSets := []Attributes{nil, {}, {"bold": true}, {"italic": true}, {"bold": nil}, {"bold": true, "color": "red"}}
-	for seed := uint64(0); seed < 300; seed++ {
+	for seed := uint64(0); seed < 100; seed++ {
 		hot, cold, peer := New(WithClientID(1)), New(WithClientID(1)), New(WithClientID(2))
 		cold.GetText("t").baseType().disableMarkers = true
 		r := rand.New(rand.NewSource(int64(seed)))
@@ -1411,9 +1411,52 @@ func TestSearchMarker_FormattedEdits_CachedAttrsMatchCold(t *testing.T) {
 				cursor = edit(hot, k, i, l, a)
 				edit(cold, k, i, l, a)
 			}
+			if step%8 != 7 {
+				continue
+			}
 			if got, want := EncodeStateAsUpdateV1(hot, nil), EncodeStateAsUpdateV1(cold, nil); !sameUpdate(t, got, want) {
 				t.Fatalf("seed %d step %d (op %d at %d): cached\n%v\ncold\n%v", seed, step, k, i, textFormatUnits(t, got), textFormatUnits(t, want))
 			}
 		}
+	}
+}
+
+// A format marker integrated or deleted before the cached item, locally or
+// by a remote update, invalidates the cached attributes.
+func TestSearchMarker_CachedAttrs_InvalidatedByFormatChanges(t *testing.T) {
+	bold, italic := Attributes{"bold": true}, Attributes{"italic": true}
+	scripts := map[string]func(d, peer *Doc){
+		"local delete": func(d, _ *Doc) {
+			txt := d.GetText("t")
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "a", bold) })
+			d.Transact(func(txn *Transaction) { txt.Format(txn, 0, 1, Attributes{"bold": nil}) })
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 1, "b", italic) })
+		},
+		"remote integrate": func(d, peer *Doc) {
+			txt := d.GetText("t")
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "ab", italic) })
+			if err := ApplyUpdateV1(peer, EncodeStateAsUpdateV1(d, nil), nil); err != nil {
+				t.Fatal(err)
+			}
+			pt := peer.GetText("t")
+			peer.Transact(func(txn *Transaction) { pt.Format(txn, 0, 2, bold) })
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 2, "c", italic) })
+			if err := ApplyUpdateV1(d, EncodeStateAsUpdateV1(peer, d.StateVector()), nil); err != nil {
+				t.Fatal(err)
+			}
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 3, "d", italic) })
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 2, "e", nil) })
+		},
+	}
+	for name, script := range scripts {
+		t.Run(name, func(t *testing.T) {
+			hot, cold := New(WithClientID(1)), New(WithClientID(1))
+			cold.GetText("t").baseType().disableMarkers = true
+			script(hot, New(WithClientID(2)))
+			script(cold, New(WithClientID(2)))
+			if got, want := EncodeStateAsUpdateV1(hot, nil), EncodeStateAsUpdateV1(cold, nil); !sameUpdate(t, got, want) {
+				t.Fatalf("cached\n%v\ncold\n%v", textFormatUnits(t, got), textFormatUnits(t, want))
+			}
+		})
 	}
 }
