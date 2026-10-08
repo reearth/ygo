@@ -16,8 +16,8 @@ type DeleteRange struct {
 type DeleteSet struct {
 	clients map[ClientID][]DeleteRange
 	// order, when non-nil, lists clients in first-add order (Yjs DeleteSet's
-	// Map order), which UndoManager replays in. Only transaction and undo
-	// stack sets keep it, so sets built from the store compare equal.
+	// Map order; for a decoded set, encoded order), which deletes are applied
+	// and replayed in. Sets built from the store leave it nil.
 	order []ClientID
 }
 

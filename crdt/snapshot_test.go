@@ -55,6 +55,7 @@ func TestUnit_EncodeDecodeSnapshot_RoundTrip(t *testing.T) {
 	snap2, err := DecodeSnapshot(data)
 	require.NoError(t, err)
 	assert.True(t, EqualSnapshots(snap, snap2))
+	assert.Equal(t, snap, snap2)
 }
 
 func TestUnit_EqualSnapshots_Same(t *testing.T) {
@@ -139,6 +140,7 @@ func TestInteg_Snapshot_EmptyDoc_RoundTrip(t *testing.T) {
 	snap2, err := DecodeSnapshot(data)
 	require.NoError(t, err)
 	assert.True(t, EqualSnapshots(snap, snap2))
+	assert.Equal(t, snap, snap2)
 }
 
 func TestInteg_RestoreDocument_SimpleText(t *testing.T) {

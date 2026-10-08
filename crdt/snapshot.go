@@ -70,6 +70,7 @@ func DecodeSnapshot(data []byte) (*Snapshot, error) {
 	if err != nil {
 		return nil, wrapUpdateErr(err)
 	}
+	ds.order = nil // a snapshot's delete set is only queried, so it matches one built from the store
 
 	n, err := dec.ReadVarUint()
 	if err != nil {
