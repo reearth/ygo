@@ -149,15 +149,10 @@ func (m *YMap) computeKeys(txn *Transaction, keysChanged map[string]struct{}) ma
 // when computing KeyChange.OldValue. Matches the unwrap rules in
 // entriesLocked so consumers see consistent shapes.
 func extractMapValue(item *Item) any {
+	if v, ok := lastPlainVal(item.Content); ok {
+		return v
+	}
 	switch c := item.Content.(type) {
-	case *ContentAny:
-		if len(c.Vals) > 0 {
-			return c.Vals[0]
-		}
-	case *ContentJSON:
-		if len(c.Vals) > 0 {
-			return c.Vals[0]
-		}
 	case *ContentEmbed:
 		return c.Val
 	case *ContentType:
@@ -172,8 +167,9 @@ func extractMapValue(item *Item) any {
 // A DETACHED shared type passed as value is staged (or attached, if this map
 // is live) as a nested type. A shared type attaches once: Set panics if the
 // value is already attached, staged under another key of this map, or staged
-// on any other container (#222). Overwriting or deleting a staged entry
-// releases its handle, making it stageable elsewhere.
+// on any other container (#222), and if it is m itself or holds m in its
+// staged content (a cycle). Overwriting or deleting a staged entry releases
+// its handle, making it stageable elsewhere.
 func (m *YMap) Set(txn *Transaction, key string, value any) {
 	checkUTF8("YMap.Set", "key", key)
 	checkAnyUTF8("YMap.Set", "value", value)
@@ -224,7 +220,7 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 	var origin *ID
 	if existing, ok := t.itemMap[key]; ok {
 		left = existing
-		id := existing.ID
+		id := existing.lastID()
 		origin = &id
 	}
 
@@ -295,11 +291,7 @@ func (m *YMap) Get(key string) (any, bool) {
 	if ct, ok := item.Content.(*ContentType); ok {
 		return ct.Type.owner, ct.Type.owner != nil
 	}
-	ca, ok := item.Content.(*ContentAny)
-	if !ok || len(ca.Vals) == 0 {
-		return nil, false
-	}
-	return ca.Vals[0], true
+	return lastPlainVal(item.Content)
 }
 
 // Has reports whether key has a live (non-deleted) entry.
@@ -385,8 +377,8 @@ func (m *YMap) ForEach(fn func(key string, value any)) {
 		if item.Deleted {
 			continue
 		}
-		if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-			fn(k, ca.Vals[0])
+		if v, ok := lastPlainVal(item.Content); ok {
+			fn(k, v)
 		}
 	}
 }

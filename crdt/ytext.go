@@ -317,6 +317,7 @@ func (txt *YText) Len() int { return txt.length }
 // markers (empty diff = no work).
 func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attributes) {
 	checkUTF8("YText.Insert", "text", text)
+	attrs = checkTextAttrs("YText.Insert", attrs)
 	checkAttrsUTF8("YText.Insert", attrs)
 	if text == "" {
 		return
@@ -534,12 +535,17 @@ func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 // attrs may carry inline attributes that apply ONLY to this embed item.
 // They are emitted as opening + closing ContentFormat markers around the
 // embed so subsequent inserts are unaffected. Pass nil for an unstyled embed.
+// Like attribute values, embed is stored in the form V1 and V2 both encode
+// (see Attributes) and InsertEmbed panics on a value with none, such as a
+// shared type (YMap, YText, ...).
 //
 // Must be called from inside a Transact callback.
 //
 // Added in v1.12.0 (#76).
 func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attributes) {
+	embed = checkTextValue("YText.InsertEmbed", "embed", embed)
 	checkAnyUTF8("YText.InsertEmbed", "embed", embed)
+	attrs = checkTextAttrs("YText.InsertEmbed", attrs)
 	checkAttrsUTF8("YText.InsertEmbed", attrs)
 	if txt.detached() {
 		attrs := cloneAttributes(attrs)
@@ -787,6 +793,7 @@ func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *
 // removal marker before the source marker when both share the same origin.
 // Full concurrent attribute removal is tracked as a follow-up improvement.
 func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) {
+	attrs = checkTextAttrs("YText.Format", attrs)
 	checkAttrsUTF8("YText.Format", attrs)
 	if len(attrs) == 0 || length <= 0 {
 		return
@@ -1278,7 +1285,8 @@ func (txt *YText) Observe(fn func(YTextEvent)) func() {
 
 // ApplyDelta applies a Quill-compatible delta to the text within the given
 // transaction. Each Delta must have exactly one of Op set:
-//   - DeltaOpInsert: inserts d.Insert at the current cursor position with optional d.Attributes
+//   - DeltaOpInsert: inserts d.Insert at the current cursor position with optional d.Attributes;
+//     a string is text, any other non-nil value an embed, as InsertEmbed takes it
 //   - DeltaOpDelete: deletes d.Delete UTF-16 code units at the current cursor position
 //   - DeltaOpRetain: advances the cursor by d.Retain UTF-16 code units; if d.Attributes is
 //     non-nil, applies formatting to the retained range
@@ -1291,10 +1299,15 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 	// op-by-op inside the loop below would let delta[0], delta[1], ... commit
 	// before a panic on delta[2] — a partial write with observers already
 	// fired (#209).
+	normalised := make([]Delta, len(delta))
 	for i, d := range delta {
+		d.Insert = checkTextValue("YText.ApplyDelta", fmt.Sprintf("delta[%d].Insert", i), d.Insert)
 		checkAnyUTF8("YText.ApplyDelta", fmt.Sprintf("delta[%d].Insert", i), d.Insert)
+		d.Attributes = checkTextAttrs("YText.ApplyDelta", d.Attributes)
 		checkAttrsUTF8("YText.ApplyDelta", d.Attributes)
+		normalised[i] = d
 	}
+	delta = normalised
 	if txt.detached() {
 		delta := cloneDelta(delta)
 		txt.buffer(func(txn *Transaction) { txt.ApplyDelta(txn, delta) })
@@ -1315,8 +1328,8 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 	for _, d := range delta {
 		switch d.Op {
 		case DeltaOpInsert:
-			if s, ok := d.Insert.(string); ok {
-				t.applyDeltaInsert(txn, pos, s, d.Attributes)
+			if d.Insert != nil {
+				t.applyDeltaInsert(txn, pos, d.Insert, d.Attributes)
 			}
 		case DeltaOpDelete:
 			t.applyDeltaDelete(txn, pos, d.Delete)
@@ -1330,7 +1343,8 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 	}
 }
 
-// applyDeltaInsert inserts text at the cursor pos, mirroring YText.Insert's
+// applyDeltaInsert inserts text, or any other value as an embed (Yjs
+// applyDelta parity), at the cursor pos, mirroring YText.Insert's
 // item construction (attribute open/close markers, tombstone-skipping
 // anchor) exactly — but sourcing the "current attributes" diff input from
 // pos.cur (already tracked incrementally by the cursor) instead of a fresh
@@ -1340,9 +1354,16 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 // the net effect on the ambient format state — and therefore on pos.cur — is
 // zero: leaving pos.cur untouched here is equivalent to (and cheaper than)
 // walking it past the new markers. Advances pos past the inserted run.
-func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, text string, attrs Attributes) {
-	if text == "" {
-		return
+func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, ins any, attrs Attributes) {
+	var content Content
+	n := 1
+	if text, ok := ins.(string); ok {
+		if text == "" {
+			return
+		}
+		content, n = NewContentString(text), utf16Len(text)
+	} else {
+		content = NewContentEmbed(ins)
 	}
 
 	// Anchor after any adjacent tombstones (Yjs text-insert parity, #160),
@@ -1420,7 +1441,7 @@ func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, text
 		OriginRight: originRight,
 		Left:        left,
 		Parent:      t,
-		Content:     NewContentString(text),
+		Content:     content,
 	}
 	if pos.index > 0 {
 		t.insertHint = pos.index
@@ -1471,7 +1492,7 @@ func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, text
 	}
 
 	pos.left = left
-	pos.index += utf16Len(text)
+	pos.index += n
 }
 
 // applyDeltaDelete deletes length countable units starting at the cursor pos,

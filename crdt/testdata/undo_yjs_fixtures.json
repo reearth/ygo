@@ -1,0 +1,164 @@
+{
+  "fixtures": [
+    {
+      "name": "map_key_text_undo_delete",
+      "description": "Undo the delete of a map key holding a Y.Text restores the text content.",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0104effdb6f50d002701016d0174020400effdb6f50d000548656c6c6fa7effdb6f50d00020400effdb6f50d060548656c6c6f01effdb6f50d010006",
+      "expectedJSON": "{\"t\":\"Hello\"}"
+    },
+    {
+      "name": "array_nested_map_children_undo_delete",
+      "description": "Undo the delete of an array element holding a Y.Map restores its entries, including a nested Y.Text.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "010aeffdb6f50d00080101610177017887effdb6f50d00012800effdb6f50d01016b017701762700effdb6f50d0103737263020400effdb6f50d03046465657088effdb6f50d0101770179c7effdb6f50d00effdb6f50d01012800effdb6f50d09016b017701762700effdb6f50d0903737263020400effdb6f50d0b046465657001effdb6f50d010107",
+      "expectedJSON": "[\"x\",{\"k\":\"v\",\"src\":\"deep\"},\"y\"]"
+    },
+    {
+      "name": "nested_in_nested_undo_delete",
+      "description": "Undo the delete of a map that holds a map that holds a Y.Text and a Y.Array.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "010eeffdb6f50d0007010161012700effdb6f50d0005696e6e6572012700effdb6f50d010474657874020400effdb6f50d02046c6561662700effdb6f50d01046c697374000800effdb6f50d070277036f6e65770374776f2800effdb6f50d00037461670177016f47effdb6f50d00012700effdb6f50d0b05696e6e6572012700effdb6f50d0c0474657874020400effdb6f50d0d046c6561662700effdb6f50d0c046c697374000800effdb6f50d120277036f6e65770374776f2800effdb6f50d0b037461670177016f01effdb6f50d01000b",
+      "expectedJSON": "[{\"inner\":{\"text\":\"leaf\",\"list\":[\"one\",\"two\"]},\"tag\":\"o\"}]"
+    },
+    {
+      "name": "map_key_text_undo_redo_undo",
+      "description": "Undo, redo, then undo again the delete of a map key holding a Y.Text.",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0106effdb6f50d002701016d0174020400effdb6f50d000548656c6c6fa7effdb6f50d00020400effdb6f50d060548656c6c6fa7effdb6f50d06020400effdb6f50d0c0548656c6c6f01effdb6f50d01000c",
+      "expectedJSON": "{\"t\":\"Hello\"}"
+    },
+    {
+      "name": "map_key_text_full_unwind",
+      "description": "After undo/redo/undo of the delete, undoing the original set removes the twice-restored text.",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0106effdb6f50d002701016d0174020400effdb6f50d000548656c6c6fa7effdb6f50d00020400effdb6f50d060548656c6c6fa7effdb6f50d06020400effdb6f50d0c0548656c6c6f01effdb6f50d010012",
+      "expectedJSON": "{}"
+    },
+    {
+      "name": "nested_edit_merged_undo",
+      "description": "A nested map edit merged between two captured pushes is undone with them, restoring the overwritten value.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0106effdb6f50d0007010161012800effdb6f50d00016b017d0188effdb6f50d00017d05a8effdb6f50d01017d0288effdb6f50d02017d06a8effdb6f50d03017d0101effdb6f50d010104",
+      "expectedJSON": "[{\"k\":1}]"
+    },
+    {
+      "name": "fresh_doc_merged_pushes_undo",
+      "description": "Two merged pushes on a fresh doc are both undone.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0102effdb6f50d00080101610177017848effdb6f50d000177017901effdb6f50d010002",
+      "expectedJSON": "[]"
+    },
+    {
+      "name": "insert_then_delete_merged_undo",
+      "description": "An element inserted and deleted within one capture interval stays deleted on undo.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0102effdb6f50d00080101610177046261736548effdb6f50d000177017801effdb6f50d010002",
+      "expectedJSON": "[]"
+    },
+    {
+      "name": "edit_after_undo_starts_new_item",
+      "description": "An edit right after an undo is not merged into the next-older stack item (undo stops capturing).",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0103effdb6f50d002801016d0161017d012801016d0162017d022801016d0163017d0301effdb6f50d010102",
+      "expectedJSON": "{\"a\":1}"
+    },
+    {
+      "name": "merged_run_undo_delete_then_remote_insert",
+      "description": "Two pushes Yjs holds as one struct are restored as one item, so a concurrent insert lands after both.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0201cef5b7f70f0048effdb6f50d000177017802effdb6f50d00080101610277016177016248effdb6f50d000277016177016201effdb6f50d010002",
+      "expectedJSON": "[\"a\",\"b\",\"x\"]",
+      "jsonOnly": true
+    },
+    {
+      "name": "merged_run_redo_then_remote_insert",
+      "description": "Redoing two merged pushes re-inserts them as one item ahead of a concurrent insert.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0201cef5b7f70f0048effdb6f50d000177017802effdb6f50d00080101610277016177016248effdb6f50d000277016177016201effdb6f50d010002",
+      "expectedJSON": "[\"a\",\"b\",\"x\"]",
+      "jsonOnly": true
+    },
+    {
+      "name": "map_restore_follows_delete_order",
+      "description": "Restored values sharing a key are replayed in first-delete order, so the last-deleted client wins.",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0203cef5b7f70f002801016d016b017d052801016d016a017d01a8cef5b7f70f00017d1306effdb6f50d00a8cef5b7f70f00017d05a1effdb6f50d0001a8cef5b7f70f02017d14a8cef5b7f70f01017d01a8effdb6f50d02017d13a8effdb6f50d04017d0502cef5b7f70f010003effdb6f50d0200030401",
+      "expectedJSON": "{\"k\":5,\"j\":1}",
+      "jsonOnly": true
+    },
+    {
+      "name": "nested_key_restored_over_collected_remote_set",
+      "description": "A remote set inside a map deleted here reaches us collected; undoing the delete restores the old value.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0203cef5b7f70f0007010161012800cef5b7f70f00016b017d06000102effdb6f50d0047cef5b7f70f00012800effdb6f50d00016b017d0601cef5b7f70f010003",
+      "expectedJSON": "[{\"k\":6}]",
+      "jsonOnly": true
+    },
+    {
+      "name": "collected_overwritten_remote_value_blocks_restore",
+      "description": "A remote value collected because a later remote value overwrote it still blocks undo restoring an older value under its key.",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0204cef5b7f70f002701016d026b30012800cef5b7f70f00016b017d08a1cef5b7f70f0101a8cef5b7f70f02017d1d04effdb6f50d00a1cef5b7f70f0101a8cef5b7f70f00017d22a7effdb6f50d01012800effdb6f50d02016b017d1d02cef5b7f70f010004effdb6f50d010002",
+      "expectedJSON": "{\"k0\":{\"k\":29}}",
+      "jsonOnly": true
+    },
+    {
+      "name": "collected_remote_delete_in_live_map_blocks_restore",
+      "description": "A remote set-then-delete of a key in a live map is a remote edit undo must not overwrite, though its value was collected.",
+      "clientID": 3735928559,
+      "root": "m",
+      "kind": "map",
+      "updateV1": "0201cef5b7f70f00a1effdb6f50d010102effdb6f50d002801016d016b017d01a1effdb6f50d000102cef5b7f70f010001effdb6f50d010002",
+      "expectedJSON": "{}",
+      "jsonOnly": true
+    },
+    {
+      "name": "merged_run_partial_undo_after_restore",
+      "description": "Undoing one half of a restored merged run deletes only that half of its copy.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0104effdb6f50d00080101610177016188effdb6f50d000177016248effdb6f50d0001770161c8effdb6f50d02effdb6f50d000177016201effdb6f50d0200020301",
+      "expectedJSON": "[\"a\"]"
+    },
+    {
+      "name": "unmerged_neighbours_restore_separately",
+      "description": "Adjacent same-client items with different right origins are separate structs in Yjs and are restored separately.",
+      "clientID": 3735928559,
+      "root": "a",
+      "kind": "array",
+      "updateV1": "0202cef5b7f70f00c8effdb6f50d01effdb6f50d000177017948effdb6f50d010177017a05effdb6f50d00080101610177017848effdb6f50d0001770161c8effdb6f50d01cef5b7f70f000177016248effdb6f50d0101770161c8effdb6f50d01effdb6f50d020177016201effdb6f50d010102",
+      "expectedJSON": "[\"a\",\"z\",\"b\",\"y\",\"x\"]",
+      "jsonOnly": true
+    }
+  ]
+}

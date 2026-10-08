@@ -317,6 +317,7 @@ func RunGC(doc *Doc) {
 				return kept[len(kept)-1]
 			}()
 			if prevIsCDItem && itemIsCD &&
+				gcMergeable(prev, item) &&
 				prev.Right == item && item.Left == prev &&
 				prev.ID.Clock+uint64(prev.Content.Len()) == item.ID.Clock {
 				// Absorb item into prev: extend the tombstone length, rewire
@@ -326,6 +327,10 @@ func RunGC(doc *Doc) {
 				if item.Right != nil {
 					item.Right.Left = prev
 				}
+				// A marker on item would walk from an off-list node.
+				if prev.Parent != nil {
+					prev.Parent.clearMarkers()
+				}
 				// item is discarded from kept — it no longer exists as a
 				// separate node.
 				continue
@@ -334,4 +339,18 @@ func RunGC(doc *Doc) {
 		}
 		doc.store.clients[client] = kept
 	}
+}
+
+// gcMergeable reports whether RunGC may absorb tombstone item into prev beyond
+// adjacency and clock contiguity (Yjs Item.mergeWith). A key's itemMap entry
+// is never absorbed, so it stays the on-list node Set links after.
+func gcMergeable(prev, item *Item) bool {
+	if prev.Parent != item.Parent || !parentSubEqual(prev.ParentSub, item.ParentSub) ||
+		prev.MovedBy != item.MovedBy || prev.redone != nil || item.redone != nil {
+		return false
+	}
+	if item.ParentSub != nil && item.Parent != nil && item.Parent.itemMap[*item.ParentSub] == item {
+		return false
+	}
+	return true
 }
