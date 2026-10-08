@@ -1,6 +1,8 @@
-// Package updatecheck centralises the check the bundled persistence adapters
-// (memory, file, sqlite) run on an update before storing it, so all three
-// accept exactly the same updates.
+// Package updatecheck centralises the check run on an update the room has
+// already applied: the bundled persistence adapters (memory, file, sqlite) run
+// it before storing the update, and the websocket server's BroadcastUpdate,
+// including the relay path, before fanning it out, so all of them accept
+// exactly the same updates.
 package updatecheck
 
 import (

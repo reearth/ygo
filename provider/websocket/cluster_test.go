@@ -129,6 +129,41 @@ func TestInteg_Cluster_SyncPropagatesAcrossServers(t *testing.T) {
 	assert.Equal(t, 1, syncPubs, "exactly one sync publish (A's local edit; no B echo)")
 }
 
+// A node applies a relayed update to its room, then sends it to its own peers
+// through BroadcastUpdate, which checks the update by decoding it alone. There
+// every key of an update setting 100,001 keys on an existing map parks, one
+// more than crdt's default pending cap. The node's peers must still receive it.
+func TestInteg_Cluster_RelaysLargeIncrementalUpdateToPeers(t *testing.T) {
+	relay := cluster.NewMemRelay(cluster.WithBufferSize(1024))
+	defer func() { require.NoError(t, relay.Close()) }()
+
+	srvA := ygws.NewServer()
+	srvB := ygws.NewServer()
+	require.NoError(t, srvA.AttachRelay(relay))
+	require.NoError(t, srvB.AttachRelay(relay))
+	tsA := httptest.NewServer(srvA)
+	defer tsA.Close()
+	tsB := httptest.NewServer(srvB)
+	defer tsB.Close()
+
+	base, update := nestedMapUpdate(t, 100_001)
+	connA := dial(t, tsA, "room")
+	drainHandshake(t, connA, crdt.New())
+	docB := crdt.New()
+	connB := dial(t, tsB, "room")
+	drainHandshake(t, connB, docB)
+
+	sendUpdate(t, connA, base)
+	readUntil(t, connB, docB, 5*time.Second,
+		func() bool { return nestedEntries(docB) == 0 },
+		"node B's peer never received the base")
+	sendUpdate(t, connA, update)
+	readUntil(t, connB, docB, 30*time.Second,
+		func() bool { return nestedEntries(docB) == 100_001 },
+		"node B's peer never received the relayed update")
+	assert.Equal(t, 100_001, nestedEntries(srvB.GetDoc("room")))
+}
+
 func TestInteg_Cluster_AwarenessPropagatesAcrossServers(t *testing.T) {
 	relay := newRecordingRelay()
 	defer func() { require.NoError(t, relay.Close()) }()
