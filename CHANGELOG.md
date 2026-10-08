@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.52.0] — 2026-10-07
+## [1.52.0] — 2026-10-08
 
 ### Added
 
@@ -29,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds everything in it and 0 otherwise. A sync frame that does not decode
   gets no `SyncStatus`, and the server closes the connection with 1002
   (protocol error). Connections on plain y-websocket framing are unchanged.
+
+## [1.51.2] — 2026-10-08
+
+### Fixed
+
+- **`crdt`: a struct parked before its root type was first accessed was lost.**
+  When an update for a root (`"t"`) arrived ahead of a dependency, its structs
+  were parked with a placeholder parent; calling `GetText("t")` (or any root
+  accessor) for the first time before the dependency arrived left them pointing
+  at the discarded placeholder, so they never appeared in the type and peers
+  diverged permanently. First access now repoints parked structs too (#290).
 
 ## [1.51.1] — 2026-10-07
 
