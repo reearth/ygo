@@ -383,14 +383,15 @@ func (m *YMap) ForEach(fn func(key string, value any)) {
 	}
 }
 
-// ToJSON returns the map serialised as a JSON object.
+// ToJSON returns the map serialised as a JSON object with sorted keys: the
+// bytes json.Marshal(m.Entries()) would produce, without recursing once per
+// nested shared type. Nested types, strings, numbers, booleans and nil are
+// written under the document's read lock; any other value (a map, a slice, an
+// embed, a json.Marshaler) is marshalled by encoding/json after the lock is
+// released, so a MarshalJSON method may read or write the document.
 // Must not be called from inside a Transact callback.
 func (m *YMap) ToJSON() ([]byte, error) {
-	if doc := m.doc; doc != nil {
-		doc.mu.RLock()
-		defer doc.mu.RUnlock()
-	}
-	return marshalJSONOwner(m)
+	return marshalSharedJSON(m.doc, m)
 }
 
 // Observe registers fn to be called after every transaction that modifies this
