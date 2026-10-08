@@ -795,12 +795,12 @@ func TestSearchMarker_Format_MatchesCold(t *testing.T) {
 	}
 }
 
-// TestSearchMarker_CurrentAttributesAt_MatchesCold exercises findTextPos's
-// !hasFormatting fast path (ytext.go) together with its full walk once
-// formatting exists — both resolve Insert's cursor whenever attrs is
-// non-empty. Attrs-carrying inserts happen before, at the hasFormatting
-// transition, and after, on a large document.
-func TestSearchMarker_CurrentAttributesAt_MatchesCold(t *testing.T) {
+// TestSearchMarker_AttrsInsert_FormattingTransition_MatchesCold exercises
+// findTextPos's !hasFormatting fast path (ytext.go) together with its
+// formatted-text path once formatting exists — both resolve Insert's cursor
+// whenever attrs is non-empty. Attrs-carrying inserts happen before, at the
+// hasFormatting transition, and after, on a large document.
+func TestSearchMarker_AttrsInsert_FormattingTransition_MatchesCold(t *testing.T) {
 	// 500-char blocks (well above maxSearchMarker=80) keep the O(n^2)
 	// force-cold single-char-append build below under the CI race budget
 	// while still exercising multiple markers and the hasFormatting
@@ -820,8 +820,8 @@ func TestSearchMarker_CurrentAttributesAt_MatchesCold(t *testing.T) {
 			for i := 0; i < 500; i++ {
 				txt.Insert(tr, txt.Len(), "b", nil)
 			}
-			// hasFormatting is now true: exercises the full walk from
-			// txt.start, at a position before the only existing marker.
+			// hasFormatting is now true: exercises the formatted path at a
+			// position before the only existing marker.
 			txt.Insert(tr, 125, "MID", Attributes{"bold": true})
 			txt.Insert(tr, txt.Len(), "END", Attributes{"italic": true})
 		})
