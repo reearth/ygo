@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/encoding"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -113,11 +114,19 @@ func TestUnit_YText_FormatCleanup_SkipsPlainAndLocal(t *testing.T) {
 }
 
 // A panic in the cleanup that follows a remote edit reaches the caller with
-// the document unlocked, as a panic in a Transact callback does.
+// the document unlocked and, as from a panicking Transact, the deletions the
+// cleanup made emitted.
 func TestUnit_YText_RemoteCleanupPanicUnlocks(t *testing.T) {
 	a, b := newTestDoc(1), newTestDoc(2)
 	at, bt := a.GetText("t"), b.GetText("t")
-	a.Transact(func(txn *Transaction) { at.Insert(txn, 0, "ab", Attributes{"bold": true}) })
+	a.Transact(func(txn *Transaction) { at.Insert(txn, 0, "abc", nil) })
+	syncText(t, a, b, nil)
+	a.Transact(func(txn *Transaction) { at.Delete(txn, 0, 3) })
+	b.Transact(func(txn *Transaction) { bt.Format(txn, 2, 1, Attributes{"bold": true}) })
+	c := newTestDoc(3)
+	syncText(t, b, c, nil)
+	var updates [][]byte
+	b.OnUpdate(func(u []byte, _ any) { updates = append(updates, u) })
 	cleanupTestHook = func() { panic("cleanup") }
 	defer func() { cleanupTestHook = nil }()
 
@@ -133,7 +142,13 @@ func TestUnit_YText_RemoteCleanupPanicUnlocks(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("document still locked after the cleanup panicked")
 	}
-	assert.Equal(t, "xab", bt.ToString())
+	assert.Equal(t, "x", bt.ToString())
+	require.Len(t, updates, 3, "remote, cleanup and local updates")
+	for _, u := range updates {
+		require.NoError(t, ApplyUpdateV1(c, u, nil))
+	}
+	assert.Equal(t, 1, countLiveContentFormat(b))
+	assert.Equal(t, 1, countLiveContentFormat(c), "the cleanup's deletion reached the peer")
 }
 
 // A root text first accessed after its format markers arrived does not clean

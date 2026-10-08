@@ -7,7 +7,7 @@ import (
 	"sort"
 )
 
-// cleanupTestHook, when set by a test, runs at the start of every cleanup.
+// cleanupTestHook, when set by a test, runs after every cleanup's deletions.
 var cleanupTestHook func()
 
 // needsFormattingCleanup reports whether a committed remote transaction
@@ -31,11 +31,10 @@ func needsFormattingCleanup(txn *Transaction) bool {
 // formattingCleanupLocked runs Yjs's cleanupYTextAfterTransaction for the
 // remote transaction remote in a new local transaction with a nil origin, as
 // Yjs does, and returns that transaction's observer phase (nil when it changed
-// nothing). It must run under d.mu before remote's deleted content is GC'd.
-func (d *Doc) formattingCleanupLocked(remote *Transaction) func() {
-	if cleanupTestHook != nil {
-		cleanupTestHook()
-	}
+// nothing) and any panic the cleanup raised. Like a panicking Transact, a
+// panicking cleanup still emits the deletions it made. It must run under d.mu
+// before remote's deleted content is GC'd.
+func (d *Doc) formattingCleanupLocked(remote *Transaction) (phase2 func(), panicked any) {
 	txn := &Transaction{
 		doc:         d,
 		Local:       true,
@@ -44,17 +43,28 @@ func (d *Doc) formattingCleanupLocked(remote *Transaction) func() {
 		changed:     make(map[*abstractType]map[string]struct{}, 1),
 		ctx:         context.Background(),
 	}
-	cleanupYTextAfterTransaction(remote, txn)
+	func() {
+		defer func() { panicked = recover() }()
+		cleanupYTextAfterTransaction(remote, txn)
+		if cleanupTestHook != nil {
+			cleanupTestHook()
+		}
+	}()
 	txn.afterState = d.store.StateVector()
 	txn.done = true
 	if len(txn.changed) == 0 {
-		return nil
+		return nil, panicked
 	}
-	phase2 := buildPhase2(d, txn)
+	func() {
+		if panicked != nil {
+			defer func() { _ = recover() }()
+		}
+		phase2 = buildPhase2(d, txn)
+	}()
 	if d.gc && d.undoManagerCount == 0 {
 		gcTxnDeleteSet(d, txn)
 	}
-	return phase2
+	return phase2, panicked
 }
 
 // cleanupYTextAfterTransaction deletes the format markers remote left

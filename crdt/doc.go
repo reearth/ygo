@@ -632,8 +632,12 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		var cleanupPanic any
 		if r == nil && needsFormattingCleanup(txn) {
 			func() {
-				defer func() { cleanupPanic = recover() }()
-				cleanupPhase2 = d.formattingCleanupLocked(txn)
+				defer func() {
+					if p := recover(); p != nil {
+						cleanupPanic = p
+					}
+				}()
+				cleanupPhase2, cleanupPanic = d.formattingCleanupLocked(txn)
 			}()
 		}
 
