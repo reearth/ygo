@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reearth/ygo/encoding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -196,4 +197,52 @@ func TestUnit_YText_FormatCleanup_LazyRoot(t *testing.T) {
 			{Op: DeltaOpInsert, Insert: "y"},
 		}, a.GetText("t").ToDelta())
 	}
+}
+
+// Parked deletions are retried clients descending, as Yjs re-reads its
+// encoded pending delete set. Here the higher client's marker deletions are
+// visited first and queue the full cleanup, which skips the contextless
+// cleanup the lower client's character deletion would otherwise run.
+func TestUnit_YText_FormatCleanup_PendingDeleteOrder(t *testing.T) {
+	rec := func(d *Doc, fn func(*YText, *Transaction)) []byte {
+		sv := d.StateVector()
+		txt := d.GetText("t")
+		d.Transact(func(txn *Transaction) { fn(txt, txn) })
+		return EncodeStateAsUpdateV1(d, sv)
+	}
+	bold := func(t *YText, txn *Transaction) { t.Format(txn, 1, 1, Attributes{"b": true}) }
+	src := newTestDoc(4)
+	base := rec(src, func(t *YText, txn *Transaction) { t.Insert(txn, 0, "zay", nil) })
+	peer := func(id uint64) *Doc {
+		d := newTestDoc(id)
+		require.NoError(t, ApplyUpdateV1(d, base, nil))
+		return d
+	}
+	fb, fd := rec(peer(2), bold), rec(peer(5), bold) // duplicate openers before "a"
+	c := peer(3)
+	fc := rec(c, bold)
+	x := rec(peer(1), func(t *YText, txn *Transaction) { t.Insert(txn, 1, "x", nil) })
+	ds := newDeleteSet()
+	ds.add(ID{1, 0}, 1)
+	ds.add(ID{3, 0}, int(c.StateVector()[3]))
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(0)
+	encodeDeleteSet(enc, ds)
+	late, err := MergeUpdatesV1(fc, x)
+	require.NoError(t, err)
+
+	r := newTestDoc(9)
+	r.GetText("t")
+	cleanups := 0
+	r.OnUpdate(func(_ []byte, origin any) {
+		if origin == nil {
+			cleanups++
+		}
+	})
+	for _, u := range [][]byte{base, fb, fd, enc.Bytes(), late} {
+		require.NoError(t, ApplyUpdateV1(r, u, "remote"))
+	}
+	require.Empty(t, r.store.pendingDs.clients)
+	assert.Equal(t, 0, cleanups)
+	assert.Equal(t, 4, countLiveContentFormat(r))
 }

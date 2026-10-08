@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"cmp"
 	"slices"
 	"sort"
 )
@@ -132,6 +133,21 @@ func (ds *DeleteSet) orderedClients() []ClientID {
 	}
 	slices.Sort(rest)
 	return append(out, rest...)
+}
+
+// retryPendingDs reapplies the store's parked deletions in the order Yjs
+// re-reads its encoded pending delete set: clients descending, ranges sorted.
+func retryPendingDs(txn *Transaction) {
+	store := txn.doc.store
+	pending := store.pendingDs
+	store.pendingDs = newDeleteSet()
+	pending.order = make([]ClientID, 0, len(pending.clients))
+	for c := range pending.clients {
+		pending.order = append(pending.order, c)
+		pending.sortAndCompact(c)
+	}
+	slices.SortFunc(pending.order, func(a, b ClientID) int { return cmp.Compare(b, a) })
+	store.pendingDs = pending.applyToPartial(txn)
 }
 
 // applyToPartial applies delete-set entries whose target items are
