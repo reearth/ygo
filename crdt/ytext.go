@@ -324,7 +324,7 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 	}
 	t := &txt.abstractType
 	if len(attrs) > 0 {
-		t.insertText(txn, t.findTextPos(txn, index), NewContentString(text), attrs)
+		t.insertText(txn, t.findTextPos(txn, index), NewContentString(text), attrs, true)
 		return
 	}
 
@@ -383,7 +383,7 @@ func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attr
 		return
 	}
 	t := &txt.abstractType
-	t.insertText(txn, t.findTextPos(txn, index), NewContentEmbed(embed), attrs)
+	t.insertText(txn, t.findTextPos(txn, index), NewContentEmbed(embed), attrs, true)
 }
 
 // Delete removes length characters starting at logical position index.
@@ -891,6 +891,16 @@ func (t *abstractType) findTextPos(txn *Transaction, index int) *itemTextPos {
 		}
 		return pos
 	}
+	// A cached state just after the item ending at index saves the walk.
+	if index > 0 && index <= t.length && !t.disableMarkers && t.attrCache.ok && t.attrCache.gen == t.fmtGen {
+		left, offset := t.leftNeighbourAt(index)
+		if cur, ok := t.cachedAttrsAfter(left); ok {
+			if offset > 0 {
+				splitItem(txn, left, offset)
+			}
+			return &itemTextPos{left: left, right: left.Right, index: index, cur: cur}
+		}
+	}
 	pos := &itemTextPos{right: t.start}
 	pos.advance(txn, index)
 	return pos
@@ -975,8 +985,9 @@ func (t *abstractType) insertNegatedAttributes(txn *Transaction, pos *itemTextPo
 // insertText inserts content at pos carrying exactly attrs, then advances pos
 // past it. Mirrors Yjs insertText: attributes in effect at pos that attrs does
 // not name are cleared, opening markers precede the content and closing
-// markers restore the surrounding formatting after it.
-func (t *abstractType) insertText(txn *Transaction, pos *itemTextPos, content Content, attrs Attributes) {
+// markers restore the surrounding formatting after it. With cache, it leaves
+// the attributes just after content cached for a following insert there.
+func (t *abstractType) insertText(txn *Transaction, pos *itemTextPos, content Content, attrs Attributes, cache bool) {
 	// Every key in effect at pos joins attrs as a clear (a missing key reads
 	// as nil below), after the caller's keys and in the order it took effect,
 	// as in Yjs. The caller's keys are sorted: a Go map has no insertion order.
@@ -1014,8 +1025,15 @@ func (t *abstractType) insertText(txn *Transaction, pos *itemTextPos, content Co
 	item.integrate(txn, 0)
 	pos.right = item
 	pos.forward()
+	var after attrState
+	if cache {
+		after = pos.cur.clone()
+	}
 
 	t.insertNegatedAttributes(txn, pos, negated)
+	if cache {
+		t.cacheAttrsAfter(item, after) // the closing markers lie after item
+	}
 }
 
 // itemOrigins returns the origin and originRight IDs for a new item to be
@@ -1263,10 +1281,10 @@ func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, ins 
 		if text == "" {
 			return
 		}
-		t.insertText(txn, pos, NewContentString(text), attrs)
+		t.insertText(txn, pos, NewContentString(text), attrs, false)
 		return
 	}
-	t.insertText(txn, pos, NewContentEmbed(ins), attrs)
+	t.insertText(txn, pos, NewContentEmbed(ins), attrs, false)
 }
 
 // applyDeltaDelete deletes length countable units starting at the cursor pos,

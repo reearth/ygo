@@ -1035,3 +1035,32 @@ func BenchmarkYText_TypeBeforeFormatMarker(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkYText_InsertEmbedFormatted inserts an embed without attributes
+// into text that has a bold run, either at a seeded-random position or just
+// after the previous embed.
+func BenchmarkYText_InsertEmbedFormatted(b *testing.B) {
+	for _, n := range []int{20_000, 100_000} {
+		for _, seq := range []bool{false, true} {
+			b.Run(fmt.Sprintf("n=%d/sequential=%t", n, seq), func(b *testing.B) {
+				b.ReportAllocs()
+				doc, txt := buildScatteredFormattedText(n)
+				doc.Transact(func(txn *Transaction) {
+					txt.Format(txn, n/2, 10, Attributes{"bold": true})
+				})
+				r := rand.New(rand.NewSource(benchSeed))
+				at := n / 4
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if !seq {
+						at = r.Intn(txt.Len() + 1)
+					}
+					doc.Transact(func(txn *Transaction) {
+						txt.InsertEmbed(txn, at, map[string]any{"img": 1}, nil)
+					})
+					at++
+				}
+			})
+		}
+	}
+}
