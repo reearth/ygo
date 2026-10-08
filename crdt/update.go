@@ -465,7 +465,9 @@ func encodeDeleteSet(enc *encoding.Encoder, ds DeleteSet) {
 	for c := range ds.clients {
 		clients = append(clients, c)
 	}
-	sort.Slice(clients, func(i, j int) bool { return clients[i] < clients[j] })
+	// Yjs writes delete set clients in descending order, and applies a delete
+	// set in its encoded order.
+	sort.Slice(clients, func(i, j int) bool { return clients[i] > clients[j] })
 	enc.WriteVarUint(uint64(len(clients)))
 	for _, c := range clients {
 		ranges := ds.clients[c]
@@ -1247,7 +1249,7 @@ func decodeTypeContent(dec *encoding.Decoder, doc *Doc, typeClass byte) (*abstra
 }
 
 func decodeDeleteSet(dec *encoding.Decoder) (DeleteSet, error) {
-	ds := newDeleteSet()
+	ds := newOrderedDeleteSet()
 	n, err := dec.ReadVarUint()
 	if err != nil {
 		return ds, err
@@ -1276,6 +1278,9 @@ func decodeDeleteSet(dec *encoding.Decoder) (DeleteSet, error) {
 			length, err := dec.ReadVarUint()
 			if err != nil {
 				return ds, err
+			}
+			if _, seen := ds.clients[client]; !seen {
+				ds.order = append(ds.order, client) // Yjs applies a delete set in its encoded order
 			}
 			ds.clients[client] = append(ds.clients[client], DeleteRange{Clock: clock, Len: length})
 		}

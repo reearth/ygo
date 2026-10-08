@@ -4998,6 +4998,518 @@
       ]
     },
     {
+      "name": "remote_cleanup_follows_deletion_order_a1b2",
+      "clients": {
+        "A": 1,
+        "B": 2
+      },
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "x",
+          "a": {
+            "italic": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "p",
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 2,
+          "s": "l",
+          "a": {
+            "bold": true,
+            "color": "red"
+          }
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 2,
+          "s": "t",
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "emb",
+          "i": 1,
+          "v": {
+            "img": 0
+          },
+          "a": {
+            "color": "blue"
+          }
+        },
+        {
+          "p": "B",
+          "k": "del",
+          "i": 0,
+          "n": 3
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 0,
+          "n": 4,
+          "a": {
+            "color": "blue"
+          }
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 3,
+          "n": 2,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        }
+      ],
+      "trace": [
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          []
+        ],
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "pt",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "pt",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "pt",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "pt",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "pt",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "pt",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "color": "blue",
+                "italic": true
+              }
+            },
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "pt",
+              "attributes": {
+                "color": "blue",
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "color": "blue",
+                "italic": true
+              }
+            },
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "pt",
+              "attributes": {
+                "color": "blue",
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "color": "red",
+                "bold": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "color": "red",
+                "bold": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "color": "red",
+                "bold": true
+              }
+            }
+          ]
+        ]
+      ],
+      "final": [
+        {
+          "peer": "A",
+          "v1": "020302000601017404626f6c6404747275658102000186020104626f6c64046e756c6c0a01000101017403c60201020205636f6c6f72052272656422c401030202016cc60104020205636f6c6f72046e756c6cc10201010301c10102020001c501070200097b22696d67223a307dc1010802000146010005636f6c6f720622626c756522c10106010301020201010101040003060209010b01"
+        },
+        {
+          "peer": "B",
+          "v1": "020302000601017404626f6c6404747275658102000186020104626f6c64046e756c6c0a01000101017403c60201020205636f6c6f72052272656422c401030202016cc60104020205636f6c6f72046e756c6cc10201010301c10102020001c501070200097b22696d67223a307dc1010802000146010005636f6c6f720622626c756522c10106010301020201010101040003060209010b01"
+        }
+      ]
+    },
+    {
       "name": "concurrent_unbold_and_insert_a1b2",
       "clients": {
         "A": 1,
@@ -8097,6 +8609,568 @@
         {
           "peer": "B",
           "v1": "021102000601017404626f6c64047472756586020005636f6c6f72052272656422850201097b22696d67223a317d86020204626f6c64046e756c6c86020305636f6c6f72046e756c6c460200066974616c69630474727565860204066974616c6963046e756c6cc602020203066974616c6963046e756c6cc60207020305636f6c6f72046e756c6cc402080203017ac602090203066974616c69630474727565c6020a020305636f6c6f72052272656422c60202020704626f6c64046e756c6cc6020c020705636f6c6f72046e756c6cc4020d02070163c6020e020704626f6c640474727565c6020f020705636f6c6f72052272656422050100c60207020805636f6c6f720622626c756522c60100020804626f6c64046e756c6cc401010208016bc60102020805636f6c6f72052272656422c60103020804626f6c64047472756500"
+        }
+      ]
+    },
+    {
+      "name": "remote_cleanup_follows_deletion_order_a2b1",
+      "clients": {
+        "A": 2,
+        "B": 1
+      },
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "x",
+          "a": {
+            "italic": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "p",
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 2,
+          "s": "l",
+          "a": {
+            "bold": true,
+            "color": "red"
+          }
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 2,
+          "s": "t",
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "emb",
+          "i": 1,
+          "v": {
+            "img": 0
+          },
+          "a": {
+            "color": "blue"
+          }
+        },
+        {
+          "p": "B",
+          "k": "del",
+          "i": 0,
+          "n": 3
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 0,
+          "n": 4,
+          "a": {
+            "color": "blue"
+          }
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 3,
+          "n": 2,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        }
+      ],
+      "trace": [
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          []
+        ],
+        [
+          [
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "t",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "t",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "t",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "t",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "t",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "x",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "t",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "color": "blue",
+                "bold": true
+              }
+            },
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "x",
+              "attributes": {
+                "color": "blue",
+                "italic": true
+              }
+            },
+            {
+              "insert": "t",
+              "attributes": {
+                "color": "blue",
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "p",
+              "attributes": {
+                "color": "blue",
+                "bold": true
+              }
+            },
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "x",
+              "attributes": {
+                "color": "blue",
+                "italic": true
+              }
+            },
+            {
+              "insert": "t",
+              "attributes": {
+                "color": "blue",
+                "bold": true
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ],
+          [
+            {
+              "insert": {
+                "img": 0
+              },
+              "attributes": {
+                "color": "blue"
+              }
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true,
+                "color": "red"
+              }
+            }
+          ]
+        ]
+      ],
+      "final": [
+        {
+          "peer": "A",
+          "v1": "020c0200010101740386020204626f6c64047472756586020305636f6c6f72052272656422840204016c86020504626f6c64046e756c6c86020605636f6c6f72046e756c6cc10203020401c10102020001c502090200097b22696d67223a307dc1020a02000146010005636f6c6f720622626c756522c60208020405636f6c6f72046e756c6c0101000101017403020203000308020b0101010003"
+        },
+        {
+          "peer": "B",
+          "v1": "020c0200010101740386020204626f6c64047472756586020305636f6c6f72052272656422840204016c86020504626f6c64046e756c6c86020605636f6c6f72046e756c6cc10203020401c10102020001c502090200097b22696d67223a307dc1020a02000146010005636f6c6f720622626c756522c60208020405636f6c6f72046e756c6c0101000101017403020203000308020b0101010003"
         }
       ]
     },

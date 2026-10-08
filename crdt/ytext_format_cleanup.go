@@ -3,6 +3,7 @@ package crdt
 import (
 	"context"
 	"reflect"
+	"slices"
 	"sort"
 )
 
@@ -69,8 +70,13 @@ func cleanupYTextAfterTransaction(remote, txn *Transaction) {
 			}
 		})
 	}
-	for _, client := range remote.deleteSet.Clients() {
-		for _, r := range remote.deleteSet.clients[client] {
+	// Visit deletions as Yjs does: clients in first-deletion order, each
+	// client's ranges sorted and merged.
+	ds := remote.deleteSet
+	for _, client := range ds.orderedClients() {
+		sorted := DeleteSet{clients: map[ClientID][]DeleteRange{client: slices.Clone(ds.clients[client])}}
+		sorted.sortAndCompact(client)
+		for _, r := range sorted.clients[client] {
 			storeRange(store, client, r.Clock, r.Clock+r.Len, func(it *Item) {
 				p := it.Parent
 				if p == nil || !p.hasFormatting || needFull[p] {

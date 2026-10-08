@@ -15,6 +15,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/encoding"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -1611,4 +1613,28 @@ func TestUnit_Doc_MaxPendingItems_DefaultIsHigh(t *testing.T) {
 
 	doc4 := New(WithMaxPendingItems(42))
 	assert.Equal(t, 42, doc4.maxPendingItemsLimit())
+}
+
+// A delete set is written with clients descending, as Yjs writes it, and a
+// decoded one is applied in the order it was written.
+func TestUnit_DeleteSet_EncodedClientOrder(t *testing.T) {
+	ds := newDeleteSet()
+	for _, c := range []ClientID{2, 3, 1} {
+		ds.add(ID{c, 0}, 1)
+	}
+	want := []ClientID{3, 2, 1}
+
+	enc := encoding.NewEncoder()
+	encodeDeleteSet(enc, ds)
+	got, err := decodeDeleteSet(encoding.NewDecoder(enc.Bytes()))
+	require.NoError(t, err)
+	assert.Equal(t, want, got.orderedClients(), "V1")
+
+	enc2 := newV2Encoder()
+	encodeDeleteSetV2(enc2, ds)
+	dec2, err := newV2Decoder(enc2.toBytes())
+	require.NoError(t, err)
+	got2, err := decodeDeleteSetV2(dec2)
+	require.NoError(t, err)
+	assert.Equal(t, want, got2.orderedClients(), "V2")
 }

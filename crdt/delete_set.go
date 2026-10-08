@@ -111,9 +111,9 @@ func (ds *DeleteSet) Clients() []ClientID {
 	return out
 }
 
-// orderedClients returns ds's clients in first-add order, then any unordered
-// ones (all of a decoded set's) ascending. order holds each client of
-// ds.clients at most once.
+// orderedClients returns ds's clients in first-add (for a decoded set,
+// encoded) order, then any unordered ones ascending. order holds each client
+// of ds.clients at most once.
 func (ds *DeleteSet) orderedClients() []ClientID {
 	out := make([]ClientID, len(ds.order), len(ds.clients))
 	copy(out, ds.order)
@@ -149,7 +149,8 @@ func (ds *DeleteSet) orderedClients() []ClientID {
 // may under-park ranges spanning a gap.
 func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 	unresolvable := newDeleteSet()
-	for client, ranges := range ds.clients {
+	for _, client := range ds.orderedClients() {
+		ranges := ds.clients[client]
 		items := txn.doc.store.clients[client]
 		if len(items) == 0 {
 			// No items for this client — entire set of ranges is unresolvable.

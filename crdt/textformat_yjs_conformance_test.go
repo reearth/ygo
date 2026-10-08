@@ -156,8 +156,8 @@ func jsNumbers(v any) any {
 
 // textFormatUnits lists a V1 update's structs, one clock unit per deleted
 // struct, plus its compacted delete set. Yjs merges adjacent GC'd structs at
-// commit and lists delete-set clients descending; ygo does neither, so two
-// updates that differ only there list the same units.
+// commit and ygo does not, so two updates that differ only there list the
+// same units.
 func textFormatUnits(t *testing.T, u []byte) []string {
 	t.Helper()
 	structs, ds, err := decodeStructsV1(New(), u)

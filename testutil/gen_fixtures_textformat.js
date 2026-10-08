@@ -259,6 +259,22 @@ for (const [a, b] of [[1, 2], [2, 1]]) {
 		{ k: 'sync', from: 'B', to: 'A' },
 		{ k: 'sync', from: 'A', to: 'B' },
 	]))
+	// The receiver's cleanup visits deletions in the update's delete set
+	// order, clients descending.
+	multis.push(multi('remote_cleanup_follows_deletion_order' + tag, c, [
+		{ p: 'A', k: 'ins', i: 0, s: 'x', a: { italic: true } },
+		{ p: 'B', k: 'ins', i: 0, s: 'p', a: B },
+		{ k: 'sync', from: 'B', to: 'A' },
+		{ p: 'A', k: 'ins', i: 2, s: 'l', a: { bold: true, color: 'red' } },
+		{ p: 'A', k: 'ins', i: 2, s: 't', a: B },
+		{ k: 'sync', from: 'A', to: 'B' },
+		{ p: 'A', k: 'emb', i: 1, v: { img: 0 }, a: { color: 'blue' } },
+		{ p: 'B', k: 'del', i: 0, n: 3 },
+		{ p: 'A', k: 'fmt', i: 0, n: 4, a: { color: 'blue' } },
+		{ p: 'A', k: 'fmt', i: 3, n: 2, a: B },
+		{ k: 'sync', from: 'B', to: 'A' },
+		{ k: 'sync', from: 'A', to: 'B' },
+	]))
 	multis.push(multi('concurrent_unbold_and_insert' + tag, c, [
 		{ p: 'A', k: 'ins', i: 0, s: 'hello', a: B },
 		{ k: 'sync', from: 'A', to: 'B' },
