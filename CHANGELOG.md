@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.52.0] — 2026-10-08
+
+### Added
+
+- **`crdt.SnapshotContainsUpdateV1(snap, update)`** reports whether a snapshot
+  already holds everything a V1 update carries (every struct below its state
+  vector, every deletion in its delete set), without integrating the update.
+  Matches Yjs `snapshotContainsUpdate`.
+
+### Fixed
+
+- **`provider/websocket`: a Hocuspocus-framed connection is answered a
+  `SyncStatus` (tag 8) for every SyncStep2 or Update it sends.** ygo defined
+  the tag but never sent it, so `@hocuspocus/provider`'s unsynced-changes count,
+  which only a `SyncStatus(true)` lowers, never returned to zero against ygo,
+  and `hasUnsyncedChanges` stayed true for the life of the connection. With
+  `HocuspocusFraming` set, every SyncStep2 or Update, under Sync (tag 0) or
+  SyncReply (tag 4), now gets exactly one `SyncStatus`, in the order the frames
+  arrived: 1 once the room applied it, and for a read-only connection 0 for an
+  Update and, for a SyncStep2, 1 when the room already holds everything in it
+  and 0 otherwise. Where those updates decode, this is how `@hocuspocus/server`
+  answers. ygo answers 0 when the room refused the update (it overflows
+  `MaxPendingItems`, say). For a sync frame that does not decode, ygo sends no
+  `SyncStatus` and closes the connection with 1002 (protocol error). For a
+  read-only SyncStep2 whose update does not decode, ygo answers 0 and keeps the
+  connection. All three differ from `@hocuspocus/server` on purpose (see the
+  release notes). Connections on plain y-websocket framing are unchanged.
+
 ## [1.51.2] — 2026-10-08
 
 ### Fixed
