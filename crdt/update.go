@@ -1,9 +1,11 @@
 package crdt
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
@@ -41,13 +43,14 @@ var ErrInvalidUpdate = errors.New("crdt: invalid update")
 func EncodeStateAsUpdateV1(doc *Doc, sv StateVector) []byte {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
-	return encodeV1Locked(doc, sv)
+	return withParked(doc, sv, encodeV1Locked(doc, sv), encodeStructStoreV1, MergeUpdatesV1)
 }
 
 // ApplyUpdateV1 decodes and integrates a V1 binary update into doc.
 func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 	var applyErr error
 	doc.Transact(func(txn *Transaction) {
+		txn.Local = false // Yjs readUpdate: transact(..., local=false)
 		applyErr = applyV1Txn(txn, update)
 	}, origin)
 	return applyErr
@@ -59,36 +62,68 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 func EncodeStateAsUpdateV2(doc *Doc, sv StateVector) []byte {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
-	return encodeV2Locked(doc, sv)
+	return withParked(doc, sv, encodeV2Locked(doc, sv), encodeStructStoreV2, MergeUpdatesV2)
+}
+
+// withParked merges structs and deletions still parked on a missing
+// dependency into an encoded state, as Yjs encodeStateAsUpdate does with
+// pendingStructs and pendingDs; a snapshot that dropped them would lose them
+// once the filler arrives. Kept out of encodeV1Locked so OnUpdate payloads
+// stay transaction-only, as in Yjs.
+func withParked(doc *Doc, sv StateVector, state []byte,
+	encode func(map[ClientID][]*Item, DeleteSet, StateVector, *StructStore) []byte,
+	merge func(...[]byte) ([]byte, error)) []byte {
+	s := doc.store
+	if s.pending == nil && len(s.pendingDs.clients) == 0 {
+		return state
+	}
+	updates := [][]byte{state}
+	if s.pending != nil {
+		// One update per item: parked items may overlap, and merge dedups.
+		for _, it := range s.pending.items {
+			updates = append(updates, encode(map[ClientID][]*Item{it.ID.Client: {it}}, newDeleteSet(), sv, s))
+		}
+	}
+	if len(s.pendingDs.clients) > 0 {
+		updates = append(updates, encode(nil, s.pendingDs, sv, s))
+	}
+	merged, err := merge(updates...)
+	if err != nil {
+		return state
+	}
+	return merged
 }
 
 // ApplyUpdateV2 decodes and integrates a Yjs V2 binary update into doc.
 func ApplyUpdateV2(doc *Doc, update []byte, origin any) error {
 	var applyErr error
 	doc.Transact(func(txn *Transaction) {
+		txn.Local = false // Yjs readUpdate: transact(..., local=false)
 		applyErr = applyV2Txn(txn, update)
 	}, origin)
 	return applyErr
 }
 
-// UpdateV1ToV2 converts a V1 update payload to real Yjs V2 format by applying
-// it to a temporary document and re-encoding in V2.
+// UpdateV1ToV2 converts a V1 update payload to real Yjs V2 format. It works at
+// the struct level, like MergeUpdatesV1, so an incremental or delete-only
+// update converts intact (integrating into a scratch doc parked such updates
+// and emitted an empty one; yjs convertUpdateFormatV1ToV2 parity).
 func UpdateV1ToV2(v1 []byte) ([]byte, error) {
-	doc := New()
-	if err := ApplyUpdateV1(doc, v1, nil); err != nil {
+	perClient, ds, store, err := buildMergeStore([][]byte{v1}, decodeStructsV1)
+	if err != nil {
 		return nil, err
 	}
-	return EncodeStateAsUpdateV2(doc, nil), nil
+	return encodeStructStoreV2(perClient, ds, StateVector{}, store), nil
 }
 
-// UpdateV2ToV1 converts a real Yjs V2 update to V1 format by applying it to a
-// temporary document and re-encoding in V1.
+// UpdateV2ToV1 converts a real Yjs V2 update to V1 format, at the struct level
+// (see UpdateV1ToV2).
 func UpdateV2ToV1(v2 []byte) ([]byte, error) {
-	doc := New()
-	if err := ApplyUpdateV2(doc, v2, nil); err != nil {
+	perClient, ds, store, err := buildMergeStore([][]byte{v2}, decodeStructsV2)
+	if err != nil {
 		return nil, err
 	}
-	return EncodeStateAsUpdateV1(doc, nil), nil
+	return encodeStructStoreV1(perClient, ds, StateVector{}, store), nil
 }
 
 // MergeUpdatesV1 and DiffUpdateV1 live in merge.go — they operate at the struct
@@ -343,7 +378,8 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 		vals := ct.Vals[offset:]
 		enc.WriteVarUint(uint64(len(vals)))
 		for _, v := range vals {
-			enc.WriteAny(v)
+			// Yjs writes JSON text per value in V1 too, not lib0 Any.
+			enc.WriteVarString(fmtValToJSON(v))
 		}
 	case *ContentBinary:
 		enc.WriteVarBytes(ct.Data)
@@ -537,17 +573,12 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 				return nil, err
 			}
 
-			// Skip structs (tag 10) are clock-range placeholders that are
-			// never stored — just advance the clock. Update existingEnd so
-			// that subsequent items in this group are not mistakenly flagged
-			// as having a clock gap (skip structs tell the receiver those
-			// clocks are intentionally absent).
+			// Skip structs (tag 10) mark clocks the sender withheld, so the
+			// receiver does NOT have them: advance the read cursor only. Items
+			// after the skip then fall into the clock-gap branch and park until
+			// the range arrives (yjs parity, #251).
 			if _, isSkip := item.Content.(*contentSkip); isSkip {
-				skipEnd := clock + uint64(item.Content.Len())
-				if skipEnd > existingEnd {
-					existingEnd = skipEnd
-				}
-				clock = skipEnd
+				clock += uint64(item.Content.Len())
 				continue
 			}
 
@@ -1021,11 +1052,28 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if n > uint64(dec.Remaining()) {
 			return nil, ErrInvalidUpdate
 		}
-		vals := make([]any, n)
-		for i := range vals {
-			if vals[i], err = dec.ReadAny(); err != nil {
+		if n == 0 || !isAnyTag(dec.RemainingBytes()[0]) {
+			vals, err := readJSONVals(dec, n)
+			if err != nil {
 				return nil, err
 			}
+			return NewContentJSON(vals...), nil
+		}
+		// ygo ≤1.51.0 wrote lib0 Any per value, always starting with a tag
+		// 116–127, as does a 116–127-byte JSON text. One encoder writes the
+		// whole item, so try JSON text for all values, else Any for all.
+		// JSON text (Yjs) wins input valid both ways.
+		rem := dec.RemainingBytes()
+		sub := encoding.NewDecoder(rem)
+		vals, jsonErr := readJSONVals(sub, n)
+		if jsonErr == nil {
+			for range len(rem) - sub.Remaining() {
+				_, _ = dec.ReadUint8()
+			}
+			return NewContentJSON(vals...), nil
+		}
+		if vals, err = readLegacyAnyVals(dec, n); err != nil {
+			return nil, jsonErr
 		}
 		return NewContentJSON(vals...), nil
 
@@ -1256,22 +1304,65 @@ func wrapUpdateErr(err error) error {
 	return fmt.Errorf("%w: %v", ErrInvalidUpdate, err)
 }
 
-// fmtValToJSON serialises a ContentFormat attribute value as a JSON string,
-// matching Yjs's ContentFormat.write() which calls encoder.writeJSON(value).
+// fmtValToJSON serialises a ContentFormat/ContentEmbed/ContentJSON value as
+// JSON text, matching Yjs's JSON.stringify. HTML escaping is off because
+// JSON.stringify never escapes <, > or &.
+//
+// A non-finite number is written as null, as JSON.stringify does; any other
+// unencodable value (one that bypassed checkTextValue) panics, as WriteAny does.
 func fmtValToJSON(v any) string {
 	if v == nil {
 		return "null"
 	}
-	b, err := json.Marshal(v)
+	s, err := encodeJSONText(v)
 	if err != nil {
-		return "null"
+		if s, err = encodeJSONText(nullNonFinite(v)); err != nil {
+			panic("crdt: value is not JSON-encodable: " + err.Error())
+		}
 	}
-	return string(b)
+	return s
 }
 
-// fmtValFromJSON deserialises a ContentFormat attribute value from a JSON
-// string, matching Yjs's ContentFormat.read() which calls decoder.readJSON().
-// Numbers decode as float64, booleans as bool, null as nil.
+func encodeJSONText(v any) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return string(bytes.TrimSuffix(buf.Bytes(), []byte("\n"))), nil
+}
+
+// nullNonFinite returns v with every NaN/±Inf replaced by nil.
+func nullNonFinite(v any) any {
+	switch t := v.(type) {
+	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) {
+			return nil
+		}
+	case float32:
+		if f := float64(t); math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil
+		}
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = nullNonFinite(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = nullNonFinite(e)
+		}
+		return out
+	}
+	return v
+}
+
+// fmtValFromJSON parses JSON text written by fmtValToJSON or Yjs's
+// JSON.stringify, with Yjs's 'undefined' marker as nil. Numbers decode as
+// float64, booleans as bool, null as nil.
 func fmtValFromJSON(s string) (any, error) {
 	if s == "undefined" {
 		return nil, nil
@@ -1281,6 +1372,57 @@ func fmtValFromJSON(s string) (any, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+// isAnyTag reports whether b is a lib0 Any type tag.
+func isAnyTag(b byte) bool { return b >= 116 && b <= 127 }
+
+// readJSONVals reads n ContentJSON values in Yjs's JSON-text form.
+func readJSONVals(dec *encoding.Decoder, n uint64) ([]any, error) {
+	vals := make([]any, n)
+	for i := range vals {
+		js, err := dec.ReadVarString()
+		if err != nil {
+			return nil, err
+		}
+		if vals[i], err = fmtValFromJSON(js); err != nil {
+			return nil, err
+		}
+	}
+	return vals, nil
+}
+
+// readLegacyAnyVals reads n ContentJSON values in ygo ≤1.51.0's lib0 Any
+// form, with numbers widened to float64 as the JSON form decodes them.
+func readLegacyAnyVals(dec *encoding.Decoder, n uint64) ([]any, error) {
+	vals := make([]any, n)
+	for i := range vals {
+		v, err := dec.ReadAny()
+		if err != nil {
+			return nil, err
+		}
+		vals[i] = jsonNumbers(v)
+	}
+	return vals, nil
+}
+
+// jsonNumbers widens lib0 Any's float32 and int64 to float64, recursively.
+func jsonNumbers(v any) any {
+	switch x := v.(type) {
+	case float32:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case []any:
+		for i := range x {
+			x[i] = jsonNumbers(x[i])
+		}
+	case map[string]any:
+		for k := range x {
+			x[k] = jsonNumbers(x[k])
+		}
+	}
+	return v
 }
 
 // tryIntegrate attempts to integrate item into the doc store. Returns

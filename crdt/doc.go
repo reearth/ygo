@@ -325,18 +325,25 @@ func (d *Doc) getOrCreateType(name string) *abstractType {
 	return &r.abstractType
 }
 
-// upgradeRawType copies a rawType's abstractType into dst, rewires all item
-// Parent pointers to dst, and stores dst in d.share[name].
+// upgradeRawType moves raw's state into dst, stores dst in d.share[name], and
+// repoints every struct parented to raw: integrated ones all sit on its list,
+// and parked ones would otherwise integrate into the discarded placeholder.
 // Must be called with d.mu held.
-func upgradeRawType(raw *rawType, dst sharedType, name string, share map[string]sharedType) {
+func (d *Doc) upgradeRawType(raw *rawType, dst sharedType, name string) {
 	at := dst.baseType()
 	*at = raw.abstractType // copy all fields (doc, start, itemMap, length, item, name)
 	at.owner = dst
-	// Rewire every item's Parent pointer.
 	for item := at.start; item != nil; item = item.Right {
 		item.Parent = at
 	}
-	share[name] = dst
+	if d.store.pending != nil {
+		for _, item := range d.store.pending.items {
+			if item.Parent == &raw.abstractType {
+				item.Parent = at
+			}
+		}
+	}
+	d.share[name] = dst
 }
 
 // getArrayLocked is the lock-free body of GetArray. Callers must hold d.mu —
@@ -348,7 +355,7 @@ func (d *Doc) getArrayLocked(name string) *YArray {
 		}
 		if raw, ok := t.(*rawType); ok {
 			arr := &YArray{}
-			upgradeRawType(raw, arr, name, d.share)
+			d.upgradeRawType(raw, arr, name)
 			return arr
 		}
 	}
@@ -380,7 +387,7 @@ func (d *Doc) getMapLocked(name string) *YMap {
 		}
 		if raw, ok := t.(*rawType); ok {
 			m := &YMap{}
-			upgradeRawType(raw, m, name, d.share)
+			d.upgradeRawType(raw, m, name)
 			return m
 		}
 	}
@@ -412,7 +419,7 @@ func (d *Doc) getTextLocked(name string) *YText {
 		}
 		if raw, ok := t.(*rawType); ok {
 			txt := &YText{}
-			upgradeRawType(raw, txt, name, d.share)
+			d.upgradeRawType(raw, txt, name)
 			return txt
 		}
 	}
@@ -582,7 +589,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		doc:         d,
 		Origin:      orig,
 		Local:       true,
-		deleteSet:   newDeleteSet(),
+		deleteSet:   newOrderedDeleteSet(),
 		beforeState: d.store.StateVector(),
 		// Pre-size changed to common-case capacity (#54 A): most transactions
 		// touch 1-3 types, and the zero-hint alloc forces immediate rehashing
@@ -649,6 +656,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 
 	retErr = fn(txn)
 
+	rearbitrateMoves(txn)
 	txn.afterState = d.store.StateVector()
 
 	squashRuns(txn)
@@ -848,7 +856,7 @@ func (d *Doc) getXmlFragmentLocked(name string) *YXmlFragment {
 		}
 		if raw, ok := t.(*rawType); ok {
 			f := &YXmlFragment{}
-			upgradeRawType(raw, f, name, d.share)
+			d.upgradeRawType(raw, f, name)
 			return f
 		}
 	}

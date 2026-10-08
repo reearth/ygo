@@ -191,6 +191,28 @@ func (c *ContentJSON) Splice(offset int) Content {
 	return right
 }
 
+// plainVals returns the values of a plain-value item: ContentAny, or the
+// legacy ContentJSON that every reader must treat identically.
+func plainVals(c Content) ([]any, bool) {
+	switch ct := c.(type) {
+	case *ContentAny:
+		return ct.Vals, true
+	case *ContentJSON:
+		return ct.Vals, true
+	}
+	return nil, false
+}
+
+// lastPlainVal returns a map entry's value: the last value of a plain-value
+// item, as Yjs reads getContent()[length-1].
+func lastPlainVal(c Content) (any, bool) {
+	vals, ok := plainVals(c)
+	if !ok || len(vals) == 0 {
+		return nil, false
+	}
+	return vals[len(vals)-1], true
+}
+
 // ContentEmbed holds a single embedded object (e.g. an image or formula in rich text).
 type ContentEmbed struct{ Val any }
 
@@ -224,8 +246,53 @@ type ContentType struct{ Type *abstractType }
 func NewContentType(t *abstractType) *ContentType { return &ContentType{t} }
 func (c *ContentType) Len() int                   { return 1 }
 func (c *ContentType) IsCountable() bool          { return true }
-func (c *ContentType) Copy() Content              { return &ContentType{c.Type} }
 func (c *ContentType) Splice(_ int) Content       { panic("crdt: ContentType is not splittable") }
+
+// Copy wraps a FRESH, empty type of the same kind: a type's item back-pointer
+// and child list are single-valued, so a re-inserted copy must not alias the
+// original. Mirrors Yjs ContentType.copy; UndoManager.redoItem re-inserts the
+// children itself.
+func (c *ContentType) Copy() Content {
+	if c.Type == nil {
+		return &ContentType{nil}
+	}
+	return &ContentType{c.Type.emptyCopy()}
+}
+
+// emptyCopy returns a new detached type of the same concrete kind as t.
+func (t *abstractType) emptyCopy() *abstractType {
+	var at *abstractType
+	switch v := t.owner.(type) {
+	case *YArray:
+		a := &YArray{}
+		a.owner = a
+		at = &a.abstractType
+	case *YMap:
+		m := &YMap{}
+		m.owner = m
+		at = &m.abstractType
+	case *YText:
+		x := &YText{}
+		x.owner = x
+		at = &x.abstractType
+	case *YXmlElement:
+		at = &NewYXmlElement(v.NodeName).abstractType
+	case *YXmlFragment:
+		f := &YXmlFragment{}
+		f.owner = f
+		at = &f.abstractType
+	case *YXmlText:
+		at = &NewYXmlText().abstractType
+	default:
+		r := &rawType{}
+		r.owner = r
+		at = &r.abstractType
+	}
+	if at.itemMap == nil {
+		at.itemMap = make(map[string]*Item)
+	}
+	return at
+}
 
 // ContentDoc holds a reference to a subdocument.
 type ContentDoc struct{ Doc *Doc }
@@ -256,10 +323,9 @@ func (c *ContentDoc) Splice(_ int) Content { panic("crdt: ContentDoc is not spli
 // instead of at its original position. ContentMove is non-countable (it does
 // not contribute to the array's logical length) and occupies one clock slot.
 //
-// When two ContentMove items target the same item concurrently, the one with
-// the lower ClientID wins (deterministic convergence). The losing ContentMove
-// stays in the linked list but renders nothing because target.MovedBy points
-// to the winning item.
+// When two ContentMove items target the same item, the lower ClientID wins,
+// and between one client's moves the latest wins. The losing ContentMove stays in the linked list but renders
+// nothing because target.MovedBy points to the winning item.
 //
 // TargetLen is the expected length of the target item (always 1 for
 // single-element moves). It is stored in the wire format so that receivers can

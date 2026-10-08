@@ -72,7 +72,8 @@ func NewArrayPrelim() *YArray {
 //
 // A shared type attaches once: PushType panics if st is already attached,
 // already staged on this array, or staged on any other container (#222).
-// Deleting it from its staging container first makes it stageable again.
+// Deleting it from its staging container first makes it stageable again. It
+// also panics if st is the receiver itself or holds it in its staged content (a cycle).
 //
 // Placement mirrors Push: anchor after the last PHYSICAL item, tombstones
 // included, matching Yjs's typeListPushGenerics.
@@ -133,9 +134,18 @@ func rejectAlreadyStaged(prelim []any, st sharedType, fn string) {
 // counterpart of rejectAlreadyStaged, failing at the call site with the entry
 // point the caller actually used rather than later, at the losing container's
 // attach, inside flushPrelim.
+//
+// It also rejects a cycle: bt must not be t or one of t's staging ancestors,
+// or every recursive read of the staged tree overflows the stack. Each type
+// has one owner, so walking t's stagedOn chain is O(depth).
 func claimForStage(t *abstractType, bt *abstractType, fn string) {
 	if bt.stagedOn != nil && bt.stagedOn != t {
 		panic("crdt: " + fn + ": this type is already staged on another container (a shared type attaches once; Delete it there first to move it)")
+	}
+	for c := t; c != nil; c = c.stagedOn {
+		if c == bt {
+			panic("crdt: " + fn + ": staging this type here would create a cycle (a type cannot contain itself)")
+		}
 	}
 	bt.stagedOn = t
 }
@@ -173,7 +183,8 @@ func releaseStaged(v any) {
 // mis-parse, usually silently (#207).
 //
 // A shared type attaches once: InsertType panics if st is already attached,
-// already staged on this array, or staged on any other container (#222).
+// already staged on this array, or staged on any other container (#222),
+// and if st is the receiver itself or holds it in its staged content (a cycle).
 //
 // Placement mirrors Insert: leftNeighbourAt uses LIVE-index semantics (it
 // skips tombstones), splitting the neighbour when the index falls inside it,

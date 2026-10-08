@@ -12,7 +12,7 @@ import (
 type Transaction struct {
 	doc         *Doc
 	Origin      any  // user-supplied tag forwarded to update observers
-	Local       bool // true when the change originated on this peer
+	Local       bool // true when the change originated on this peer; false while applying a remote update
 	deleteSet   DeleteSet
 	beforeState StateVector
 	afterState  StateVector
@@ -27,6 +27,12 @@ type Transaction struct {
 	// transient (no item was inserted between them). Mirrors Yjs JS's
 	// `_mergeStructs` and powers gap #78 H2.
 	mergeStructs []*Item
+	// rearbitrate queues, per parent, move targets whose winning ContentMove
+	// was tombstoned; rearbitrateMoves resolves them in one pass at commit.
+	rearbitrate map[*abstractType]map[*Item]struct{}
+	// movedBefore holds each move target's MovedBy as it was before this
+	// transaction first changed it, so YArray deltas can diff the old render.
+	movedBefore map[*Item]*Item
 	// subdocsAdded/subdocsRemoved/subdocsLoaded track subdocument lifecycle
 	// changes made during this transaction (#63). Populated by Item.integrate
 	// and Item.delete when the item's Content is a *ContentDoc. Reconciled
@@ -139,16 +145,15 @@ func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
 // Item.mergeWith conditions. Merging items with different right origins makes
 // every later encoding move the right item's characters on decode.
 //
-// Every transaction is Local, ApplyUpdate's included (transactInternal sets
-// Local unconditionally), so this runs for remote updates too, as Yjs's
-// transaction cleanup does.
+// squashRuns runs for remote applies too, so a peer's per-keystroke history
+// loads as one item per run, as Yjs's transaction cleanup does.
 //
 // Performance: uses a two-pointer (run) approach with strings.Builder so that
 // string concatenation is O(total_run_length) rather than O(n²), and tracks
 // the expected next-clock without calling left.Content.Len() on the growing
 // merged string. Store compaction is a single O(n) filter pass per client.
 func squashRuns(txn *Transaction) {
-	if !txn.Local || len(txn.newItems) == 0 {
+	if len(txn.newItems) == 0 {
 		return
 	}
 
@@ -378,6 +383,10 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if left.MovedBy != item.MovedBy {
 		return false
 	}
+	// A merge would drop the right half's redone link (Yjs mergeWith parity).
+	if left.redone != nil || item.redone != nil {
+		return false
+	}
 	// item.Origin must reference the last clock of left for the split to be
 	// reversible. (splitItem always sets Origin this way; foreign updates may
 	// set Origin differently, in which case we leave the items split.)
@@ -429,7 +438,10 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		return false
 	}
 
-	// Splice item out of the linked list.
+	// Splice item out of the linked list; a key entry moves to the merged item.
+	if item.ParentSub != nil && item.Parent != nil && item.Parent.itemMap[*item.ParentSub] == item {
+		item.Parent.itemMap[*item.ParentSub] = left
+	}
 	left.Right = item.Right
 	if item.Right != nil {
 		item.Right.Left = left
