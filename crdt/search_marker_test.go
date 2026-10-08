@@ -1302,7 +1302,7 @@ func TestSearchMarker_ConcurrentReadersNoRace(t *testing.T) {
 // sitting on that format marker: random formatted edits keep every marker at
 // its item's rendered start and read back as on a cold (marker-free) text.
 func TestSearchMarker_FormattedInserts_MatchCold(t *testing.T) {
-	for seed := uint64(0); seed < 300; seed++ {
+	for seed := uint64(0); seed < uint64(raceSeeds(300)); seed++ {
 		hot, cold := New(WithClientID(1)), New(WithClientID(1))
 		cold.GetText("t").baseType().disableMarkers = true
 		r := rand.New(rand.NewSource(int64(seed)))
@@ -1359,7 +1359,7 @@ func TestSearchMarker_FormattedInserts_MatchCold(t *testing.T) {
 // cold (marker- and cache-free) text's.
 func TestSearchMarker_FormattedEdits_CachedAttrsMatchCold(t *testing.T) {
 	attrSets := []Attributes{nil, {}, {"bold": true}, {"italic": true}, {"bold": nil}, {"bold": true, "color": "red"}}
-	for seed := uint64(0); seed < 100; seed++ {
+	for seed := uint64(0); seed < uint64(raceSeeds(100)); seed++ {
 		hot, cold, peer := New(WithClientID(1)), New(WithClientID(1)), New(WithClientID(2))
 		cold.GetText("t").baseType().disableMarkers = true
 		r := rand.New(rand.NewSource(int64(seed)))
