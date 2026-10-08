@@ -1,3 +1,28 @@
+## v1.51.4
+
+**Who is affected:** anyone using rich text (`YText` with formatting), embeds,
+or `ApplyDelta`, especially alongside yjs clients.
+
+**Formatting now behaves like yjs.** Inserting text or an embed with attributes
+inside formatted text used to keep the surrounding formatting too; it now gets
+exactly the attributes you pass, as in yjs. `Insert` with no attributes still
+continues the formatting around it. `ApplyDelta` follows the delta exactly.
+
+**Stale formatting is cleaned up after remote deletes.** When a collaborator
+deleted all the text a format covered, ygo kept the leftover markers, so text
+typed there later came out bold or italic unexpectedly. It now removes them the
+way yjs does.
+
+**What you might notice:**
+
+- After a remote update to formatted text, you may see a second, local update
+  and observer round with a nil origin: that is the cleanup, and it is broadcast
+  like any edit. The default `UndoManager` records it, as yjs does.
+- Servers applying many remote formatting edits to very large documents do more
+  work per update (a walk of the text, as yjs does). Plain text is unaffected.
+
+**Upgrading.** No API change.
+
 ## v1.51.3
 
 **Who is affected:** anyone whose documents get concurrent text inserts, once
