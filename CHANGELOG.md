@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.51.3] — 2026-10-08
+
+### Fixed
+
+- **`provider/websocket`: with `RoomIdleTimeout` set, the idle sweeper now
+  reclaims rooms that only `Apply` or a relay delivery touched.** `Apply` and
+  `Server.Inject` (both the sync and the awareness paths) cleared the room's
+  idle stamp and nothing set it again, while the sweeper collects only empty
+  rooms that carry a stamp and the only other stamp is the last peer leaving.
+  A room `Apply` created with no peer, or a room `Inject` created on a node
+  with no local peer for it, was therefore never swept and never counted
+  toward `MaxResidentRooms`; and one `Apply` on an idle room whose last peer
+  had left pinned that room until process exit. Each of these calls now stamps
+  the room idle when it returns, on every return path, if no peer is connected,
+  so such a room is evicted `RoomIdleTimeout` after the last call, durably
+  flushed first, and counts toward `MaxResidentRooms`. A room stays resident
+  while a call on it is still running. With `RoomIdleTimeout` at zero (the
+  default) nothing changes: such rooms stay until `CloseRoom`, as documented.
+
 ## [1.51.2] — 2026-10-08
 
 ### Fixed
