@@ -38,10 +38,9 @@ func TestFirstLiveCache_StaleAfterInsertAfterTombstone(t *testing.T) {
 // TestSearchMarker_StaleAfterRemoteDeleteOnlyApply is #70 residual class 2 — a
 // pre-existing bug independent of the YText fix.
 //
-// transactInternal hardcodes txn.Local=true even for ApplyUpdate, so
-// item.delete's marker-clearing branch (`if !txn.Local`) is dead during
-// remote applies, and applyToPartial never invalidates the search-marker
-// cache. A remote update that only tombstones an item leaves stale markers
+// Before ApplyUpdate ran with txn.Local=false, item.delete's marker-clearing
+// branch (`if !txn.Local`) was dead during remote applies and applyToPartial
+// never invalidated the search-marker cache. A remote update that only tombstones an item leaves stale markers
 // behind, so the next local positioned insert resolves the wrong neighbour.
 func TestSearchMarker_StaleAfterRemoteDeleteOnlyApply(t *testing.T) {
 	docA := New(WithClientID(1))

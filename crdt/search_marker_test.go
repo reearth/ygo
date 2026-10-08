@@ -164,17 +164,14 @@ func TestSearchMarker_InsertMatchesCold_LargeRandom(t *testing.T) {
 
 // TestSearchMarker_RemoteDeleteOnly_NoStale is the v1.31.6 stale-cache class
 // guard (Task 3, #181). A remote update that ONLY tombstones an item is applied
-// via ApplyUpdateV1 (which runs with txn.Local hardcoded true, so item.delete's
-// own !txn.Local invalidation is dead), then a positioned LOCAL insert follows.
+// via ApplyUpdateV1, then a positioned LOCAL insert follows.
 // If the remote delete-apply path fails to invalidate the search markers, the
 // still-live markers after the tombstone carry indices that are now one-too-high
 // and the insert resolves the wrong neighbour. The marker-run result must equal
 // the force-cold run.
 func TestSearchMarker_RemoteDeleteOnly_NoStale(t *testing.T) {
 	// The v1.31.6 stale-cache class: a remote update that ONLY tombstones an
-	// item applies with txn.Local hardcoded true (so item.delete's own
-	// !txn.Local invalidation is dead) and must still invalidate the search
-	// markers. A warmed cache holding markers for live items AFTER the deleted
+	// item must invalidate the search markers. A warmed cache holding markers for live items AFTER the deleted
 	// one would otherwise carry indices that are now too high, and the next
 	// positioned insert resolves the wrong neighbour.
 	//

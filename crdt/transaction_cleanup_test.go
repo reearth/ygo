@@ -174,9 +174,10 @@ func TestUnit_Transaction_H1_SuppressedWhenUndoManagerAttached(t *testing.T) {
 	})
 	require.NotNil(t, helloItem)
 
-	// Delete in a separate transaction. With an UndoManager attached, H1
+	// Delete in a separate stack item. With an UndoManager attached, H1
 	// must NOT run — otherwise the content gets tombstoned and undo can't
 	// restore "hello".
+	um.StopCapturing()
 	doc.Transact(func(txn *Transaction) { txt.Delete(txn, 0, 5) })
 
 	_, isContentDeleted := helloItem.Content.(*ContentDeleted)

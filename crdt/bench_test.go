@@ -970,3 +970,33 @@ func benchObservedTxn(b *testing.B, withObserver bool) {
 
 func BenchmarkObservedTxn_Apply(b *testing.B)         { benchObservedTxn(b, true) }
 func BenchmarkObservedTxn_ApplyBaseline(b *testing.B) { benchObservedTxn(b, false) }
+
+// BenchmarkUndoManager_UndoMapClear undoes the deletion of every key of a
+// 10k-key map, restoring each entry.
+func BenchmarkUndoManager_UndoMapClear(b *testing.B) {
+	const n = 10_000
+	keys := make([]string, n)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("k%d", i)
+	}
+	for range b.N {
+		b.StopTimer()
+		doc := New(WithClientID(1))
+		m := doc.GetMap("m")
+		doc.Transact(func(txn *Transaction) {
+			for i, k := range keys {
+				m.Set(txn, k, i)
+			}
+		})
+		um := NewUndoManager(doc, []SharedType{m})
+		doc.Transact(func(txn *Transaction) {
+			for _, k := range keys {
+				m.Delete(txn, k)
+			}
+		})
+		b.StartTimer()
+		if !um.Undo() {
+			b.Fatal("nothing undone")
+		}
+	}
+}

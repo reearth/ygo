@@ -1,4 +1,4 @@
-## v1.50.1
+## v1.51.3
 
 **Who is affected: anyone who stores a room with `persistence.MemoryPersistence`,
 `persistence.FilePersistence` or `persistence/sqlite`, for example through
@@ -19,6 +19,131 @@ decoder's own per-update item limit already bounds what one update can park.
 Updates that do not decode are still refused. `RunConformance` gains a subtest
 that appends such an update, so an external adapter that validates the same
 way finds out from its conformance run. No API or wire format changes.
+
+## v1.51.2
+
+**Who is affected:** servers and clients that call `GetText`, `GetArray`,
+`GetMap` or `GetXmlFragment` only after applying updates, for example after a
+sync step.
+
+**Edits that arrived out of order could vanish.** If an update for a document
+root arrived before an edit it depends on, and the code then accessed that root
+for the first time before the missing edit arrived, the waiting update was
+attached to a placeholder and never showed up. That peer stayed different from
+everyone else for good. Accessing a root now picks up waiting updates too.
+
+**Upgrading.** No API change.
+
+## v1.51.1
+
+**Who is affected:** anyone using `UndoManager` or `YArray.Move`, and anyone
+exchanging V1 updates with yjs peers that carry legacy JSON content.
+
+**Undo no longer touches other people's edits.** Undo groups edits made close
+together into one step. That step used to cover every change in its time
+span, including a collaborator's insert that arrived in between, so pressing
+undo could delete their work. It could also overwrite a map entry a
+collaborator had changed since. Undo now tracks exactly which edits it
+recorded, as yjs does, and leaves everything else alone. Every transaction
+also claimed to be local, so a default `UndoManager` recorded remote updates
+as your own; `Transaction.Local` is now `false` for applied updates.
+
+**Undo restores nested content.** Deleting an entry that held a nested text,
+map or array and pressing undo brought it back empty. It now comes back with
+its contents. Edits inside nested types are now recorded for undo too, and
+undoing two quick edits on a fresh document no longer leaves the first behind.
+
+**`YArray.Get` no longer panics after undo, redo or a move.** Reads could
+crash with an index out of range, or return the wrong element. Undoing a move
+could also make the element disappear from reads while still counting in
+`Len`.
+
+**V1 legacy JSON content is readable both ways.** Older yjs content stored as
+JSON failed to decode in the V1 format, in either direction. It now matches
+yjs, and data an older ygo stored in its previous format still loads.
+
+**Staging a type into itself panics instead of crashing later.**
+
+**`YArray.Move` fixes.** Moving an element you already moved now takes effect,
+undoing the delete of a moved element puts it back where you moved it, and
+array change events now report undone moves, so an editor bound to the events
+stays in step.
+
+**`RunGC` no longer makes maps diverge.** Garbage collection could merge
+deleted entries belonging to different keys, after which peers disagreed on a
+key's value.
+
+**A map write could vanish on other peers.** Setting a key whose previous
+value arrived from yjs as a merged run could keep the new value locally while
+every other peer dropped it. Copying text with `ApplyDelta` also lost embeds;
+both now behave as in yjs.
+
+**Undo matches yjs more closely**, including which value wins when two
+collaborators' restored values compete for one key.
+
+**XML and JSON edge cases.** An XML node can no longer be put into two parents
+at once, legacy JSON attributes read correctly, and Go values that JSON cannot
+represent (functions, channels) are rejected instead of silently replacing the
+whole value with `null`.
+
+**Upgrading.** No API change, but check these behaviour changes:
+
+- Observers reading `Transaction.Local` now see `false` for remote changes.
+- `Undo`/`Redo` skip steps that would no longer change anything, so one call
+  may undo an older step, and they return `false` when nothing changed.
+- Something inserted and deleted within one undo step stays deleted on undo.
+  Call `StopCapturing` between the two if you want separate steps.
+- XML `Insert` panics on a node that is already attached or staged elsewhere
+  (including a child of a detached node you never attached: delete it from that
+  node first), and text inserts panic on functions, channels or shared types
+  passed as values. Both used to be
+  accepted and corrupted the document.
+- **Rolling upgrades:** ygo 1.51.0 and older cannot read V1 updates carrying
+  legacy JSON content written by this version. Upgrade all nodes before
+  relaying such documents in V1, or use V2.
+
+## v1.51.0
+
+**Who is affected:** anyone who applies *merged* updates one at a time with
+`ApplyUpdateV1` or `ApplyUpdateV2` — for example a custom persistence adapter
+that replays its stored log on load, or a peer that receives the output of
+`MergeUpdatesV1` / yjs `mergeUpdates`. If your adapter rebuilds documents by
+merging its whole log first (every adapter bundled with ygo does), you were not
+affected on load. Applications that compact a stored log by merging rows were
+affected, and so were yjs clients loading a snapshot such a document produced.
+
+**What went wrong.** Merging two updates from the same client that are not
+consecutive — say its 1st and 3rd edits — produces an update with a marker
+saying "clocks withheld here". ygo read that marker the wrong way round, as
+"the receiver already has these". So when the 2nd edit arrived, ygo believed it
+already had it and threw it away. Nothing reported an error; the document was
+just missing that edit, permanently. Worse, a snapshot of that document
+(`EncodeStateAsUpdateV1`) was malformed, and yjs threw a `TypeError` loading it.
+
+The websocket server can produce these merges itself: it batches persistence
+writes, and when several goroutines commit to one room concurrently their
+updates can reach the batcher out of order.
+
+**What changed.** Edits after the marker now wait until the missing range
+arrives, then apply — the same outcome as yjs, in either arrival order.
+
+**Upgrading.** No API change. Documents already rebuilt with an edit missing
+are not repaired by upgrading; if the original update log is still stored,
+reloading from it with this version restores the edit.
+
+**Also fixed: the V1/V2 format converters.** `UpdateV1ToV2` and
+`UpdateV2ToV1` only worked on a document's *first* update. Anything later — an
+ordinary incremental edit, or an update that only deletes — came back as an
+empty update, with no error. If you convert updates between formats at an edge
+(for example to talk to a V2 client), those edits never reached the other side.
+Both now produce exactly the bytes yjs's own converters do.
+
+**Also fixed: snapshots taken while an update is waiting.** When an update
+arrives before one it depends on, ygo holds it until the missing one shows up.
+`EncodeStateAsUpdateV1`/`V2` used to leave held updates out, so a snapshot
+taken in that window — a compaction, or a sync reply to a new peer — lost them
+for good. Snapshots now include them, byte for byte as yjs does. Thanks to
+@sjawhar for the report and reproduction.
 
 ## v1.50.0
 

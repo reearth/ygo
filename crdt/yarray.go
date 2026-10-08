@@ -111,25 +111,16 @@ func (a *YArray) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 }
 
 // computeDelta builds a Quill-compatible delta for the array changes in
-// txn — mirrors YText.computeDelta but for array semantics. Walks items in
-// linked-list order; for each item, classifies as:
-//   - new + not deleted   → Insert with the values
-//   - new + deleted       → no-op (transient)
-//   - pre-existing, now-deleted → Delete N
-//   - pre-existing, still-live  → Retain N (consecutive retains coalesce
-//     into a single op so the emitted delta is compact)
+// txn — mirrors YText.computeDelta but for array semantics. Each slot in
+// linked-list order renders at most one value run, so the delta is a per-slot
+// diff of whether the slot rendered before the transaction and after it:
+// both → Retain, before only → Delete, after only → Insert. Consecutive
+// retains coalesce and a trailing Retain is elided per Quill convention.
 //
-// Move semantics mirror the render walk used by Get / ToSlice:
-//   - a winning ContentMove (MovedBy of the target points back at this item)
-//     renders as the target's values at this position; for a new winning
-//     move that means an Insert; for a pre-existing winning move the
-//     destination has not changed, so Retain N.
-//   - items with MovedBy != nil are rendered elsewhere and therefore must
-//     not appear at their original position; when the move-away happened
-//     this transaction the original position emits a Delete, otherwise the
-//     item is silently skipped (already invisible before the txn).
-//
-// Trailing Retain is elided per Quill convention.
+// A plain item renders at its own slot while live and not moved away; a
+// ContentMove renders its target's values while it is the target's winning
+// move. The "before" render reads the pre-transaction MovedBy recorded by
+// setMovedBy.
 func (a *YArray) computeDelta(txn *Transaction) []Delta {
 	var ops []Delta
 	retain := 0
@@ -139,6 +130,18 @@ func (a *YArray) computeDelta(txn *Transaction) []Delta {
 			retain = 0
 		}
 	}
+	liveBefore := func(it *Item) bool {
+		if it.ID.Clock >= txn.beforeState.Clock(it.ID.Client) {
+			return false
+		}
+		return !it.Deleted || txn.deleteSet.IsDeleted(it.ID)
+	}
+	movedByBefore := func(it *Item) *Item {
+		if m, ok := txn.movedBefore[it]; ok {
+			return m
+		}
+		return it.MovedBy
+	}
 
 	t := &a.abstractType
 	for item := t.start; item != nil; item = item.Right {
@@ -146,69 +149,35 @@ func (a *YArray) computeDelta(txn *Transaction) []Delta {
 			// Map-keyed entries don't belong to the array's sequence; skip.
 			continue
 		}
-
-		// Move-aware classification — see contract above.
+		values := item
+		var before, after bool
 		if cm, ok := item.Content.(*ContentMove); ok {
-			// Resolve the target this ContentMove claims. Render only if
-			// this move is the current winner for the target.
 			if a.doc == nil || cm.Target == nil {
 				continue
 			}
 			target := a.doc.store.Find(*cm.Target)
-			if target == nil || target.MovedBy != item || target.Deleted || item.Deleted {
+			if target == nil || !target.Content.IsCountable() {
 				continue
 			}
-			n := target.Content.Len()
-			beforeClock := txn.beforeState.Clock(item.ID.Client)
-			isNew := item.ID.Clock >= beforeClock
-			if isNew {
-				flushRetain()
-				ops = append(ops, Delta{
-					Op:     DeltaOpInsert,
-					Insert: arrayValuesFromItem(target),
-				})
-			} else {
-				retain += n
-			}
-			continue
-		}
-		if item.MovedBy != nil {
-			// Item is rendered at the ContentMove's position, not here. If
-			// the move-away happened this transaction the original position
-			// emits a Delete; otherwise the item was already invisible.
+			values = target
+			before = liveBefore(item) && liveBefore(target) && movedByBefore(target) == item
+			after = !item.Deleted && !target.Deleted && target.MovedBy == item
+		} else {
 			if !item.Content.IsCountable() {
 				continue
 			}
-			beforeClock := txn.beforeState.Clock(item.MovedBy.ID.Client)
-			moveIsNew := item.MovedBy.ID.Clock >= beforeClock
-			if moveIsNew && !item.Deleted {
-				flushRetain()
-				ops = append(ops, Delta{Op: DeltaOpDelete, Delete: item.Content.Len()})
-			}
-			continue
+			before = liveBefore(item) && movedByBefore(item) == nil
+			after = !item.Deleted && item.MovedBy == nil
 		}
-
-		if !item.Content.IsCountable() {
-			continue
-		}
-		beforeClock := txn.beforeState.Clock(item.ID.Client)
-		isNew := item.ID.Clock >= beforeClock
-		n := item.Content.Len()
-
-		if isNew {
-			if !item.Deleted {
-				flushRetain()
-				ops = append(ops, Delta{
-					Op:     DeltaOpInsert,
-					Insert: arrayValuesFromItem(item),
-				})
-			}
-			// new + deleted → transient; skip
-		} else if txn.deleteSet.IsDeleted(item.ID) {
+		switch {
+		case before && after:
+			retain += values.Content.Len()
+		case before:
 			flushRetain()
-			ops = append(ops, Delta{Op: DeltaOpDelete, Delete: n})
-		} else if !item.Deleted {
-			retain += n
+			ops = append(ops, Delta{Op: DeltaOpDelete, Delete: values.Content.Len()})
+		case after:
+			flushRetain()
+			ops = append(ops, Delta{Op: DeltaOpInsert, Insert: arrayValuesFromItem(values)})
 		}
 	}
 	// Trailing retain is elided.
@@ -414,9 +383,10 @@ func (a *YArray) Get(index int) any {
 	if _, _, renderAt := t.renderedStep(item); renderAt != nil {
 		valItem = renderAt
 	}
+	if vals, ok := plainVals(valItem.Content); ok {
+		return vals[index-start]
+	}
 	switch c := valItem.Content.(type) {
-	case *ContentAny:
-		return c.Vals[index-start]
 	case *ContentType:
 		return c.Type.owner
 	}
@@ -478,27 +448,17 @@ func (a *YArray) toSliceLocked() []any {
 	t := &a.abstractType
 	result := make([]any, 0, t.length)
 	for item := t.start; item != nil; item = item.Right {
-		if item.Deleted {
+		// renderedStep (shared with Get) also expands a winning move to its
+		// target, whatever the target's content kind.
+		countable, _, renderAt := t.renderedStep(item)
+		if !countable {
 			continue
 		}
-		if cm, ok := item.Content.(*ContentMove); ok {
-			if a.doc != nil {
-				target := a.doc.store.Find(*cm.Target)
-				if target != nil && target.MovedBy == item && !target.Deleted {
-					if ca, ok := target.Content.(*ContentAny); ok {
-						result = append(result, ca.Vals...)
-					}
-				}
-			}
-			continue
+		valItem := item
+		if renderAt != nil {
+			valItem = renderAt
 		}
-		if !item.Content.IsCountable() {
-			continue
-		}
-		if item.MovedBy != nil {
-			continue
-		}
-		switch c := item.Content.(type) {
+		switch c := valItem.Content.(type) {
 		case *ContentAny:
 			result = append(result, c.Vals...)
 		case *ContentJSON:
@@ -646,7 +606,7 @@ func (a *YArray) Slice(start, end int) []any {
 		if renderAt != nil {
 			valItem = renderAt
 		}
-		ca, ok := valItem.Content.(*ContentAny)
+		vals, ok := plainVals(valItem.Content)
 		if !ok {
 			// Countable but not a plain-value item (e.g. a nested ContentType):
 			// advance the rendered cursor by its full contribution without
@@ -655,7 +615,7 @@ func (a *YArray) Slice(start, end int) []any {
 			counted += n
 			continue
 		}
-		for _, v := range ca.Vals {
+		for _, v := range vals {
 			if counted >= start && counted < end {
 				result = append(result, v)
 			}
@@ -702,8 +662,8 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 		if renderAt != nil {
 			valItem = renderAt
 		}
-		if ca, ok := valItem.Content.(*ContentAny); ok {
-			for _, v := range ca.Vals {
+		if vals, ok := plainVals(valItem.Content); ok {
+			for _, v := range vals {
 				fn(index, v)
 				index++
 			}
@@ -724,6 +684,8 @@ func (a *YArray) ForEach(fn func(index int, value any)) {
 //     up at its respective destination.
 //   - Two peers moving THE SAME element: the ContentMove with the lower ClientID
 //     wins; the element appears at the winner's destination.
+//   - One peer moving an element again: its latest move wins, and undoing it
+//     returns the element to the previous move's destination.
 //
 // physPos formula: after splitting the target element into its own item, the
 // ContentMove is placed at physical position toIndex+1 when fromIndex < toIndex
