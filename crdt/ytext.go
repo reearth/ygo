@@ -585,20 +585,20 @@ func (t *abstractType) applyFormatAtPos(txn *Transaction, pos *itemTextPos, leng
 
 	remaining := length
 	for pos.right != nil &&
-		(remaining > 0 || (len(negated) > 0 && (pos.right.Deleted || isContentFormat(pos.right)))) {
+		(remaining > 0 || (negated.len() > 0 && (pos.right.Deleted || isContentFormat(pos.right)))) {
 		if !pos.right.Deleted {
 			if cf, ok := pos.right.Content.(*ContentFormat); ok {
 				if _, touched := attrs[cf.Key]; touched {
 					if attrEqual(attrs[cf.Key], cf.Val) {
 						// Past this marker the value already matches the target.
-						delete(negated, cf.Key)
+						negated.del(cf.Key)
 					} else {
 						if remaining == 0 {
 							// Don't extend the restore set past the range.
 							break
 						}
 						// This value follows the range — restore it afterwards.
-						negated[cf.Key] = cf.Val
+						negated.set(cf.Key, cf.Val)
 					}
 					pos.right.delete(txn)
 				}
@@ -615,7 +615,7 @@ func (t *abstractType) applyFormatAtPos(txn *Transaction, pos *itemTextPos, leng
 		pos.forward()
 	}
 
-	t.insertNegatedAttributes(txn, pos, negated, keys)
+	t.insertNegatedAttributes(txn, pos, negated)
 }
 
 // isContentFormat reports whether item carries a ContentFormat marker.
@@ -634,6 +634,54 @@ func attrEqual(a, b any) bool {
 	return reflect.DeepEqual(a, b)
 }
 
+// attrState is an attribute map that iterates in insertion order, like the JS
+// Maps Yjs keeps a cursor's current and negated attributes in: the order
+// decides which marker each attribute gets, so it is observable.
+type attrState struct {
+	keys []string
+	vals map[string]any
+}
+
+func (s *attrState) len() int { return len(s.keys) }
+
+func (s *attrState) get(key string) (any, bool) {
+	v, ok := s.vals[key]
+	return v, ok
+}
+
+// set keeps an existing key's position, as Map.set does.
+func (s *attrState) set(key string, val any) {
+	if s.vals == nil {
+		s.vals = make(map[string]any)
+	}
+	if _, ok := s.vals[key]; !ok {
+		s.keys = append(s.keys, key)
+	}
+	s.vals[key] = val
+}
+
+func (s *attrState) del(key string) {
+	if _, ok := s.vals[key]; !ok {
+		return
+	}
+	delete(s.vals, key)
+	for i, k := range s.keys {
+		if k == key {
+			s.keys = append(s.keys[:i], s.keys[i+1:]...)
+			return
+		}
+	}
+}
+
+// apply passes a live marker: a nil value clears the key.
+func (s *attrState) apply(cf *ContentFormat) {
+	if cf.Val == nil {
+		s.del(cf.Key)
+	} else {
+		s.set(cf.Key, cf.Val)
+	}
+}
+
 // itemTextPos is a cursor into a YText's item list, mirroring Yjs JS's
 // ItemTextListPosition. cur holds the formatting state in effect at the cursor
 // (i.e. just before right). It backs the Yjs-faithful formatText algorithm.
@@ -641,7 +689,7 @@ type itemTextPos struct {
 	left  *Item
 	right *Item
 	index int
-	cur   Attributes
+	cur   attrState
 }
 
 // forward advances the cursor one item rightward, updating cur when passing a
@@ -652,7 +700,7 @@ func (p *itemTextPos) forward() {
 	}
 	if cf, ok := p.right.Content.(*ContentFormat); ok {
 		if !p.right.Deleted {
-			updateAttr(p.cur, cf)
+			p.cur.apply(cf)
 		}
 	} else if !p.right.Deleted {
 		p.index += p.right.Content.Len()
@@ -674,7 +722,7 @@ func (p *itemTextPos) advance(txn *Transaction, n int) {
 	for p.right != nil && count > 0 {
 		if cf, ok := p.right.Content.(*ContentFormat); ok {
 			if !p.right.Deleted {
-				updateAttr(p.cur, cf)
+				p.cur.apply(cf)
 			}
 		} else if !p.right.Deleted {
 			itemLen := p.right.Content.Len()
@@ -765,7 +813,7 @@ func (t *abstractType) findTextPos(txn *Transaction, index int) *itemTextPos {
 	// runs its loop for count<=0 and returns right=t.start unconditionally).
 	if !t.disableMarkers && !t.hasFormatting {
 		if index <= 0 {
-			return &itemTextPos{right: t.start, cur: make(Attributes)}
+			return &itemTextPos{right: t.start}
 		}
 		left, offset := t.leftNeighbourAt(index)
 		if offset > 0 {
@@ -775,7 +823,7 @@ func (t *abstractType) findTextPos(txn *Transaction, index int) *itemTextPos {
 		if pidx > t.length {
 			pidx = t.length
 		}
-		pos := &itemTextPos{left: left, index: pidx, cur: make(Attributes)}
+		pos := &itemTextPos{left: left, index: pidx}
 		if left != nil {
 			pos.right = left.Right
 		} else {
@@ -783,7 +831,7 @@ func (t *abstractType) findTextPos(txn *Transaction, index int) *itemTextPos {
 		}
 		return pos
 	}
-	pos := &itemTextPos{right: t.start, cur: make(Attributes)}
+	pos := &itemTextPos{right: t.start}
 	pos.advance(txn, index)
 	return pos
 }
@@ -826,13 +874,13 @@ func minimizeAttributeChanges(pos *itemTextPos, attrs Attributes) {
 // state at the cursor, returning the negated map of values to restore after the
 // range (a key present with a nil value means "restore to no formatting").
 // Mirrors Yjs insertAttributes.
-func (t *abstractType) insertAttributes(txn *Transaction, pos *itemTextPos, keys []string, attrs Attributes) Attributes {
-	negated := make(Attributes)
+func (t *abstractType) insertAttributes(txn *Transaction, pos *itemTextPos, keys []string, attrs Attributes) *attrState {
+	negated := &attrState{}
 	for _, key := range keys {
 		val := attrs[key]
-		curVal := pos.cur[key] // nil when absent
+		curVal, _ := pos.cur.get(key) // nil when absent
 		if !attrEqual(curVal, val) {
-			negated[key] = curVal
+			negated.set(key, curVal)
 			t.insertFormatAt(txn, pos, key, val)
 		}
 	}
@@ -842,26 +890,25 @@ func (t *abstractType) insertAttributes(txn *Transaction, pos *itemTextPos, keys
 // insertNegatedAttributes restores the negated values at the cursor. It first
 // skips over deleted items and existing markers that already provide a negated
 // value (dropping those keys), then inserts a marker for each remaining negated
-// key. Mirrors Yjs insertNegatedAttributes.
-func (t *abstractType) insertNegatedAttributes(txn *Transaction, pos *itemTextPos, negated Attributes, keys []string) {
+// key in negated's order. Mirrors Yjs insertNegatedAttributes.
+func (t *abstractType) insertNegatedAttributes(txn *Transaction, pos *itemTextPos, negated *attrState) {
 	for pos.right != nil {
 		if pos.right.Deleted {
 			pos.forward()
 			continue
 		}
 		if cf, ok := pos.right.Content.(*ContentFormat); ok {
-			if v, has := negated[cf.Key]; has && attrEqual(v, cf.Val) {
-				delete(negated, cf.Key)
+			if v, has := negated.get(cf.Key); has && attrEqual(v, cf.Val) {
+				negated.del(cf.Key)
 				pos.forward()
 				continue
 			}
 		}
 		break
 	}
-	for _, key := range keys {
-		if v, has := negated[key]; has {
-			t.insertFormatAt(txn, pos, key, v)
-		}
+	for _, key := range negated.keys {
+		v, _ := negated.get(key)
+		t.insertFormatAt(txn, pos, key, v)
 	}
 }
 
@@ -871,20 +918,18 @@ func (t *abstractType) insertNegatedAttributes(txn *Transaction, pos *itemTextPo
 // markers restore the surrounding formatting after it.
 func (t *abstractType) insertText(txn *Transaction, pos *itemTextPos, content Content, attrs Attributes) {
 	// Every key in effect at pos joins attrs as a clear (a missing key reads
-	// as nil below). Yjs orders markers by attribute insertion order: the
-	// caller's keys (sorted here, as Go maps have no order), then the cleared.
-	keys := make([]string, 0, len(attrs)+len(pos.cur))
+	// as nil below), after the caller's keys and in the order it took effect,
+	// as in Yjs. The caller's keys are sorted: a Go map has no insertion order.
+	keys := make([]string, 0, len(attrs)+pos.cur.len())
 	for k := range attrs {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	named := len(keys)
-	for k := range pos.cur {
+	for _, k := range pos.cur.keys {
 		if _, ok := attrs[k]; !ok {
 			keys = append(keys, k)
 		}
 	}
-	sort.Strings(keys[named:])
 
 	minimizeAttributeChanges(pos, attrs)
 	negated := t.insertAttributes(txn, pos, keys, attrs)
@@ -910,7 +955,7 @@ func (t *abstractType) insertText(txn *Transaction, pos *itemTextPos, content Co
 	pos.right = item
 	pos.forward()
 
-	t.insertNegatedAttributes(txn, pos, negated, keys)
+	t.insertNegatedAttributes(txn, pos, negated)
 }
 
 // itemOrigins returns the origin and originRight IDs for a new item to be
@@ -1131,7 +1176,7 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 	// pos starts at index 0 — equivalent to t.findTextPos(txn, 0), just
 	// without that call's marker-lookup machinery for a position we already
 	// know statically.
-	pos := &itemTextPos{right: t.start, cur: make(Attributes)}
+	pos := &itemTextPos{right: t.start}
 	for _, d := range delta {
 		switch d.Op {
 		case DeltaOpInsert:
@@ -1184,7 +1229,7 @@ func (t *abstractType) applyDeltaDelete(txn *Transaction, pos *itemTextPos, leng
 		item := pos.right
 		if !item.Deleted {
 			if cf, ok := item.Content.(*ContentFormat); ok {
-				updateAttr(pos.cur, cf)
+				pos.cur.apply(cf)
 			} else if item.Content.IsCountable() {
 				n := item.Content.Len()
 				if n <= length {
