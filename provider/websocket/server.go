@@ -840,8 +840,9 @@ type Server struct {
 	// interop. One room per connection is still enforced (no multi-document
 	// multiplexing); the inbound docName is read and used only for logging.
 	// Such a connection is also answered one SyncStatus (tag 8) frame for every
-	// SyncStep2 or Update it sends, in order, as @hocuspocus/server answers, and
-	// closed with 1002 when it sends a sync frame that does not decode.
+	// SyncStep2 or Update it sends, in order, and closed with 1002 when it sends
+	// a sync frame that does not decode (see the package documentation for the
+	// answers).
 	// Leave false (default) for native y-websocket clients — the two framings
 	// cannot be auto-detected on one endpoint.
 	HocuspocusFraming bool

@@ -18,8 +18,8 @@ import (
 )
 
 // Tests for the SyncStatus (tag 8) acknowledgement a Hocuspocus-framed peer
-// receives for every SyncStep2 or Update it sends, as @hocuspocus/server
-// answers them: 1 once the room applied it, 0 when the room did not.
+// receives for every SyncStep2 or Update it sends: 1 once the room applied it,
+// 0 when the room did not.
 
 const (
 	tagSync       = uint64(0)
@@ -200,7 +200,7 @@ func TestInteg_SyncStatus_OneAnswerPerFrameInArrivalOrder(t *testing.T) {
 // An update the room refuses (here, one that overflows its pending cap) is
 // answered SyncStatus(0) and the socket stays: the next good update on it is
 // answered SyncStatus(1). @hocuspocus/server answers such an update 1, since
-// y-protocols swallows the apply error; ygo answers what the room did.
+// Yjs has no pending cap and parks it; ygo answers what the room did.
 func TestInteg_SyncStatus_RefusedUpdateAnsweredZeroAndSocketStays(t *testing.T) {
 	srv, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 2 })
 	doc := crdt.New(crdt.WithClientID(7))
@@ -270,9 +270,9 @@ func TestInteg_SyncStatus_ReadOnlySyncStep2AnsweredByWhetherTheRoomHoldsIt(t *te
 }
 
 // A sync frame that does not decode gets no SyncStatus, and the server closes
-// the socket with 1002 (protocol error), as @hocuspocus/server closes a
-// connection whose message throws. The client's next connection starts its
-// pairing afresh.
+// the socket with 1002 (protocol error). @hocuspocus/server answers a truncated
+// SyncStep2 or Update with 1 instead; ygo does not acknowledge an edit the room
+// never saw. The client's next connection starts its pairing afresh.
 func TestInteg_SyncStatus_UndecodableSyncFrameClosesWithoutAnswer(t *testing.T) {
 	_, ts := hocuspocusServer(t, nil)
 	conn := hpDial(t, ts, "room", false, crdt.New())

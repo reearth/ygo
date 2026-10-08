@@ -229,13 +229,18 @@ func (p *peer) handleMessage(data []byte) {
 //
 // On a connection using Hocuspocus framing it answers every such frame with
 // exactly one SyncStatus (tag 8), in the order the frames arrived, so a client
-// can pair each answer with the frame it sent. As @hocuspocus/server answers:
-// 1 once the room applied the update; for a read-only peer, 0 for an Update,
-// and for a SyncStep2 1 when the room already holds everything in it and 0
-// otherwise. One difference: an update the room refuses (it does not decode,
-// or it overflows MaxPendingItems) is answered 0, where @hocuspocus/server
-// answers 1 because y-protocols swallows the apply error; 1 would tell the
-// client the room holds an edit it does not.
+// can pair each answer with the frame it sent: 1 once the room applied the
+// update; for a read-only peer, 0 for an Update, and for a SyncStep2 1 when the
+// room already holds everything in it and 0 otherwise, which is how
+// @hocuspocus/server answers when the update decodes. Two differences: (1) an
+// update the room refuses (ApplyUpdateV1 fails: its V1 bytes do not decode, or
+// it overflows MaxPendingItems) is answered 0, where @hocuspocus/server answers
+// 1, since Yjs has no pending cap and y-protocols swallows the decode error; 1
+// would tell the client the room holds an edit it does not; (2) a read-only
+// peer's SyncStep2 whose update does not decode is answered 0, where
+// @hocuspocus/server closes with 4403, which would stop @hocuspocus/provider
+// from reconnecting. A sync message whose own framing does not decode never
+// reaches here: see discardMalformedSync.
 func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 	if p.readOnly {
 		if p.hocuspocusFraming {
@@ -284,9 +289,14 @@ func (p *peer) sendSyncStatus(applied bool) {
 
 // discardMalformedSync drops a Sync or SyncReply frame whose sync message
 // does not decode. On a connection using Hocuspocus framing it also closes
-// the connection with 1002 (protocol error) and sends no SyncStatus, as
-// @hocuspocus/server closes a connection whose message throws: the frame can
-// be paired with no answer, so the client's pairing ends with the connection.
+// the connection with 1002 (protocol error) and sends no SyncStatus: the frame
+// can be paired with no answer, so the client's pairing ends with the
+// connection. @hocuspocus/server 2.15.3 differs: on a read-write connection it
+// answers a truncated SyncStep2 or Update with SyncStatus(1), because
+// y-protocols catches the read error along with the apply error, and it
+// answers 0 or closes with 4403 for the other frames it cannot read. An answer
+// of 1 would acknowledge an edit the room never saw, and 4403 would stop
+// @hocuspocus/provider from reconnecting.
 func (p *peer) discardMalformedSync(err error) {
 	p.server.log().Debug("discarded malformed sync message",
 		"room", p.roomName, "err", err)
