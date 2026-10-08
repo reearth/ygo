@@ -84,8 +84,14 @@ func (f *YXmlFragment) Len() int {
 // While the fragment/element is detached the nodes are only buffered
 // (prelimChildren) and materialised when the subtree attaches — see
 // prelimFlusher. (#yxml-wire)
+//
+// A node attaches once: Insert panics if a node is already attached, staged
+// on any parent, or passed twice, and if it is f itself or buffers f in its
+// subtree (a cycle). Deleting a buffered node from its detached parent
+// makes it stageable again.
 func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 	t := &f.abstractType
+	claimXMLNodes(t, nodes)
 	if t.detached() {
 		if index < 0 || index > len(f.prelimChildren) {
 			index = len(f.prelimChildren)
@@ -169,10 +175,59 @@ func (f *YXmlFragment) Delete(txn *Transaction, index, length int) {
 			return
 		}
 		end := min(index+length, len(f.prelimChildren))
+		for _, n := range f.prelimChildren[index:end] {
+			n.baseXMLType().stagedOn = nil // re-stageable once removed
+		}
 		f.prelimChildren = append(f.prelimChildren[:index], f.prelimChildren[end:]...)
 		return
 	}
 	deleteChildRange(&f.abstractType, txn, index, length)
+}
+
+// claimXMLNodes enforces Insert's attach-once and cycle rules, validating
+// every node before claiming any so a rejected call leaves no partial claim.
+// The cycle check walks t's stagedOn chain in O(depth), as claimForStage does.
+func claimXMLNodes(t *abstractType, nodes []xmlNode) {
+	staging := t.detached()
+	var seen map[*abstractType]struct{}
+	if len(nodes) > 1 {
+		seen = make(map[*abstractType]struct{}, len(nodes))
+	}
+	for _, n := range nodes {
+		bt := n.baseXMLType()
+		if staging {
+			for c := t; c != nil; c = c.stagedOn {
+				if c == bt {
+					panic("crdt: Insert: staging this node here would create a cycle (a node cannot contain itself)")
+				}
+			}
+		}
+		if !bt.detached() {
+			panic("crdt: Insert requires a detached node (use NewYXmlElement/NewYXmlText)")
+		}
+		switch {
+		case staging && bt.stagedOn == t:
+			panic("crdt: Insert: this node is already staged on this parent (a node attaches once)")
+		case staging && bt.stagedOn != nil:
+			panic("crdt: Insert: this node is already staged on another parent (a node attaches once; Delete it there first to move it)")
+		case !staging && bt.stagedOn != nil && bt.stagedOn != t:
+			// t's own flushPrelim re-enters Insert with its staged children.
+			panic("crdt: Insert: this node is staged on another parent (a node attaches once; Delete it there first to move it)")
+		}
+		if seen != nil {
+			if _, dup := seen[bt]; dup {
+				panic("crdt: Insert: a node is passed twice (a node attaches once)")
+			}
+			seen[bt] = struct{}{}
+		}
+	}
+	var owner *abstractType
+	if staging {
+		owner = t
+	}
+	for _, n := range nodes {
+		n.baseXMLType().stagedOn = owner
+	}
 }
 
 // flushPrelim materialises children buffered while this fragment was detached.
@@ -188,10 +243,7 @@ func (f *YXmlFragment) flushPrelim(txn *Transaction) {
 // Children returns all non-deleted child XML nodes in document order. A
 // DETACHED fragment/element returns a copy of its buffered prelim children (the
 // same node values that were inserted), so iteration and ToXML reflect the
-// subtree before it attaches. As everywhere in this package, buffer only FRESH
-// nodes into a detached parent: inserting an already-attached node is the usual
-// re-parenting misuse, and reading the detached parent's ToXML would then
-// recurse into that attached child's lock-taking serialisation. (#yxml-wire)
+// subtree before it attaches. (#yxml-wire)
 func (f *YXmlFragment) Children() []xmlNode {
 	if f.detached() {
 		return append([]xmlNode(nil), f.prelimChildren...)
@@ -361,7 +413,7 @@ func (e *YXmlElement) setAttributeValue(op string, txn *Transaction, key string,
 	var origin *ID
 	if existing, ok := t.itemMap[key]; ok {
 		left = existing
-		id := existing.ID
+		id := existing.lastID()
 		origin = &id
 	}
 	item := &Item{
@@ -436,10 +488,7 @@ func (e *YXmlElement) GetAttributeValue(key string) (any, bool) {
 	if !ok || item.Deleted {
 		return nil, false
 	}
-	if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-		return ca.Vals[0], true
-	}
-	return nil, false
+	return lastPlainVal(item.Content)
 }
 
 // GetAttributes returns all live attributes as a string-keyed map. Non-string
@@ -473,8 +522,8 @@ func (e *YXmlElement) GetAttributeValues() map[string]any {
 		if item.Deleted {
 			continue
 		}
-		if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-			result[k] = ca.Vals[0]
+		if v, ok := lastPlainVal(item.Content); ok {
+			result[k] = v
 		}
 	}
 	return result
