@@ -11,14 +11,17 @@ import (
 var cleanupTestHook func()
 
 // needsFormattingCleanup reports whether a committed remote transaction
-// changed a text that has formatting, which is when Yjs's YText observer sets
-// _needFormattingCleanup.
+// changed a text with cleanFormatting set, which is when Yjs's YText observer
+// sets _needFormattingCleanup; a root placeholder has no such observer.
 func needsFormattingCleanup(txn *Transaction) bool {
 	if txn.Local {
 		return false
 	}
 	for t := range txn.changed {
-		if t.hasFormatting && (t.item == nil || !t.item.Deleted) {
+		if _, raw := t.owner.(*rawType); raw {
+			continue
+		}
+		if t.cleanFormatting && (t.item == nil || !t.item.Deleted) {
 			return true
 		}
 	}
@@ -85,7 +88,7 @@ func cleanupYTextAfterTransaction(remote, txn *Transaction) {
 		for _, r := range sorted.clients[client] {
 			storeRange(store, client, r.Clock, r.Clock+r.Len, func(it *Item) {
 				p := it.Parent
-				if p == nil || !p.hasFormatting || needFull[p] {
+				if p == nil || !p.cleanFormatting || needFull[p] {
 					return
 				}
 				if isContentFormat(it) {

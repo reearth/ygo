@@ -333,6 +333,7 @@ func (d *Doc) upgradeRawType(raw *rawType, dst sharedType, name string) {
 	at := dst.baseType()
 	*at = raw.abstractType // copy all fields (doc, start, itemMap, length, item, name)
 	at.owner = dst
+	at.cleanFormatting = false
 	for item := at.start; item != nil; item = item.Right {
 		item.Parent = at
 	}

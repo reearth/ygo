@@ -134,3 +134,66 @@ func TestUnit_YText_RemoteCleanupPanicUnlocks(t *testing.T) {
 	}
 	assert.Equal(t, "xab", bt.ToString())
 }
+
+// A root text first accessed after its format markers arrived does not clean
+// up until a marker integrates into it, as Yjs's lazily created YText starts
+// without _hasFormatting; one never accessed is cleaned only when the same
+// remote transaction changes an accessed formatted text.
+func TestUnit_YText_FormatCleanup_LazyRoot(t *testing.T) {
+	rec := func(d *Doc, fn func(*Transaction)) []byte {
+		sv := d.StateVector()
+		d.Transact(fn)
+		return EncodeStateAsUpdateV1(d, sv)
+	}
+	b, c, e, f := newTestDoc(2), newTestDoc(3), newTestDoc(4), newTestDoc(5)
+	base := rec(b, func(txn *Transaction) {
+		txn.GetText("t").Insert(txn, 0, "xay", nil)
+		txn.GetText("u").Insert(txn, 0, "q", Attributes{"b": true})
+	})
+	syncText(t, b, c, nil)
+	syncText(t, b, e, nil)
+	syncText(t, b, f, nil)
+	// B and C bold "a" concurrently, leaving a redundant opener that a
+	// deletion beside it cleans up.
+	fb := rec(b, func(txn *Transaction) { txn.GetText("t").Format(txn, 1, 1, Attributes{"b": true}) })
+	fc := rec(c, func(txn *Transaction) { txn.GetText("t").Format(txn, 1, 1, Attributes{"b": true}) })
+	del := rec(e, func(txn *Transaction) { txn.GetText("t").Delete(txn, 0, 1) })
+	delAndU := rec(f, func(txn *Transaction) {
+		txn.GetText("t").Delete(txn, 0, 1)
+		txn.GetText("u").Insert(txn, 1, "r", nil)
+	})
+
+	// Cleanups Yjs runs when the receiver first accesses "t" just before
+	// update accessAt (4: not before the deletion) and "u" up front or never.
+	for _, tc := range []struct {
+		accessAt int
+		accessU  bool
+		last     []byte
+		want     int
+	}{
+		{0, false, del, 1}, {1, false, del, 1}, {2, false, del, 1},
+		{3, false, del, 0}, {4, false, del, 0}, {4, true, delAndU, 1},
+	} {
+		a := newTestDoc(1)
+		if tc.accessU {
+			a.GetText("u")
+		}
+		cleanups := 0
+		a.OnUpdate(func(_ []byte, origin any) {
+			if origin == nil {
+				cleanups++
+			}
+		})
+		for i, u := range [][]byte{base, fb, fc, tc.last} {
+			if i == tc.accessAt {
+				a.GetText("t")
+			}
+			require.NoError(t, ApplyUpdateV1(a, u, "remote"))
+		}
+		assert.Equal(t, tc.want, cleanups, "first access before update %d, u accessed %t", tc.accessAt, tc.accessU)
+		assert.Equal(t, []Delta{
+			{Op: DeltaOpInsert, Insert: "a", Attributes: Attributes{"b": true}},
+			{Op: DeltaOpInsert, Insert: "y"},
+		}, a.GetText("t").ToDelta())
+	}
+}

@@ -305,6 +305,7 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	if _, ok := item.Content.(*ContentFormat); ok && item.Parent != nil {
 		item.Parent.hasFormatting = true
 		item.Parent.fmtGen++
+		item.Parent.cleanFormatting = true
 	}
 
 	// If this item wraps a nested type, set the back-pointer so the type

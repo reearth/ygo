@@ -85,6 +85,11 @@ type abstractType struct {
 	// workloads in plain-text documents. Once true, stays true.
 	hasFormatting bool
 
+	// cleanFormatting is Yjs's _hasFormatting, which gates the remote format
+	// cleanup. Unlike hasFormatting it is not carried over when a root
+	// placeholder is first accessed, as Yjs's new YText starts without it.
+	cleanFormatting bool
+
 	// fmtGen counts integrations and deletions of this type's format
 	// markers; attrCache is valid only for the generation it was taken at.
 	fmtGen    uint64
