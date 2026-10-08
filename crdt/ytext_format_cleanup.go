@@ -7,6 +7,9 @@ import (
 	"sort"
 )
 
+// cleanupTestHook, when set by a test, runs at the start of every cleanup.
+var cleanupTestHook func()
+
 // needsFormattingCleanup reports whether a committed remote transaction
 // changed a text that has formatting, which is when Yjs's YText observer sets
 // _needFormattingCleanup.
@@ -27,6 +30,9 @@ func needsFormattingCleanup(txn *Transaction) bool {
 // Yjs does, and returns that transaction's observer phase (nil when it changed
 // nothing). It must run under d.mu before remote's deleted content is GC'd.
 func (d *Doc) formattingCleanupLocked(remote *Transaction) func() {
+	if cleanupTestHook != nil {
+		cleanupTestHook()
+	}
 	txn := &Transaction{
 		doc:         d,
 		Local:       true,

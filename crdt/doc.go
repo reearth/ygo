@@ -626,9 +626,14 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		// Yjs cleans up the format markers a remote change left redundant in
 		// a follow-up local transaction; run it before GC drops the
 		// deleted content it inspects.
+		// A panic there is re-raised once the lock is released.
 		var cleanupPhase2 func()
+		var cleanupPanic any
 		if r == nil && needsFormattingCleanup(txn) {
-			cleanupPhase2 = d.formattingCleanupLocked(txn)
+			func() {
+				defer func() { cleanupPanic = recover() }()
+				cleanupPhase2 = d.formattingCleanupLocked(txn)
+			}()
 		}
 
 		// #78 H1 — Auto-GC at transaction commit. Runs AFTER buildPhase2 so
@@ -662,6 +667,9 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 
 		if r != nil {
 			panic(r)
+		}
+		if cleanupPanic != nil {
+			panic(cleanupPanic)
 		}
 	}()
 

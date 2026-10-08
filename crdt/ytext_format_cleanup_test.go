@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,4 +83,28 @@ func TestUnit_YText_FormatCleanup_SkipsPlainAndLocal(t *testing.T) {
 		bt.Delete(txn, 0, 3)
 	})
 	assert.Equal(t, 3, n, "a local edit: one transaction")
+}
+
+// A panic in the cleanup that follows a remote edit reaches the caller with
+// the document unlocked, as a panic in a Transact callback does.
+func TestUnit_YText_RemoteCleanupPanicUnlocks(t *testing.T) {
+	a, b := newTestDoc(1), newTestDoc(2)
+	at, bt := a.GetText("t"), b.GetText("t")
+	a.Transact(func(txn *Transaction) { at.Insert(txn, 0, "ab", Attributes{"bold": true}) })
+	cleanupTestHook = func() { panic("cleanup") }
+	defer func() { cleanupTestHook = nil }()
+
+	assert.PanicsWithValue(t, "cleanup", func() { syncText(t, a, b, nil) })
+	cleanupTestHook = nil
+	done := make(chan struct{})
+	go func() {
+		b.Transact(func(txn *Transaction) { bt.Insert(txn, 0, "x", nil) })
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("document still locked after the cleanup panicked")
+	}
+	assert.Equal(t, "xab", bt.ToString())
 }
