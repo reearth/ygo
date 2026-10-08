@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.51.3] — 2026-10-08
+
+### Fixed
+
+- **`persistence`: the bundled stores keep large incremental updates instead
+  of refusing them, and every edit after them.** `MemoryPersistence`,
+  `FilePersistence` and `sqlite.Store` check an update in `AppendUpdate` by
+  decoding it alone into a scratch document, which took the crdt default
+  pending cap of 100,000. Decoded without the room's stored state, an update
+  parks every struct that depends on that state, and when its client already
+  has edits stored, that is every struct in it. So an update the room had
+  applied was refused with `crdt: invalid update` whenever more than 100,000
+  of its structs depended on stored state: any update of more than 100,000
+  structs from a client with stored edits, or a batch of smaller updates the
+  server coalesced past that count. With the server's default write
+  coalescing, the refused batch stayed queued and every later edit in the room
+  was merged into it and refused with it, so the room stayed in memory after
+  its last peer left, and every edit since the first refused write was lost
+  when it closed. The scratch document now has no pending cap: it is discarded
+  after the one decode, and the decoder's per-update item limit already bounds
+  what it can park. Updates that do not decode are still refused. The three
+  stores share the check (`internal/updatecheck`), and the `AppendUpdate`
+  godoc says how a custom adapter should build its scratch document.
+- **`provider/websocket`: `BroadcastUpdate` and the cluster relay no longer
+  refuse large incremental updates.** `BroadcastUpdate` checked an update the
+  same way, so it returned `ErrInvalidUpdate` for an update of more than
+  100,000 dependent structs that the room had already applied. A clustered
+  node runs that check after `Server.Inject` applies a relayed update to its
+  room, so such an update reached the room and never the node's own peers.
+  `BroadcastUpdate` now uses the stores' check; each room's document still
+  enforces `MaxPendingItems` when it applies an update.
+- **`crdt`: the comment on the default pending cap no longer says it matches
+  the decoder's per-update limit.** It is 100,000; the per-update limit is
+  2^20.
+
 ## [1.51.2] — 2026-10-08
 
 ### Fixed

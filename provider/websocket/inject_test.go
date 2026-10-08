@@ -181,6 +181,99 @@ func TestUnit_BroadcastUpdate_DoesNotMutateServerDoc(t *testing.T) {
 	assert.Nil(t, got)
 }
 
+// BroadcastUpdate checks an update by decoding it alone into a scratch
+// document, where every key an incremental update sets on a map the room
+// already holds parks, waiting for that map. The room has applied the update
+// by then, so the check applies no pending cap, neither crdt's default of
+// 100,000 nor the server's MaxPendingItems: refusing would only keep the
+// update from the room's peers.
+func TestUnit_BroadcastUpdate_AdmitsLargeIncrementalUpdate(t *testing.T) {
+	cases := []struct {
+		name            string
+		maxPendingItems int
+		entries         int
+	}{
+		{"more dependent entries than crdt's default pending cap", 0, 100_001},
+		{"more dependent entries than the server's MaxPendingItems", 10, 11},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base, update := nestedMapUpdate(t, tc.entries)
+			srv := ygws.NewServer()
+			srv.MaxPendingItems = tc.maxPendingItems
+			httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+			t.Cleanup(httpSrv.Close)
+			peerDoc := crdt.New()
+			conn := dial(t, httpSrv, "room")
+			drainHandshake(t, conn, peerDoc)
+			require.NoError(t, crdt.ApplyUpdateV1(peerDoc, base, nil))
+			serverDoc := srv.GetDoc("room")
+			require.NoError(t, crdt.ApplyUpdateV1(serverDoc, base, nil))
+			require.NoError(t, crdt.ApplyUpdateV1(serverDoc, update, nil))
+
+			require.NoError(t, srv.BroadcastUpdate(context.Background(), "room", update))
+			readUntil(t, conn, peerDoc, 30*time.Second,
+				func() bool { return nestedEntries(peerDoc) == tc.entries },
+				"the room's peer never received the update")
+		})
+	}
+}
+
+// nestedMapUpdate returns base, in which client 1 creates the map "nested"
+// under root map "m", and update, in which client 2 sets n keys on it. Decoded
+// without base, every entry of update parks waiting for its parent.
+func nestedMapUpdate(t *testing.T, n int) (base, update []byte) {
+	t.Helper()
+	author := crdt.New(crdt.WithClientID(1))
+	root := author.GetMap("m")
+	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
+	base = crdt.EncodeStateAsUpdateV1(author, nil)
+
+	editor := crdt.New(crdt.WithClientID(2))
+	require.NoError(t, crdt.ApplyUpdateV1(editor, base, nil))
+	v, _ := editor.GetMap("m").Get("nested")
+	nested, ok := v.(*crdt.YMap)
+	require.True(t, ok, "nested is %T, want *crdt.YMap", v)
+	editor.Transact(func(txn *crdt.Transaction) {
+		for i := range n {
+			nested.Set(txn, fmt.Sprintf("k%d", i), i)
+		}
+	})
+	return base, crdt.EncodeStateAsUpdateV1(editor, author.StateVector())
+}
+
+// nestedEntries returns how many keys the map "nested" under root map "m"
+// holds in doc, or -1 when doc has no such map.
+func nestedEntries(doc *crdt.Doc) int {
+	v, ok := doc.GetMap("m").Get("nested")
+	if !ok {
+		return -1
+	}
+	nested, ok := v.(*crdt.YMap)
+	if !ok {
+		return -1
+	}
+	return len(nested.Keys())
+}
+
+// readUntil applies every sync message conn receives to doc until done
+// reports true, failing with msg if that takes longer than timeout.
+func readUntil(t *testing.T, conn *gws.Conn, doc *crdt.Doc, timeout time.Duration, done func() bool, msg string) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	for !done() {
+		_, data, err := conn.ReadMessage()
+		require.NoError(t, err, msg)
+		dec := encoding.NewDecoder(data)
+		outerType, err := dec.ReadVarUint()
+		require.NoError(t, err)
+		if outerType == 0 { // msgSync
+			_, _ = ygsync.ApplySyncMessage(doc, dec.RemainingBytes(), nil)
+		}
+	}
+}
+
 func TestUnit_Apply_MutatesBroadcastsAndPersists(t *testing.T) {
 	srv := ygws.NewServer()
 	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))

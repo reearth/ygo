@@ -293,6 +293,67 @@ func TestConformance_SQLite(t *testing.T) {
 	})
 }
 
+// Decoded without the state it was made against, an incremental update parks
+// every item that depends on that state. AppendUpdate checks an update by
+// decoding it alone, so it must keep such an update however many items it
+// parks there: the room has already applied it, and refusing it loses the
+// edit. An update that does not decode is still refused and takes no version.
+func TestAppendUpdate_KeepsLargeIncrementalUpdate(t *testing.T) {
+	const entries = 100_001 // one more than crdt's default pending cap
+	// Client 1 creates the map "nested" under root map "m"; client 2 sets
+	// entries keys on it. Decoded without base, every one of them parks.
+	author := crdt.New(crdt.WithClientID(1))
+	root := author.GetMap("m")
+	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
+	base := crdt.EncodeStateAsUpdateV1(author, nil)
+	editor := crdt.New(crdt.WithClientID(2))
+	if err := crdt.ApplyUpdateV1(editor, base, nil); err != nil {
+		t.Fatalf("ApplyUpdateV1(base): %v", err)
+	}
+	v, _ := editor.GetMap("m").Get("nested")
+	nested, ok := v.(*crdt.YMap)
+	if !ok {
+		t.Fatalf("nested is %T, want *crdt.YMap", v)
+	}
+	editor.Transact(func(txn *crdt.Transaction) {
+		for i := range entries {
+			nested.Set(txn, fmt.Sprintf("k%d", i), i)
+		}
+	})
+	update := crdt.EncodeStateAsUpdateV1(editor, author.StateVector())
+
+	s := mustOpen(t, filepath.Join(t.TempDir(), "large.db"))
+	defer s.Close()
+	ctx := context.Background()
+	for _, u := range [][]byte{base, update} {
+		if _, err := s.AppendUpdate(ctx, "room", u); err != nil {
+			t.Fatalf("AppendUpdate: %v", err)
+		}
+	}
+	if _, err := s.AppendUpdate(ctx, "room", []byte{0xff, 0xff, 0xff}); err == nil {
+		t.Fatal("AppendUpdate accepted an update that does not decode")
+	}
+	lr, err := s.Load(ctx, "room")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if lr.Version != 2 {
+		t.Fatalf("Load version = %d, want 2", lr.Version)
+	}
+	loaded := crdt.New()
+	if err := crdt.ApplyUpdateV1(loaded, lr.Update, nil); err != nil {
+		t.Fatalf("ApplyUpdateV1(loaded): %v", err)
+	}
+	v, _ = loaded.GetMap("m").Get("nested")
+	stored, ok := v.(*crdt.YMap)
+	if !ok {
+		t.Fatalf("loaded nested is %T, want *crdt.YMap", v)
+	}
+	if got := len(stored.Keys()); got != entries {
+		t.Fatalf("Load holds %d nested entries, want %d", got, entries)
+	}
+}
+
 // TestOpen_URIPathWithExistingQuery proves Open does not emit a double-"?" DSN
 // when the caller passes a URI-form path that already carries a query string.
 // modernc accepts file: URIs; we append a pragma block with "&" rather than "?".

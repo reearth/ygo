@@ -78,6 +78,18 @@ type VersionedPersistence interface {
 	// AppendUpdate appends one incremental V1 update to room's log and returns
 	// the newly assigned Version. The update must be a valid V1 update; an
 	// invalid update is rejected without advancing the version.
+	//
+	// An implementation that checks the update by applying it to a scratch
+	// document must give that document no pending-queue cap, as the bundled
+	// stores do:
+	//
+	//	err := crdt.ApplyUpdateV1(crdt.New(crdt.WithMaxPendingItems(math.MaxInt)), update, nil)
+	//
+	// Decoded without the room's stored state, an incremental update parks
+	// every item that depends on that state, and when its client already has
+	// edits stored, that is every item in it. A bare crdt.New() caps the queue
+	// at 100,000, so it refuses a large update the room has already applied,
+	// and the edit is lost.
 	AppendUpdate(ctx context.Context, room string, update []byte) (Version, error)
 
 	// ListVersions returns metadata for every stored update in room,
