@@ -133,6 +133,29 @@ func connect(t *testing.T, c *Client) {
 	})
 }
 
+// awaitRoomResident blocks until room is resident on srv.
+//
+// StateSynced is a CLIENT-side signal; CloseRoom needs the room to exist
+// SERVER-side, and under CPU starvation the two diverge — the client can
+// report synced while a previous forced close's teardown is still evicting
+// the room the reconnect just created, so CloseRoom returns ErrRoomNotFound.
+// That is what failed TestClient_Reconnect_BackoffResetsOnlyAfterHandshake on
+// main when crdt's 85s run saturated both runner vCPUs alongside it.
+func awaitRoomResident(t *testing.T, srv *ygws.Server, room string) {
+	t.Helper()
+	deadline := time.Now().Add(hangDeadline)
+	for time.Now().Before(deadline) {
+		for _, r := range srv.Rooms() {
+			if r == room {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	dumpGoroutines(t, fmt.Sprintf("room %q never became resident", room))
+	t.Fatalf("room %q never became resident on the server within %s", room, hangDeadline)
+}
+
 // statusWaiter subscribes to c's status stream NOW and returns a function that
 // blocks until want has been reported (failing the test on timeout).
 //
