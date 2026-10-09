@@ -60,11 +60,36 @@ jobs:
       # seeds, Go-vs-Go), TestFuzzCorpus (frozen reproducers), and
       # TestFuzzCrossImpl (vs real Yjs — runs here because `npm ci` above
       # installs yjs; it self-skips only when node/yjs are absent).
-      - run: go test -race -timeout 120s -coverprofile=coverage.txt -covermode=atomic ./...
+      # Coverage runs in its own job: -race with -covermode=atomic together
+      # cost about 3x either one alone.
+      - run: go test -race -timeout 120s ./...
       - name: CGo-free build (pure Go)
         run: CGO_ENABLED=0 go build ./persistence/sqlite/... ./cmd/ygo-server/... ./mobile/...
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    env:
+      YGO_REQUIRE_NODE: "1"
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.23"
+          cache: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: testutil/package-lock.json
+      - run: npm ci
+        working-directory: testutil
+      - run: go test -timeout 120s -coverprofile=coverage.txt -covermode=set ./...
       - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
-        if: matrix.go == '1.23'
         with:
           files: coverage.txt
           fail_ci_if_error: false

@@ -9,7 +9,7 @@ test:
 	$(GOTEST) $(PACKAGES)
 
 coverage:
-	$(GOTEST) -coverprofile=coverage.txt -covermode=atomic $(PACKAGES)
+	go test -timeout 120s -coverprofile=coverage.txt -covermode=set $(PACKAGES)
 	go tool cover -html=coverage.txt -o coverage.html
 
 lint:
