@@ -152,7 +152,9 @@ func cleanupYTextAfterTransaction(remote, txn *Transaction) {
 		})
 	}
 	// Visit deletions as Yjs does: clients in first-deletion order, each
-	// client's ranges sorted and merged.
+	// client's ranges sorted and merged. Each gap is cleaned once: cleaning
+	// it again from another of its items deletes nothing.
+	cleaned := map[*Item]bool{}
 	ds := remote.deleteSet
 	for _, client := range ds.orderedClients() {
 		sorted := DeleteSet{clients: map[ClientID][]DeleteRange{client: slices.Clone(ds.clients[client])}}
@@ -165,8 +167,8 @@ func cleanupYTextAfterTransaction(remote, txn *Transaction) {
 				}
 				if isContentFormat(it) {
 					addFull(p)
-				} else {
-					cleanupContextlessFormattingGap(txn, it)
+				} else if !cleaned[it] {
+					cleanupContextlessFormattingGap(txn, it, cleaned)
 				}
 			})
 		}
@@ -201,13 +203,15 @@ func storeRange(store *StructStore, client ClientID, from, to uint64, fn func(*I
 }
 
 // cleanupContextlessFormattingGap keeps only the last live marker per key in
-// the run of deleted and non-countable items around item. Mirrors Yjs.
-func cleanupContextlessFormattingGap(txn *Transaction, item *Item) {
+// the run of deleted and non-countable items around item, adding the run's
+// items to cleaned. Mirrors Yjs.
+func cleanupContextlessFormattingGap(txn *Transaction, item *Item, cleaned map[*Item]bool) {
 	for item != nil && item.Right != nil && (item.Right.Deleted || !item.Right.Content.IsCountable()) {
 		item = item.Right
 	}
 	seen := map[string]bool{}
 	for item != nil && (item.Deleted || !item.Content.IsCountable()) {
+		cleaned[item] = true
 		if cf, ok := item.Content.(*ContentFormat); ok && !item.Deleted {
 			if seen[cf.Key] {
 				item.delete(txn)
