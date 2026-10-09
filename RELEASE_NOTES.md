@@ -85,6 +85,11 @@ everyone else for good. Accessing a root now picks up waiting updates too.
 
 ## v1.51.1
 
+Map updates no longer spend time building conflict sets for unrelated keys.
+This removes quadratic conflict-scan work when another client inserts new keys
+into a large map, while preserving same-key arbitration, snapshot recovery and
+the existing wire format.
+
 **Who is affected:** anyone using `UndoManager` or `YArray.Move`, and anyone
 exchanging V1 updates with yjs peers that carry legacy JSON content.
 

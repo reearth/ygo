@@ -85,6 +85,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Avoid scanning unrelated map keys during item integration. New keys and causal
+  replacements after the current key winner bypass conflict scanning; concurrent
+  writes still resolve against items belonging to the same key.
+
 - **`crdt`: undo restored a deleted nested type empty.** `ContentType.Copy`
   shared the original type, whose children were all tombstoned, and
   `UndoManager` never collected a nested type's children for redo. Deleting a
