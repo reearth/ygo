@@ -2,9 +2,12 @@ package crdt
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
+
+	"github.com/reearth/ygo/encoding"
 )
 
 // cleanupTestHook, when set by a test, runs after every cleanup's deletions.
@@ -221,27 +224,38 @@ func cleanupContextlessFormattingGap(txn *Transaction, item *Item) {
 // cleans the markers before the first one.
 func cleanupYTextFormatting(txn *Transaction, t *abstractType) {
 	start := t.start
-	startAttrs := Attributes{}
-	cur := Attributes{}
+	startAttrs := fmtAttrs{}
+	cur := fmtAttrs{}
 	for end := t.start; end != nil; end = end.Right {
 		if end.Deleted {
 			continue
 		}
 		if cf, ok := end.Content.(*ContentFormat); ok {
-			updateAttr(cur, cf)
+			cur.update(cf)
 			continue
 		}
 		cleanupFormattingGap(txn, start, end, startAttrs, cur)
-		startAttrs = cloneAttributes(cur)
+		startAttrs = maps.Clone(cur)
 		start = end
+	}
+}
+
+// fmtAttrs maps each attribute to the marker that set it, so values keep
+// the identity Yjs's === sees.
+type fmtAttrs map[string]*ContentFormat
+
+func (a fmtAttrs) update(cf *ContentFormat) {
+	if cf.Val == nil {
+		delete(a, cf.Key)
+	} else {
+		a[cf.Key] = cf
 	}
 }
 
 // cleanupFormattingGap deletes the markers between start and the next live
 // content item that are overwritten within the gap or restate startAttrs,
-// adjusting curAttrs for markers before curr. Mirrors Yjs, including its ===
-// comparisons (composite values are equal only to themselves).
-func cleanupFormattingGap(txn *Transaction, start, curr *Item, startAttrs, curAttrs Attributes) {
+// adjusting curAttrs for markers before curr. Mirrors Yjs.
+func cleanupFormattingGap(txn *Transaction, start, curr *Item, startAttrs, curAttrs fmtAttrs) {
 	end := start
 	endFormats := map[string]*ContentFormat{}
 	for end != nil && (!end.Content.IsCountable() || end.Deleted) {
@@ -259,41 +273,56 @@ func cleanupFormattingGap(txn *Transaction, start, curr *Item, startAttrs, curAt
 		if !ok || start.Deleted {
 			continue
 		}
-		startVal := startAttrs[cf.Key]
-		if endFormats[cf.Key] != cf || jsIdentical(startVal, cf.Val) {
+		startCF := startAttrs[cf.Key]
+		if endFormats[cf.Key] != cf || jsIdentical(startCF, cf) {
 			start.delete(txn)
-			if !reachedCurr && jsIdentical(curAttrs[cf.Key], cf.Val) && !jsIdentical(startVal, cf.Val) {
-				if startVal == nil {
+			if !reachedCurr && jsIdentical(curAttrs[cf.Key], cf) && !jsIdentical(startCF, cf) {
+				if startCF == nil {
 					delete(curAttrs, cf.Key)
 				} else {
-					curAttrs[cf.Key] = startVal
+					curAttrs[cf.Key] = startCF
 				}
 			}
 		}
 		if !reachedCurr && !start.Deleted {
-			updateAttr(curAttrs, cf)
+			curAttrs.update(cf)
 		}
 	}
 }
 
-// jsIdentical is JavaScript's === on attribute values: numbers by value,
-// maps and slices by identity.
-func jsIdentical(a, b any) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
+// jsIdentical is JavaScript's === on two markers' values, a nil marker
+// standing for an absent attribute (null). Scalars compare by value; a
+// composite value is identical only to itself, as each decoded Yjs marker
+// holds its own object.
+func jsIdentical(a, b *ContentFormat) bool {
+	if a == b {
+		return true
 	}
-	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	var av, bv any
+	if a != nil {
+		av = a.Val
+	}
+	if b != nil {
+		bv = b.Val
+	}
+	if av == nil || bv == nil {
+		return av == nil && bv == nil
+	}
+	_, aBig := av.(encoding.BigInt)
+	_, bBig := bv.(encoding.BigInt)
+	if aBig || bBig {
+		return av == bv
+	}
+	va, vb := reflect.ValueOf(av), reflect.ValueOf(bv)
+	if fa, ok := jsNumber(va); ok {
+		fb, ok := jsNumber(vb)
+		return ok && fa == fb
+	}
 	switch va.Kind() {
-	case reflect.Map, reflect.Slice:
-		return va.Kind() == vb.Kind() && va.Pointer() == vb.Pointer() && va.Len() == vb.Len()
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64:
-		fa, okA := jsNumber(va)
-		fb, okB := jsNumber(vb)
-		return okA && okB && fa == fb
+	case reflect.String, reflect.Bool:
+		return va.Type() == vb.Type() && av == bv
 	}
-	return va.Type() == vb.Type() && va.Comparable() && a == b
+	return false
 }
 
 func jsNumber(v reflect.Value) (float64, bool) {

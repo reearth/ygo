@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -297,4 +298,35 @@ func TestUnit_YText_FormatCleanup_PendingDeleteOrder(t *testing.T) {
 	require.Empty(t, r.store.pendingDs.clients)
 	assert.Equal(t, 0, cleanups)
 	assert.Equal(t, 4, countLiveContentFormat(r))
+}
+
+// Attribute values compare as JavaScript's === does: scalars by value, and a
+// composite value only to itself, each marker holding its own object as a
+// decoded Yjs marker does.
+func TestUnit_YText_FormatCleanup_ValueIdentity(t *testing.T) {
+	f := func(v any) *ContentFormat { return NewContentFormat("k", v) }
+	buf := []byte{1, 2, 3}
+	m := map[string]any{"a": 1}
+	same := f([]any{})
+	for _, tc := range []struct {
+		name string
+		a, b *ContentFormat
+		want bool
+	}{
+		{"byte views of one buffer", f(buf[:2]), f(buf[:2]), false},
+		{"empty slices", f([]any{}), f([]any{}), false},
+		{"empty byte slices", f([]byte{}), f([]byte{}), false},
+		{"empty maps", f(map[string]any{}), f(map[string]any{}), false},
+		{"one map in two markers", f(m), f(m), false},
+		{"one marker", same, same, true},
+		{"integer and float", f(int64(1)), f(1.0), true},
+		{"NaN", f(math.NaN()), f(math.NaN()), false},
+		{"strings", f("x"), f("x"), true},
+		{"bigint and number", f(encoding.BigInt(1)), f(int64(1)), false},
+		{"bigints", f(encoding.BigInt(1)), f(encoding.BigInt(1)), true},
+		{"absent and null", nil, f(nil), true},
+		{"absent and false", nil, f(false), false},
+	} {
+		assert.Equal(t, tc.want, jsIdentical(tc.a, tc.b), tc.name)
+	}
 }

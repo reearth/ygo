@@ -275,6 +275,30 @@ for (const [a, b] of [[1, 2], [2, 1]]) {
 		{ k: 'sync', from: 'B', to: 'A' },
 		{ k: 'sync', from: 'A', to: 'B' },
 	]))
+	// The receiver's cleanup compares composite values by identity; a value
+	// the sender's format restores is one object shared by two markers.
+	for (const [vn, v] of [['empty_array', []], ['empty_object', {}], ['array', [1]], ['object', { k: 1 }]]) {
+		multis.push(multi(`concurrent_format_from_start_${vn}` + tag, c, [
+			{ p: 'A', k: 'ins', i: 0, s: 'hello' },
+			{ k: 'sync', from: 'A', to: 'B' },
+			{ p: 'A', k: 'fmt', i: 0, n: 3, a: { c: v } },
+			{ p: 'B', k: 'fmt', i: 0, n: 2, a: { c: v } },
+			{ k: 'sync', from: 'A', to: 'B' },
+			{ k: 'sync', from: 'B', to: 'A' },
+			{ k: 'sync', from: 'A', to: 'B' },
+			{ p: 'B', k: 'ins', i: 0, s: 'x' },
+			{ k: 'sync', from: 'B', to: 'A' },
+		]))
+		multis.push(multi(`shared_value_object_${vn}` + tag, c, [
+			{ p: 'B', k: 'ins', i: 0, s: 'hello', a: { c: v } },
+			{ p: 'B', k: 'fmt', i: 1, n: 2, a: { c: 'x' } },
+			{ k: 'sync', from: 'B', to: 'A' },
+			{ p: 'A', k: 'delta', d: [{ delete: 3 }, { retain: 1 }, { retain: 1, attributes: { d: true } }] },
+			{ k: 'sync', from: 'A', to: 'B' },
+			{ p: 'B', k: 'ins', i: 0, s: 'z' },
+			{ k: 'sync', from: 'B', to: 'A' },
+		]))
+	}
 	multis.push(multi('concurrent_unbold_and_insert' + tag, c, [
 		{ p: 'A', k: 'ins', i: 0, s: 'hello', a: B },
 		{ k: 'sync', from: 'A', to: 'B' },

@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -157,6 +158,13 @@ func jsNumbers(v any) any {
 			return int64(x)
 		}
 	case map[string]any:
+		if h, ok := x["$bytes"].(string); ok && len(x) == 1 {
+			b, err := hex.DecodeString(h)
+			if err != nil {
+				panic(err)
+			}
+			return b
+		}
 		out := make(map[string]any, len(x))
 		for k, e := range x {
 			out[k] = jsNumbers(e)
