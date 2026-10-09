@@ -1,3 +1,10 @@
+## v1.51.6
+
+**Replacing a map value no longer scans unrelated keys.** Direct replacements
+skip the shared-list scan when placed immediately after the key's previous
+rightmost value. Concurrent and non-adjacent replacements retain conflict
+resolution.
+
 ## v1.51.5
 
 **Who is affected:** documents with long editing histories where a transaction
