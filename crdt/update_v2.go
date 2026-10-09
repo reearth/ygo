@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
+	"github.com/reearth/ygo/internal/anycodec"
 )
 
 // maxV2Items caps the total number of structs decoded from a single V2 update to
@@ -126,15 +127,15 @@ func (e *v2Encoder) writeDsLen(l uint64) {
 // ── V2 decoder state ──────────────────────────────────────────────────────────
 
 type v2Decoder struct {
-	keyClockDec   *encoding.IntDiffOptRleDecoder
-	clientDec     *encoding.UintOptRleDecoder
-	leftClockDec  *encoding.IntDiffOptRleDecoder
-	rightClockDec *encoding.IntDiffOptRleDecoder
-	infoDec       *encoding.RleByteDecoder
-	stringDec     *encoding.StringDecoder
-	parentInfoDec *encoding.RleByteDecoder
-	typeRefDec    *encoding.UintOptRleDecoder
-	lenDec        *encoding.UintOptRleDecoder
+	keyClockDec   anycodec.IntDiffOptRleDecoder
+	clientDec     anycodec.UintOptRleDecoder
+	leftClockDec  anycodec.IntDiffOptRleDecoder
+	rightClockDec anycodec.IntDiffOptRleDecoder
+	infoDec       anycodec.RleByteDecoder
+	stringDec     anycodec.StringDecoder
+	parentInfoDec anycodec.RleByteDecoder
+	typeRefDec    anycodec.UintOptRleDecoder
+	lenDec        anycodec.UintOptRleDecoder
 	restDec       *encoding.Decoder
 
 	keys      []string
@@ -199,21 +200,21 @@ func newV2Decoder(data []byte) (*v2Decoder, error) {
 	// Remaining bytes = restDecoder (raw, no length prefix)
 	remaining := dec.RemainingBytes()
 
-	stringDec, err := encoding.NewStringDecoder(stringBytes)
+	stringDec, err := anycodec.NewStringDecoder(stringBytes)
 	if err != nil {
 		return nil, fmt.Errorf("%w: V2 stringDecoder: %v", ErrInvalidUpdate, err)
 	}
 
 	return &v2Decoder{
-		keyClockDec:   encoding.NewIntDiffOptRleDecoder(keyClockBytes),
-		clientDec:     encoding.NewUintOptRleDecoder(clientBytes),
-		leftClockDec:  encoding.NewIntDiffOptRleDecoder(leftClockBytes),
-		rightClockDec: encoding.NewIntDiffOptRleDecoder(rightClockBytes),
-		infoDec:       encoding.NewRleByteDecoder(infoBytes),
+		keyClockDec:   anycodec.NewIntDiffOptRleDecoder(keyClockBytes),
+		clientDec:     anycodec.NewUintOptRleDecoder(clientBytes),
+		leftClockDec:  anycodec.NewIntDiffOptRleDecoder(leftClockBytes),
+		rightClockDec: anycodec.NewIntDiffOptRleDecoder(rightClockBytes),
+		infoDec:       anycodec.NewRleByteDecoder(infoBytes),
 		stringDec:     stringDec,
-		parentInfoDec: encoding.NewRleByteDecoder(parentInfoBytes),
-		typeRefDec:    encoding.NewUintOptRleDecoder(typeRefBytes),
-		lenDec:        encoding.NewUintOptRleDecoder(lenBytes),
+		parentInfoDec: anycodec.NewRleByteDecoder(parentInfoBytes),
+		typeRefDec:    anycodec.NewUintOptRleDecoder(typeRefBytes),
+		lenDec:        anycodec.NewUintOptRleDecoder(lenBytes),
 		restDec:       encoding.NewDecoder(remaining),
 	}, nil
 }
@@ -596,6 +597,10 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 
 	sv := txn.doc.store.StateVector()
+	initialV2 := *dec
+	budget := newPendingBudget(txn.doc, sv, update, true)
+	budget.v2Start = &initialV2
+	budget.v2Rest = *dec.restDec
 
 	numClients, err := dec.restDec.ReadVarUint()
 	if err != nil {
@@ -712,21 +717,14 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				offset = int(existingEnd - clock)
 			}
 
-			// Same-client clock gap: this item's clock is past the store's
-			// current clock for this client (we have 0..existingEnd but this
-			// item starts at clock > existingEnd). Silently integrating would
-			// misplace the item at the head of its parent list. Park instead,
-			// with the store's current clock as the watermark — when the store
-			// reaches that clock, the missing predecessor may be available.
+			// A predecessor may be deferred until a later client group in this
+			// same message. Resolve the bounded update before charging items to
+			// the cross-update pending limit.
 			if clock > existingEnd {
-				if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
-					return wrapUpdateErr(ErrInvalidUpdate)
+				pending = append(pending, item)
+				if err := budget.check(len(pending)); err != nil {
+					return err
 				}
-				if txn.doc.store.pending == nil {
-					txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
-				}
-				txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
-				mergePendingMissing(txn.doc.store.pending.missing, client, existingEnd)
 				clock = itemEnd
 				continue
 			}
@@ -751,6 +749,9 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			// reference to a group not yet decoded) are deferred.
 			if item.Parent == nil {
 				pending = append(pending, item)
+				if err := budget.check(len(pending)); err != nil {
+					return err
+				}
 				clock = itemEnd
 				continue
 			}
@@ -764,6 +765,9 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			if offset == 0 && item.OriginRight != nil &&
 				item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
 				pending = append(pending, item)
+				if err := budget.check(len(pending)); err != nil {
+					return err
+				}
 				clock = itemEnd
 				continue
 			}
@@ -778,91 +782,8 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		}
 	}
 
-	// Retry items whose parent couldn't be resolved during the first pass
-	// because their origin items were in a later client group.
-	for len(pending) > 0 {
-		var remaining []*Item
-		for _, item := range pending {
-			// Inherit parentSub alongside parent from the origin neighbour:
-			// a keyed item with an origin has no on-wire parentSub. (#YMap-wire)
-			if item.Origin != nil {
-				if oi := txn.doc.store.Find(*item.Origin); oi != nil {
-					item.Parent = oi.Parent
-					if item.ParentSub == nil {
-						item.ParentSub = oi.ParentSub
-					}
-				}
-			}
-			if item.Parent == nil && item.OriginRight != nil {
-				if ori := txn.doc.store.Find(*item.OriginRight); ori != nil {
-					item.Parent = ori.Parent
-					if item.ParentSub == nil {
-						item.ParentSub = ori.ParentSub
-					}
-				}
-			}
-			// Parent referenced by container item-ID (C-3): the container may have
-			// integrated in an earlier group this pass. Resolve before the ParentSub
-			// fallback, which would otherwise graft this keyed item onto an arbitrary map.
-			if item.Parent == nil && item.parentID != nil {
-				if pi := txn.doc.store.Find(*item.parentID); pi != nil {
-					// Non-ContentType => tombstoned/GC'd container. Leave Parent
-					// nil so the item orphan-drops (Yjs parent=nil) rather than
-					// aborting the update. See update.go resolveWithinUpdatePending.
-					if ct, ok := pi.Content.(*ContentType); ok {
-						item.Parent = ct.Type
-					}
-				}
-			}
-			// A keyed item still unresolved here is a genuine orphan (its
-			// container/origin was deleted and GC'd). Yjs drops it on every
-			// peer; do NOT graft it onto an arbitrary map by scanning the store,
-			// which diverges by integration order (#156). Mirrors the V1 loop:
-			// leave Parent nil and let it orphan-Append below.
-			if item.Parent != nil {
-				// A resolved parent is not sufficient: the item may still depend
-				// on a not-yet-integrated origin/rightOrigin clock (C-2).
-				// Integrating now would place it at the wrong position. Defer to
-				// `remaining` so the no-progress branch below parks it via
-				// itemFutureDep. Mirrors the V1 retry loop in update.go.
-				if _, _, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
-					remaining = append(remaining, item)
-					continue
-				}
-				if item.Origin != nil {
-					item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
-				}
-				item.integrate(txn, 0)
-			} else {
-				remaining = append(remaining, item)
-			}
-		}
-		if len(remaining) == len(pending) {
-			// No progress made. Partition `remaining` into two buckets:
-			//   - Future-clock references -> park in store.pending for retry
-			//     when the missing updates arrive (fixes #11).
-			//   - Truly unresolvable (e.g. GC'd parents with lost parent info
-			//     from the Yjs wire format) -> store without integration so
-			//     they survive re-encoding. Matches the pre-#11 fallback.
-			for _, item := range remaining {
-				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
-					if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
-						return wrapUpdateErr(ErrInvalidUpdate)
-					}
-					if txn.doc.store.pending == nil {
-						txn.doc.store.pending = &pendingUpdate{
-							missing: make(StateVector),
-						}
-					}
-					txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
-					mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
-				} else {
-					txn.doc.store.Append(item)
-				}
-			}
-			break
-		}
-		pending = remaining
+	if err := resolveWithinUpdatePending(txn, pending); err != nil {
+		return err
 	}
 
 	// Decode delete set

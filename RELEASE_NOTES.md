@@ -1,3 +1,36 @@
+## v1.51.8
+
+**Overlapping updates no longer duplicate content.** When out-of-order V1/V2
+updates partially overlap a pending text or array range, the retry now skips
+its already received prefix and inserts only the new suffix. This also applies
+to orphaned ranges after container garbage collection, preserving correct clocks
+across checkpoint restore so later updates are not silently skipped.
+
+**Large dependency queues restore faster.** The V1/V2 within-update resolver
+processes producers before their dependents and completes contiguous client tails
+before returning to consumers. This accelerates reverse client chains, including
+updates with multiple structs per client, without leaving ready tails for costly
+later insertion. The same range index tracks prefix coverage, preventing shorter
+overlapping copies from hiding a producer and forcing repeated retries.
+
+Small queues and queues making no progress avoid the dependency index. Complex
+queues use temporary memory proportional to their size; remaining unresolved
+items retain the fixed-point fallback and the configured persistent pending limit.
+The public API and update encodings remain compatible.
+
+## v1.51.7
+
+Complete V1/V2 checkpoints resolve dependencies within the update before the
+cross-update pending limit is applied. Preflight retains the current blocked
+struct and a resumable decoder cursor per wire group, rather than metadata for
+every struct in a blocked tail. Unique-client groups with unfillable clock
+gaps or dependencies outside both the update and store are counted without
+cursors. V2 cursors share immutable columns and the string pool. Single-group
+updates stop once the number of permanently blocked structs exceeds the
+remaining budget. A rejected preflight update adds none of its deferred items to the persistent pending queue; previously queued items
+remain. Changes already integrated before rejection are not rolled back.
+The configured pending limit, wire format and public API are unchanged.
+
 ## v1.51.5
 
 **Who is affected:** documents with long editing histories where a transaction

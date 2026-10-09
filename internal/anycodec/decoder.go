@@ -1,0 +1,393 @@
+// Package anycodec provides shared lib0 primitive, RLE and Any cursors used by
+// encoding and the CRDT wire-only preflight.
+package anycodec
+
+import (
+	"encoding/binary"
+	"errors"
+	"math"
+	"unicode/utf8"
+)
+
+var (
+	// ErrUnexpectedEOF is returned when the buffer is exhausted before decoding completes.
+	ErrUnexpectedEOF = errors.New("encoding: unexpected end of input")
+
+	// ErrOverflow is returned when a VarUint exceeds the 53-bit safe integer range.
+	// This matches JavaScript's Number.MAX_SAFE_INTEGER constraint in the Yjs protocol.
+	ErrOverflow = errors.New("encoding: varuint overflow (> 53 bits)")
+
+	// ErrUnknownTag is returned by ReadAny when the tag byte does not correspond
+	// to a known Any variant. Returning an error (rather than nil, nil) prevents
+	// crafted payloads from silently injecting nil values into the document.
+	ErrUnknownTag = errors.New("encoding: unknown Any tag")
+
+	// ErrInvalidUTF8 is returned by ReadVarString when the byte sequence is not
+	// valid UTF-8. Matches lib0's TextDecoder('utf-8', { fatal: true }) which
+	// throws on malformed input rather than producing a corrupt string.
+	ErrInvalidUTF8 = errors.New("encoding: invalid UTF-8 in varstring")
+)
+
+// Decoder reads values from a byte slice using the lib0 encoding format.
+// Decoder is not safe for concurrent use; each goroutine should use its own instance.
+type Decoder struct {
+	buf []byte
+	pos int
+}
+
+// NewDecoder returns a Decoder that reads from b.
+func NewDecoder(b []byte) Decoder {
+	return Decoder{buf: b}
+}
+
+// Remaining returns the number of unread bytes.
+func (d *Decoder) Remaining() int { return len(d.buf) - d.pos }
+
+// HasContent reports whether there are unread bytes remaining.
+func (d *Decoder) HasContent() bool { return d.pos < len(d.buf) }
+
+// RemainingBytes returns the unread portion of the buffer as a sub-slice.
+//
+// The returned slice ALIASES the decoder's underlying buffer; mutating it
+// (or extending its length via append beyond cap) corrupts the decoder.
+// Callers must treat it as read-only and copy if they need a slice with
+// an independent lifetime. Most callers in this codebase hand the bytes
+// straight to ApplySyncMessage or json.Unmarshal, both of which read-only,
+// so the zero-copy path is safe.
+//
+// Use RemainingBytesCopy if you need an independent allocation.
+func (d *Decoder) RemainingBytes() []byte {
+	return d.buf[d.pos:]
+}
+
+// RemainingBytesCopy returns an independently-allocated copy of the unread
+// portion of the buffer. Use when the caller needs to retain the bytes
+// across mutations of the decoder's underlying buffer.
+func (d *Decoder) RemainingBytesCopy() []byte {
+	rem := d.buf[d.pos:]
+	cp := make([]byte, len(rem))
+	copy(cp, rem)
+	return cp
+}
+
+func (d *Decoder) readByte() (byte, error) {
+	if d.pos >= len(d.buf) {
+		return 0, ErrUnexpectedEOF
+	}
+	b := d.buf[d.pos]
+	d.pos++
+	return b, nil
+}
+
+// ReadUint8 reads a single byte.
+func (d *Decoder) ReadUint8() (uint8, error) {
+	return d.readByte()
+}
+
+// ReadVarUint decodes a variable-length unsigned integer.
+// Returns ErrOverflow if the value exceeds 53 significant bits.
+func (d *Decoder) ReadVarUint() (uint64, error) {
+	var result uint64
+	var shift uint
+	for {
+		b, err := d.readByte()
+		if err != nil {
+			return 0, err
+		}
+		result |= uint64(b&0x7f) << shift
+		if b&0x80 == 0 {
+			return result, nil
+		}
+		shift += 7
+		if shift > 49 {
+			return 0, ErrOverflow
+		}
+	}
+}
+
+// ReadVarInt decodes a lib0 sign-magnitude variable-length integer.
+// Returns ErrOverflow if the encoded magnitude exceeds 55 bits (the lib0 protocol's maximum).
+func (d *Decoder) ReadVarInt() (int64, error) {
+	b, err := d.readByte()
+	if err != nil {
+		return 0, err
+	}
+	neg := b&0x40 != 0
+	result := uint64(b & 0x3F)
+	shift := uint(6)
+	for b&0x80 != 0 {
+		if shift > 48 {
+			return 0, ErrOverflow
+		}
+		b, err = d.readByte()
+		if err != nil {
+			return 0, err
+		}
+		result |= uint64(b&0x7F) << shift
+		shift += 7
+	}
+	if neg {
+		return -int64(result), nil
+	}
+	return int64(result), nil
+}
+
+// ReadVarString decodes a length-prefixed UTF-8 string. Invalid UTF-8 byte
+// sequences return ErrInvalidUTF8, matching lib0's TextDecoder fatal:true
+// mode. Without this, malformed input would silently produce a corrupt Go
+// string carrying non-UTF-8 bytes that downstream code may misinterpret.
+func (d *Decoder) ReadVarString() (string, error) {
+	b, err := d.ReadVarBytes()
+	if err != nil {
+		return "", err
+	}
+	if !utf8.Valid(b) {
+		return "", ErrInvalidUTF8
+	}
+	return string(b), nil
+}
+
+// ReadVarBytes decodes a length-prefixed byte slice.
+// The returned slice is a sub-slice of the decoder's buffer; copy if you need to retain it.
+//
+// A field can be no larger than the bytes that remain in the buffer; a declared
+// length beyond that is malformed and returns ErrUnexpectedEOF. Because the
+// returned slice aliases the buffer (no allocation), the buffer length is the
+// real bound — a crafted multi-GiB length prefix is rejected here without any
+// large allocation. Bounding by the remaining buffer rather than a fixed
+// ceiling (previously 16 MiB) lets a single large field — e.g. a big text node
+// or binary embed — sync inside an otherwise-valid message, with the maximum
+// message size policed by the provider layer (MaxMessageBytes, default 64 MiB)
+// instead of being silently rejected here (N-12).
+func (d *Decoder) ReadVarBytes() ([]byte, error) {
+	n, err := d.ReadVarUint()
+	if err != nil {
+		return nil, err
+	}
+	if n > uint64(d.Remaining()) {
+		return nil, ErrUnexpectedEOF
+	}
+	end := d.pos + int(n)
+	out := d.buf[d.pos:end]
+	d.pos = end
+	return out, nil
+}
+
+// ReadFloat32 reads a 32-bit big-endian IEEE 754 float.
+func (d *Decoder) ReadFloat32() (float32, error) {
+	if d.pos+4 > len(d.buf) {
+		return 0, ErrUnexpectedEOF
+	}
+	bits := binary.BigEndian.Uint32(d.buf[d.pos:])
+	d.pos += 4
+	return math.Float32frombits(bits), nil
+}
+
+// ReadFloat64 reads a 64-bit big-endian IEEE 754 float.
+func (d *Decoder) ReadFloat64() (float64, error) {
+	if d.pos+8 > len(d.buf) {
+		return 0, ErrUnexpectedEOF
+	}
+	bits := binary.BigEndian.Uint64(d.buf[d.pos:])
+	d.pos += 8
+	return math.Float64frombits(bits), nil
+}
+
+// ReadBigInt64 reads a signed 64-bit big-endian integer.
+func (d *Decoder) ReadBigInt64() (int64, error) {
+	if d.pos+8 > len(d.buf) {
+		return 0, ErrUnexpectedEOF
+	}
+	bits := binary.BigEndian.Uint64(d.buf[d.pos:])
+	d.pos += 8
+	return int64(bits), nil
+}
+
+// ReadVarIntWithSign reads a sign-magnitude VarInt and returns the magnitude
+// and whether the sign bit was set.  Used by UintOptRleDecoder to distinguish
+// negative zero from positive zero.
+func (d *Decoder) ReadVarIntWithSign() (magnitude uint64, negative bool, err error) {
+	b, err := d.readByte()
+	if err != nil {
+		return 0, false, err
+	}
+	negative = b&0x40 != 0
+	result := uint64(b & 0x3F)
+	shift := uint(6)
+	for b&0x80 != 0 {
+		if shift > 48 {
+			return 0, negative, ErrOverflow
+		}
+		b, err = d.readByte()
+		if err != nil {
+			return 0, negative, err
+		}
+		result |= uint64(b&0x7F) << shift
+		shift += 7
+	}
+	return result, negative, nil
+}
+
+// MaxDepth is the maximum nesting depth for ReadAny. A crafted payload with
+// deeply-nested arrays or maps would otherwise exhaust the goroutine stack.
+const MaxDepth = 100
+const maxAnyDepth = MaxDepth
+
+// MaxElements caps the number of elements allocated for a single array or
+// map inside ReadAny. Without this cap, a crafted payload could claim 1,000,000
+// elements with 1 byte each, passing the d.Remaining() guard but still causing
+// make([]any, n) to allocate ~8 MiB for the slice header alone (N-C2).
+const MaxElements = 100_000
+const maxAnyElements = MaxElements
+
+// ErrDepthExceeded is returned when a nested Any value exceeds maxAnyDepth levels.
+var ErrDepthExceeded = errors.New("encoding: nested Any exceeds maximum depth")
+
+// ReadAny decodes a tagged-union value written by Encoder.WriteAny.
+// Nested arrays and maps are limited to maxAnyDepth levels to prevent
+// stack-overflow DoS from crafted inputs.
+func (d *Decoder) ReadAny(bigInt func(int64) any) (any, error) {
+	return d.readAny(bigInt, 0, false)
+}
+
+// Skip validates an Any value and returns the number of consumed bytes,
+// including the cursor position on malformed input. No values are materialized.
+func Skip(data []byte) (int, error) {
+	d := NewDecoder(data)
+	_, err := d.readAny(nil, 0, true)
+	return len(data) - d.Remaining(), err
+}
+
+func (d *Decoder) readAny(bigInt func(int64) any, depth int, skip bool) (any, error) {
+	if depth > maxAnyDepth {
+		return nil, ErrDepthExceeded
+	}
+	tag, err := d.ReadUint8()
+	if err != nil {
+		return nil, err
+	}
+	switch tag {
+	case 127, 126: // undefined, null
+		return nil, nil
+	case 120:
+		return true, nil
+	case 121:
+		return false, nil
+	case 125:
+		v, err := d.ReadVarInt()
+		if err != nil {
+			return nil, err
+		}
+		if skip {
+			return nil, nil
+		}
+		return v, nil // v is already int64; preserve full precision
+	case 124:
+		v, err := d.ReadFloat32()
+		if skip {
+			return nil, err
+		}
+		return v, err
+	case 123:
+		v, err := d.ReadFloat64()
+		if skip {
+			return nil, err
+		}
+		return v, err
+	case 122:
+		v, err := d.ReadBigInt64()
+		if err != nil {
+			return nil, err
+		}
+		if skip {
+			return nil, nil
+		}
+		return bigInt(v), nil
+	case 119:
+		if skip {
+			b, err := d.ReadVarBytes()
+			if err == nil && !utf8.Valid(b) {
+				err = ErrInvalidUTF8
+			}
+			return nil, err
+		}
+		return d.ReadVarString()
+	case 116:
+		b, err := d.ReadVarBytes()
+		if skip {
+			return nil, err
+		}
+		return b, err
+	case 117:
+		n, err := d.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		// Guard against OOM: even if each element needs only 1 byte, a
+		// large n would allocate ~8 MiB for the slice header alone before
+		// any elements are decoded (N-C2).
+		if n > maxAnyElements {
+			return nil, ErrDepthExceeded
+		}
+		if n > uint64(d.Remaining()) {
+			return nil, ErrUnexpectedEOF
+		}
+		var out []any
+		if !skip {
+			out = make([]any, n)
+		}
+		for i := uint64(0); i < n; i++ {
+			v, err := d.readAny(bigInt, depth+1, skip)
+			if err != nil {
+				return nil, err
+			}
+			if !skip {
+				out[i] = v
+			}
+		}
+		return out, nil
+	case 118:
+		n, err := d.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		// Same OOM guard as the array case (N-C2).
+		if n > maxAnyElements {
+			return nil, ErrDepthExceeded
+		}
+		if n > uint64(d.Remaining()) {
+			return nil, ErrUnexpectedEOF
+		}
+		var out map[string]any
+		if !skip {
+			out = make(map[string]any, n)
+		}
+		for range n {
+			var k string
+			if skip {
+				b, err := d.ReadVarBytes()
+				if err != nil {
+					return nil, err
+				}
+				if !utf8.Valid(b) {
+					return nil, ErrInvalidUTF8
+				}
+			} else {
+				k, err = d.ReadVarString()
+				if err != nil {
+					return nil, err
+				}
+			}
+			v, err := d.readAny(bigInt, depth+1, skip)
+			if err != nil {
+				return nil, err
+			}
+			if !skip {
+				out[k] = v
+			}
+		}
+		return out, nil
+	default:
+		return nil, ErrUnknownTag
+	}
+}

@@ -311,3 +311,122 @@ a *performance* one, but relevant context for interpreting any future
 cross-impl performance numbers: "faster than yrs" and "as conformant as
 yrs" are separate claims, and on the conformance axis ygo already has
 better-documented parity with the Yjs reference than yrs does.
+
+## Pending-budget preflight review
+
+These scenarios use `benchheavy`; sources are
+[`pending_budget_bench_test.go`](crdt/pending_budget_bench_test.go),
+[`pending_budget_review_bench_test.go`](crdt/pending_budget_review_bench_test.go) and
+[`pending_cursor_bench_test.go`](crdt/pending_cursor_bench_test.go).
+
+- Reverse chains exercise V1/V2 references to later client groups.
+- Many-client checkpoints use ordinary Ygo text transactions and V2 encoding.
+- Incomplete updates cover same-parent tails and varied missing clocks,
+  content lengths, cycles and client groups, including missing-client cursor bombs.
+
+```sh
+go test -tags benchheavy ./crdt -run '^$' \
+  -bench '^BenchmarkPending(ReverseChain|ManyClientCheckpoint|UpdateDiverseDependencies|CursorBomb)$' \
+  -benchmem -benchtime=1x -count=10 -timeout=30m
+go test -tags benchheavy ./crdt -run '^$' \
+  -bench '^Benchmark(ApplyUpdateV[12](_Bulk)?|PendingUpdateIncomplete)$' \
+  -benchmem -benchtime=100ms -count=10
+```
+
+Compare at least ten samples with `benchstat`, using identical fixtures and
+options on both revisions. Fixture generation is outside the timed loop.
+Complete-update benches also exclude destination creation/destruction and
+result checks; `rejections/op` distinguishes rejection from successful restore.
+
+`B/op` and `allocs/op` are cumulative Go allocation metrics, not peak RAM.
+Reported peak RSS uses the largest of three fresh `/usr/bin/time -l` processes
+applying identical prepared wire bytes, with a GC before destination creation.
+Runtime/input/document are included; fixture generation and build are excluded.
+
+## Within-update dependency resolver
+
+Fixtures in `crdt/pending_budget_review_bench_test.go` and
+`crdt/pending_resolver_bench_test.go` cover reverse client chains, ordinary V2
+checkpoints, non-mergeable string/embed pairs per client, missing/complete keyed
+queues, longer producers hidden by shorter overlapping ranges, and scheduler-off
+fixed-point controls against an independent reference.
+
+```sh
+go test -tags benchheavy ./crdt -run '^$' \
+  -bench '^BenchmarkPending(ReverseChain|ManyClientCheckpoint|MultiStructChain|OverlapFallback|FixedPointFallback|LinearClientQueue)$' \
+  -benchmem -benchtime=1x -count=10 -timeout=30m
+go test ./crdt -run '^$' -bench '^BenchmarkApplyUpdateV[12](_Bulk)?$' \
+  -benchmem -benchtime=100ms -count=10
+benchstat before.txt after.txt
+```
+
+Complete-update timers exclude destination creation/destruction and result checks.
+`rejections/op` distinguishes rejection from successful restore. Compare identical
+fixtures and options on both revisions. Allocation volume is cumulative, not peak RAM.
+
+Local results: Apple M4 Pro, macOS arm64, Go 1.26.8; ten samples per revision,
+identical fixtures. Main is `8e7e969`, the preflight baseline is `bd642e5`.
+Baseline figures were measured earlier with the same fixtures and toolchain;
+after figures use the final PR implementation.
+Time/allocations are medians. Peak RSS is the maximum of three fresh processes
+with prepared wire bytes; fixture generation and compilation are excluded,
+runtime/input/document included. The two-struct fixture uses a string and an
+own-origin embed; main rejects it at cap=16, so its successful-restore baseline
+is the preflight implementation. All restores shown below succeed.
+
+### V1 reverse chain, 20k clients (cap=16)
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 3,099.862 | 14.023 |
+| Allocated, MiB/op | 6,487.450 | 17.138 |
+| Allocations/op | 448,949.0 | 160,623.5 |
+| Peak RSS, MiB | 19.609 | 16.438 |
+
+### V2 reverse chain, 20k clients (cap=16)
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 3,018.060 | 13.896 |
+| Allocated, MiB/op | 6,487.547 | 17.251 |
+| Allocations/op | 448,935.5 | 160,635.5 |
+| Peak RSS, MiB | 20.719 | 16.594 |
+
+### V2 checkpoint, 10k clients (cap=16)
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 760.888 | 6.644 |
+| Allocated, MiB/op | 1,489.218 | 8.494 |
+| Allocations/op | 202,754.5 | 80,369.0 |
+| Peak RSS, MiB | 14.734 | 11.062 |
+
+### V1 two structs/client, 20k clients (cap=16)
+
+| Metric | Before (#260) | After |
+|---|---:|---:|
+| Time, ms/op | 6,017.359 | 26.477 |
+| Allocated, MiB/op | 25.473 | 27.364 |
+| Allocations/op | 360,631.0 | 360,632.0 |
+| Peak RSS, MiB | 22.438 | 23.828 |
+
+### V2 two structs/client, 20k clients (cap=16)
+
+| Metric | Before (#260) | After |
+|---|---:|---:|
+| Time, ms/op | 5,910.772 | 25.510 |
+| Allocated, MiB/op | 33.364 | 35.254 |
+| Allocations/op | 300,630.5 | 300,632.0 |
+| Peak RSS, MiB | 40.359 | 39.844 |
+
+### Overlapping ranges, 5k clients
+
+The producer index must find a long range even when a shorter overlapping copy
+has a later start. The same complete queue is compared before/after prefix
+coverage; both variants restore successfully. No extra index array is allocated.
+
+| Metric | Before coverage | After |
+|---|---:|---:|
+| Time, ms/op | 258.723 | 1.578 |
+| Allocated, MiB/op | 2.010 | 2.010 |
+| Allocations/op | 10,138.0 | 10,138.0 |

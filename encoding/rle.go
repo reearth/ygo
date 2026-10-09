@@ -1,9 +1,9 @@
 package encoding
 
 import (
-	"math"
 	"strings"
-	"unicode/utf8"
+
+	"github.com/reearth/ygo/internal/anycodec"
 )
 
 // ── RleByte ───────────────────────────────────────────────────────────────────
@@ -51,29 +51,7 @@ func NewRleByteDecoder(data []byte) *RleByteDecoder {
 
 // Read returns the next decoded byte.
 func (d *RleByteDecoder) Read() (byte, error) {
-	if d.count == 0 {
-		b, err := d.dec.ReadUint8()
-		if err != nil {
-			return 0, err
-		}
-		d.state = b
-		if d.dec.HasContent() {
-			cnt, err := d.dec.ReadVarUint()
-			if err != nil {
-				return 0, err
-			}
-			if cnt > math.MaxInt32 {
-				return 0, ErrOverflow
-			}
-			d.count = int(cnt) + 1
-		} else {
-			d.count = -1 // last run: read forever
-		}
-	}
-	if d.count > 0 {
-		d.count--
-	}
-	return d.state, nil
+	return anycodec.ReadRleByte(&d.dec.cursor, &d.state, &d.count)
 }
 
 // ── UintOptRle ────────────────────────────────────────────────────────────────
@@ -141,27 +119,7 @@ func NewUintOptRleDecoder(data []byte) *UintOptRleDecoder {
 
 // Read returns the next decoded value.
 func (d *UintOptRleDecoder) Read() (uint64, error) {
-	if d.count == 0 {
-		mag, neg, err := d.dec.readVarIntWithSign()
-		if err != nil {
-			return 0, err
-		}
-		d.state = mag
-		d.count = 1
-		if neg {
-			// run encoding: negative sign → read count
-			cnt, err := d.dec.ReadVarUint()
-			if err != nil {
-				return 0, err
-			}
-			if cnt > math.MaxInt32 {
-				return 0, ErrOverflow
-			}
-			d.count = int(cnt) + 2
-		}
-	}
-	d.count--
-	return d.state, nil
+	return anycodec.ReadUintOptRle(&d.dec.cursor, &d.state, &d.count)
 }
 
 // ── IntDiffOptRle ─────────────────────────────────────────────────────────────
@@ -237,28 +195,7 @@ func NewIntDiffOptRleDecoder(data []byte) *IntDiffOptRleDecoder {
 
 // Read returns the next decoded value.
 func (d *IntDiffOptRleDecoder) Read() (int64, error) {
-	if d.count == 0 {
-		encodedDiff, err := d.dec.ReadVarInt()
-		if err != nil {
-			return 0, err
-		}
-		hasCount := encodedDiff & 1
-		d.diff = encodedDiff >> 1 // arithmetic right shift
-		d.count = 1
-		if hasCount != 0 {
-			cnt, err := d.dec.ReadVarUint()
-			if err != nil {
-				return 0, err
-			}
-			if cnt > math.MaxInt32 {
-				return 0, ErrOverflow
-			}
-			d.count = int(cnt) + 2
-		}
-	}
-	d.state += d.diff
-	d.count--
-	return d.state, nil
+	return anycodec.ReadIntDiffOptRle(&d.dec.cursor, &d.state, &d.diff, &d.count)
 }
 
 // ── String ────────────────────────────────────────────────────────────────────
@@ -302,8 +239,7 @@ func NewStringDecoder(data []byte) (*StringDecoder, error) {
 		return nil, err
 	}
 	// Remaining bytes are the UintOptRle-encoded lengths.
-	remaining := make([]byte, len(data)-dec.pos)
-	copy(remaining, data[dec.pos:])
+	remaining := dec.RemainingBytesCopy()
 	return &StringDecoder{
 		str:  str,
 		lens: NewUintOptRleDecoder(remaining),
@@ -316,16 +252,7 @@ func (d *StringDecoder) Read() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	length := int(l)
-	// Reads are sequential, so advance the byte offset from where the last read
-	// ended instead of rescanning from the start of the column string every
-	// time. This makes decoding the whole column O(total length) rather than
-	// O(n^2) — the previous code re-counted UTF-16 units from offset 0 on every
-	// Read, which dominated ApplyUpdateV2 for string-heavy documents.
-	byteStart := d.bytePos
-	byteEnd := advanceUTF16(d.str, byteStart, length)
-	d.bytePos = byteEnd
-	return d.str[byteStart:byteEnd], nil
+	return anycodec.ReadStringChunk(d.str, &d.bytePos, l), nil
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -341,23 +268,4 @@ func utf16CodeUnitLen(s string) int {
 		}
 	}
 	return n
-}
-
-// advanceUTF16 returns the byte offset reached by advancing `units` UTF-16 code
-// units forward from byteStart in s. It scans only the requested span, so a
-// sequential StringDecoder (which remembers its byte position) decodes an entire
-// column in O(total length) instead of O(n^2).
-func advanceUTF16(s string, byteStart, units int) int {
-	bytePos := byteStart
-	counted := 0
-	for counted < units && bytePos < len(s) {
-		r, size := utf8.DecodeRuneInString(s[bytePos:])
-		if r >= 0x10000 {
-			counted += 2
-		} else {
-			counted++
-		}
-		bytePos += size
-	}
-	return bytePos
 }
