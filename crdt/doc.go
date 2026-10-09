@@ -475,6 +475,7 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 			}
 		}
 	}
+	txn.typeObserved = len(fireFns) > 0
 
 	// Snapshot deep-observer chains.
 	type deepEntry struct {
@@ -545,6 +546,9 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 	return func() {
 		for _, fn := range fireFns {
 			fn()
+		}
+		if txn.afterTypeObservers != nil {
+			txn.afterTypeObservers()
 		}
 		for _, de := range deepSnap {
 			for _, fn := range de.fns {
@@ -624,21 +628,22 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			phase2 = buildPhase2(d, txn)
 		}
 
-		// Yjs cleans up the format markers a remote change left redundant in
-		// a follow-up local transaction; run it before GC drops the
-		// deleted content it inspects.
-		// A panic there is re-raised once the lock is released.
-		var cleanupPhase2 func()
-		var cleanupPanic any
-		if r == nil && needsFormattingCleanup(txn) {
-			func() {
-				defer func() {
-					if p := recover(); p != nil {
-						cleanupPanic = p
-					}
-				}()
-				cleanupPhase2, cleanupPanic = d.formattingCleanupLocked(txn)
-			}()
+		// Yjs cleans up the format markers a remote change left redundant
+		// after the change's observers, in a follow-up local transaction,
+		// and GCs the change only then. A type observer may give a text its
+		// first marker, so with type observers to fire the gate waits.
+		deferGC := false
+		if r == nil && !txn.Local {
+			if needsFormattingCleanup(txn) {
+				txn.formatCleanup, deferGC = true, true
+			} else if txn.typeObserved && changedText(txn) {
+				txn.afterTypeObservers = func() {
+					d.mu.Lock()
+					txn.formatCleanup = needsFormattingCleanup(txn)
+					d.mu.Unlock()
+				}
+				deferGC = true
+			}
 		}
 
 		// #78 H1 — Auto-GC at transaction commit. Runs AFTER buildPhase2 so
@@ -652,7 +657,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		// Yjs handles this with a per-item keep flag; we take the conservative
 		// position of disabling auto-GC entirely while any UndoManager is
 		// registered. RunGC remains available as the explicit manual entry point.
-		if d.gc && d.undoManagerCount == 0 {
+		if d.gc && d.undoManagerCount == 0 && !deferGC {
 			gcTxnDeleteSet(d, txn)
 		}
 
@@ -663,18 +668,16 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		txn.done = true
 		d.mu.Unlock()
 
+		if deferGC {
+			// Runs even if an observer panics, as Yjs runs the cleanup.
+			defer d.afterRemoteObservers(txn)
+		}
 		if phase2 != nil {
 			phase2()
-		}
-		if cleanupPhase2 != nil {
-			cleanupPhase2()
 		}
 
 		if r != nil {
 			panic(r)
-		}
-		if cleanupPanic != nil {
-			panic(cleanupPanic)
 		}
 	}()
 

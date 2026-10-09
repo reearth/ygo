@@ -9451,5 +9451,3905 @@
         }
       ]
     }
+  ],
+  "observed": [
+    {
+      "name": "emptied_range_ins_plain_observe",
+      "mode": "observe",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "abc"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 3
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 1,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "observe",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "cleanup"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "x"
+        }
+      ],
+      "v1": "02030200c1010101020186010204626f6c64046e756c6cc4010102000178020100010101740281010101020201000101010003"
+    },
+    {
+      "name": "emptied_range_ins_plain_deep",
+      "mode": "deep",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "abc"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 3
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 1,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "observe",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "cleanup"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "x"
+        }
+      ],
+      "v1": "02030200c1010101020186010204626f6c64046e756c6cc4010102000178020100010101740281010101020201000101010003"
+    },
+    {
+      "name": "emptied_range_ins_plain_after",
+      "mode": "after",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "abc"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 3
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 1,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "observe",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "cleanup"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "x"
+        }
+      ],
+      "v1": "02030200c1010101020186010204626f6c64046e756c6cc4010102000178020100010101740281010101020201000101010003"
+    },
+    {
+      "name": "emptied_range_ins_bold_observe",
+      "mode": "observe",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "abc"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 3
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 1,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x",
+        "a": {
+          "bold": true
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        }
+      ],
+      "delta": [
+        {
+          "insert": "x",
+          "attributes": {
+            "bold": true
+          }
+        }
+      ],
+      "v1": "02030200c60101010204626f6c64047472756586010204626f6c64046e756c6cc40102020101780201000101017402810101010101010003"
+    },
+    {
+      "name": "emptied_range_ins_bold_deep",
+      "mode": "deep",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "abc"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 3
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 1,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x",
+        "a": {
+          "bold": true
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        }
+      ],
+      "delta": [
+        {
+          "insert": "x",
+          "attributes": {
+            "bold": true
+          }
+        }
+      ],
+      "v1": "02030200c60101010204626f6c64047472756586010204626f6c64046e756c6cc40102020101780201000101017402810101010101010003"
+    },
+    {
+      "name": "emptied_range_ins_bold_after",
+      "mode": "after",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "abc"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 3
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 1,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x",
+        "a": {
+          "bold": true
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            }
+          ],
+          "live": 2
+        }
+      ],
+      "delta": [
+        {
+          "insert": "x",
+          "attributes": {
+            "bold": true
+          }
+        }
+      ],
+      "v1": "02030200c60101010204626f6c64047472756586010204626f6c64046e756c6cc40102020101780201000101017402810101010101010003"
+    },
+    {
+      "name": "concurrent_bold_ins_plain_observe",
+      "mode": "observe",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "hello"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 1,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        }
+      ],
+      "delta": [
+        {
+          "insert": "xh"
+        },
+        {
+          "insert": "e",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "ll",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "o"
+        }
+      ],
+      "v1": "02030200c60101010204626f6c64047472756586010404626f6c64046e756c6c44010001780601000401017401688401000165840101026c6c840103016fc60100010104626f6c640474727565c60103010404626f6c64046e756c6c00"
+    },
+    {
+      "name": "concurrent_bold_ins_plain_deep",
+      "mode": "deep",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "hello"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 1,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        }
+      ],
+      "delta": [
+        {
+          "insert": "xh"
+        },
+        {
+          "insert": "e",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "ll",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "o"
+        }
+      ],
+      "v1": "02030200c60101010204626f6c64047472756586010404626f6c64046e756c6c44010001780601000401017401688401000165840101026c6c840103016fc60100010104626f6c640474727565c60103010404626f6c64046e756c6c00"
+    },
+    {
+      "name": "concurrent_bold_ins_plain_after",
+      "mode": "after",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "hello"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 1,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xh"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        }
+      ],
+      "delta": [
+        {
+          "insert": "xh"
+        },
+        {
+          "insert": "e",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "ll",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "o"
+        }
+      ],
+      "v1": "02030200c60101010204626f6c64047472756586010404626f6c64046e756c6c44010001780601000401017401688401000165840101026c6c840103016fc60100010104626f6c640474727565c60103010404626f6c64046e756c6c00"
+    },
+    {
+      "name": "concurrent_bold_ins_bold_observe",
+      "mode": "observe",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "hello"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 1,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x",
+        "a": {
+          "bold": true
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        }
+      ],
+      "delta": [
+        {
+          "insert": "x",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "h"
+        },
+        {
+          "insert": "e",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "ll",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "o"
+        }
+      ],
+      "v1": "02050200c60101010204626f6c64047472756586010404626f6c64046e756c6c46010004626f6c640474727565c4020201000178c60203010004626f6c64046e756c6c0601000401017401688401000165840101026c6c840103016fc60100010104626f6c640474727565c60103010404626f6c64046e756c6c00"
+    },
+    {
+      "name": "concurrent_bold_ins_bold_deep",
+      "mode": "deep",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "hello"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 1,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x",
+        "a": {
+          "bold": true
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        }
+      ],
+      "delta": [
+        {
+          "insert": "x",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "h"
+        },
+        {
+          "insert": "e",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "ll",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "o"
+        }
+      ],
+      "v1": "02050200c60101010204626f6c64047472756586010404626f6c64046e756c6c46010004626f6c640474727565c4020201000178c60203010004626f6c64046e756c6c0601000401017401688401000165840101026c6c840103016fc60100010104626f6c640474727565c60103010404626f6c64046e756c6c00"
+    },
+    {
+      "name": "concurrent_bold_ins_bold_after",
+      "mode": "after",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "hello"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 1,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x",
+        "a": {
+          "bold": true
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "x",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 6
+        }
+      ],
+      "delta": [
+        {
+          "insert": "x",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "h"
+        },
+        {
+          "insert": "e",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "ll",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "o"
+        }
+      ],
+      "v1": "02050200c60101010204626f6c64047472756586010404626f6c64046e756c6c46010004626f6c640474727565c4020201000178c60203010004626f6c64046e756c6c0601000401017401688401000165840101026c6c840103016fc60100010104626f6c640474727565c60103010404626f6c64046e756c6c00"
+    },
+    {
+      "name": "concurrent_bold_unbold_observe",
+      "mode": "observe",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "hello"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 1,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "fmt",
+        "i": 1,
+        "n": 2,
+        "a": {
+          "bold": null
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        }
+      ],
+      "delta": [
+        {
+          "insert": "hel"
+        },
+        {
+          "insert": "l",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "o"
+        }
+      ],
+      "v1": "02030200c1010101020186010404626f6c64046e756c6cc60102010304626f6c6404747275650701000401017401688401000165840101016c840102016c840103016fc10100010101c60103010404626f6c64046e756c6c020201000101010501"
+    },
+    {
+      "name": "concurrent_bold_unbold_deep",
+      "mode": "deep",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "hello"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 1,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "fmt",
+        "i": 1,
+        "n": 2,
+        "a": {
+          "bold": null
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        }
+      ],
+      "delta": [
+        {
+          "insert": "hel"
+        },
+        {
+          "insert": "l",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "o"
+        }
+      ],
+      "v1": "02030200c1010101020186010404626f6c64046e756c6cc60102010304626f6c6404747275650701000401017401688401000165840101016c840102016c840103016fc10100010101c60103010404626f6c64046e756c6c020201000101010501"
+    },
+    {
+      "name": "concurrent_bold_unbold_after",
+      "mode": "after",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "hello"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "fmt",
+          "i": 1,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 2,
+          "n": 3,
+          "a": {
+            "bold": true
+          }
+        }
+      ],
+      "react": {
+        "k": "fmt",
+        "i": 1,
+        "n": 2,
+        "a": {
+          "bold": null
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "h"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "ll",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 4
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "hel"
+            },
+            {
+              "insert": "l",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "o"
+            }
+          ],
+          "live": 3
+        }
+      ],
+      "delta": [
+        {
+          "insert": "hel"
+        },
+        {
+          "insert": "l",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "o"
+        }
+      ],
+      "v1": "02030200c1010101020186010404626f6c64046e756c6cc60102010304626f6c6404747275650701000401017401688401000165840101016c840102016c840103016fc10100010101c60103010404626f6c64046e756c6c020201000101010501"
+    },
+    {
+      "name": "deleted_word_ins_plain_observe",
+      "mode": "observe",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "ab"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 1,
+          "s": "xy",
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 1,
+        "s": "z"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "azb"
+        }
+      ],
+      "v1": "02010200c401050101017a0301000401017401618401000162c101000101040101010204"
+    },
+    {
+      "name": "deleted_word_ins_plain_deep",
+      "mode": "deep",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "ab"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 1,
+          "s": "xy",
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 1,
+        "s": "z"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "azb"
+        }
+      ],
+      "v1": "02010200c401050101017a0301000401017401618401000162c101000101040101010204"
+    },
+    {
+      "name": "deleted_word_ins_plain_after",
+      "mode": "after",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "ab"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 1,
+          "s": "xy",
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 1,
+        "s": "z"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "azb"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "azb"
+        }
+      ],
+      "v1": "02010200c401050101017a0301000401017401618401000162c101000101040101010204"
+    },
+    {
+      "name": "deleted_word_ins_bold_observe",
+      "mode": "observe",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "ab"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 1,
+          "s": "xy",
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 1,
+        "s": "z",
+        "a": {
+          "bold": true
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        }
+      ],
+      "delta": [
+        {
+          "insert": "a"
+        },
+        {
+          "insert": "z",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "b"
+        }
+      ],
+      "v1": "02030200c60105010104626f6c640474727565c402000101017ac60201010104626f6c64046e756c6c0301000401017401618401000162c101000101040101010204"
+    },
+    {
+      "name": "deleted_word_ins_bold_deep",
+      "mode": "deep",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "ab"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 1,
+          "s": "xy",
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 1,
+        "s": "z",
+        "a": {
+          "bold": true
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "a"
+        },
+        {
+          "insert": "z",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "b"
+        }
+      ],
+      "v1": "02030200c60105010104626f6c640474727565c402000101017ac60201010104626f6c64046e756c6c0301000401017401618401000162c101000101040101010204"
+    },
+    {
+      "name": "deleted_word_ins_bold_after",
+      "mode": "after",
+      "ops": [
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "ab"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 1,
+          "s": "xy",
+          "a": {
+            "bold": true
+          }
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 1,
+        "s": "z",
+        "a": {
+          "bold": true
+        }
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ab"
+            }
+          ],
+          "live": 0
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "a"
+            },
+            {
+              "insert": "z",
+              "attributes": {
+                "bold": true
+              }
+            },
+            {
+              "insert": "b"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "a"
+        },
+        {
+          "insert": "z",
+          "attributes": {
+            "bold": true
+          }
+        },
+        {
+          "insert": "b"
+        }
+      ],
+      "v1": "02030200c60105010104626f6c640474727565c402000101017ac60201010104626f6c64046e756c6c0301000401017401618401000162c101000101040101010204"
+    }
   ]
 }

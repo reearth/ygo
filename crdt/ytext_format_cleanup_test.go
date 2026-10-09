@@ -151,6 +151,43 @@ func TestUnit_YText_RemoteCleanupPanicUnlocks(t *testing.T) {
 	assert.Equal(t, 1, countLiveContentFormat(c), "the cleanup's deletion reached the peer")
 }
 
+// The cleanup and the remote change's GC run even when an observer of the
+// change panics, as Yjs runs every cleanup step; the panic then reaches the
+// caller with the document unlocked.
+func TestUnit_YText_FormatCleanup_AfterObserverPanic(t *testing.T) {
+	a, b := newTestDoc(1), newTestDoc(2)
+	at, bt := a.GetText("t"), b.GetText("t")
+	a.Transact(func(txn *Transaction) { at.Insert(txn, 0, "abc", nil) })
+	syncText(t, a, b, nil)
+	a.Transact(func(txn *Transaction) { at.Delete(txn, 0, 3) })
+	b.Transact(func(txn *Transaction) { bt.Format(txn, 2, 1, Attributes{"bold": true}) })
+	var origins []any
+	b.OnUpdate(func(_ []byte, origin any) { origins = append(origins, origin) })
+	bt.Observe(func(e YTextEvent) {
+		if !e.Txn.Local {
+			assert.Equal(t, 2, countLiveContentFormat(b), "the observer runs before the cleanup")
+			panic("observer")
+		}
+	})
+
+	assert.PanicsWithValue(t, "observer", func() { syncText(t, a, b, "remote") })
+	assert.Equal(t, 1, countLiveContentFormat(b))
+	assert.Equal(t, []any{nil}, origins, "the cleanup's update; the panic skipped the remote one's")
+	for _, it := range b.store.clients[1] {
+		assert.IsType(t, &ContentDeleted{}, it.Content, "the remote deletion is GC'd")
+	}
+	done := make(chan struct{})
+	go func() {
+		b.Transact(func(txn *Transaction) { bt.Insert(txn, 0, "x", nil) })
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("document still locked after the observer panicked")
+	}
+}
+
 // A root text first accessed after its format markers arrived does not clean
 // up until a marker integrates into it, as Yjs's lazily created YText starts
 // without _hasFormatting; one never accessed is cleaned only when the same

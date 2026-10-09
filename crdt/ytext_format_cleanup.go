@@ -28,12 +28,55 @@ func needsFormattingCleanup(txn *Transaction) bool {
 	return false
 }
 
+// changedText reports whether txn changed a text, which an observer could
+// still give its first marker.
+func changedText(txn *Transaction) bool {
+	for t := range txn.changed {
+		switch t.owner.(type) {
+		case *YText, *YXmlText:
+			return true
+		}
+	}
+	return false
+}
+
+// afterRemoteObservers finishes a remote transaction once its observers have
+// fired: it runs the format cleanup, GCs the transaction, and fires the
+// cleanup's observers. A panicking cleanup still emits what it deleted, then
+// re-panics.
+func (d *Doc) afterRemoteObservers(remote *Transaction) {
+	var phase2 func()
+	var panicked any
+	func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		defer func() {
+			if p := recover(); p != nil {
+				panicked = p
+			}
+		}()
+		if remote.formatCleanup {
+			phase2, panicked = d.formattingCleanupLocked(remote)
+		}
+		if d.gc && d.undoManagerCount == 0 {
+			gcTxnDeleteSet(d, remote)
+		}
+	}()
+	if phase2 != nil {
+		phase2()
+	}
+	if panicked != nil {
+		panic(panicked)
+	}
+}
+
 // formattingCleanupLocked runs Yjs's cleanupYTextAfterTransaction for the
 // remote transaction remote in a new local transaction with a nil origin, as
-// Yjs does, and returns that transaction's observer phase (nil when it changed
-// nothing) and any panic the cleanup raised. Like a panicking Transact, a
-// panicking cleanup still emits the deletions it made. It must run under d.mu
-// before remote's deleted content is GC'd.
+// Yjs does, and returns that transaction's observer phase and any panic the
+// cleanup raised. A cleanup that deleted nothing fires only the
+// after-transaction observers, as Yjs emits no update without content. Like
+// a panicking Transact, a panicking cleanup still emits the deletions it
+// made. It must run under d.mu before remote's deleted content is GC'd.
 func (d *Doc) formattingCleanupLocked(remote *Transaction) (phase2 func(), panicked any) {
 	txn := &Transaction{
 		doc:         d,
@@ -53,7 +96,7 @@ func (d *Doc) formattingCleanupLocked(remote *Transaction) (phase2 func(), panic
 	txn.afterState = d.store.StateVector()
 	txn.done = true
 	if len(txn.changed) == 0 {
-		return nil, panicked
+		return afterTxnPhase(d, txn), panicked
 	}
 	func() {
 		if panicked != nil {
@@ -65,6 +108,22 @@ func (d *Doc) formattingCleanupLocked(remote *Transaction) (phase2 func(), panic
 		gcTxnDeleteSet(d, txn)
 	}
 	return phase2, panicked
+}
+
+// afterTxnPhase fires only d's after-transaction observers for txn.
+func afterTxnPhase(d *Doc, txn *Transaction) func() {
+	if len(d.onAfterTxn) == 0 {
+		return nil
+	}
+	fns := make([]func(*Transaction), len(d.onAfterTxn))
+	for i, s := range d.onAfterTxn {
+		fns[i] = s.fn
+	}
+	return func() {
+		for _, fn := range fns {
+			fn(txn)
+		}
+	}
 }
 
 // cleanupYTextAfterTransaction deletes the format markers remote left

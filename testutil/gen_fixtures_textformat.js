@@ -287,7 +287,84 @@ for (const [a, b] of [[1, 2], [2, 1]]) {
 	]))
 }
 
-const out = { single: singles, multi: multis }
+// `observed` rows replay `ops`, then apply A's diff to B with origin 'remote'
+// while B's observers log what they see; the `mode` observer applies `react`
+// on B once, from the first remote transaction. Each event names its
+// transaction: the remote one, the reaction, or the cleanup.
+function liveFormats (d) {
+	let n = 0
+	d.store.clients.forEach((ss) => ss.forEach((s) => {
+		if (s.content && s.content.constructor === Y.ContentFormat && !s.deleted) n++
+	}))
+	return n
+}
+
+function observed (name, mode, ops, react) {
+	const docs = { A: new Y.Doc(), B: new Y.Doc() }
+	docs.A.clientID = 1
+	docs.B.clientID = 2
+	const sync = (from, to, origin) => Y.applyUpdate(to, Y.encodeStateAsUpdate(from, Y.encodeStateVector(to)), origin)
+	for (const o of ops) {
+		if (o.k === 'sync') sync(docs[o.from], docs[o.to])
+		else apply(docs[o.p].getText('t'), o)
+	}
+	const b = docs.B
+	const bt = b.getText('t')
+	const log = []
+	let fired = false
+	let reacting = false
+	let reaction = null
+	const txnName = (tr) => tr === reaction ? 'react' : tr.origin === 'remote' ? 'remote' : 'cleanup'
+	const seen = (ev, tr) => {
+		log.push({ ev, txn: txnName(tr), delta: bt.toDelta(), live: liveFormats(b) })
+		if (ev === mode && !tr.local && !fired) {
+			fired = true
+			reacting = true
+			apply(bt, react)
+			reacting = false
+		}
+	}
+	b.on('beforeTransaction', (tr) => { if (reacting) reaction = tr })
+	bt.observe((e) => seen('observe', e.transaction))
+	bt.observeDeep((_, tr) => seen('deep', tr))
+	b.on('afterTransaction', (tr) => seen('after', tr))
+	b.on('update', (_, __, ___, tr) => log.push({ ev: 'update', txn: txnName(tr) }))
+	sync(docs.A, b, 'remote')
+	return { name, mode, ops, react, log, delta: bt.toDelta(), v1: hex(Y.encodeStateAsUpdate(b)) }
+}
+
+const insPlain = { k: 'ins', i: 0, s: 'x' }
+const insBold = { k: 'ins', i: 0, s: 'x', a: B }
+const observedScripts = {
+	emptied_range: [[
+		{ p: 'A', k: 'ins', i: 0, s: 'abc' },
+		{ k: 'sync', from: 'A', to: 'B' },
+		{ p: 'A', k: 'del', i: 0, n: 3 },
+		{ p: 'B', k: 'fmt', i: 2, n: 1, a: B },
+	], { ins_plain: insPlain, ins_bold: insBold }],
+	concurrent_bold: [[
+		{ p: 'A', k: 'ins', i: 0, s: 'hello' },
+		{ k: 'sync', from: 'A', to: 'B' },
+		{ p: 'A', k: 'fmt', i: 1, n: 3, a: B },
+		{ p: 'B', k: 'fmt', i: 2, n: 3, a: B },
+	], { ins_plain: insPlain, ins_bold: insBold, unbold: { k: 'fmt', i: 1, n: 2, a: { bold: null } } }],
+	deleted_word: [[
+		{ p: 'A', k: 'ins', i: 0, s: 'ab' },
+		{ p: 'A', k: 'ins', i: 1, s: 'xy', a: B },
+		{ k: 'sync', from: 'A', to: 'B' },
+		{ p: 'A', k: 'del', i: 1, n: 2 },
+	], { ins_plain: { k: 'ins', i: 1, s: 'z' }, ins_bold: { k: 'ins', i: 1, s: 'z', a: B } }],
+}
+const observedRows = []
+for (const [sname, [ops, reactions]] of Object.entries(observedScripts)) {
+	for (const [rname, react] of Object.entries(reactions)) {
+		for (const mode of ['observe', 'deep', 'after']) {
+			observedRows.push(observed(`${sname}_${rname}_${mode}`, mode, ops, react))
+		}
+	}
+}
+
+const out = { single: singles, multi: multis, observed: observedRows }
 const file = path.join(outDir, 'textformat_yjs_fixtures.json')
 fs.writeFileSync(file, JSON.stringify(out, null, 2) + '\n')
-console.log(`wrote crdt/testdata/textformat_yjs_fixtures.json (${singles.length} single, ${multis.length} multi)`)
+console.log(`wrote crdt/testdata/textformat_yjs_fixtures.json (${singles.length} single, ${multis.length} multi, ${observedRows.length} observed)`)

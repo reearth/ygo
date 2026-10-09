@@ -59,6 +59,13 @@ type Transaction struct {
 	// TransactContext. Exposed via the Ctx() method so fn can poll for
 	// cancellation.
 	ctx context.Context
+	// formatCleanup marks a remote transaction whose format cleanup runs
+	// once its observers have fired; afterTypeObservers, when set, decides
+	// it after the type observers (typeObserved: there are some), where
+	// Yjs does.
+	formatCleanup      bool
+	typeObserved       bool
+	afterTypeObservers func()
 }
 
 // Ctx returns the context associated with this transaction. Transactions

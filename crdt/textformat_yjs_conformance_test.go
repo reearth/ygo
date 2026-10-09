@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -44,6 +46,22 @@ type textFormatFixtures struct {
 			V1   string `json:"v1"`
 		} `json:"final"`
 	} `json:"multi"`
+	Observed []struct {
+		Name  string          `json:"name"`
+		Mode  string          `json:"mode"`
+		Ops   []textFormatOp  `json:"ops"`
+		React textFormatOp    `json:"react"`
+		Log   []observedEvent `json:"log"`
+		Delta json.RawMessage `json:"delta"`
+		V1    string          `json:"v1"`
+	} `json:"observed"`
+}
+
+type observedEvent struct {
+	Ev    string          `json:"ev"`
+	Txn   string          `json:"txn"`
+	Delta json.RawMessage `json:"delta"`
+	Live  int             `json:"live"`
 }
 
 func loadTextFormatFixtures(t *testing.T) textFormatFixtures {
@@ -287,6 +305,112 @@ func TestConformance_TextFormat_MultiPeer(t *testing.T) {
 				if got := EncodeStateAsUpdateV1(docs[f.Peer], nil); !sameUpdate(t, got, mustHex(t, f.V1)) {
 					t.Errorf("peer %s final V1\n got=%v\nwant=%v", f.Peer, textFormatUnits(t, got), textFormatUnits(t, mustHex(t, f.V1)))
 				}
+			}
+		})
+	}
+}
+
+// Observers of a remote transaction see the formatting before its cleanup,
+// edits they make precede the cleanup, and the cleanup's events come last.
+// A transaction an observer starts fires its observers before returning,
+// where Yjs queues them after the cleanup, so for it only the event kinds
+// are compared, and the update order only when it starts after the remote
+// update was emitted.
+func TestConformance_TextFormat_Observed(t *testing.T) {
+	for _, fx := range loadTextFormatFixtures(t).Observed {
+		t.Run(fx.Name, func(t *testing.T) {
+			docs := map[string]*Doc{"A": New(WithClientID(1)), "B": New(WithClientID(2))}
+			for _, o := range fx.Ops {
+				if o.K == "sync" {
+					from, to := docs[o.From], docs[o.To]
+					if err := ApplyUpdateV1(to, EncodeStateAsUpdateV1(from, to.StateVector()), nil); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					applyTextFormatOp(docs[o.P], o)
+				}
+			}
+			b := docs["B"]
+			bt := b.GetText("t")
+			fired, reacting := false, false
+			name := func(origin any) string {
+				switch {
+				case reacting:
+					return "react"
+				case origin == "remote":
+					return "remote"
+				}
+				return "cleanup"
+			}
+			var got, gotUpdates []string
+			seen := func(ev string, txn *Transaction) {
+				n := name(txn.Origin)
+				if n == "react" {
+					got = append(got, n+" "+ev)
+					return
+				}
+				d, err := json.Marshal(deltaAsYjsJSON(t, bt.ToDelta()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, fmt.Sprintf("%s %s %d %s", n, ev, countLiveContentFormat(b), d))
+				if ev == fx.Mode && !txn.Local && !fired {
+					fired, reacting = true, true
+					applyTextFormatOp(b, fx.React)
+					reacting = false
+				}
+			}
+			bt.Observe(func(e YTextEvent) { seen("observe", e.Txn) })
+			bt.ObserveDeep(func(txn *Transaction) { seen("deep", txn) })
+			b.OnAfterTransaction(func(txn *Transaction) { seen("after", txn) })
+			b.OnUpdate(func(_ []byte, origin any) { gotUpdates = append(gotUpdates, name(origin)) })
+			if err := ApplyUpdateV1(b, EncodeStateAsUpdateV1(docs["A"], b.StateVector()), "remote"); err != nil {
+				t.Fatal(err)
+			}
+
+			var want, wantUpdates []string
+			for _, e := range fx.Log {
+				switch {
+				case e.Ev == "update":
+					wantUpdates = append(wantUpdates, e.Txn)
+				case e.Txn == "react":
+					want = append(want, e.Txn+" "+e.Ev)
+				default:
+					d, err := json.Marshal(yjsDelta(t, e.Delta))
+					if err != nil {
+						t.Fatal(err)
+					}
+					want = append(want, fmt.Sprintf("%s %s %d %s", e.Txn, e.Ev, e.Live, d))
+				}
+			}
+			byTxn := func(evs []string) map[string][]string {
+				m := map[string][]string{}
+				for _, e := range evs {
+					n, _, _ := strings.Cut(e, " ")
+					m[n] = append(m[n], e)
+				}
+				return m
+			}
+			if g, w := byTxn(got), byTxn(want); !reflect.DeepEqual(g, w) {
+				t.Errorf("events\n got=%q\nwant=%q", g, w)
+			}
+			if fx.Mode != "after" {
+				for _, u := range [][]string{gotUpdates, wantUpdates} {
+					n := len(u)
+					if n > 0 && u[n-1] == "cleanup" {
+						n--
+					}
+					slices.Sort(u[:n])
+				}
+			}
+			if !reflect.DeepEqual(gotUpdates, wantUpdates) {
+				t.Errorf("updates\n got=%q\nwant=%q", gotUpdates, wantUpdates)
+			}
+			if got := deltaAsYjsJSON(t, bt.ToDelta()); !reflect.DeepEqual(got, yjsDelta(t, fx.Delta)) {
+				t.Errorf("final delta\n got=%v\nwant=%v", got, yjsDelta(t, fx.Delta))
+			}
+			if got := EncodeStateAsUpdateV1(b, nil); !sameUpdate(t, got, mustHex(t, fx.V1)) {
+				t.Errorf("final V1\n got=%v\nwant=%v", textFormatUnits(t, got), textFormatUnits(t, mustHex(t, fx.V1)))
 			}
 		})
 	}
