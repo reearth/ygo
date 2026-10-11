@@ -50,6 +50,28 @@ Three answers differ from `@hocuspocus/server` 2.15.3, on purpose:
 holds everything a V1 update carries, as Yjs `snapshotContainsUpdate` does. The
 read-only SyncStep2 answer uses it.
 
+**Who is affected: servers that want to look at a read-write peer's update
+before it applies** — a per-document size bound, schema validation, write
+moderation — or that want a lock of their own held across the apply.
+
+`Server.OnPeerUpdate`, if set, runs in place of the room's own apply of a
+read-write peer's SyncStep2 or Update (Sync/SyncReply, tags 0/4). It is handed
+the room name, its document, the update's V1 bytes and the transaction origin,
+and an `apply` function that applies the update exactly as the room does
+without a hook; a second call to `apply` returns `ErrPeerUpdateApplied`. An
+update `apply` did not apply is refused: not broadcast, and answered
+`SyncStatus(0)` on a Hocuspocus-framed connection. A hook error that is or
+wraps a `*PeerClose{Code, Reason}` closes the peer with that code after the
+`SyncStatus`, its reason cut to a close frame's 123 bytes at a rune boundary.
+An update `apply` applied is broadcast and answered `SyncStatus(1)` whatever
+the hook returns afterward. Read-only peers never reach the hook, as before.
+Nil, the default, leaves every peer's update applied exactly as it was.
+
+This is the counterpart of `@hocuspocus/server`'s `beforeHandleMessage`
+(`packages/server/src/Connection.ts`), which runs before the message
+handler's own apply and lets a rejection close the connection with its own
+code and reason.
+
 ## v1.51.2
 
 **Who is affected:** servers and clients that call `GetText`, `GetArray`,
