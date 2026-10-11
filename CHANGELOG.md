@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already holds everything a V1 update carries (every struct below its state
   vector, every deletion in its delete set), without integrating the update.
   Matches Yjs `snapshotContainsUpdate`.
+- **`provider/websocket`: `Server.OnPeerUpdate`, a hook that runs in place of
+  the room's own apply of a read-write peer's SyncStep2 or Update.** The hook is
+  handed the room, its document, the update's V1 bytes and the origin, and an
+  `apply` function that applies the update as the room does without a hook (a
+  second call returns `ErrPeerUpdateApplied`), so an embedder can refuse an
+  update before it reaches the room or any other peer - a per-document size
+  bound, schema validation, write moderation - or hold a lock of its own across
+  the apply. An update `apply` did not apply is not broadcast and is answered
+  `SyncStatus(0)` on a Hocuspocus-framed connection; a hook error that is or
+  wraps a `*PeerClose` also closes the peer with its code and reason (cut to a
+  close frame's 123 bytes). An update `apply` applied is broadcast and answered
+  `SyncStatus(1)` whatever the hook returns. Read-only peers never reach the
+  hook. The hook is the counterpart of `@hocuspocus/server`'s
+  `beforeHandleMessage`. Nil, the default, leaves the behaviour unchanged.
 
 ### Fixed
 

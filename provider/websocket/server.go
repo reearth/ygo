@@ -903,6 +903,19 @@ type Server struct {
 	// to the embedding application.
 	OnStateless StatelessHook
 
+	// OnPeerUpdate, if non-nil, runs in place of the room's own apply of a
+	// SyncStep2 or Update a read-write peer sent, under Sync (tag 0) or
+	// SyncReply (tag 4), so the embedder can refuse it before it reaches the
+	// room or any other peer, or hold a lock of its own across the apply.
+	// apply applies the update exactly as the room does without a hook. An
+	// update apply did not apply is not broadcast and is answered
+	// SyncStatus(0) on a Hocuspocus-framed connection; when the hook's error is
+	// or wraps a *PeerClose, the peer is closed with its code after that
+	// answer. An update apply applied is broadcast and answered SyncStatus(1)
+	// whatever the hook returns. A read-only peer's update never reaches the
+	// hook. Nil keeps the behaviour without a hook. See PeerUpdateHook.
+	OnPeerUpdate PeerUpdateHook
+
 	// OnTokenAuth, if non-nil, validates the token from a Hocuspocus in-band
 	// Auth message (tag 2). A nil error accepts the connection and replies
 	// Authenticated (scope from the returned ConnectionConfig.ReadOnly); a
