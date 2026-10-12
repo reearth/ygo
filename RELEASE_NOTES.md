@@ -1,3 +1,23 @@
+## v1.51.10
+
+**Overlapping updates no longer duplicate content.** When out-of-order V1/V2
+updates partially overlap a pending text or array range, the retry now skips
+its already received prefix and inserts only the new suffix. This also applies
+to orphaned ranges after container garbage collection, preserving correct clocks
+across checkpoint restore so later updates are not silently skipped.
+
+**Large dependency queues restore faster.** The V1/V2 within-update resolver
+processes producers before their dependents and completes contiguous client tails
+before returning to consumers. This accelerates reverse client chains, including
+updates with multiple structs per client, without leaving ready tails for costly
+later insertion. The same range index tracks prefix coverage, preventing shorter
+overlapping copies from hiding a producer and forcing repeated retries.
+
+Small queues and queues making no progress avoid the dependency index. Complex
+queues use temporary memory proportional to their size; remaining unresolved
+items retain the fixed-point fallback and the configured persistent pending limit.
+The public API and update encodings remain compatible.
+
 ## v1.51.9
 
 **Map updates avoid unrelated-key conflict scans.** New keys and replacements

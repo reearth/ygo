@@ -76,9 +76,8 @@ func strPtr(s string) *string { return &s }
 // conflict-resolution algorithm. After integrate returns, Left and Right
 // reflect the item's final position.
 //
-// offset > 0 is only needed when the item partially overlaps an existing item
-// in the store (a split scenario during update decoding). For Phase 2 all
-// items arrive cleanly (offset = 0).
+// offset skips an already integrated prefix when the item's range partially
+// overlaps the store, either during decoding or when retrying a parked item.
 func (item *Item) integrate(txn *Transaction, offset int) {
 	if offset > 0 {
 		item.ID.Clock += uint64(offset)

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.51.10] — 2026-10-12
+
+### Fixed
+
+- **`crdt`: trim partially received ranges when retrying pending updates.**
+  Out-of-order overlapping V1/V2 updates no longer duplicate text or array
+  elements. Orphaned ranges whose containers were garbage-collected are trimmed
+  too, preventing incorrect clocks after checkpoint restore and lost later updates.
+
+### Performance
+
+- **`crdt`: resolve large within-update dependency queues in producer-first order.**
+  An immutable range index and iterative scheduler avoid repeated reverse-chain
+  retries. Contiguous client tails are processed before dependents, preventing
+  deferred tails from scanning a growing set of descendants. Prefix coverage
+  reuses the range index so shorter overlapping copies cannot hide a producer.
+  Small and entirely blocked queues avoid indexing; remaining unresolved items
+  retain the fixed-point fallback and persistent pending limit.
+
 ## [1.51.9] — 2026-10-12
 
 ### Performance

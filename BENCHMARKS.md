@@ -342,3 +342,91 @@ result checks; `rejections/op` distinguishes rejection from successful restore.
 Reported peak RSS uses the largest of three fresh `/usr/bin/time -l` processes
 applying identical prepared wire bytes, with a GC before destination creation.
 Runtime/input/document are included; fixture generation and build are excluded.
+
+## Within-update dependency resolver
+
+Fixtures in `crdt/pending_budget_review_bench_test.go` and
+`crdt/pending_resolver_bench_test.go` cover reverse client chains, ordinary V2
+checkpoints, non-mergeable string/embed pairs per client, missing/complete keyed
+queues, longer producers hidden by shorter overlapping ranges, and scheduler-off
+fixed-point controls against an independent reference.
+
+```sh
+go test -tags benchheavy ./crdt -run '^$' \
+  -bench '^BenchmarkPending(ReverseChain|ManyClientCheckpoint|MultiStructChain|OverlapFallback|FixedPointFallback|LinearClientQueue)$' \
+  -benchmem -benchtime=1x -count=10 -timeout=30m
+go test ./crdt -run '^$' -bench '^BenchmarkApplyUpdateV[12](_Bulk)?$' \
+  -benchmem -benchtime=100ms -count=10
+benchstat before.txt after.txt
+```
+
+Complete-update timers exclude destination creation/destruction and result checks.
+`rejections/op` distinguishes rejection from successful restore. Compare identical
+fixtures and options on both revisions. Allocation volume is cumulative, not peak RAM.
+
+Local results: Apple M4 Pro, macOS arm64, Go 1.26.8; ten serial alternating
+samples per revision with identical fixtures. Before is main `8ca1701`; after
+is the resolver at `404ae02` on the same base. Both accept every complete fixture below
+with cap=16. The overlap scenario calls the resolver directly.
+
+Time/allocations are medians; allocation volume is cumulative. Peak RSS is the
+maximum of three fresh processes applying identical prepared wire bytes.
+Fixture generation and compilation are excluded; runtime/input/document included.
+Complete-update timers exclude document lifecycle and result checks.
+
+Temporary scheduler storage adds about 0.40 MiB at 10k queued items,
+0.79 MiB at 20k and 1.89 MiB for 40k contiguous items. The four ordinary
+ApplyUpdate V1/V2 benchmarks show no significant time/allocation change.
+
+### V1 reverse chain, 20k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 4,200.673 | 13.812 |
+| Allocated, MiB/op | 12.519 | 13.312 |
+| Allocations/op | 100,566.5 | 100,570.0 |
+| Peak RSS, MiB | 14.906 | 16.469 |
+
+### V2 reverse chain, 20k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 4,209.086 | 14.640 |
+| Allocated, MiB/op | 12.631 | 13.424 |
+| Allocations/op | 100,579.5 | 100,582.0 |
+| Peak RSS, MiB | 14.828 | 15.938 |
+
+### V2 checkpoint, 10k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 984.154 | 7.154 |
+| Allocated, MiB/op | 6.185 | 6.585 |
+| Allocations/op | 50,345.0 | 50,348.0 |
+| Peak RSS, MiB | 10.172 | 10.641 |
+
+### V1 two structs/client, 20k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 6,075.010 | 26.030 |
+| Allocated, MiB/op | 20.218 | 22.109 |
+| Allocations/op | 280,571.0 | 280,575.0 |
+| Peak RSS, MiB | 20.828 | 23.141 |
+
+### V2 two structs/client, 20k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 5,873.531 | 23.694 |
+| Allocated, MiB/op | 17.129 | 19.019 |
+| Allocations/op | 200,581.0 | 200,585.0 |
+| Peak RSS, MiB | 20.859 | 20.312 |
+
+### Overlapping ranges, 5k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 327.309 | 1.822 |
+| Allocated, MiB/op | 1.615 | 2.015 |
+| Allocations/op | 10,141.0 | 10,144.5 |
