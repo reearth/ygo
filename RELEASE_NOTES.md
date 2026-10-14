@@ -1,4 +1,4 @@
-## v1.51.3
+## v1.51.10
 
 **Who is affected: anyone who stores rooms with `persistence.MemoryPersistence`,
 `persistence.FilePersistence` or `persistence/sqlite` (for example through
@@ -29,6 +29,134 @@ check. `MaxPendingItems` still caps each room's document.
 them to a bare `crdt.New()` refuses the same updates; the `AppendUpdate` godoc
 shows how to build the scratch document instead. No API or wire format
 changes.
+
+## v1.51.9
+
+**Map updates avoid unrelated-key conflict scans.** New keys and replacements
+immediately after their current winner bypass the scan; concurrent writes
+resolve against the same key. XML attributes and child elements use separate
+conflict orders, preserving child order regardless of update delivery order.
+The public API and wire format are unchanged.
+
+## v1.51.8
+
+**Who is affected:** servers that apply updates from untrusted peers. Updates
+encoded by yjs or ygo are unaffected by the behaviour change below.
+
+**Repeated client groups now behave like yjs.** An update can carry more than
+one wire group for the same client, although no standard encoder produces
+one. ygo used to integrate every such group, and overlapping groups put
+duplicate structs in the document, showed repeated text and moved the state
+vector backwards, without an error. ygo now keeps only the last group for each
+client and drops the earlier ones, exactly as yjs does, so both reach the same
+document. Content that appears only in an earlier group for a client is no
+longer applied. `MergeUpdates`, `DiffUpdate` and `EncodeStateVectorFromUpdate`
+follow the same rule, so they agree with applying the update. (#305, #308)
+
+**Crafted incomplete updates are cheap to reject again.** Since v1.51.7 the
+pending-limit preflight kept a full decoder copy for each blocked wire group
+when the missing dependency was present in the update but could never resolve,
+for example in a dependency cycle. Such an update could allocate dozens of
+times its own size before being rejected. Preflight now keeps only a compact
+record per blocked group, so rejection costs at most about 11 times the
+update's size, and updates that can resolve are still accepted. (#306)
+
+**Upgrading.** No API change.
+
+## v1.51.7
+
+**Who is affected:** servers that store or exchange large full-document updates,
+such as checkpoints from documents with many clients, where structs refer to
+other structs later in the same update.
+
+**Complete checkpoints no longer fail the pending limit.** ygo parked any
+struct whose dependency had not been integrated yet, and counted it against
+the limit on pending structs. A complete but large checkpoint could therefore
+be rejected, so the document could not be loaded from it. ygo now resolves
+dependencies inside the update first; only structs that are still missing
+afterwards count against the limit. If an update is rejected, none of its structs are added to
+the pending queue, but changes already applied before the rejection stay.
+Incomplete or crafted updates are still rejected quickly and with little
+memory. The pending limit, wire format and public API are unchanged. Thanks
+to @kovaa-dev.
+
+## v1.51.6
+
+**Replacing a map value no longer scans unrelated keys.** Direct replacements
+skip the shared-list scan when placed immediately after the key's previous
+rightmost value. Concurrent and non-adjacent replacements retain conflict
+resolution.
+
+## v1.51.5
+
+**Who is affected:** documents with long editing histories where a transaction
+deletes many separate ranges, for example clearing scattered text or many
+array items at once.
+
+**Faster cleanup after deletes.** After each transaction ygo garbage-collects
+the content it deleted. For every deleted range it used to scan the client's
+history from the beginning; it now jumps straight to the right place. A pass
+over 50,000 structs with sparse deletions went from about 212 ms to under a
+millisecond. Nothing else changes. Thanks to @kovaa-dev for the fix.
+
+**Upgrading.** No API change.
+
+## v1.51.4
+
+**Who is affected:** anyone using rich text (`YText` with formatting), embeds,
+or `ApplyDelta`, especially alongside yjs clients.
+
+**Formatting now behaves like yjs.** Inserting text or an embed with attributes
+inside formatted text used to keep the surrounding formatting too; it now gets
+exactly the attributes you pass, as in yjs. `Insert` with no attributes still
+continues the formatting around it. `ApplyDelta` follows the delta exactly.
+
+**Stale formatting is cleaned up after remote deletes.** When a collaborator
+deleted all the text a format covered, ygo kept the leftover markers, so text
+typed there later came out bold or italic unexpectedly. It now removes them the
+way yjs does.
+
+**What you might notice:**
+
+- After a remote update to formatted text, you may see a second, local update
+  and observer round with a nil origin: that is the cleanup, and it is broadcast
+  like any edit. The default `UndoManager` records it, as yjs does.
+- Servers applying many remote formatting edits to very large documents do more
+  work per update (a walk of the text, as yjs does). Plain text is unaffected.
+
+**Upgrading.** No API change.
+
+## v1.51.3
+
+**Who is affected:** anyone whose documents get concurrent text inserts, once
+a peer receives several of one client's inserts in a single apply: a late
+joiner's sync step 2, an offline client catching up, a server loading a stored
+state. Any state that peer then encodes (a sync step 2 it answers, a compacted
+log, `RunGC` followed by an encode) passes the problem to every peer that
+loads it.
+
+**Concurrent inserts could end up in different places on different peers.**
+Applying an update merged adjacent items from one client into a single item
+whenever their clocks were contiguous and nothing sat between them. Yjs merges
+two items only when the right one was inserted directly after the left one and
+both were inserted toward the same right neighbour (their right origin),
+because the merged item keeps only the left item's origins. ygo did not check
+the right origins. The peer that merged them then placed the next concurrent
+insert inside that run differently from the peers that had received the items
+one at a time, and any state it encoded gave the right item's characters a
+right origin they never had, so ygo and Yjs alike decoded them elsewhere.
+`RunGC`'s tombstone merge had the same gap and could move live text whose
+origin was inside the second tombstone.
+
+Both merges now require the right item's origin to be the left item's last
+character and the two right origins to be equal, as `Item.mergeWith` does.
+Items that do not qualify stay separate, so such a document keeps a few more
+items than before.
+
+**Upgrading.** No API or wire format change. A state that an earlier version
+already encoded or compacted keeps its merged items and their wrong right
+origins: this release stops new ones from being written but does not repair
+stored ones.
 
 ## v1.51.2
 

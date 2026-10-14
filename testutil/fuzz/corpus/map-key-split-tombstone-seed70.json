@@ -1,0 +1,36 @@
+{
+  "seed": 70,
+  "numPeers": 4,
+  "steps": [
+    {
+      "kind": "op",
+      "root": "m",
+      "typeKind": "map",
+      "op": "setkey",
+      "key": "k3",
+      "jsonVal": "0.3249954493692401"
+    },
+    {
+      "kind": "sync",
+      "to": 1,
+      "method": "mergev1"
+    },
+    {
+      "kind": "op",
+      "root": "m",
+      "typeKind": "map",
+      "op": "setkey",
+      "key": "k3",
+      "jsonVal": "\"ab\""
+    },
+    {
+      "kind": "op",
+      "peer": 1,
+      "root": "m",
+      "typeKind": "map",
+      "op": "setkey",
+      "key": "k3",
+      "jsonVal": "470"
+    }
+  ]
+}

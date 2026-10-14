@@ -311,3 +311,34 @@ a *performance* one, but relevant context for interpreting any future
 cross-impl performance numbers: "faster than yrs" and "as conformant as
 yrs" are separate claims, and on the conformance axis ygo already has
 better-documented parity with the Yjs reference than yrs does.
+
+## Pending-budget preflight review
+
+These scenarios use `benchheavy`; sources are
+[`pending_budget_bench_test.go`](crdt/pending_budget_bench_test.go),
+[`pending_budget_review_bench_test.go`](crdt/pending_budget_review_bench_test.go) and
+[`pending_cursor_bench_test.go`](crdt/pending_cursor_bench_test.go).
+
+- Reverse chains exercise V1/V2 references to later client groups.
+- Many-client checkpoints use ordinary Ygo text transactions and V2 encoding.
+- Incomplete updates cover same-parent tails and varied missing clocks,
+  content lengths, cycles and client groups, including missing-client cursor bombs.
+
+```sh
+go test -tags benchheavy ./crdt -run '^$' \
+  -bench '^BenchmarkPending(ReverseChain|ManyClientCheckpoint|UpdateDiverseDependencies|CursorBomb)$' \
+  -benchmem -benchtime=1x -count=10 -timeout=30m
+go test -tags benchheavy ./crdt -run '^$' \
+  -bench '^Benchmark(ApplyUpdateV[12](_Bulk)?|PendingUpdateIncomplete)$' \
+  -benchmem -benchtime=100ms -count=10
+```
+
+Compare at least ten samples with `benchstat`, using identical fixtures and
+options on both revisions. Fixture generation is outside the timed loop.
+Complete-update benches also exclude destination creation/destruction and
+result checks; `rejections/op` distinguishes rejection from successful restore.
+
+`B/op` and `allocs/op` are cumulative Go allocation metrics, not peak RAM.
+Reported peak RSS uses the largest of three fresh `/usr/bin/time -l` processes
+applying identical prepared wire bytes, with a GC before destination creation.
+Runtime/input/document are included; fixture generation and build are excluded.

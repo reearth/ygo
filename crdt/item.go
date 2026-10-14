@@ -117,7 +117,11 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// Fast path: no conflict scanning needed when there are no items between
 	// the left origin and the right origin. This is the common case for local
 	// inserts at the end of a run and for remote items decoded in clock order.
-	if o != nil && o != item.Right {
+	// Different map keys have independent conflict orders. A new key or a
+	// replacement immediately after its current winner has no same-key
+	// competitor to its right. Keep unrelated keys out of conflict scanning.
+	uncontestedMapKey := item.ParentSub != nil && item.Parent.itemMap[*item.ParentSub] == item.Left
+	if !uncontestedMapKey && o != nil && o != item.Right {
 		// Slow path: conflicting is the set of items in the current conflict
 		// group (items with the same left origin as us that we are comparing
 		// against). beforeOrigin tracks every item we have scanned past, so we
@@ -130,6 +134,11 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 
 		// Scan right until we hit our right origin (item.Right) or the end.
 		for o != nil && o != item.Right {
+			// Children and keyed attributes have independent conflict orders.
+			if !parentSubEqual(item.ParentSub, o.ParentSub) {
+				o = o.Right
+				continue
+			}
 			beforeOrigin[o] = struct{}{}
 			conflicting[o] = struct{}{}
 
@@ -215,6 +224,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		item.Parent.length += item.Content.Len()
 		if item.Right != nil {
 			if hint > 0 {
+				if l := item.Left; l != nil && (l.Deleted || !l.Content.IsCountable()) {
+					item.Parent.dropUncountedMarkersAt(hint)
+				}
 				item.Parent.updateMarkerChanges(hint, item.Content.Len())
 			} else {
 				item.Parent.clearMarkers()
@@ -301,6 +313,8 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// so their deletes skip the walk entirely (#86 final fix).
 	if _, ok := item.Content.(*ContentFormat); ok && item.Parent != nil {
 		item.Parent.hasFormatting = true
+		item.Parent.fmtGen++
+		item.Parent.cleanFormatting = true
 	}
 
 	// If this item wraps a nested type, set the back-pointer so the type
@@ -340,12 +354,11 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	if item.ParentSub != nil {
 		key := *item.ParentSub
 		rightmost := true
-		// Fast path: if no item has ever been recorded for this key, none can be
-		// to our right, so we are trivially the rightmost. This keeps populating a
-		// map with N distinct keys O(N) rather than O(N²). Only when a prior
-		// same-key item exists do we scan right (past other keys / tombstones) to
-		// see whether it sits to our right and supersedes us.
-		if _, exists := item.Parent.itemMap[key]; exists {
+		// A new key has no successor with the same key. Likewise, when the
+		// previous rightmost same-key item is immediately to our left, no
+		// same-key item can be to our right. Avoid scanning unrelated keys for
+		// these common insertion and replacement cases.
+		if previous, exists := item.Parent.itemMap[key]; exists && previous != item.Left {
 			for r := item.Right; r != nil; r = r.Right {
 				if parentSubEqual(r.ParentSub, item.ParentSub) {
 					// A same-key item (live or tombstone) sits to our right and is
@@ -405,6 +418,9 @@ func (item *Item) delete(txn *Transaction) {
 		return
 	}
 	item.Deleted = true
+	if _, ok := item.Content.(*ContentFormat); ok && item.Parent != nil {
+		item.Parent.fmtGen++
+	}
 	if item.Parent != nil && item.Content.IsCountable() {
 		item.Parent.length -= item.Content.Len()
 		if !txn.Local {

@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.51.3] — 2026-10-08
+## [1.51.10] — 2026-10-14
 
 ### Fixed
 
@@ -39,6 +39,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`crdt`: the comment on the default pending cap no longer says it matches
   the decoder's per-update limit.** It is 100,000; the per-update limit is
   2^20.
+
+## [1.51.9] — 2026-10-12
+
+### Performance
+
+- **`crdt`: avoid unrelated-key conflict scans during map integration.** New
+  keys and causal replacements after the current key winner bypass the scan;
+  contended writes consider only the same key. XML children and attributes keep
+  separate conflict orders, so concurrent child order is independent of delivery.
+
+## [1.51.8] — 2026-10-11
+
+### Fixed
+
+- **`crdt`: an update with several groups for one client applied the overlap
+  twice.** When a V1 or V2 update carried more than one wire group for the same
+  client, each group was trimmed only against the state from before the update,
+  so overlapping structs were integrated again: the store held duplicates, the
+  text showed repeated content and the state vector went backwards, with no
+  error. ygo now matches yjs, which keeps only the last group for each client
+  and drops earlier groups without integrating them. An update whose group
+  framing is malformed is rejected before any group is integrated, so a bad
+  later group can no longer leave the earlier ones applied. This is a behaviour
+  change for such updates: content found only in an earlier group for a client
+  is no longer applied. yjs and ygo never encode repeated groups, so their
+  updates are unaffected. The pending-limit preflight counts only the groups
+  that are integrated, so a dropped group can no longer cause a rejection.
+  `MergeUpdatesV1/V2`, `DiffUpdateV1/V2`,
+  `EncodeStateVectorFromUpdate(V2)` and the `ContentMap` constructors apply the
+  same rule, so merging or diffing such an update no longer changes what it
+  applies. (#305, #308)
+- **`crdt`: rejecting some crafted incomplete updates allocated far more than
+  their size.** The pending-limit preflight kept a full decoder copy for every
+  blocked wire group whose dependency was present in the update but could never
+  resolve, such as a dependency cycle or a client that reaches a clock only
+  through a gap or a skip. A 6–10 MiB update could allocate up to 470 MiB
+  before being rejected. Preflight now keeps a small record per blocked group
+  and its blocked structs as compact varints, and rules out dependencies a
+  client can never reach before keeping anything. Rejecting these updates now
+  allocates at most about 11 times their size, and in linear time. Updates that
+  can resolve are still accepted. (#306)
+
+## [1.51.7] — 2026-10-11
+
+### Fixed
+
+- **`crdt`: a complete checkpoint could be rejected by the pending limit.**
+  When a V1/V2 update's structs depended on other structs later in the same
+  update, they were parked as pending and counted against the cross-update
+  pending limit, so a large but complete document state (for example a
+  many-client checkpoint) failed to apply. Dependencies inside the update are
+  now resolved first, and only structs still missing after that count against
+  the limit. A rejected update adds nothing to the persistent pending queue,
+  but changes integrated before the rejection are not rolled back. Preflight
+  keeps one cursor per wire group rather than metadata for every blocked
+  struct, so incomplete updates stay cheap to reject. The pending limit, wire
+  format and public API are unchanged. Thanks to @kovaa-dev.
+
+## [1.51.6] — 2026-10-11
+
+### Performance
+
+- **`crdt`: replacing a map value no longer scans unrelated keys.** Direct
+  replacements after the previous rightmost value skip the shared-list scan.
+  Concurrent and non-adjacent replacements retain conflict resolution.
+
+## [1.51.5] — 2026-10-09
+
+### Performance
+
+- **`crdt`: garbage collection after a transaction no longer rescans each
+  client's history once per deleted range.** `gcTxnDeleteSet` started every
+  range lookup at the start of the client's structs, so many sparse deletions
+  rescanned the same prefix. It now binary-searches for the struct containing
+  the range start; results are unchanged. At 50,000 structs a GC pass over
+  sparse ranges drops from about 212 ms to 0.28 ms. Thanks to @kovaa-dev.
+
+## [1.51.4] — 2026-10-09
+
+### Fixed
+
+- **`crdt`: text inserts picked up formatting yjs clears (#285).** `ApplyDelta`
+  inserts, `InsertEmbed`, and `Insert` with attributes inherited the formatting
+  around the cursor. They now clear every attribute they don't name, as yjs
+  `insertText` does; cleared and restored markers follow yjs's order. `Insert`
+  with nil or empty attributes still inherits, as yjs `insert` does with the
+  argument omitted.
+
+- **`crdt`: formatting emptied by a remote delete was never cleaned up (#284).**
+  yjs deletes format markers left covering no text after a remote transaction;
+  ygo kept them, so later text inherited stale formatting. ygo now runs the same
+  cleanup, as a local transaction with a nil origin, and only on texts yjs would
+  clean (not on a root first accessed after its markers arrived).
+
+- **`crdt`: formatted inserts dropped the right origin yjs keeps (#287).**
+
+- **`crdt`: two identical documents could clean up the same update
+  differently.** Delete sets were applied in map order. They now apply, and
+  retry when parked, in yjs's order, and V1 writes delete-set clients
+  descending like yjs and V2.
+
+### Changed
+
+- Applying a remote update to formatted text may be followed by a local,
+  nil-origin cleanup transaction with its own update and observer events. The
+  default `UndoManager` captures it, as yjs's default tracked origins do.
+- A remote update that adds formatting to a text now walks that whole text, as
+  yjs does (about 170µs per update on a 100k-character document). Plain text is
+  unaffected. A random-position `InsertEmbed` into heavily fragmented formatted
+  text costs a full walk too.
+- V1 encodings list delete-set clients in descending order. Decoders accept
+  either order.
+
+## [1.51.3] — 2026-10-08
+
+### Fixed
+
+- **`crdt`: applying an update no longer merges same-client items that were
+  inserted toward different right neighbours.** `ApplyUpdate`
+  merged adjacent, clock-contiguous items from one client without checking
+  that the right item was inserted directly after the left one and that both
+  had the same right origin, and `RunGC` merged tombstones the same way. The
+  merged item kept only the left item's right origin. A peer that received
+  the items in one apply (a late joiner, an offline client catching up, a
+  server loading a stored state) then placed the next concurrent insert inside
+  that run differently from the peers that received the items one by one, and
+  every later encoding of its state (a sync step 2, a compacted state) gave
+  the right item's characters the wrong right origin, for ygo and Yjs alike.
+  Items now merge only under Yjs's `Item.mergeWith` conditions. States that
+  were already encoded with the merged items keep the wrong right origins.
 
 ## [1.51.2] — 2026-10-08
 
