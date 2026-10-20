@@ -318,6 +318,18 @@ func (t *abstractType) updateMarkerChanges(index, delta int) {
 	}
 }
 
+// dropUncountedMarkersAt drops markers on non-countable items at rendered
+// index: one there may sit on either side of an item inserted after a
+// non-countable neighbour, so updateMarkerChanges cannot tell whether to
+// shift it.
+func (t *abstractType) dropUncountedMarkersAt(index int) {
+	for i := len(t.markers) - 1; i >= 0; i-- {
+		if m := t.markers[i]; m.index == index && m.item != nil && !m.item.Content.IsCountable() {
+			t.markers = append(t.markers[:i], t.markers[i+1:]...)
+		}
+	}
+}
+
 // clearMarkers drops every search marker. Always safe: a subsequent lookup
 // simply falls back to a cold walk and repopulates markers. markerTimestamp is
 // intentionally left monotonic across clears.

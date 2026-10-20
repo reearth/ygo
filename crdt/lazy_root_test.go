@@ -459,8 +459,10 @@ func lazyRandomOp(r *rand.Rand, txn *Transaction) {
 
 // TestLazyRoot_Shuffled delivers random multi-client histories in shuffled
 // order, optionally merged into skip-carrying chunks and in either encoding,
-// to fresh docs that first access each root at a random point, and requires
-// every one to match an eagerly accessed reference and reload identically.
+// to fresh docs that first access each root at a random point. The receivers
+// and an eagerly accessed reference then exchange the format cleanups they
+// emitted, as connected peers do, and must all converge and reload
+// identically.
 func TestLazyRoot_Shuffled(t *testing.T) {
 	first := 0
 	if v, err := strconv.Atoi(os.Getenv("FUZZ_SEED")); err == nil {
@@ -473,6 +475,24 @@ func TestLazyRoot_Shuffled(t *testing.T) {
 
 var lazyKinds = []lazyKind{lazyText, lazyArray, lazyMap, lazyXML}
 
+// lazyPeer is a doc and the updates its own transactions emitted that it has
+// not yet relayed; for a doc that only applies remote updates these are its
+// format cleanups.
+type lazyPeer struct {
+	d      *Doc
+	outbox [][]byte
+}
+
+func newLazyPeer(id ClientID) *lazyPeer {
+	p := &lazyPeer{d: New(WithClientID(id))}
+	p.d.OnUpdate(func(u []byte, origin any) {
+		if origin == nil {
+			p.outbox = append(p.outbox, append([]byte(nil), u...))
+		}
+	})
+	return p
+}
+
 func lazyShuffledSeed(t *testing.T, seed int) {
 	defer func() {
 		if t.Failed() {
@@ -481,20 +501,22 @@ func lazyShuffledSeed(t *testing.T, seed int) {
 	}()
 	r := rand.New(rand.NewSource(int64(seed)))
 	log := lazyHistory(t, r)
-	ref := New()
+	ref := newLazyPeer(99)
 	for _, k := range lazyKinds {
-		lazyGet(ref, nil, k)
+		lazyGet(ref.d, nil, k)
 	}
 	for _, u := range log {
-		lazyApply(t, ref, u, false)
+		lazyApply(t, ref.d, u, false)
 	}
+	refCleaned := len(ref.outbox) > 0
 	want := make([]string, len(lazyKinds))
 	for i, k := range lazyKinds {
-		want[i] = lazyView(t, ref, k)
+		want[i] = lazyView(t, ref.d, k)
 	}
+	peers := []*lazyPeer{ref}
 	for recv := 0; recv < 4; recv++ {
 		chunks := lazyChunks(t, r, log)
-		at := make([]int, len(lazyKinds)) // chunks applied before first access; len+1 defers it to the final check
+		at := make([]int, len(lazyKinds)) // chunks applied before first access; len+1 leaves it to the checks
 		for i := range at {
 			at[i] = r.Intn(len(chunks) + 2)
 		}
@@ -502,13 +524,58 @@ func lazyShuffledSeed(t *testing.T, seed int) {
 		for i := range v2 {
 			v2[i] = r.Intn(2) == 0
 		}
-		d := lazyReceive(t, chunks, at, v2, r.Intn(2) == 0)
+		p := newLazyPeer(ClientID(100 + recv))
+		lazyReceive(t, p, chunks, at, v2, r.Intn(2) == 0)
+		// Cleanup only touches text, and only a doc that ran one can differ
+		// from the reference before the exchange.
 		for i, k := range lazyKinds {
-			if got := lazyView(t, d, k); got != want[i] {
+			if k == lazyText && (refCleaned || len(p.outbox) > 0) {
+				continue
+			}
+			if got := lazyView(t, p.d, k); got != want[i] {
 				t.Fatalf("recv %d root %q (first access after %d of %d chunks): got %s, want %s",
 					recv, k.root(), at[i], len(chunks), got, want[i])
 			}
-			lazyCheck(t, d, k, want[i])
+		}
+		peers = append(peers, p)
+	}
+	lazyRelay(t, r, peers)
+	for i, k := range lazyKinds {
+		want[i] = lazyView(t, ref.d, k)
+	}
+	for n, p := range peers {
+		if p.d.store.pending != nil || len(p.d.store.pendingDs.clients) > 0 {
+			t.Fatalf("peer %d: updates still parked after the exchange", n)
+		}
+		for i, k := range lazyKinds {
+			lazyCheck(t, p.d, k, want[i])
+		}
+	}
+}
+
+// lazyRelay delivers every peer's outbox to all the other peers, round by
+// round, until no delivery makes a peer emit anything more.
+func lazyRelay(t *testing.T, r *rand.Rand, peers []*lazyPeer) {
+	t.Helper()
+	for round := 0; ; round++ {
+		if round == 100 {
+			t.Fatal("format cleanups did not quiesce")
+		}
+		sent := false
+		for i, p := range peers {
+			out := p.outbox
+			p.outbox = nil
+			for _, u := range out {
+				sent = true
+				for j, q := range peers {
+					if j != i {
+						lazyApply(t, q.d, u, r.Intn(2) == 0)
+					}
+				}
+			}
+		}
+		if !sent {
+			return
 		}
 	}
 }
@@ -535,18 +602,21 @@ func lazyChunks(t *testing.T, r *rand.Rand, log [][]byte) [][]byte {
 	return chunks
 }
 
-// lazyReceive applies chunks to a fresh doc, first accessing root kind i just
-// before chunk at[i] (or after the last one).
-func lazyReceive(t *testing.T, chunks [][]byte, at []int, v2 []bool, viaTxn bool) *Doc {
+// lazyReceive applies chunks to p, first accessing root kind i just before
+// chunk at[i] (or after the last one).
+func lazyReceive(t *testing.T, p *lazyPeer, chunks [][]byte, at []int, v2 []bool, viaTxn bool) {
 	t.Helper()
-	d := New(WithClientID(100))
+	d := p.d
 	access := func(step int) {
 		for i, k := range lazyKinds {
 			if at[i] != step {
 				continue
 			}
 			if viaTxn {
+				// An access transaction changes nothing, so drop what it emits.
+				n := len(p.outbox)
 				d.Transact(func(txn *Transaction) { lazyGet(d, txn, k) })
+				p.outbox = p.outbox[:n]
 			} else {
 				lazyGet(d, nil, k)
 			}
@@ -560,5 +630,4 @@ func lazyReceive(t *testing.T, chunks [][]byte, at []int, v2 []bool, viaTxn bool
 	if d.store.pending != nil || len(d.store.pendingDs.clients) > 0 {
 		t.Fatal("updates still parked after full delivery")
 	}
-	return d
 }

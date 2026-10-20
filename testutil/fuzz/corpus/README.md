@@ -20,3 +20,9 @@ hand-written regressions in `crdt/` (e.g. `TestYArrayPush_TombstonedTail_Matches
   parent-item-ID); delivery back uses `MergeV2`. Exercises the parent-by-ID
   resolution + V2 merge path behind the rightOrigin / parent-by-ID convergence
   work (#65, #68).
+
+- **`map-key-split-tombstone-seed70.json`** — concurrent replacements of one map
+  key after sharing its initial value. Yjs compacts the deleted predecessor
+  writes; decoding the snapshot splits that run at the concurrent origin. The
+  corpus preserves the four-step scenario; `TestCompat_MapReplacementInsideDeletedRun`
+  guards the snapshot-decode failure in V1/V2 without requiring Node.

@@ -3,7 +3,9 @@ package crdt
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -298,23 +300,16 @@ func (txt *YText) Len() int { return txt.length }
 
 // Insert inserts text at logical character position index.
 //
-// Attribute semantics (#71 vectors A2 + A3, v1.13.0):
+// Attribute semantics match Yjs's YText.insert:
 //
-//   - When attrs is nil or empty, the new text inherits whatever
-//     ContentFormat markers are in effect at the cursor position
-//     (computed via currentAttributesAt). Typing at the end of bold
-//     text continues being bold without the caller passing {bold:true}
-//     explicitly. Matches Yjs JS's insertText inheritance behavior.
+//   - When attrs is nil or empty, the new text inherits the formatting in
+//     effect at the cursor: typing at the end of bold text stays bold. (Yjs
+//     inherits only when the attributes argument is omitted; an explicit {}
+//     there clears every attribute.)
 //
-//   - When attrs is non-empty, the difference between attrs and the
-//     cursor's currentAttributes drives marker emission. Opening
-//     markers are inserted for keys that need to change; after the
-//     text item, negating closing markers are emitted to revert to the
-//     pre-insert state. Without these closers, formatting would bleed
-//     rightward through subsequent retained text — the A3 gap pre-fix.
-//
-// Keys whose requested value already matches the current state produce no
-// markers (empty diff = no work).
+//   - When attrs is non-empty, the text carries exactly attrs: every attribute
+//     in effect at the cursor that attrs does not name is cleared for the
+//     insert, and closing markers restore the surrounding formatting after it.
 func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attributes) {
 	checkUTF8("YText.Insert", "text", text)
 	attrs = checkTextAttrs("YText.Insert", attrs)
@@ -328,94 +323,23 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 		return
 	}
 	t := &txt.abstractType
+	if len(attrs) > 0 {
+		t.insertText(txn, t.findTextPos(txn, index), NewContentString(text), attrs, true)
+		return
+	}
+
+	// Inheriting insert: no markers, so the cursor's attributes are never
+	// needed — skipping that O(n) walk keeps typing in a long doc near O(1).
 	left, offset := t.leftNeighbourAt(index)
 	if offset > 0 {
 		splitItem(txn, left, offset)
 		// left is now the left half; left.Right is the right half.
 	}
 	// Anchor after any adjacent tombstones (Yjs text-insert parity, #160).
-	left = t.skipDeletedForTextAnchor(left)
-
-	// Fast path: when caller passed nil/empty attrs, there's nothing to diff,
-	// no markers to emit, and the new text inherits surrounding formatting
-	// via the existing markers in the linked list — ToDelta walks them as it
-	// emits the new text. Skipping currentAttributesAt here is what keeps
-	// sequential typing in a long doc at near-O(1) per Insert instead of
-	// degrading to O(n²) — currentAttributesAt itself is O(n) (walks from
-	// txt.start to the anchor).
-	type diffEntry struct {
-		key    string
-		newVal any
-		oldVal any // currentAttrs[key], or nil if absent
-		hadKey bool
-	}
-	var diff []diffEntry
-	if len(attrs) > 0 {
-		// Caller passed explicit attrs — we need currentAttributes to compute
-		// which keys actually need an open/close pair around the insert.
-		currentAttrs := txt.currentAttributesAt(left)
-
-		// Deterministic emission order — Go map iteration is randomized, but
-		// linked-list order is observable, so sort keys.
-		keys := make([]string, 0, len(attrs))
-		for k := range attrs {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			newVal := attrs[k]
-			oldVal, hadKey := currentAttrs[k]
-			// Treat (absent in current) and (newVal == nil) as the same state
-			// — both mean "no formatting for this key." No marker needed.
-			if !hadKey && newVal == nil {
-				continue
-			}
-			// reflect.DeepEqual safely compares any JSON-decoded value
-			// (including []any / map[string]any), where `==` would panic.
-			same := hadKey && reflect.DeepEqual(oldVal, newVal)
-			if same {
-				continue
-			}
-			diff = append(diff, diffEntry{key: k, newVal: newVal, oldVal: oldVal, hadKey: hadKey})
-		}
-	}
-
-	var origin *ID
-	var originRight *ID
-	if left != nil {
-		end := left.ID.Clock + uint64(left.Content.Len()) - 1
-		origin = &ID{Client: left.ID.Client, Clock: end}
-		if left.Right != nil {
-			id := left.Right.ID
-			originRight = &id
-		}
-	} else if t.start != nil {
-		id := t.start.ID
-		originRight = &id
-	}
-
-	clock := txn.doc.store.NextClock(txn.doc.clientID)
-
-	// Opening markers — one per key whose value needs to change.
-	for _, d := range diff {
-		fmtItem := &Item{
-			ID:          ID{Client: txn.doc.clientID, Clock: clock},
-			Origin:      origin,
-			OriginRight: originRight,
-			Left:        left,
-			Parent:      t,
-			Content:     NewContentFormat(d.key, d.newVal),
-		}
-		fmtItem.integrate(txn, 0)
-		left = fmtItem
-		origin = &ID{Client: fmtItem.ID.Client, Clock: fmtItem.ID.Clock}
-		originRight = nil
-		clock = txn.doc.store.NextClock(txn.doc.clientID)
-	}
-
-	// The text item itself.
+	left, cur := t.skipDeletedForTextAnchor(left)
+	origin, originRight := itemOrigins(left, t)
 	item := &Item{
-		ID:          ID{Client: txn.doc.clientID, Clock: clock},
+		ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
 		Origin:      origin,
 		OriginRight: originRight,
 		Left:        left,
@@ -428,103 +352,9 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 		t.insertHint = index
 	}
 	item.integrate(txn, 0)
-
-	// Negating (closing) markers — for each diff key, revert to the pre-insert
-	// state. If the key was absent in currentAttrs, emit a nil-value marker
-	// (which deletes the key from currentAttributes going forward). If the key
-	// had a prior value, emit a marker carrying that value (restoring it).
-	//
-	// Without this loop, the opened attributes would bleed past the inserted
-	// text into subsequent retained content — the A3 gap.
-	if len(diff) > 0 {
-		left = item
-		// Origin must be the LAST clock of the text item (item.ID.Clock + Len - 1),
-		// not the first — otherwise YATA places the closer mid-text rather than
-		// immediately after.
-		origin = &ID{
-			Client: item.ID.Client,
-			Clock:  item.ID.Clock + uint64(item.Content.Len()) - 1,
-		}
-		if left.Right != nil {
-			rid := left.Right.ID
-			originRight = &rid
-		} else {
-			originRight = nil
-		}
-		clock = txn.doc.store.NextClock(txn.doc.clientID)
-
-		for _, d := range diff {
-			var revertVal any
-			if d.hadKey {
-				revertVal = d.oldVal
-			}
-			closeItem := &Item{
-				ID:          ID{Client: txn.doc.clientID, Clock: clock},
-				Origin:      origin,
-				OriginRight: originRight,
-				Left:        left,
-				Parent:      t,
-				Content:     NewContentFormat(d.key, revertVal),
-			}
-			closeItem.integrate(txn, 0)
-			left = closeItem
-			origin = &ID{Client: closeItem.ID.Client, Clock: closeItem.ID.Clock}
-			originRight = nil
-			clock = txn.doc.store.NextClock(txn.doc.clientID)
-		}
+	if cur != nil {
+		t.cacheAttrsAfter(item, *cur)
 	}
-}
-
-// currentAttributesAt computes the format state in effect at the cursor
-// position immediately AFTER `anchor`. Walks from txt.start to anchor,
-// applying each live ContentFormat marker in linked-list order. Tombstoned
-// markers are skipped — they no longer contribute to the formatting state.
-//
-// When anchor is nil, the cursor is BEFORE any item (insertion at the
-// document start), so no markers can be in effect — returns an empty map
-// without walking the list. Without this early exit, the loop would walk
-// the whole document and return the end-state attrs instead of the
-// start-state attrs.
-//
-// Added in v1.13.0 (#71 vectors A2 + A3). The caller is responsible for
-// not invoking this with stale anchor pointers; YText.Insert calls it
-// immediately after leftNeighbourAt.
-//
-// Marker-era fast path (#181): a ContentFormat item can only ever exist if
-// hasFormatting is true (item.go sets it the first time one integrates, and
-// it is sticky), so when hasFormatting is false the walk below is guaranteed
-// to find nothing and always returns an empty map — we can skip it entirely
-// rather than walk from txt.start to anchor. This is what keeps a first-ever
-// attrs-carrying Insert on an otherwise-plain document O(1) instead of O(n);
-// once any formatting exists, the exact walk resumes so scattered markers
-// anywhere before anchor are still picked up correctly (search markers only
-// track rendered position, not accumulated attribute state, so they cannot
-// safely shortcut this in general). Gated on t.disableMarkers too
-// so the force-cold test seam still exercises the full walk.
-func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
-	t := &txt.abstractType
-	if !t.disableMarkers && !t.hasFormatting {
-		return make(Attributes)
-	}
-	attrs := make(Attributes)
-	if anchor == nil {
-		return attrs
-	}
-	for item := txt.start; item != nil; item = item.Right {
-		if !item.Deleted {
-			if cf, ok := item.Content.(*ContentFormat); ok {
-				if cf.Val == nil {
-					delete(attrs, cf.Key)
-				} else {
-					attrs[cf.Key] = cf.Val
-				}
-			}
-		}
-		if item == anchor {
-			break
-		}
-	}
-	return attrs
 }
 
 // InsertEmbed inserts an embedded object (image, formula, video metadata, or
@@ -532,9 +362,9 @@ func (txt *YText) currentAttributesAt(anchor *Item) Attributes {
 // embed counts as one UTF-16 code unit in the document's length, matching
 // Yjs JS's `YText.insertEmbed` semantics.
 //
-// attrs may carry inline attributes that apply ONLY to this embed item.
-// They are emitted as opening + closing ContentFormat markers around the
-// embed so subsequent inserts are unaffected. Pass nil for an unstyled embed.
+// The embed carries exactly attrs, as in Yjs: every attribute in effect at the
+// cursor that attrs does not name is cleared for it, so an embed inside bold
+// text is not bold unless attrs says so. Pass nil for an unstyled embed.
 // Like attribute values, embed is stored in the form V1 and V2 both encode
 // (see Attributes) and InsertEmbed panics on a value with none, such as a
 // shared type (YMap, YText, ...).
@@ -553,93 +383,7 @@ func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attr
 		return
 	}
 	t := &txt.abstractType
-	left, offset := t.leftNeighbourAt(index)
-	if offset > 0 {
-		splitItem(txn, left, offset)
-	}
-	// Anchor after any adjacent tombstones (Yjs text-insert parity, #160).
-	left = t.skipDeletedForTextAnchor(left)
-
-	var origin *ID
-	var originRight *ID
-	if left != nil {
-		end := left.ID.Clock + uint64(left.Content.Len()) - 1
-		origin = &ID{Client: left.ID.Client, Clock: end}
-		if left.Right != nil {
-			id := left.Right.ID
-			originRight = &id
-		}
-	} else if t.start != nil {
-		id := t.start.ID
-		originRight = &id
-	}
-
-	clock := txn.doc.store.NextClock(txn.doc.clientID)
-
-	// Opening attr markers — same pattern as Insert with attrs.
-	if len(attrs) > 0 {
-		for k, v := range attrs {
-			fmtItem := &Item{
-				ID:          ID{Client: txn.doc.clientID, Clock: clock},
-				Origin:      origin,
-				OriginRight: originRight,
-				Left:        left,
-				Parent:      t,
-				Content:     NewContentFormat(k, v),
-			}
-			fmtItem.integrate(txn, 0)
-			left = fmtItem
-			origin = &ID{Client: fmtItem.ID.Client, Clock: fmtItem.ID.Clock}
-			originRight = nil
-			clock = txn.doc.store.NextClock(txn.doc.clientID)
-		}
-	}
-
-	// The embed item itself.
-	item := &Item{
-		ID:          ID{Client: txn.doc.clientID, Clock: clock},
-		Origin:      origin,
-		OriginRight: originRight,
-		Left:        left,
-		Parent:      t,
-		Content:     NewContentEmbed(embed),
-	}
-	if index > 0 {
-		t.insertHint = index
-	}
-	item.integrate(txn, 0)
-
-	// Closing (negating) attr markers — without these the attrs would bleed
-	// into subsequent content. Unlike Insert (which currently doesn't emit
-	// negated attrs — that's the deferred A3 work), InsertEmbed scopes attrs
-	// to the embed exactly, so we always close here.
-	if len(attrs) > 0 {
-		left = item
-		origin = &ID{Client: item.ID.Client, Clock: item.ID.Clock}
-		if left.Right != nil {
-			rid := left.Right.ID
-			originRight = &rid
-		} else {
-			originRight = nil
-		}
-		clock = txn.doc.store.NextClock(txn.doc.clientID)
-
-		for k := range attrs {
-			closeItem := &Item{
-				ID:          ID{Client: txn.doc.clientID, Clock: clock},
-				Origin:      origin,
-				OriginRight: originRight,
-				Left:        left,
-				Parent:      t,
-				Content:     NewContentFormat(k, nil),
-			}
-			closeItem.integrate(txn, 0)
-			left = closeItem
-			origin = &ID{Client: closeItem.ID.Client, Clock: closeItem.ID.Clock}
-			originRight = nil
-			clock = txn.doc.store.NextClock(txn.doc.clientID)
-		}
-	}
+	t.insertText(txn, t.findTextPos(txn, index), NewContentEmbed(embed), attrs, true)
 }
 
 // Delete removes length characters starting at logical position index.
@@ -846,20 +590,20 @@ func (t *abstractType) applyFormatAtPos(txn *Transaction, pos *itemTextPos, leng
 
 	remaining := length
 	for pos.right != nil &&
-		(remaining > 0 || (len(negated) > 0 && (pos.right.Deleted || isContentFormat(pos.right)))) {
+		(remaining > 0 || (negated.len() > 0 && (pos.right.Deleted || isContentFormat(pos.right)))) {
 		if !pos.right.Deleted {
 			if cf, ok := pos.right.Content.(*ContentFormat); ok {
 				if _, touched := attrs[cf.Key]; touched {
 					if attrEqual(attrs[cf.Key], cf.Val) {
 						// Past this marker the value already matches the target.
-						delete(negated, cf.Key)
+						negated.del(cf.Key)
 					} else {
 						if remaining == 0 {
 							// Don't extend the restore set past the range.
 							break
 						}
 						// This value follows the range — restore it afterwards.
-						negated[cf.Key] = cf.Val
+						negated.set(cf.Key, cf.Val)
 					}
 					pos.right.delete(txn)
 				}
@@ -876,7 +620,7 @@ func (t *abstractType) applyFormatAtPos(txn *Transaction, pos *itemTextPos, leng
 		pos.forward()
 	}
 
-	t.insertNegatedAttributes(txn, pos, negated, keys)
+	t.insertNegatedAttributes(txn, pos, negated)
 }
 
 // isContentFormat reports whether item carries a ContentFormat marker.
@@ -895,6 +639,62 @@ func attrEqual(a, b any) bool {
 	return reflect.DeepEqual(a, b)
 }
 
+// attrState is an attribute map that iterates in insertion order, like the JS
+// Maps Yjs keeps a cursor's current and negated attributes in: the order
+// decides which marker each attribute gets, so it is observable.
+type attrState struct {
+	keys []string
+	vals map[string]any
+}
+
+func (s *attrState) len() int { return len(s.keys) }
+
+func (s *attrState) get(key string) (any, bool) {
+	v, ok := s.vals[key]
+	return v, ok
+}
+
+// set keeps an existing key's position, as Map.set does.
+func (s *attrState) set(key string, val any) {
+	if s.vals == nil {
+		s.vals = make(map[string]any)
+	}
+	if _, ok := s.vals[key]; !ok {
+		s.keys = append(s.keys, key)
+	}
+	s.vals[key] = val
+}
+
+func (s *attrState) del(key string) {
+	if _, ok := s.vals[key]; !ok {
+		return
+	}
+	delete(s.vals, key)
+	for i, k := range s.keys {
+		if k == key {
+			s.keys = append(s.keys[:i], s.keys[i+1:]...)
+			return
+		}
+	}
+}
+
+func (s *attrState) clone() attrState {
+	c := attrState{keys: slices.Clone(s.keys)}
+	if len(s.vals) > 0 {
+		c.vals = maps.Clone(s.vals)
+	}
+	return c
+}
+
+// apply passes a live marker: a nil value clears the key.
+func (s *attrState) apply(cf *ContentFormat) {
+	if cf.Val == nil {
+		s.del(cf.Key)
+	} else {
+		s.set(cf.Key, cf.Val)
+	}
+}
+
 // itemTextPos is a cursor into a YText's item list, mirroring Yjs JS's
 // ItemTextListPosition. cur holds the formatting state in effect at the cursor
 // (i.e. just before right). It backs the Yjs-faithful formatText algorithm.
@@ -902,7 +702,7 @@ type itemTextPos struct {
 	left  *Item
 	right *Item
 	index int
-	cur   Attributes
+	cur   attrState
 }
 
 // forward advances the cursor one item rightward, updating cur when passing a
@@ -913,7 +713,7 @@ func (p *itemTextPos) forward() {
 	}
 	if cf, ok := p.right.Content.(*ContentFormat); ok {
 		if !p.right.Deleted {
-			updateAttr(p.cur, cf)
+			p.cur.apply(cf)
 		}
 	} else if !p.right.Deleted {
 		p.index += p.right.Content.Len()
@@ -935,7 +735,7 @@ func (p *itemTextPos) advance(txn *Transaction, n int) {
 	for p.right != nil && count > 0 {
 		if cf, ok := p.right.Content.(*ContentFormat); ok {
 			if !p.right.Deleted {
-				updateAttr(p.cur, cf)
+				p.cur.apply(cf)
 			}
 		} else if !p.right.Deleted {
 			itemLen := p.right.Content.Len()
@@ -971,21 +771,88 @@ func updateAttr(attrs Attributes, cf *ContentFormat) {
 // is the live neighbour from leftNeighbourAt (nil = document head); the returned
 // anchor is the last adjacent tombstone (or the original left when none).
 //
-// Only deleted items are skipped — not live ContentFormat markers. Yjs's full
-// minimizeAttributeChanges also skips redundant matching markers, but that
-// affects only concurrent *formatted*-text edits (not exercised here) and would
-// entangle the attribute-diff logic; the tombstone skip alone is what the
-// convergence bug requires.
-func (t *abstractType) skipDeletedForTextAnchor(left *Item) *Item {
+// In formatted text it also skips live markers that restate the attributes in
+// effect at left, as minimizeAttributeChanges does with an inheriting insert's
+// attributes, and then returns those attributes (nil when it needed none).
+// They come from attrsAfter, so only the first keystroke after a format change
+// next to a marker walks the text.
+func (t *abstractType) skipDeletedForTextAnchor(left *Item) (*Item, *attrState) {
+	anchor := left
+	var attrs *attrState
 	next := t.start
 	if left != nil {
 		next = left.Right
 	}
-	for next != nil && next.Deleted {
+	for next != nil {
+		if !next.Deleted {
+			if !t.hasFormatting {
+				break
+			}
+			cf, ok := next.Content.(*ContentFormat)
+			if !ok {
+				break
+			}
+			if attrs == nil {
+				s := t.attrsAfter(anchor)
+				attrs = &s
+			}
+			if v, _ := attrs.get(cf.Key); !attrEqual(v, cf.Val) {
+				break
+			}
+		}
 		left = next
 		next = next.Right
 	}
-	return left
+	return left, attrs
+}
+
+// attrsAfterCache holds the attributes in effect just after the live
+// countable item containing id, as of format generation gen. No marker lies
+// inside an item, so a split or merge of that item leaves them unchanged.
+type attrsAfterCache struct {
+	id    ID
+	gen   uint64
+	ok    bool
+	attrs attrState
+}
+
+// cachedAttrsAfter returns a copy of the attributes in effect just after item,
+// a live countable item, when the cache holds them.
+func (t *abstractType) cachedAttrsAfter(item *Item) (attrState, bool) {
+	c := &t.attrCache
+	if item == nil || !c.ok || c.gen != t.fmtGen || c.id.Client != item.ID.Client ||
+		c.id.Clock < item.ID.Clock || c.id.Clock >= item.ID.Clock+uint64(item.Content.Len()) {
+		return attrState{}, false
+	}
+	return c.attrs.clone(), true
+}
+
+// cacheAttrsAfter records attrs, which the caller no longer mutates, as the
+// attributes in effect just after item, a live countable item. Cold texts
+// keep no cache, so they stay a cache-free oracle.
+func (t *abstractType) cacheAttrsAfter(item *Item, attrs attrState) {
+	if !t.disableMarkers {
+		t.attrCache = attrsAfterCache{id: item.ID, gen: t.fmtGen, ok: true, attrs: attrs}
+	}
+}
+
+// attrsAfter returns the attributes in effect just after item, a live
+// countable item or nil for the start, walking from the start on a cache miss.
+func (t *abstractType) attrsAfter(item *Item) attrState {
+	if item == nil {
+		return attrState{}
+	}
+	if s, ok := t.cachedAttrsAfter(item); ok {
+		return s
+	}
+	var s attrState
+	for it := t.start; it != nil && it != item; it = it.Right {
+		if cf, ok := it.Content.(*ContentFormat); ok && !it.Deleted {
+			s.apply(cf)
+		}
+	}
+	t.cacheAttrsAfter(item, s.clone())
+	return s
 }
 
 // findTextPos returns a cursor at logical position index, splitting the
@@ -1006,7 +873,7 @@ func (t *abstractType) findTextPos(txn *Transaction, index int) *itemTextPos {
 	// runs its loop for count<=0 and returns right=t.start unconditionally).
 	if !t.disableMarkers && !t.hasFormatting {
 		if index <= 0 {
-			return &itemTextPos{right: t.start, cur: make(Attributes)}
+			return &itemTextPos{right: t.start}
 		}
 		left, offset := t.leftNeighbourAt(index)
 		if offset > 0 {
@@ -1016,7 +883,7 @@ func (t *abstractType) findTextPos(txn *Transaction, index int) *itemTextPos {
 		if pidx > t.length {
 			pidx = t.length
 		}
-		pos := &itemTextPos{left: left, index: pidx, cur: make(Attributes)}
+		pos := &itemTextPos{left: left, index: pidx}
 		if left != nil {
 			pos.right = left.Right
 		} else {
@@ -1024,7 +891,17 @@ func (t *abstractType) findTextPos(txn *Transaction, index int) *itemTextPos {
 		}
 		return pos
 	}
-	pos := &itemTextPos{right: t.start, cur: make(Attributes)}
+	// A cached state just after the item ending at index saves the walk.
+	if index > 0 && index <= t.length && !t.disableMarkers && t.attrCache.ok && t.attrCache.gen == t.fmtGen {
+		left, offset := t.leftNeighbourAt(index)
+		if cur, ok := t.cachedAttrsAfter(left); ok {
+			if offset > 0 {
+				splitItem(txn, left, offset)
+			}
+			return &itemTextPos{left: left, right: left.Right, index: index, cur: cur}
+		}
+	}
+	pos := &itemTextPos{right: t.start}
 	pos.advance(txn, index)
 	return pos
 }
@@ -1067,13 +944,13 @@ func minimizeAttributeChanges(pos *itemTextPos, attrs Attributes) {
 // state at the cursor, returning the negated map of values to restore after the
 // range (a key present with a nil value means "restore to no formatting").
 // Mirrors Yjs insertAttributes.
-func (t *abstractType) insertAttributes(txn *Transaction, pos *itemTextPos, keys []string, attrs Attributes) Attributes {
-	negated := make(Attributes)
+func (t *abstractType) insertAttributes(txn *Transaction, pos *itemTextPos, keys []string, attrs Attributes) *attrState {
+	negated := &attrState{}
 	for _, key := range keys {
 		val := attrs[key]
-		curVal := pos.cur[key] // nil when absent
+		curVal, _ := pos.cur.get(key) // nil when absent
 		if !attrEqual(curVal, val) {
-			negated[key] = curVal
+			negated.set(key, curVal)
 			t.insertFormatAt(txn, pos, key, val)
 		}
 	}
@@ -1083,26 +960,79 @@ func (t *abstractType) insertAttributes(txn *Transaction, pos *itemTextPos, keys
 // insertNegatedAttributes restores the negated values at the cursor. It first
 // skips over deleted items and existing markers that already provide a negated
 // value (dropping those keys), then inserts a marker for each remaining negated
-// key. Mirrors Yjs insertNegatedAttributes.
-func (t *abstractType) insertNegatedAttributes(txn *Transaction, pos *itemTextPos, negated Attributes, keys []string) {
+// key in negated's order. Mirrors Yjs insertNegatedAttributes.
+func (t *abstractType) insertNegatedAttributes(txn *Transaction, pos *itemTextPos, negated *attrState) {
 	for pos.right != nil {
 		if pos.right.Deleted {
 			pos.forward()
 			continue
 		}
 		if cf, ok := pos.right.Content.(*ContentFormat); ok {
-			if v, has := negated[cf.Key]; has && attrEqual(v, cf.Val) {
-				delete(negated, cf.Key)
+			if v, has := negated.get(cf.Key); has && attrEqual(v, cf.Val) {
+				negated.del(cf.Key)
 				pos.forward()
 				continue
 			}
 		}
 		break
 	}
-	for _, key := range keys {
-		if v, has := negated[key]; has {
-			t.insertFormatAt(txn, pos, key, v)
+	for _, key := range negated.keys {
+		v, _ := negated.get(key)
+		t.insertFormatAt(txn, pos, key, v)
+	}
+}
+
+// insertText inserts content at pos carrying exactly attrs, then advances pos
+// past it. Mirrors Yjs insertText: attributes in effect at pos that attrs does
+// not name are cleared, opening markers precede the content and closing
+// markers restore the surrounding formatting after it. With cache, it leaves
+// the attributes just after content cached for a following insert there.
+func (t *abstractType) insertText(txn *Transaction, pos *itemTextPos, content Content, attrs Attributes, cache bool) {
+	// Every key in effect at pos joins attrs as a clear (a missing key reads
+	// as nil below), after the caller's keys and in the order it took effect,
+	// as in Yjs. The caller's keys are sorted: a Go map has no insertion order.
+	keys := make([]string, 0, len(attrs)+pos.cur.len())
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range pos.cur.keys {
+		if _, ok := attrs[k]; !ok {
+			keys = append(keys, k)
 		}
+	}
+
+	minimizeAttributeChanges(pos, attrs)
+	negated := t.insertAttributes(txn, pos, keys, attrs)
+
+	origin, _ := itemOrigins(pos.left, t)
+	var originRight *ID
+	if pos.right != nil {
+		id := pos.right.ID
+		originRight = &id
+	}
+	item := &Item{
+		ID:          ID{Client: txn.doc.clientID, Clock: txn.doc.store.NextClock(txn.doc.clientID)},
+		Origin:      origin,
+		OriginRight: originRight,
+		Left:        pos.left,
+		Parent:      t,
+		Content:     content,
+	}
+	if pos.index > 0 {
+		t.insertHint = pos.index
+	}
+	item.integrate(txn, 0)
+	pos.right = item
+	pos.forward()
+	var after attrState
+	if cache {
+		after = pos.cur.clone()
+	}
+
+	t.insertNegatedAttributes(txn, pos, negated)
+	if cache {
+		t.cacheAttrsAfter(item, after) // the closing markers lie after item
 	}
 }
 
@@ -1324,7 +1254,7 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 	// pos starts at index 0 — equivalent to t.findTextPos(txn, 0), just
 	// without that call's marker-lookup machinery for a position we already
 	// know statically.
-	pos := &itemTextPos{right: t.start, cur: make(Attributes)}
+	pos := &itemTextPos{right: t.start}
 	for _, d := range delta {
 		switch d.Op {
 		case DeltaOpInsert:
@@ -1343,156 +1273,18 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 	}
 }
 
-// applyDeltaInsert inserts text, or any other value as an embed (Yjs
-// applyDelta parity), at the cursor pos, mirroring YText.Insert's
-// item construction (attribute open/close markers, tombstone-skipping
-// anchor) exactly — but sourcing the "current attributes" diff input from
-// pos.cur (already tracked incrementally by the cursor) instead of a fresh
-// currentAttributesAt walk from t.start. This is safe because the opening
-// markers this function inserts are always paired with closing markers that
-// restore the exact pre-insert value (or absence) for each touched key, so
-// the net effect on the ambient format state — and therefore on pos.cur — is
-// zero: leaving pos.cur untouched here is equivalent to (and cheaper than)
-// walking it past the new markers. Advances pos past the inserted run.
+// applyDeltaInsert inserts text, or any other value as an embed, at the
+// cursor pos and advances pos past it. As in Yjs applyDelta, the insert
+// carries exactly the op's attributes: nil clears every attribute in effect.
 func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, ins any, attrs Attributes) {
-	var content Content
-	n := 1
 	if text, ok := ins.(string); ok {
 		if text == "" {
 			return
 		}
-		content, n = NewContentString(text), utf16Len(text)
-	} else {
-		content = NewContentEmbed(ins)
+		t.insertText(txn, pos, NewContentString(text), attrs, false)
+		return
 	}
-
-	// Anchor after any adjacent tombstones (Yjs text-insert parity, #160),
-	// same as YText.Insert. Resync pos.right so the cursor invariant
-	// (right == left.Right, or t.start when left is nil) holds afterward.
-	left := t.skipDeletedForTextAnchor(pos.left)
-	pos.left = left
-	if left != nil {
-		pos.right = left.Right
-	} else {
-		pos.right = t.start
-	}
-
-	type diffEntry struct {
-		key    string
-		newVal any
-		oldVal any
-		hadKey bool
-	}
-	var diff []diffEntry
-	if len(attrs) > 0 {
-		keys := make([]string, 0, len(attrs))
-		for k := range attrs {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			newVal := attrs[k]
-			oldVal, hadKey := pos.cur[k]
-			if !hadKey && newVal == nil {
-				continue
-			}
-			if hadKey && reflect.DeepEqual(oldVal, newVal) {
-				continue
-			}
-			diff = append(diff, diffEntry{key: k, newVal: newVal, oldVal: oldVal, hadKey: hadKey})
-		}
-	}
-
-	var origin *ID
-	var originRight *ID
-	if left != nil {
-		end := left.ID.Clock + uint64(left.Content.Len()) - 1
-		origin = &ID{Client: left.ID.Client, Clock: end}
-		if left.Right != nil {
-			id := left.Right.ID
-			originRight = &id
-		}
-	} else if t.start != nil {
-		id := t.start.ID
-		originRight = &id
-	}
-
-	clock := txn.doc.store.NextClock(txn.doc.clientID)
-
-	for _, d := range diff {
-		fmtItem := &Item{
-			ID:          ID{Client: txn.doc.clientID, Clock: clock},
-			Origin:      origin,
-			OriginRight: originRight,
-			Left:        left,
-			Parent:      t,
-			Content:     NewContentFormat(d.key, d.newVal),
-		}
-		fmtItem.integrate(txn, 0)
-		left = fmtItem
-		origin = &ID{Client: fmtItem.ID.Client, Clock: fmtItem.ID.Clock}
-		originRight = nil
-		clock = txn.doc.store.NextClock(txn.doc.clientID)
-	}
-
-	item := &Item{
-		ID:          ID{Client: txn.doc.clientID, Clock: clock},
-		Origin:      origin,
-		OriginRight: originRight,
-		Left:        left,
-		Parent:      t,
-		Content:     content,
-	}
-	if pos.index > 0 {
-		t.insertHint = pos.index
-	}
-	item.integrate(txn, 0)
-	// Always advance the anchor past the just-inserted item — regardless of
-	// whether it carried its own attributes (diff non-empty) — so the cursor
-	// invariant (pos.left/pos.right bracket the position immediately after
-	// this insert) holds for whatever op comes next. Previously this was
-	// only done inside the `len(diff) > 0` branch below (as part of setting
-	// up the closing-marker chain's origin), which left pos stale after a
-	// plain attribute-less insert: the following op would re-anchor at the
-	// PRE-insert position and could integrate out of order (#181 follow-up).
-	left = item
-
-	if len(diff) > 0 {
-		origin = &ID{
-			Client: item.ID.Client,
-			Clock:  item.ID.Clock + uint64(item.Content.Len()) - 1,
-		}
-		if left.Right != nil {
-			rid := left.Right.ID
-			originRight = &rid
-		} else {
-			originRight = nil
-		}
-		clock = txn.doc.store.NextClock(txn.doc.clientID)
-
-		for _, d := range diff {
-			var revertVal any
-			if d.hadKey {
-				revertVal = d.oldVal
-			}
-			closeItem := &Item{
-				ID:          ID{Client: txn.doc.clientID, Clock: clock},
-				Origin:      origin,
-				OriginRight: originRight,
-				Left:        left,
-				Parent:      t,
-				Content:     NewContentFormat(d.key, revertVal),
-			}
-			closeItem.integrate(txn, 0)
-			left = closeItem
-			origin = &ID{Client: closeItem.ID.Client, Clock: closeItem.ID.Clock}
-			originRight = nil
-			clock = txn.doc.store.NextClock(txn.doc.clientID)
-		}
-	}
-
-	pos.left = left
-	pos.index += n
+	t.insertText(txn, pos, NewContentEmbed(ins), attrs, false)
 }
 
 // applyDeltaDelete deletes length countable units starting at the cursor pos,
@@ -1515,7 +1307,7 @@ func (t *abstractType) applyDeltaDelete(txn *Transaction, pos *itemTextPos, leng
 		item := pos.right
 		if !item.Deleted {
 			if cf, ok := item.Content.(*ContentFormat); ok {
-				updateAttr(pos.cur, cf)
+				pos.cur.apply(cf)
 			} else if item.Content.IsCountable() {
 				n := item.Content.Len()
 				if n <= length {
