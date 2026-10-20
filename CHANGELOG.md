@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.51.13] — 2026-10-20
+
+### Fixed
+
+- **`crdt`: deleting or reading a deeply nested shared type used one stack frame
+  per nesting level.** A peer can build a document of any depth through many
+  small, valid updates. Deleting the outer container, or reading the document
+  with `ToJSON`, `ToSlice`, `Entries` or `ToXML`, recursed once per level, so a
+  deep enough document ended the process with a fatal stack overflow that
+  `recover` cannot catch. At Go's default stack limit that takes millions of
+  levels, tens of megabytes of updates and gigabytes of heap, so this was a
+  costly denial of service rather than a small-payload crash. Deletion now
+  walks the subtree through parent links in the same depth-first order, and
+  the readers walk nested types with an explicit stack. Results and their
+  order are unchanged.
+
+### Performance
+
+- **`crdt`: `YArray.ToJSON` and `YMap.ToJSON` write JSON directly.** They no
+  longer build intermediate slices and maps, and the document's read lock is
+  held only while values are copied out; sorting keys and formatting happen
+  after it is released. On 10,000-element containers the lock is held 52–76%
+  less time than before, `ToJSON` runs 31–87% faster for numbers and 15–17%
+  faster for mixed values, takes about as long for objects (−1% to +2%), and
+  uses 30–89% less memory. Output
+  bytes and errors are unchanged.
+
 ## [1.51.12] — 2026-10-20
 
 ### Fixed

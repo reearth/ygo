@@ -419,10 +419,9 @@ func (a *YArray) toSliceLocked() []any {
 
 // ToJSON returns the array serialised as a JSON array: the bytes
 // json.Marshal(a.ToSlice()) would produce, without recursing once per nested
-// shared type. Nested types, strings, numbers, booleans and nil are written
-// under the document's read lock; any other value (a map, a slice, an embed,
-// a json.Marshaler) is marshalled by encoding/json after the lock is released,
-// so a MarshalJSON method may read or write the document.
+// shared type. Values are copied out under the document's read lock and
+// formatted after it is released, so a MarshalJSON method may read or write
+// the document.
 // Must not be called from inside a Transact callback.
 func (a *YArray) ToJSON() ([]byte, error) {
 	return marshalSharedJSON(a.doc, a)
