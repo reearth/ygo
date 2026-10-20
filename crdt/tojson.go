@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"unicode/utf8"
 )
@@ -76,19 +77,31 @@ func newJSONArrayCursor(a *YArray) jsonArrayCursor {
 }
 
 func (c *jsonArrayCursor) next() (nestedJSONEntry, bool) {
-	for {
-		if len(c.vals) > 0 {
-			value := c.vals[0]
-			c.vals = c.vals[1:]
-			if c.staged {
-				return nestedJSONEntryForValue(value), true
-			}
-			return nestedJSONEntry{value: value}, true
+	run, entry, ok := c.nextRun()
+	if len(run) > 0 {
+		c.vals = run[1:]
+		return nestedJSONEntry{value: run[0]}, true
+	}
+	return entry, ok
+}
+
+// nextRun returns the next plain values of one item as a run, which aliases
+// the item's content, or else the next single entry.
+func (c *jsonArrayCursor) nextRun() ([]any, nestedJSONEntry, bool) {
+	if c.staged {
+		if len(c.vals) == 0 {
+			return nil, nestedJSONEntry{}, false
 		}
-		item := c.item
-		if item == nil {
-			return nestedJSONEntry{}, false
-		}
+		value := c.vals[0]
+		c.vals = c.vals[1:]
+		return nil, nestedJSONEntryForValue(value), true
+	}
+	if len(c.vals) > 0 {
+		run := c.vals
+		c.vals = nil
+		return run, nestedJSONEntry{}, true
+	}
+	for item := c.item; item != nil; item = c.item {
 		c.item = item.Right
 		countable, _, renderAt := c.t.renderedStep(item)
 		if !countable {
@@ -98,150 +111,159 @@ func (c *jsonArrayCursor) next() (nestedJSONEntry, bool) {
 			item = renderAt
 		}
 		if vals, ok := plainVals(item.Content); ok {
-			c.vals = vals
+			if len(vals) > 0 {
+				return vals, nestedJSONEntry{}, true
+			}
 			continue
 		}
 		switch content := item.Content.(type) {
 		case *ContentEmbed:
-			return nestedJSONEntry{value: content.Val}, true
+			return nil, nestedJSONEntry{value: content.Val}, true
 		case *ContentType:
-			return nestedJSONEntryForContent(content), true
+			return nil, nestedJSONEntryForContent(content), true
 		}
 	}
+	return nil, nestedJSONEntry{}, false
 }
 
-// jsonEntryLocked reads the entry under key, which appendJSONKeysLocked
-// reported.
-func (m *YMap) jsonEntryLocked(key string) nestedJSONEntry {
-	if m.detached() {
-		return nestedJSONEntryForValue(m.prelim[key])
-	}
-	entry, _ := nestedJSONEntryForMapItem(m.itemMap[key])
-	return entry
-}
-
-// appendJSONKeysLocked appends the keys m renders, sorted bytewise as
-// encoding/json sorts map keys.
-func (m *YMap) appendJSONKeysLocked(keys []string) []string {
-	start := len(keys)
-	if m.detached() {
-		for key := range m.prelim {
-			keys = append(keys, key)
-		}
-	} else {
-		for key, item := range m.itemMap {
-			if _, ok := nestedJSONEntryForMapItem(item); ok {
-				keys = append(keys, key)
-			}
-		}
-	}
-	sort.Strings(keys[start:])
-	return keys
-}
-
-// nestedJSONSlot is where a converted nested type goes: the result, an element
-// of its parent's slice, or a key of its parent's map.
-type nestedJSONSlot struct {
-	root   *any
-	array  []any
-	index  int
-	object map[string]any
-	key    string
-}
-
-func (slot nestedJSONSlot) set(value any) {
-	switch {
-	case slot.root != nil:
-		*slot.root = value
-	case slot.array != nil:
-		slot.array[slot.index] = value
-	default:
-		slot.object[slot.key] = value
-	}
-}
-
+// nestedJSONFrame is a YArray or YMap being converted. An array reads its
+// cursor up to the next nested container; a map has filled its plain entries
+// and converts the nested ones in pending[next:end] one at a time.
 type nestedJSONFrame struct {
+	array     jsonArrayCursor
+	slice     []any
+	object    map[string]any // nil for an array
+	start     int            // the map's first entry in pending
+	next, end int
+}
+
+// nestedJSONPending is a map entry holding a nested container.
+type nestedJSONPending struct {
+	key   string
 	owner any
-	slot  nestedJSONSlot
+}
+
+// leafJSONValue converts a nested type that holds no nested JSON values: YText
+// → string, the XML types → their XML string, anything else but YArray and
+// YMap → nil. ok is false for YArray and YMap. Caller must hold the doc lock.
+func leafJSONValue(owner any) (value any, ok bool) {
+	switch current := owner.(type) {
+	case *YArray, *YMap:
+		return nil, false
+	case *YText:
+		return current.toStringLocked(), true
+	case *YXmlElement:
+		return current.toXMLLocked(), true
+	case *YXmlFragment:
+		return current.toXMLLocked(), true
+	case *YXmlText:
+		return current.toXMLLocked(), true
+	}
+	return nil, true
 }
 
 // nestedJSONValue converts owner to its JSON-shaped value: YArray → []any,
-// YMap → map[string]any, YText → string, the XML types → their XML string,
-// anything else → nil. A container fills its own slice or map in one pass and
-// leaves a frame only for each nested type it holds. Caller must hold the doc
-// lock.
+// YMap → map[string]any, and leafJSONValue for the rest. It keeps one frame
+// per open container, and a container's value goes to its parent once it is
+// complete. Caller must hold the doc lock.
 func nestedJSONValue(owner any) any {
-	var result any
-	var inline [16]nestedJSONFrame
-	stack := inline[:1]
-	stack[0] = nestedJSONFrame{owner: owner, slot: nestedJSONSlot{root: &result}}
+	if value, ok := leafJSONValue(owner); ok {
+		return value
+	}
+	var inline [8]nestedJSONFrame
+	stack := inline[:0]
+	var pending []nestedJSONPending
+	stack, pending = openNestedJSON(stack, pending, owner)
 
-	for len(stack) > 0 {
-		last := len(stack) - 1
-		frame := stack[last]
-		stack = stack[:last]
+	for {
+		frame := &stack[len(stack)-1]
+		var child any
+		if frame.object == nil {
+			child = frame.nextArrayChild()
+		} else if frame.next < frame.end {
+			child = pending[frame.next].owner
+		}
+		if child != nil {
+			stack, pending = openNestedJSON(stack, pending, child)
+			continue
+		}
 
-		switch current := frame.owner.(type) {
-		case *YArray:
-			value := make([]any, 0, current.Len())
-			children := len(stack)
-			cursor := newJSONArrayCursor(current)
-			for entry, ok := cursor.next(); ok; entry, ok = cursor.next() {
-				if entry.owner != nil {
-					stack = append(stack, nestedJSONFrame{
-						owner: entry.owner,
-						slot:  nestedJSONSlot{index: len(value)},
-					})
-				}
-				value = append(value, entry.value)
-			}
-			// The slice's backing array is final only now.
-			for i := children; i < len(stack); i++ {
-				stack[i].slot.array = value
-			}
-			frame.slot.set(value)
-		case *YMap:
-			var value map[string]any
-			if current.detached() {
-				value = make(map[string]any, len(current.prelim))
-				for key, staged := range current.prelim {
-					stack = putNestedJSONEntry(stack, value, key, nestedJSONEntryForValue(staged))
-				}
-			} else {
-				value = make(map[string]any, len(current.itemMap))
-				for key, item := range current.itemMap {
-					if entry, ok := nestedJSONEntryForMapItem(item); ok {
-						stack = putNestedJSONEntry(stack, value, key, entry)
-					}
-				}
-			}
-			frame.slot.set(value)
-		case *YText:
-			frame.slot.set(current.toStringLocked())
-		case *YXmlElement:
-			frame.slot.set(current.toXMLLocked())
-		case *YXmlFragment:
-			frame.slot.set(current.toXMLLocked())
-		case *YXmlText:
-			frame.slot.set(current.toXMLLocked())
-		default:
-			frame.slot.set(nil)
+		var value any = frame.object
+		if frame.object == nil {
+			value = frame.slice
+		} else {
+			pending = pending[:frame.start]
+		}
+		stack = stack[:len(stack)-1]
+		if len(stack) == 0 {
+			return value
+		}
+		parent := &stack[len(stack)-1]
+		if parent.object == nil {
+			parent.slice = append(parent.slice, value)
+		} else {
+			parent.object[pending[parent.next].key] = value
+			pending[parent.next] = nestedJSONPending{}
+			parent.next++
 		}
 	}
-	return result
 }
 
-// putNestedJSONEntry stores a plain entry in object, or pushes a frame that
-// stores the converted nested type there later.
-func putNestedJSONEntry(stack []nestedJSONFrame, object map[string]any, key string, entry nestedJSONEntry) []nestedJSONFrame {
+// openNestedJSON pushes a frame for the YArray or YMap owner.
+func openNestedJSON(stack []nestedJSONFrame, pending []nestedJSONPending, owner any) ([]nestedJSONFrame, []nestedJSONPending) {
+	if a, ok := owner.(*YArray); ok {
+		return append(stack, nestedJSONFrame{
+			array: newJSONArrayCursor(a),
+			slice: make([]any, 0, a.Len()),
+		}), pending
+	}
+	m := owner.(*YMap)
+	start := len(pending)
+	var object map[string]any
+	if m.detached() {
+		object = make(map[string]any, len(m.prelim))
+		for key, staged := range m.prelim {
+			pending = putNestedJSONEntry(pending, object, key, nestedJSONEntryForValue(staged))
+		}
+	} else {
+		object = make(map[string]any, len(m.itemMap))
+		for key, item := range m.itemMap {
+			if entry, ok := nestedJSONEntryForMapItem(item); ok {
+				pending = putNestedJSONEntry(pending, object, key, entry)
+			}
+		}
+	}
+	return append(stack, nestedJSONFrame{object: object, start: start, next: start, end: len(pending)}), pending
+}
+
+// nextArrayChild appends the array's values up to its next nested YArray or
+// YMap, which it returns, or to its end, where it returns nil.
+func (frame *nestedJSONFrame) nextArrayChild() any {
+	for entry, ok := frame.array.next(); ok; entry, ok = frame.array.next() {
+		if entry.owner != nil {
+			leaf, isLeaf := leafJSONValue(entry.owner)
+			if !isLeaf {
+				return entry.owner
+			}
+			entry.value = leaf
+		}
+		frame.slice = append(frame.slice, entry.value)
+	}
+	return nil
+}
+
+// putNestedJSONEntry stores entry in object, or queues it in pending when it
+// holds a nested YArray or YMap.
+func putNestedJSONEntry(pending []nestedJSONPending, object map[string]any, key string, entry nestedJSONEntry) []nestedJSONPending {
 	if entry.owner == nil {
 		object[key] = entry.value
-		return stack
+		return pending
 	}
-	return append(stack, nestedJSONFrame{
-		owner: entry.owner,
-		slot:  nestedJSONSlot{object: object, key: key},
-	})
+	if leaf, ok := leafJSONValue(entry.owner); ok {
+		object[key] = leaf
+		return pending
+	}
+	return append(pending, nestedJSONPending{key: key, owner: entry.owner})
 }
 
 // toJSONValue unwraps a ContentType into its JSON-shaped value. Caller must
@@ -254,93 +276,172 @@ func toJSONValue(ct *ContentType) any {
 }
 
 // jsonWriter is ToJSON's scratch space, pooled so repeated calls reuse its
-// buffers. write runs under the document's read lock and renders everything
-// except the values only encoding/json can encode, whose positions it
-// records; finish runs after the lock is released and marshals those, so no
+// buffers. collect runs under the document's read lock and only copies the
+// document out as tokens; render sorts and formats them after the lock is
+// released, so writers wait for a copy rather than for formatting, and no
 // MarshalJSON method runs while the lock is held.
 type jsonWriter struct {
+	tokens       []jsonToken
+	vals         []any // the values of every jsonValues token
+	frames       []jsonFrame
+	order        []int // entry tokens of every open object, sorted by key
 	out          []byte
 	deferredAt   []int // offsets in out where deferredVals go
 	deferredVals []any
-	frames       []jsonFrame
-	keys         []string // sorted keys of every open map, outermost first
-	full         bytes.Buffer
-	encoder      *json.Encoder // writes to full
+	encoded      bytes.Buffer
+	encoder      *json.Encoder // writes to encoded
 }
 
-// jsonFrame is one open container: an array read through its cursor, or a
-// map (m != nil) with keys w.keys[next:end] still to write.
+type jsonTokenKind uint8
+
+const (
+	jsonValue  jsonTokenKind = iota // value
+	jsonValues                      // vals[start:end], array elements
+	jsonArray                       // tokens[start:end], or owner in value until collected
+	jsonObject                      // tokens[start:end], or owner in value until collected
+)
+
+// jsonToken is one value. Inside an object it carries its key.
+type jsonToken struct {
+	kind       jsonTokenKind
+	start, end int32
+	key        string
+	value      any
+}
+
+// jsonFrame is one open container during render: tokens[next:end] of an
+// array, or order[next:end] of an object.
 type jsonFrame struct {
-	array     jsonArrayCursor
-	m         *YMap
-	keysStart int
-	next, end int
-	written   bool // an entry was written, so the next one needs a comma
+	object           bool
+	written          bool // an entry was written, so the next one needs a comma
+	start, next, end int
 }
 
-var jsonWriterPool = sync.Pool{New: func() any {
+func newJSONWriter() *jsonWriter {
 	w := &jsonWriter{}
-	w.encoder = json.NewEncoder(&w.full)
+	w.encoder = json.NewEncoder(&w.encoded)
 	return w
-}}
+}
+
+var jsonWriterPool = sync.Pool{New: func() any { return newJSONWriter() }}
 
 // marshalSharedJSON is YArray.ToJSON and YMap.ToJSON.
 func marshalSharedJSON(doc *Doc, owner any) ([]byte, error) {
 	w := jsonWriterPool.Get().(*jsonWriter)
 	defer w.release()
-	w.writeLocked(doc, owner)
+	w.collectLocked(doc, owner)
+	w.render()
 	return w.finish()
 }
 
-func (w *jsonWriter) writeLocked(doc *Doc, owner any) {
+func (w *jsonWriter) collectLocked(doc *Doc, owner any) {
 	if doc != nil {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
 	}
-	w.write(owner)
+	w.collect(owner)
 }
 
-// write renders owner with one frame per open container: the Go stack stays
-// flat, and the frame stack grows with the nesting depth, not with the number
-// of elements.
-func (w *jsonWriter) write(owner any) {
-	w.open(owner)
-	for len(w.frames) > 0 {
-		frame := &w.frames[len(w.frames)-1]
-		if child := w.writeLeaves(frame); child != nil {
-			w.open(child)
-			continue
+// collect records owner as tokens. Each container's direct children are one
+// contiguous range, appended when the scan reaches the container's token, so
+// one pass over the growing slice collects every level without recursion.
+func (w *jsonWriter) collect(owner any) {
+	w.appendEntry("", nestedJSONEntry{owner: owner})
+	for i := 0; i < len(w.tokens); i++ {
+		switch current := w.tokens[i].value.(type) {
+		case *YArray:
+			start := len(w.tokens)
+			cursor := newJSONArrayCursor(current)
+			for run, entry, ok := cursor.nextRun(); ok; run, entry, ok = cursor.nextRun() {
+				if run == nil {
+					w.appendEntry("", entry)
+					continue
+				}
+				// Copied: a later merge may append into the content's spare capacity.
+				w.tokens = append(w.tokens, jsonToken{
+					kind:  jsonValues,
+					start: int32(len(w.vals)),
+					end:   int32(len(w.vals) + len(run)),
+				})
+				w.vals = append(w.vals, run...)
+			}
+			w.setChildren(i, start)
+		case *YMap:
+			start := len(w.tokens)
+			if current.detached() {
+				for key, staged := range current.prelim {
+					w.appendEntry(key, nestedJSONEntryForValue(staged))
+				}
+			} else {
+				for key, item := range current.itemMap {
+					if entry, ok := nestedJSONEntryForMapItem(item); ok {
+						w.appendEntry(key, entry)
+					}
+				}
+			}
+			w.setChildren(i, start)
 		}
-		w.close(frame)
 	}
 }
 
-// writeLeaves writes frame's entries up to the next nested shared type, which
-// it returns, or to the container's end, where it returns nil.
-func (w *jsonWriter) writeLeaves(frame *jsonFrame) any {
-	for {
-		var entry nestedJSONEntry
-		if frame.m != nil {
-			if frame.next == frame.end {
-				return nil
+// appendEntry records a plain value, a nested type that reads as a value, or
+// a nested YArray or YMap whose children collect appends later.
+func (w *jsonWriter) appendEntry(key string, entry nestedJSONEntry) {
+	token := jsonToken{key: key, value: entry.value}
+	if entry.owner != nil {
+		switch entry.owner.(type) {
+		case *YArray:
+			token.kind, token.value = jsonArray, entry.owner
+		case *YMap:
+			token.kind, token.value = jsonObject, entry.owner
+		default:
+			token.value, _ = leafJSONValue(entry.owner)
+		}
+	}
+	w.tokens = append(w.tokens, token)
+}
+
+func (w *jsonWriter) setChildren(i, start int) {
+	token := &w.tokens[i]
+	token.start, token.end, token.value = int32(start), int32(len(w.tokens)), nil
+}
+
+// render writes the tokens, objects in encoding/json's bytewise key order,
+// except the values only encoding/json can encode, whose positions it records
+// for finish.
+func (w *jsonWriter) render() {
+	w.writeToken(0)
+	for len(w.frames) > 0 {
+		frame := &w.frames[len(w.frames)-1]
+		if frame.next == frame.end {
+			if frame.object {
+				w.out = append(w.out, '}')
+				w.order = w.order[:frame.start]
+			} else {
+				w.out = append(w.out, ']')
 			}
-			key := w.keys[frame.next]
-			frame.next++
-			w.separate(frame)
-			w.writeString(key)
+			w.frames = w.frames[:len(w.frames)-1]
+			continue
+		}
+		i := frame.next
+		if frame.object {
+			i = w.order[i]
+		}
+		frame.next++
+		token := &w.tokens[i]
+		if token.kind == jsonValues {
+			for _, value := range w.vals[token.start:token.end] {
+				w.separate(frame)
+				w.writeValue(value)
+			}
+			continue
+		}
+		w.separate(frame)
+		if frame.object {
+			w.writeString(token.key)
 			w.out = append(w.out, ':')
-			entry = frame.m.jsonEntryLocked(key)
-		} else {
-			var ok bool
-			if entry, ok = frame.array.next(); !ok {
-				return nil
-			}
-			w.separate(frame)
 		}
-		if entry.owner != nil {
-			return entry.owner
-		}
-		w.writeValue(entry.value)
+		w.writeToken(i)
 	}
 }
 
@@ -351,44 +452,27 @@ func (w *jsonWriter) separate(frame *jsonFrame) {
 	frame.written = true
 }
 
-// open writes a container's opening bracket and pushes its frame, or writes a
-// nested type that reads as a string, or null.
-func (w *jsonWriter) open(owner any) {
-	switch current := owner.(type) {
-	case *YArray:
+// writeToken writes a value, or opens a container and pushes its frame.
+func (w *jsonWriter) writeToken(i int) {
+	token := &w.tokens[i]
+	switch token.kind {
+	case jsonArray:
 		w.out = append(w.out, '[')
-		w.frames = append(w.frames, jsonFrame{array: newJSONArrayCursor(current)})
-	case *YMap:
+		w.frames = append(w.frames, jsonFrame{next: int(token.start), end: int(token.end)})
+	case jsonObject:
 		w.out = append(w.out, '{')
-		start := len(w.keys)
-		w.keys = current.appendJSONKeysLocked(w.keys)
-		w.frames = append(w.frames, jsonFrame{
-			m:         current,
-			keysStart: start,
-			next:      start,
-			end:       len(w.keys),
+		start := len(w.order)
+		for j := token.start; j < token.end; j++ {
+			w.order = append(w.order, int(j))
+		}
+		entries := w.order[start:]
+		slices.SortFunc(entries, func(a, b int) int {
+			return strings.Compare(w.tokens[a].key, w.tokens[b].key)
 		})
-	case *YText:
-		w.writeString(current.toStringLocked())
-	case *YXmlElement:
-		w.writeString(current.toXMLLocked())
-	case *YXmlFragment:
-		w.writeString(current.toXMLLocked())
-	case *YXmlText:
-		w.writeString(current.toXMLLocked())
+		w.frames = append(w.frames, jsonFrame{object: true, start: start, next: start, end: len(w.order)})
 	default:
-		w.out = append(w.out, "null"...)
+		w.writeValue(token.value)
 	}
-}
-
-func (w *jsonWriter) close(frame *jsonFrame) {
-	if frame.m != nil {
-		w.out = append(w.out, '}')
-		w.keys = w.keys[:frame.keysStart]
-	} else {
-		w.out = append(w.out, ']')
-	}
-	w.frames = w.frames[:len(w.frames)-1]
 }
 
 func (w *jsonWriter) writeString(s string) {
@@ -409,64 +493,95 @@ func (w *jsonWriter) writeValue(value any) {
 	w.deferredVals = append(w.deferredVals, value)
 }
 
-// finish marshals the deferred values with encoding/json, splices them into
-// the rendered output, and returns a copy the caller owns. Errors are
-// encoding/json's, for the first failing value in output order.
+// finish marshals the deferred values with encoding/json in one call, splices
+// them into the rendered output, and returns a copy the caller owns. Errors
+// are encoding/json's, for the first failing value in output order.
 func (w *jsonWriter) finish() ([]byte, error) {
 	if len(w.deferredAt) == 0 {
 		return bytes.Clone(w.out), nil
 	}
+	var encode any = w.deferredVals
+	if len(w.deferredVals) == 1 {
+		encode = w.deferredVals[0]
+	}
+	if err := w.encoder.Encode(encode); err != nil {
+		return nil, err
+	}
+	encoded := w.encoded.Bytes()
+	encoded = encoded[:len(encoded)-1] // Encode ends with a newline
+	if len(w.deferredVals) > 1 {
+		encoded = encoded[1 : len(encoded)-1] // the brackets around the values
+	}
+
+	result := make([]byte, 0, len(w.out)+len(encoded))
 	prev := 0
 	for i := 0; i < len(w.deferredAt); {
 		// Deferred values with only a comma between them are neighbouring
-		// elements of one array, which encoding/json marshals in one call.
+		// array elements, encoded the same way here, so they copy as one run.
 		j := i + 1
 		for j < len(w.deferredAt) && string(w.out[w.deferredAt[j-1]:w.deferredAt[j]]) == "," {
 			j++
 		}
-		w.full.Write(w.out[prev:w.deferredAt[i]])
-		if err := w.encodeRun(w.deferredVals[i:j]); err != nil {
-			return nil, err
-		}
+		result = append(result, w.out[prev:w.deferredAt[i]]...)
 		prev = w.deferredAt[j-1]
+		n := len(encoded)
+		if j < len(w.deferredAt) {
+			n = -1
+			for range j - i {
+				n++ // past the previous value's comma
+				n += nextJSONValueEnd(encoded[n:])
+			}
+		}
+		result = append(result, encoded[:n]...)
+		if n < len(encoded) {
+			n++ // the comma before the next run
+		}
+		encoded = encoded[n:]
 		i = j
 	}
-	w.full.Write(w.out[prev:])
-	return bytes.Clone(w.full.Bytes()), nil
+	return append(result, w.out[prev:]...), nil
 }
 
-// encodeRun appends values to full as comma-separated JSON.
-func (w *jsonWriter) encodeRun(values []any) error {
-	if len(values) == 1 {
-		return w.encode(values[0])
+// nextJSONValueEnd returns the length of the first value in compact JSON:
+// the offset of the first comma outside strings and nested containers.
+func nextJSONValueEnd(data []byte) int {
+	depth := 0
+	inString := false
+	for i := 0; i < len(data); i++ {
+		b := data[i]
+		if inString {
+			switch b {
+			case '\\':
+				i++
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			inString = true
+		case '[', '{':
+			depth++
+		case ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				return i
+			}
+		}
 	}
-	start := w.full.Len()
-	if err := w.encode(values); err != nil {
-		return err
-	}
-	// Drop the brackets encoding/json put around the run.
-	encoded := w.full.Bytes()
-	copy(encoded[start:], encoded[start+1:len(encoded)-1])
-	w.full.Truncate(len(encoded) - 2)
-	return nil
-}
-
-func (w *jsonWriter) encode(value any) error {
-	if err := w.encoder.Encode(value); err != nil {
-		return err
-	}
-	w.full.Truncate(w.full.Len() - 1) // Encode ends each value with a newline
-	return nil
+	return len(data)
 }
 
 // release clears every reference into the document before pooling w.
 func (w *jsonWriter) release() {
+	clear(w.tokens[:cap(w.tokens)])
+	clear(w.vals[:cap(w.vals)])
 	clear(w.deferredVals[:cap(w.deferredVals)])
-	clear(w.frames[:cap(w.frames)])
-	clear(w.keys[:cap(w.keys)])
-	w.out, w.deferredAt, w.deferredVals = w.out[:0], w.deferredAt[:0], w.deferredVals[:0]
-	w.frames, w.keys = w.frames[:0], w.keys[:0]
-	w.full.Reset()
+	w.tokens, w.vals, w.out, w.deferredAt, w.deferredVals = w.tokens[:0], w.vals[:0], w.out[:0], w.deferredAt[:0], w.deferredVals[:0]
+	w.frames, w.order = w.frames[:0], w.order[:0]
+	w.encoded.Reset()
 	jsonWriterPool.Put(w)
 }
 

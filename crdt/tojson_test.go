@@ -165,8 +165,7 @@ func TestUnit_AppendJSONString_MatchesEncodingJSON(t *testing.T) {
 	// Invalid UTF-8 goes to encoding/json.
 	_, ok := appendJSONString(nil, "a\xffb")
 	assert.False(t, ok)
-	w := &jsonWriter{}
-	w.encoder = json.NewEncoder(&w.full)
+	w := newJSONWriter()
 	w.writeString("a\xffb")
 	got, err := w.finish()
 	require.NoError(t, err)
