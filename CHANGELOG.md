@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.0] — 2026-10-20
+
+### Added
+
+- **`crdt`: inspect live text-formatting boundaries with `YText.WalkFormatting` (#317).**
+  The callback receives each non-deleted formatting marker's key and value,
+  including boundaries that have no visible text and are absent from `ToDelta`.
+  `YXmlText` inherits the method. The walk holds the document read lock and
+  stops on the first callback error; callbacks must not mutate values or call
+  document APIs. Existing readers, merging and wire formats are unchanged.
+
 ## [1.53.0] — 2026-10-20
 
 ### Fixed

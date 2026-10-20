@@ -1,3 +1,18 @@
+## v1.54.0
+
+**`YText.WalkFormatting` exposes live formatting boundaries.** Concurrent
+formatting and deletion can leave formatting markers without visible text.
+`ToDelta` describes visible text, so those markers are absent from its output.
+Applications that validate formatting keys and values or account for live CRDT
+items can inspect them through the new callback. `YXmlText` inherits the method.
+
+The walk holds the document read lock. Call it outside transactions, and do not
+mutate values or call document APIs from the callback. Returning an error stops
+the walk and returns that error unchanged. The helper does not modify the
+document or change merging, encoding, or existing readers.
+
+This is a minor release because it adds a public method. Closes #317.
+
 ## v1.53.0
 
 **Who is affected:** anyone building the iOS or Android bindings with
