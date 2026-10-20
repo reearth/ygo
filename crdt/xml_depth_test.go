@@ -5,6 +5,9 @@ import (
 	"os/exec"
 	"runtime/debug"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 const deepXMLTestDepth = 20_000
@@ -68,4 +71,43 @@ func TestUnit_YXmlElement_ToXML_DetachedChildrenInOrder(t *testing.T) {
 	if got := list.toXMLLocked(); got != want {
 		t.Errorf("toXMLLocked() = %q, want %q", got, want)
 	}
+}
+
+// toXMLLocked must stay lock-free all the way down: a nested YXmlText read
+// through its unlocked ToXML would deadlock under the write lock.
+func TestUnit_YXmlElement_ToXMLLocked_UnderWriteLock(t *testing.T) {
+	doc := newTestDoc(1)
+	fragment := doc.GetXmlFragment("x")
+	element := NewYXmlElement("p")
+	text := NewYXmlText()
+	doc.Transact(func(txn *Transaction) {
+		fragment.InsertElement(txn, 0, element)
+		element.InsertText(txn, 0, text)
+		text.Insert(txn, 0, "a<b", nil)
+	})
+
+	done := make(chan [2]string, 1)
+	go func() {
+		doc.Transact(func(*Transaction) {
+			done <- [2]string{element.toXMLLocked(), fragment.toXMLLocked()}
+		})
+	}()
+	select {
+	case got := <-done:
+		require.Equal(t, "<p>a&lt;b</p>", got[0])
+		require.Equal(t, "<p>a&lt;b</p>", got[1])
+	case <-time.After(10 * time.Second):
+		t.Fatal("toXMLLocked took the document lock")
+	}
+}
+
+// With GC off a deleted child keeps its type, which ToXML must still skip.
+func TestUnit_YXmlFragment_ToXML_SkipsDeletedChildWithoutGC(t *testing.T) {
+	doc := New(WithClientID(1), WithGC(false))
+	fragment := doc.GetXmlFragment("x")
+	doc.Transact(func(txn *Transaction) {
+		fragment.Insert(txn, 0, NewYXmlElement("a"), NewYXmlElement("b"), NewYXmlElement("c"))
+	})
+	doc.Transact(func(txn *Transaction) { fragment.Delete(txn, 1, 1) })
+	require.Equal(t, "<a></a><c></c>", fragment.ToXML())
 }

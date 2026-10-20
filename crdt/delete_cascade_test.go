@@ -206,3 +206,28 @@ func TestUnit_DeleteSet_ExactMatch_NoSpuriousSplit(t *testing.T) {
 	assert.Equal(t, itemsBefore, itemsAfter,
 		"no spurious splits when the range exactly matches an item")
 }
+
+// The cascade stops at the deleted item: its live siblings to the right, and
+// their children, stay live.
+func TestUnit_Item_Delete_CascadeLeavesRightSiblingsLive(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("outer")
+	deleted, kept := NewMapPrelim(), NewMapPrelim()
+	inner := NewArrayPrelim()
+	doc.Transact(func(txn *Transaction) {
+		arr.PushType(txn, deleted)
+		deleted.Set(txn, "inner", inner)
+		inner.Push(txn, []any{1, 2})
+		arr.PushType(txn, kept)
+		kept.Set(txn, "k", "v")
+		arr.Push(txn, []any{"plain"})
+	})
+
+	doc.Transact(func(txn *Transaction) { arr.Delete(txn, 0, 1) })
+
+	require.True(t, deleted.item.Deleted)
+	require.True(t, inner.item.Deleted)
+	require.False(t, kept.item.Deleted)
+	require.False(t, kept.itemMap["k"].Deleted)
+	assert.Equal(t, []any{map[string]any{"k": "v"}, "plain"}, arr.ToSlice())
+}

@@ -304,3 +304,241 @@ func TestUnit_ToJSON_MarshalJSONRunsAfterUnlock(t *testing.T) {
 		})
 	}
 }
+
+func newTestXmlFragment() *YXmlFragment {
+	f := &YXmlFragment{}
+	f.owner = f
+	f.itemMap = make(map[string]*Item)
+	return f
+}
+
+// Embeds and nested XML types read the same through ToJSON, ToSlice and
+// Entries, in arrays and maps.
+func TestUnit_ToJSON_EmbedsAndNestedXMLMatchEncodingJSON(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	m := doc.GetMap("m")
+	embed := map[string]any{"image": "x.png", "w": 2.0}
+	doc.Transact(func(txn *Transaction) {
+		arr.Push(txn, []any{"before"})
+		arr.insertContentAfterItem(txn, arr.start, NewContentEmbed(embed), 1)
+		text, fragment := NewYXmlText(), newTestXmlFragment()
+		arr.PushType(txn, text)
+		text.Insert(txn, 0, "a<b", nil)
+		arr.PushType(txn, fragment)
+		fragment.InsertElement(txn, 0, NewYXmlElement("e"))
+
+		key := "embed"
+		(&Item{
+			ID:        ID{Client: doc.clientID, Clock: doc.store.NextClock(doc.clientID)},
+			Parent:    m.baseType(),
+			ParentSub: &key,
+			Content:   NewContentEmbed(embed),
+		}).integrate(txn, 0)
+		mapText, mapFragment := NewYXmlText(), newTestXmlFragment()
+		m.Set(txn, "text", mapText)
+		mapText.Insert(txn, 0, "c&d", nil)
+		m.Set(txn, "fragment", mapFragment)
+		mapFragment.InsertText(txn, 0, NewYXmlText())
+	})
+
+	assert.Equal(t, []any{"before", embed, "a&lt;b", "<e></e>"}, arr.ToSlice())
+	assert.Equal(t, map[string]any{"embed": embed, "text": "c&amp;d", "fragment": ""}, m.Entries())
+	got, err := arr.ToJSON()
+	assertToJSONMatchesEncodingJSON(t, got, err, arr.ToSlice())
+	got, err = m.ToJSON()
+	assertToJSONMatchesEncodingJSON(t, got, err, m.Entries())
+}
+
+// Values only encoding/json can encode are marshalled in one call and split
+// back out, so their encodings may hold commas, brackets and quotes.
+func TestUnit_ToJSON_DeferredValuesSplitBackOut(t *testing.T) {
+	tricky := []any{
+		map[string]any{"a,b": []any{1, "]", "}"}, "q": `x,"y\`},
+		[]any{",", map[string]any{}, []any{}},
+		jsonTestMarshaler{label: `,]}`},
+		[]byte(",[{"),
+	}
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	m := doc.GetMap("m")
+	doc.Transact(func(txn *Transaction) {
+		arr.Push(txn, tricky)
+		arr.Push(txn, []any{1.5})
+		arr.Push(txn, tricky)
+		for i, value := range tricky {
+			m.Set(txn, string(rune('a'+i)), value)
+		}
+		nested := NewMapPrelim()
+		m.Set(txn, "nested", nested)
+		nested.Set(txn, "z", tricky[0])
+		nested.Set(txn, "y", tricky[2])
+	})
+	got, err := arr.ToJSON()
+	assertToJSONMatchesEncodingJSON(t, got, err, arr.ToSlice())
+	got, err = m.ToJSON()
+	assertToJSONMatchesEncodingJSON(t, got, err, m.Entries())
+
+	// The error is the first failing value in key order.
+	doc.Transact(func(txn *Transaction) {
+		m.Set(txn, "0", failingJSONMarshaler{})
+		m.Set(txn, "1", math.NaN())
+	})
+	got, err = m.ToJSON()
+	assertToJSONMatchesEncodingJSON(t, got, err, m.Entries())
+}
+
+// randomJSONDoc builds a random tree of nested types and plain values in doc,
+// returning the value ToSlice or Entries should read.
+type randomJSONDoc struct {
+	rng *rand.Rand
+}
+
+var randomJSONKeys = []string{"a", "B", "aa", "é", "a,b", `q"`, "", "z", " ", "k1", "k10", "k2"}
+
+func (g randomJSONDoc) leaf() any {
+	switch g.rng.IntN(12) {
+	case 0:
+		return nil
+	case 1:
+		return g.rng.IntN(2) == 0
+	case 2:
+		return g.rng.NormFloat64() * 1e6
+	case 3:
+		return int64(g.rng.IntN(1000) - 500)
+	case 4:
+		return randomJSONKeys[g.rng.IntN(len(randomJSONKeys))] + "<&>"
+	case 5:
+		return map[string]any{"x": g.rng.Float64(), "s": ",]"}
+	case 6:
+		return []any{"y", int64(g.rng.IntN(9)), map[string]any{}}
+	case 7:
+		return json.Number("12.50")
+	case 8:
+		return []byte("raw,")
+	case 9:
+		return jsonTestMarshaler{label: "m,"}
+	case 10:
+		return float32(g.rng.Float32())
+	default:
+		return "plain"
+	}
+}
+
+func (g randomJSONDoc) fillArray(txn *Transaction, a *YArray, depth int) []any {
+	want := []any{}
+	for range g.rng.IntN(6) {
+		switch g.rng.IntN(4) {
+		case 0, 1:
+			run := make([]any, 1+g.rng.IntN(3))
+			for i := range run {
+				run[i] = g.leaf()
+			}
+			a.Push(txn, run)
+			want = append(want, run...)
+		default:
+			want = append(want, g.nested(txn, depth, func(st sharedType) { a.PushType(txn, st) }))
+		}
+	}
+	return want
+}
+
+func (g randomJSONDoc) fillMap(txn *Transaction, m *YMap, depth int) map[string]any {
+	want := map[string]any{}
+	for range g.rng.IntN(6) {
+		key := randomJSONKeys[g.rng.IntN(len(randomJSONKeys))]
+		if g.rng.IntN(2) == 0 {
+			value := g.leaf()
+			m.Set(txn, key, value)
+			want[key] = value
+			continue
+		}
+		want[key] = g.nested(txn, depth, func(st sharedType) { m.Set(txn, key, st) })
+	}
+	return want
+}
+
+// nested attaches a nested type through attach and fills it.
+func (g randomJSONDoc) nested(txn *Transaction, depth int, attach func(sharedType)) any {
+	kind := g.rng.IntN(3)
+	if depth == 0 {
+		kind = 2
+	}
+	switch kind {
+	case 0:
+		a := NewArrayPrelim()
+		attach(a)
+		return g.fillArray(txn, a, depth-1)
+	case 1:
+		m := NewMapPrelim()
+		attach(m)
+		return g.fillMap(txn, m, depth-1)
+	default:
+		text := NewTextPrelim()
+		attach(text)
+		text.Insert(txn, 0, "t,<x>", nil)
+		return "t,<x>"
+	}
+}
+
+func TestUnit_ToJSON_RandomTreesMatchEncodingJSON(t *testing.T) {
+	for seed := range uint64(300) {
+		g := randomJSONDoc{rng: rand.New(rand.NewPCG(seed, 7))}
+		doc := newTestDoc(1)
+		arr := doc.GetArray("a")
+		m := doc.GetMap("m")
+		var wantArray []any
+		var wantMap map[string]any
+		doc.Transact(func(txn *Transaction) {
+			wantArray = g.fillArray(txn, arr, 4)
+			wantMap = g.fillMap(txn, m, 4)
+		})
+
+		require.Equal(t, wantArray, arr.ToSlice(), "seed %d", seed)
+		require.Equal(t, wantMap, m.Entries(), "seed %d", seed)
+		got, err := arr.ToJSON()
+		assertToJSONMatchesEncodingJSON(t, got, err, wantArray)
+		got, err = m.ToJSON()
+		assertToJSONMatchesEncodingJSON(t, got, err, wantMap)
+	}
+}
+
+// Readers hold the read lock while they walk the document; run under -race.
+func TestUnit_ToJSON_ConcurrentWithWriter(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	m := doc.GetMap("m")
+	nested := NewMapPrelim()
+	doc.Transact(func(txn *Transaction) { m.Set(txn, "nested", nested) })
+
+	stop := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			doc.Transact(func(txn *Transaction) {
+				arr.Push(txn, []any{i, map[string]any{"i": i}})
+				nested.Set(txn, "k", i)
+				if arr.Len() > 50 {
+					arr.Delete(txn, 0, 10)
+				}
+			})
+		}
+	}()
+
+	for range 200 {
+		_, err := arr.ToJSON()
+		require.NoError(t, err)
+		_, err = m.ToJSON()
+		require.NoError(t, err)
+		_ = arr.ToSlice()
+		_ = m.Entries()
+	}
+	close(stop)
+	<-writerDone
+}
