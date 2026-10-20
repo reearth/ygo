@@ -542,3 +542,70 @@ func TestUnit_ToJSON_ConcurrentWithWriter(t *testing.T) {
 	close(stop)
 	<-writerDone
 }
+
+// A detached map's staged entries read like attached ones, nested types
+// included.
+func TestUnit_YMap_Entries_Detached(t *testing.T) {
+	m := NewMapPrelim()
+	inner := NewArrayPrelim()
+	inner.Push(nil, []any{1.5, "x"})
+	m.Set(nil, "plain", "v")
+	m.Set(nil, "inner", inner)
+	m.Set(nil, "text", NewTextPrelim())
+	assert.Equal(t, map[string]any{"plain": "v", "inner": []any{1.5, "x"}, "text": ""}, m.Entries())
+}
+
+// toJSONValue reads a nested type given directly, as text deltas do for an
+// embedded type, and nil for a type it cannot read.
+func TestUnit_ToJSONValue_LeavesAndUnreadable(t *testing.T) {
+	doc := newTestDoc(1)
+	text := NewTextPrelim()
+	m := doc.GetMap("m")
+	doc.Transact(func(txn *Transaction) {
+		m.Set(txn, "t", text)
+		text.Insert(txn, 0, "hi", nil)
+	})
+	assert.Equal(t, "hi", toJSONValue(&ContentType{Type: &text.abstractType}))
+
+	raw := &rawType{}
+	raw.owner = raw
+	assert.Nil(t, toJSONValue(&ContentType{Type: &raw.abstractType}))
+	assert.Nil(t, toJSONValue(&ContentType{}))
+	assert.Nil(t, toJSONValue(nil))
+	assert.Equal(t, nestedJSONEntry{}, nestedJSONEntryForContent(&ContentType{}))
+
+	// Content a map does not render is skipped.
+	_, ok := nestedJSONEntryForMapItem(&Item{Content: NewContentFormat("bold", true)})
+	assert.False(t, ok)
+}
+
+// An item with no values renders nothing between its neighbours.
+func TestUnit_JSONArrayCursor_SkipsEmptyItem(t *testing.T) {
+	last := &Item{Content: NewContentAny("v")}
+	first := &Item{Content: NewContentAny(), Right: last}
+	cursor := jsonArrayCursor{t: &abstractType{}, item: first}
+	entry, ok := cursor.next()
+	require.True(t, ok)
+	assert.Equal(t, "v", entry.value)
+	_, ok = cursor.next()
+	assert.False(t, ok)
+}
+
+func TestUnit_AppendJSONScalar_PlainInt(t *testing.T) {
+	got, ok := appendJSONScalar(nil, -42)
+	require.True(t, ok)
+	assert.Equal(t, "-42", string(got))
+}
+
+// The splitter returns the whole input when no comma ends the first value.
+func TestUnit_NextJSONValueEnd(t *testing.T) {
+	for data, want := range map[string]int{
+		`"a,b"`:         5,
+		`"a\",b",1`:     7,
+		`{"k":[1,2]},3`: 11,
+		`[[],{}],"x"`:   7,
+		`"\\",[1]`:      4,
+	} {
+		assert.Equal(t, want, nextJSONValueEnd([]byte(data)), data)
+	}
+}

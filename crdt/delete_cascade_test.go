@@ -231,3 +231,11 @@ func TestUnit_Item_Delete_CascadeLeavesRightSiblingsLive(t *testing.T) {
 	require.False(t, kept.itemMap["k"].Deleted)
 	assert.Equal(t, []any{map[string]any{"k": "v"}, "plain"}, arr.ToSlice())
 }
+
+// nextDeleteItem stops at a top-level item even if root is not its ancestor.
+func TestUnit_NextDeleteItem_StopsAtTopLevel(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{1}) })
+	assert.Nil(t, nextDeleteItem(arr.start, &Item{}))
+}
