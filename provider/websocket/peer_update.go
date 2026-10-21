@@ -49,10 +49,6 @@ func (c *PeerClose) Error() string {
 	return fmt.Sprintf("ygo/websocket: close peer with %d: %s", c.Code, c.Reason)
 }
 
-// maxCloseReasonBytes is the most a close frame's reason holds: a control
-// frame's 125-byte payload less the two-byte code.
-const maxCloseReasonBytes = 123
-
 // closeReason is reason cut to the last whole rune within maxCloseReasonBytes.
 func closeReason(reason string) string {
 	if len(reason) <= maxCloseReasonBytes {

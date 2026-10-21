@@ -496,12 +496,14 @@ flag-driven demo. `mobile.SyncClient` is the `gomobile` binding — see
 
 The [`mobile/`](mobile/) subpackage is a [`gomobile bind`](https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile)-able façade over `crdt` and `awareness`, so you can embed ygo natively in iOS and Android apps — **no JavaScript runtime and no CGO**. It is a **full on-device editor**: a Swift/Kotlin app can edit locally, sync, render, exchange presence, and subscribe to push change-notifications — not just receive and display.
 
-```
-gomobile bind -target=ios                ./mobile   # → Mobile.xcframework
-gomobile bind -target=android -androidapi 21 ./mobile  # → mobile.aar
+```sh
+cd mobile
+go install tool                              # pinned gomobile + gobind
+gomobile bind -target=ios .                  # → Mobile.xcframework
+gomobile bind -target=android -androidapi 21 .  # → mobile.aar
 ```
 
-`Doc` exposes sync (`ApplyUpdate`, `EncodeStateAsUpdate`, `EncodeStateVector`, `EncodeDiff`), read accessors (`GetText`, `GetTextJSON`, `GetMapJSON`, `GetArrayJSON`), on-device mutators (`InsertText`, `FormatText`, `DeleteText`, `InsertArray`, `DeleteArray`, `SetMap`, `DeleteMapKey`, …), and change observers (`Observe`); `Awareness` exposes presence (`SetLocalState`, `StatesJSON`, `EncodeAll`, `ApplyUpdate`) plus its own `Observe`. Every exported signature uses only gomobile-safe types (`string` / `int64` / `bool` / `[]byte` / `error`, plus the bound `*Doc` / `*Awareness` / `*Subscription` and observer interfaces), and `Close()` releases the native state. `gomobile` is a build-time tool, not a dependency — `go.mod` is unchanged. See [`mobile/README.md`](mobile/README.md) for the build matrix, threading and lifecycle guidance, binary size / ABI notes, and Kotlin / Swift snippets.
+`Doc` exposes sync (`ApplyUpdate`, `EncodeStateAsUpdate`, `EncodeStateVector`, `EncodeDiff`), read accessors (`GetText`, `GetTextJSON`, `GetMapJSON`, `GetArrayJSON`), on-device mutators (`InsertText`, `FormatText`, `DeleteText`, `InsertArray`, `DeleteArray`, `SetMap`, `DeleteMapKey`, …), and change observers (`Observe`); `Awareness` exposes presence (`SetLocalState`, `StatesJSON`, `EncodeAll`, `ApplyUpdate`) plus its own `Observe`. Every exported signature uses only gomobile-safe types (`string` / `int64` / `bool` / `[]byte` / `error`, plus the bound `*Doc` / `*Awareness` / `*Subscription` and observer interfaces), and `Close()` releases the native state. `mobile/` is its own Go module (Go 1.26+, which `golang.org/x/mobile` requires), so the root module's Go 1.23 floor and dependencies are unaffected; import it with `go get github.com/reearth/ygo/mobile`. See [`mobile/README.md`](mobile/README.md) for the build matrix, threading and lifecycle guidance, binary size / ABI notes, and Kotlin / Swift snippets.
 
 `SyncClient` (v1.48.0, #165) makes that on-device `Doc` **self-syncing**: `NewSyncClient(url, dbPath, token)` returns one wired to a `provider/websocket`-compatible server, persisting locally and reconnecting on its own with no platform-side reconnect logic to write. See [Offline-First Client](#offline-first-client) above and [`mobile/README.md`](mobile/README.md#self-syncing-syncclient) for Kotlin/Swift call shapes.
 

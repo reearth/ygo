@@ -1000,3 +1000,67 @@ func BenchmarkUndoManager_UndoMapClear(b *testing.B) {
 		}
 	}
 }
+
+// buildScatteredFormattedText builds a text of n one-character items inserted
+// at seeded-random positions, so no two merge and a walk over it is O(n).
+func buildScatteredFormattedText(n int) (*Doc, *YText) {
+	doc := newTestDoc(1)
+	txt := doc.GetText("t")
+	r := rand.New(rand.NewSource(benchSeed))
+	doc.Transact(func(txn *Transaction) {
+		for i := 0; i < n; i++ {
+			txt.Insert(txn, r.Intn(txt.Len()+1), "a", nil)
+		}
+	})
+	return doc, txt
+}
+
+// BenchmarkYText_TypeBeforeFormatMarker types one keystroke per transaction
+// just before a trailing bold character, the position where an inheriting
+// insert must look up the attribute in effect before the next marker.
+func BenchmarkYText_TypeBeforeFormatMarker(b *testing.B) {
+	for _, n := range []int{5_000, 20_000, 50_000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			doc, txt := buildScatteredFormattedText(n)
+			doc.Transact(func(txn *Transaction) {
+				txt.Insert(txn, txt.Len(), "B", Attributes{"bold": true})
+			})
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				doc.Transact(func(txn *Transaction) {
+					txt.Insert(txn, txt.Len()-1, "x", nil)
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkYText_InsertEmbedFormatted inserts an embed without attributes
+// into text that has a bold run, either at a seeded-random position or just
+// after the previous embed.
+func BenchmarkYText_InsertEmbedFormatted(b *testing.B) {
+	for _, n := range []int{20_000, 100_000} {
+		for _, seq := range []bool{false, true} {
+			b.Run(fmt.Sprintf("n=%d/sequential=%t", n, seq), func(b *testing.B) {
+				b.ReportAllocs()
+				doc, txt := buildScatteredFormattedText(n)
+				doc.Transact(func(txn *Transaction) {
+					txt.Format(txn, n/2, 10, Attributes{"bold": true})
+				})
+				r := rand.New(rand.NewSource(benchSeed))
+				at := n / 4
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if !seq {
+						at = r.Intn(txt.Len() + 1)
+					}
+					doc.Transact(func(txn *Transaction) {
+						txt.InsertEmbed(txn, at, map[string]any{"img": 1}, nil)
+					})
+					at++
+				}
+			})
+		}
+	}
+}
