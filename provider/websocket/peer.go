@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -235,14 +236,15 @@ func (p *peer) handleMessage(data []byte) {
 // update; for a read-only peer, 0 for an Update, and for a SyncStep2 1 when the
 // room already holds everything in it and 0 otherwise, which is how
 // @hocuspocus/server answers when the update decodes. Two differences: (1) an
-// update the room refuses (ApplyUpdateV1 fails: its V1 bytes do not decode, or
-// it overflows MaxPendingItems) is answered 0, where @hocuspocus/server answers
-// 1, since Yjs has no pending cap and y-protocols swallows the decode error; 1
-// would tell the client the room holds an edit it does not; (2) a read-only
-// peer's SyncStep2 whose update does not decode is answered 0, where
-// @hocuspocus/server closes with 4403, which would stop @hocuspocus/provider
-// from reconnecting. A sync message whose own framing does not decode never
-// reaches here: see discardMalformedSync.
+// update the room does not fully apply (ApplyUpdateV1 fails: its V1 bytes do
+// not decode, or it overflows MaxPendingItems) is answered 0, where
+// @hocuspocus/server answers 1, since Yjs has no pending cap and y-protocols
+// swallows the decode error; 1 would tell the client the room holds an edit it
+// does not, and whatever part of the update did integrate is still broadcast;
+// (2) a read-only peer's SyncStep2 whose update does not decode is answered 0,
+// where @hocuspocus/server closes with 4403, which would stop
+// @hocuspocus/provider from reconnecting. A sync message whose own framing does
+// not decode never reaches here: see discardMalformedSync.
 func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 	if p.readOnly {
 		if p.hocuspocusFraming {
@@ -250,9 +252,17 @@ func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 		}
 		return
 	}
+	before := p.room.doc.StateVector()
 	if err := crdt.ApplyUpdateV1(p.room.doc, update, p); err != nil {
 		p.server.log().Debug("discarded unappliable sync message",
 			"room", p.roomName, "err", err)
+		// ApplyUpdateV1 integrates item by item, so an update that overflows
+		// MaxPendingItems can leave part of itself in the room. The other
+		// peers get that part. An edit another peer made between the two
+		// state vectors may reach them twice, which applying tolerates.
+		if !maps.Equal(p.room.doc.StateVector(), before) {
+			p.broadcastSync(ygsync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(p.room.doc, before)))
+		}
 		p.sendSyncStatus(false)
 		return
 	}

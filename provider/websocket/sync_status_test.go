@@ -197,10 +197,11 @@ func TestInteg_SyncStatus_OneAnswerPerFrameInArrivalOrder(t *testing.T) {
 	assert.Equal(t, []uint64{1, 0, 1, 1}, syncStatuses(t, conn, "room"))
 }
 
-// An update the room refuses (here, one that overflows its pending cap) is
-// answered SyncStatus(0) and the socket stays: the next good update on it is
-// answered SyncStatus(1). @hocuspocus/server answers such an update 1, since
-// Yjs has no pending cap and parks it; ygo answers what the room did.
+// An update the room does not fully apply (here, one that overflows its
+// pending cap) is answered SyncStatus(0) and the socket stays: the next good
+// update on it, one that does not depend on the parked entries, is answered
+// SyncStatus(1). @hocuspocus/server answers such an update 1, since Yjs has no
+// pending cap and parks it; ygo answers what the room did.
 func TestInteg_SyncStatus_RefusedUpdateAnsweredZeroAndSocketStays(t *testing.T) {
 	srv, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 2 })
 	doc := crdt.New(crdt.WithClientID(7))
@@ -212,6 +213,50 @@ func TestInteg_SyncStatus_RefusedUpdateAnsweredZeroAndSocketStays(t *testing.T) 
 	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(textUpdate(doc, "after")))
 	assert.Equal(t, []uint64{1}, syncStatuses(t, conn, "room"))
 	assert.Equal(t, "after", srv.GetDoc("room").GetText("t").ToString())
+}
+
+// An update the room only partly takes (it overflows MaxPendingItems after
+// some of it has integrated) must still reach the other peers for the part
+// the room now holds.
+func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
+	srv, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 3 })
+	author := crdt.New(crdt.WithClientID(1))
+	root := author.GetMap("m")
+	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
+
+	editor := crdt.New(crdt.WithClientID(7))
+	conn := hpDial(t, ts, "room", false, editor)
+	watcherDoc := crdt.New(crdt.WithClientID(9))
+	watcher := hpDial(t, ts, "room", false, watcherDoc)
+
+	// The editor's own text integrates; its entries on a map the room never
+	// received park until the cap is hit.
+	require.NoError(t, crdt.ApplyUpdateV1(editor, crdt.EncodeStateAsUpdateV1(author, nil), nil))
+	v, _ := editor.GetMap("m").Get("nested")
+	nested := v.(*crdt.YMap)
+	txt := editor.GetText("t")
+	editor.Transact(func(txn *crdt.Transaction) {
+		txt.Insert(txn, 0, "abc", nil)
+		for i := range 6 {
+			nested.Set(txn, "k"+strconv.Itoa(i), i)
+		}
+	})
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(editor, author.StateVector())))
+	syncStatuses(t, conn, "room")
+	require.Equal(t, "abc", srv.GetDoc("room").GetText("t").ToString(), "the room kept the part that integrated")
+
+	// Whatever the room now holds, the watcher should get it too.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		tag, body, err := hpRead(watcher, "room", 200*time.Millisecond)
+		if err != nil {
+			break
+		}
+		if tag == tagSync {
+			_, _ = ygsync.ApplySyncMessage(watcherDoc, body, nil)
+		}
+	}
+	assert.Equal(t, "abc", watcherDoc.GetText("t").ToString())
 }
 
 // A read-only peer's Update is answered SyncStatus(0) and the room is

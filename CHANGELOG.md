@@ -26,12 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arrived: 1 once the room applied it, and for a read-only connection 0 for an
   Update and, for a SyncStep2, 1 when the room already holds everything in it
   and 0 otherwise. Where those updates decode, this is how `@hocuspocus/server`
-  answers. ygo answers 0 when the room refused the update (it overflows
-  `MaxPendingItems`, say). For a sync frame that does not decode, ygo sends no
-  `SyncStatus` and closes the connection with 1002 (protocol error). For a
-  read-only SyncStep2 whose update does not decode, ygo answers 0 and keeps the
-  connection. All three differ from `@hocuspocus/server` on purpose (see the
-  release notes). Connections on plain y-websocket framing are unchanged.
+  answers. ygo answers 0 when the room did not fully apply the update (it
+  overflows `MaxPendingItems`, say); whatever part of it did integrate still
+  reaches the room's other peers. For a sync frame that does not decode, ygo
+  sends no `SyncStatus` and closes the connection with 1002 (protocol error).
+  For a read-only SyncStep2 whose update does not decode, ygo answers 0 and
+  keeps the connection. All three differ from `@hocuspocus/server` on purpose
+  (see the release notes). Connections on plain y-websocket framing are
+  unchanged.
 
 ## [1.53.0] — 2026-10-20
 
