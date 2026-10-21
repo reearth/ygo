@@ -336,9 +336,7 @@ func (s *Server) Apply(
 	// (#193 review). Also protects rm from a concurrent eviction while in use.
 	defer s.releaseInflight(rm)
 	rm.clearIdle() // #183: Apply mutates the doc immediately; no registration delay.
-	// Stamp the room idle again on every return path if no peer is connected,
-	// so the sweeper reclaims a room only Apply touched (runs before the
-	// releaseInflight above, so the room stays safe until Apply is done).
+	// see markIdleIfEmpty
 	defer s.markIdleIfEmpty(rm)
 
 	origin := &applyOriginSentinel{}
