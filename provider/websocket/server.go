@@ -745,17 +745,10 @@ func (r *room) clearIdle() {
 	r.mu.Unlock()
 }
 
-// markIdleIfEmpty stamps the room idle when RoomIdleTimeout > 0 and the room has
-// no peers. The immediate-mutation callers (relay Inject, admin Apply) defer it
-// right after clearIdle, so it runs on every return path, panics included. No
-// peer ever leaves a room only they touched, so no disconnect would stamp it, and
-// a clearIdle on an idle room would otherwise wipe the stamp its last peer left:
-// either way the sweeper would never reclaim the room or count it toward
-// MaxResidentRooms. The deferred call runs before the caller's releaseInflight,
-// so the room cannot be evicted until the caller is done with it; a peer that
-// registers later clears the stamp under the same rm.mu, and evictIdleRoom
-// flushes before it evicts. In eager-evict mode (RoomIdleTimeout == 0) it does
-// nothing: such rooms stay resident until CloseRoom, as documented there.
+// markIdleIfEmpty stamps the room idle when RoomIdleTimeout > 0 and no peer is
+// connected. Apply and Inject defer it after clearIdle so rooms only they touch
+// are still swept; it runs before releaseInflight, so the room is not evicted
+// mid-call.
 func (s *Server) markIdleIfEmpty(r *room) {
 	if s.RoomIdleTimeout <= 0 {
 		return
