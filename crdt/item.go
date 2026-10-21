@@ -76,9 +76,8 @@ func strPtr(s string) *string { return &s }
 // conflict-resolution algorithm. After integrate returns, Left and Right
 // reflect the item's final position.
 //
-// offset > 0 is only needed when the item partially overlaps an existing item
-// in the store (a split scenario during update decoding). For Phase 2 all
-// items arrive cleanly (offset = 0).
+// offset skips an already integrated prefix when the item's range partially
+// overlaps the store, either during decoding or when retrying a parked item.
 func (item *Item) integrate(txn *Transaction, offset int) {
 	if offset > 0 {
 		item.ID.Clock += uint64(offset)
@@ -117,7 +116,11 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// Fast path: no conflict scanning needed when there are no items between
 	// the left origin and the right origin. This is the common case for local
 	// inserts at the end of a run and for remote items decoded in clock order.
-	if o != nil && o != item.Right {
+	// Different map keys have independent conflict orders. A new key or a
+	// replacement immediately after its current winner has no same-key
+	// competitor to its right. Keep unrelated keys out of conflict scanning.
+	uncontestedMapKey := item.ParentSub != nil && item.Parent.itemMap[*item.ParentSub] == item.Left
+	if !uncontestedMapKey && o != nil && o != item.Right {
 		// Slow path: conflicting is the set of items in the current conflict
 		// group (items with the same left origin as us that we are comparing
 		// against). beforeOrigin tracks every item we have scanned past, so we
@@ -130,6 +133,11 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 
 		// Scan right until we hit our right origin (item.Right) or the end.
 		for o != nil && o != item.Right {
+			// Children and keyed attributes have independent conflict orders.
+			if !parentSubEqual(item.ParentSub, o.ParentSub) {
+				o = o.Right
+				continue
+			}
 			beforeOrigin[o] = struct{}{}
 			conflicting[o] = struct{}{}
 
@@ -215,6 +223,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		item.Parent.length += item.Content.Len()
 		if item.Right != nil {
 			if hint > 0 {
+				if l := item.Left; l != nil && (l.Deleted || !l.Content.IsCountable()) {
+					item.Parent.dropUncountedMarkersAt(hint)
+				}
 				item.Parent.updateMarkerChanges(hint, item.Content.Len())
 			} else {
 				item.Parent.clearMarkers()
@@ -301,6 +312,8 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// so their deletes skip the walk entirely (#86 final fix).
 	if _, ok := item.Content.(*ContentFormat); ok && item.Parent != nil {
 		item.Parent.hasFormatting = true
+		item.Parent.fmtGen++
+		item.Parent.cleanFormatting = true
 	}
 
 	// If this item wraps a nested type, set the back-pointer so the type
@@ -340,12 +353,11 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	if item.ParentSub != nil {
 		key := *item.ParentSub
 		rightmost := true
-		// Fast path: if no item has ever been recorded for this key, none can be
-		// to our right, so we are trivially the rightmost. This keeps populating a
-		// map with N distinct keys O(N) rather than O(N²). Only when a prior
-		// same-key item exists do we scan right (past other keys / tombstones) to
-		// see whether it sits to our right and supersedes us.
-		if _, exists := item.Parent.itemMap[key]; exists {
+		// A new key has no successor with the same key. Likewise, when the
+		// previous rightmost same-key item is immediately to our left, no
+		// same-key item can be to our right. Avoid scanning unrelated keys for
+		// these common insertion and replacement cases.
+		if previous, exists := item.Parent.itemMap[key]; exists && previous != item.Left {
 			for r := item.Right; r != nil; r = r.Right {
 				if parentSubEqual(r.ParentSub, item.ParentSub) {
 					// A same-key item (live or tombstone) sits to our right and is
@@ -364,6 +376,12 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 			}
 			item.Parent.itemMap[key] = item
 		}
+	}
+
+	// Yjs Item.integrate deletes an item whose parent is already deleted: a
+	// write into a nested type that a concurrent peer removed is never live.
+	if item.Parent != nil && item.Parent.item != nil && item.Parent.item.Deleted && !item.Deleted {
+		item.delete(txn)
 	}
 
 	if item.Parent != nil {
@@ -395,63 +413,93 @@ func (item *Item) lastID() ID {
 // cannot leave stale markers.
 //
 // Cascade: when this item wraps a ContentType (nested YMap/YArray/YText/…),
-// every child item is recursively deleted so the delete-set encoded on the
-// wire includes the children's clocks. Without this, peers that held the
-// same nested type would see inner items as live after the outer container
-// was deleted (Yjs JS Item.delete walks content.getContent() identically;
-// yrs Block::delete does the same). See #72 vector B1.
+// every child item is deleted so the delete-set encoded on the wire includes
+// the children's clocks. Without this, peers that held the same nested type
+// would see inner items as live after the outer container was deleted (Yjs JS
+// Item.delete walks content.getContent() identically; yrs Block::delete does
+// the same). See #72 vector B1. The cascade visits items depth-first, in the
+// order a recursive walk would, but moves between them through parent links
+// (nextDeleteItem), so a remotely built tree of any depth deletes without
+// growing the goroutine stack.
 func (item *Item) delete(txn *Transaction) {
-	if item.Deleted {
-		return
-	}
-	item.Deleted = true
-	if item.Parent != nil && item.Content.IsCountable() {
-		item.Parent.length -= item.Content.Len()
-		if !txn.Local {
-			item.Parent.clearMarkers()
+	for current := item; current != nil; {
+		if current.Deleted {
+			current = nextDeleteItem(current, item)
+			continue
 		}
-	}
-	// Move-related deletes change rendered positions in ways the plain
-	// updateMarkerChanges index-shift can't model (G5): tombstoning a
-	// ContentMove stops it rendering its target at the destination (the target
-	// may re-render at its origin), and tombstoning a moved-away item removes a
-	// rendered position at the destination rather than at the item's physical
-	// slot. Either way, clear all markers — always safe, and independent of
-	// txn.Local since local move-deletes also take this path. ContentMove is
-	// non-countable, so the block above never runs for it.
-	if item.Parent != nil {
-		if cm, ok := item.Content.(*ContentMove); ok {
-			item.Parent.clearMarkers()
-			rearbitrateMove(txn, item, cm)
-		} else if item.MovedBy != nil {
-			item.Parent.clearMarkers()
-		}
-	}
-	txn.deleteSet.add(item.ID, item.Content.Len())
-	if item.Parent != nil {
-		txn.addChanged(item.Parent, parentSubKey(item.ParentSub))
-	}
 
-	// Recurse into nested-type children so their clocks land in the
-	// delete-set too. Recursive call handles arbitrarily-deep nesting.
-	if ct, ok := item.Content.(*ContentType); ok && ct.Type != nil {
-		for child := ct.Type.start; child != nil; child = child.Right {
-			if !child.Deleted {
-				child.delete(txn)
+		current.Deleted = true
+		if _, ok := current.Content.(*ContentFormat); ok && current.Parent != nil {
+			current.Parent.fmtGen++
+		}
+		if current.Parent != nil && current.Content.IsCountable() {
+			current.Parent.length -= current.Content.Len()
+			if !txn.Local {
+				current.Parent.clearMarkers()
 			}
 		}
-	}
-
-	// #63 — subdocument removal. Cancel an add-in-same-txn; else mark removed.
-	// GC does not remove subdocs (matches Yjs ContentDoc: gc is a no-op).
-	if cd, ok := item.Content.(*ContentDoc); ok && cd.Doc != nil {
-		if _, added := txn.subdocsAdded[cd.Doc]; added {
-			delete(txn.subdocsAdded, cd.Doc)
-			delete(txn.subdocsLoaded, cd.Doc)
-		} else {
-			txn.addSubdocRemoved(cd.Doc)
+		// Move-related deletes change rendered positions in ways the plain
+		// updateMarkerChanges index-shift can't model (G5): tombstoning a
+		// ContentMove stops it rendering its target at the destination (the target
+		// may re-render at its origin), and tombstoning a moved-away item removes a
+		// rendered position at the destination rather than at the item's physical
+		// slot. Either way, clear all markers — always safe, and independent of
+		// txn.Local since local move-deletes also take this path. ContentMove is
+		// non-countable, so the block above never runs for it.
+		if current.Parent != nil {
+			if cm, ok := current.Content.(*ContentMove); ok {
+				current.Parent.clearMarkers()
+				rearbitrateMove(txn, current, cm)
+			} else if current.MovedBy != nil {
+				current.Parent.clearMarkers()
+			}
 		}
+		txn.deleteSet.add(current.ID, current.Content.Len())
+		if current.Parent != nil {
+			txn.addChanged(current.Parent, parentSubKey(current.ParentSub))
+		}
+
+		// #63 — subdocument removal. Cancel an add-in-same-txn; else mark removed.
+		// GC does not remove subdocs (matches Yjs ContentDoc: gc is a no-op).
+		if cd, ok := current.Content.(*ContentDoc); ok && cd.Doc != nil {
+			if _, added := txn.subdocsAdded[cd.Doc]; added {
+				delete(txn.subdocsAdded, cd.Doc)
+				delete(txn.subdocsLoaded, cd.Doc)
+			} else {
+				txn.addSubdocRemoved(cd.Doc)
+			}
+		}
+
+		if ct, ok := current.Content.(*ContentType); ok && ct.Type != nil {
+			child := ct.Type.start
+			for child != nil && child.Deleted {
+				child = child.Right
+			}
+			if child != nil {
+				current = child
+				continue
+			}
+		}
+		current = nextDeleteItem(current, item)
 	}
+}
+
+// nextDeleteItem returns the item after current in root's depth-first cascade:
+// the next live sibling of current or of its nearest ancestor below root, or
+// nil once the walk is back at root.
+func nextDeleteItem(current, root *Item) *Item {
+	for current != root {
+		for sibling := current.Right; sibling != nil; sibling = sibling.Right {
+			if !sibling.Deleted {
+				return sibling
+			}
+		}
+		if current.Parent == nil || current.Parent.item == nil {
+			return nil
+		}
+		current = current.Parent.item
+	}
+	return nil
 }
 
 // splitItem splits item at offset, returning the new right half.

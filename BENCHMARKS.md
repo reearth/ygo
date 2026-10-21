@@ -311,3 +311,152 @@ a *performance* one, but relevant context for interpreting any future
 cross-impl performance numbers: "faster than yrs" and "as conformant as
 yrs" are separate claims, and on the conformance axis ygo already has
 better-documented parity with the Yjs reference than yrs does.
+
+## Pending-budget preflight review
+
+These scenarios use `benchheavy`; sources are
+[`pending_budget_bench_test.go`](crdt/pending_budget_bench_test.go),
+[`pending_budget_review_bench_test.go`](crdt/pending_budget_review_bench_test.go) and
+[`pending_cursor_bench_test.go`](crdt/pending_cursor_bench_test.go).
+
+- Reverse chains exercise V1/V2 references to later client groups.
+- Many-client checkpoints use ordinary Ygo text transactions and V2 encoding.
+- Incomplete updates cover same-parent tails and varied missing clocks,
+  content lengths, cycles and client groups, including missing-client cursor bombs.
+
+```sh
+go test -tags benchheavy ./crdt -run '^$' \
+  -bench '^BenchmarkPending(ReverseChain|ManyClientCheckpoint|UpdateDiverseDependencies|CursorBomb)$' \
+  -benchmem -benchtime=1x -count=10 -timeout=30m
+go test -tags benchheavy ./crdt -run '^$' \
+  -bench '^Benchmark(ApplyUpdateV[12](_Bulk)?|PendingUpdateIncomplete)$' \
+  -benchmem -benchtime=100ms -count=10
+```
+
+Compare at least ten samples with `benchstat`, using identical fixtures and
+options on both revisions. Fixture generation is outside the timed loop.
+Complete-update benches also exclude destination creation/destruction and
+result checks; `rejections/op` distinguishes rejection from successful restore.
+
+`B/op` and `allocs/op` are cumulative Go allocation metrics, not peak RAM.
+Reported peak RSS uses the largest of three fresh `/usr/bin/time -l` processes
+applying identical prepared wire bytes, with a GC before destination creation.
+Runtime/input/document are included; fixture generation and build are excluded.
+
+## Within-update dependency resolver
+
+Fixtures in `crdt/pending_budget_review_bench_test.go` and
+`crdt/pending_resolver_bench_test.go` cover reverse client chains, ordinary V2
+checkpoints, non-mergeable string/embed pairs per client, missing/complete keyed
+queues, longer producers hidden by shorter overlapping ranges, and scheduler-off
+fixed-point controls against an independent reference.
+
+```sh
+go test -tags benchheavy ./crdt -run '^$' \
+  -bench '^BenchmarkPending(ReverseChain|ManyClientCheckpoint|MultiStructChain|OverlapFallback|FixedPointFallback|LinearClientQueue)$' \
+  -benchmem -benchtime=1x -count=10 -timeout=30m
+go test ./crdt -run '^$' -bench '^BenchmarkApplyUpdateV[12](_Bulk)?$' \
+  -benchmem -benchtime=100ms -count=10
+benchstat before.txt after.txt
+```
+
+Complete-update timers exclude destination creation/destruction and result checks.
+`rejections/op` distinguishes rejection from successful restore. Compare identical
+fixtures and options on both revisions. Allocation volume is cumulative, not peak RAM.
+
+Local results: Apple M4 Pro, macOS arm64, Go 1.26.8; ten serial alternating
+samples per revision with identical fixtures. Before is main `8ca1701`; after
+is the resolver at `404ae02` on the same base. Both accept every complete fixture below
+with cap=16. The overlap scenario calls the resolver directly. Time and
+allocations are medians. Peak RSS is the maximum of three fresh processes
+applying identical prepared wire bytes, excluding fixture generation and
+compilation.
+
+Temporary scheduler storage adds about 0.40 MiB at 10k queued items,
+0.79 MiB at 20k and 1.89 MiB for 40k contiguous items. The four ordinary
+ApplyUpdate V1/V2 benchmarks show no significant time/allocation change.
+
+### V1 reverse chain, 20k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 4,200.673 | 13.812 |
+| Allocated, MiB/op | 12.519 | 13.312 |
+| Allocations/op | 100,566.5 | 100,570.0 |
+| Peak RSS, MiB | 14.906 | 16.469 |
+
+### V2 reverse chain, 20k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 4,209.086 | 14.640 |
+| Allocated, MiB/op | 12.631 | 13.424 |
+| Allocations/op | 100,579.5 | 100,582.0 |
+| Peak RSS, MiB | 14.828 | 15.938 |
+
+### V2 checkpoint, 10k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 984.154 | 7.154 |
+| Allocated, MiB/op | 6.185 | 6.585 |
+| Allocations/op | 50,345.0 | 50,348.0 |
+| Peak RSS, MiB | 10.172 | 10.641 |
+
+### V1 two structs/client, 20k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 6,075.010 | 26.030 |
+| Allocated, MiB/op | 20.218 | 22.109 |
+| Allocations/op | 280,571.0 | 280,575.0 |
+| Peak RSS, MiB | 20.828 | 23.141 |
+
+### V2 two structs/client, 20k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 5,873.531 | 23.694 |
+| Allocated, MiB/op | 17.129 | 19.019 |
+| Allocations/op | 200,581.0 | 200,585.0 |
+| Peak RSS, MiB | 20.859 | 20.312 |
+
+### Overlapping ranges, 5k clients
+
+| Metric | Before (main) | After |
+|---|---:|---:|
+| Time, ms/op | 327.309 | 1.822 |
+| Allocated, MiB/op | 1.615 | 2.015 |
+| Allocations/op | 10,141.0 | 10,144.5 |
+
+## Interleaved clients
+
+`BenchmarkInterleavedTyping` (`crdt/pending_resolver_bench_test.go`, heavy
+tier) builds the history from #311: five peers take 20,000 turns appending to
+one text, so every struct's origin is another client's struct. It loads the
+encoded state into a fresh document, merges that state with the last 500
+per-turn updates, and applies all 20,000 updates newest first.
+
+```sh
+go test -tags benchheavy ./crdt -run '^$' -bench '^BenchmarkInterleavedTyping$' \
+  -benchmem -benchtime=10x -count=6
+```
+
+Local results: Apple M4 Max, macOS arm64, Go 1.27.2. Before is main with the
+within-update resolver above; after adds the clock waiters and single-walk
+parent inference. Medians.
+
+| Path | Before | After |
+|---|---:|---:|
+| Load full state, ms/op | 204.7 | 7.6 |
+| Load full state, MiB/op | 6.62 | 7.78 |
+| Merge state + 500 updates, ms/op | 1,807.5 | 4.0 |
+| Merge state + 500 updates, MiB/op | 7.29 | 7.06 |
+| Apply newest first, ms/op | 3,107.1 | 11.6 |
+| Apply newest first, MiB/op | 6,498.0 | 17.9 |
+
+On the resolver benchmarks above, `LinearClientQueue` and `OverlapFallback`
+show no significant change and `MultiStructChain` is within 7% (V2, 1k
+clients); the waiters only run on what the dependency walk leaves. The
+ordinary `ApplyUpdateV1/V2` and `MergeUpdatesV1` benchmarks show no
+significant change.

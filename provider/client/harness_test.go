@@ -197,12 +197,18 @@ func dialSynced(t *testing.T, ts *httptest.Server, room string, o Options) (*Cli
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	connect(t, c)
-	select {
-	case <-c.Synced():
-	case <-time.After(hangDeadline):
-		dumpGoroutines(t, fmt.Sprintf("client for room %q did not sync", room))
-		t.Fatalf("client for room %q did not sync within %s", room, hangDeadline)
-	}
+	connectSynced(t, c)
 	return c, o.Doc
+}
+
+// connectSynced starts c and blocks until its first StateSynced has been
+// delivered to subscribers. Waiting on Synced() is not enough: markSynced
+// closes it before emitStatus snapshots subscribers, so a StateSynced waiter
+// armed right after Synced() fires can still receive this initial event and
+// return before the next handshake it was meant to wait for.
+func connectSynced(t *testing.T, c *Client) {
+	t.Helper()
+	wait := statusWaiter(t, c, StateSynced)
+	connect(t, c)
+	wait()
 }

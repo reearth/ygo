@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.51.3] — 2026-10-08
+## [1.53.1] — 2026-10-21
 
 ### Fixed
 
@@ -23,6 +23,301 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flushed first, and counts toward `MaxResidentRooms`. A room stays resident
   while a call on it is still running. With `RoomIdleTimeout` at zero (the
   default) nothing changes: such rooms stay until `CloseRoom`, as documented.
+
+## [1.53.0] — 2026-10-20
+
+### Fixed
+
+- **`mobile`: `gomobile bind -target=android` failed (#315).** Two separate
+  breakages. `gomobile bind` now requires `golang.org/x/mobile` in the bound
+  module's dependency graph, and it was not there. Then the generated JNI code
+  did not compile: `SyncClient.SetOnStatus`'s parameter was named `o`, which
+  gobind also uses for the receiver's local in every method. The parameter is
+  now `observer` (source-compatible).
+
+### Changed
+
+- **`mobile/` is now its own Go module, `github.com/reearth/ygo/mobile`.**
+  `golang.org/x/mobile` requires Go 1.26, so adding it to the root module would
+  have raised the Go floor for every user of the library. The root module keeps
+  Go 1.23 and its dependencies unchanged, but no longer contains the `mobile`
+  package: direct importers must require `github.com/reearth/ygo/mobile`
+  (tagged `mobile/v1.53.0`). `mobile/go.mod` pins `gomobile` and `gobind` as
+  tools and builds against the surrounding checkout through a `replace`
+  directive: run `go install tool` and `gomobile bind` from inside `mobile/`.
+  CI now runs the `mobile/` tests, lint, govulncheck and a real
+  Android bind.
+
+## [1.52.0] — 2026-10-20
+
+### Added
+
+- **`provider/websocket`: close a peer with an application close code (#264).**
+  When the request context passed to `(*Server).ServeHTTP` is cancelled with a
+  cause (`context.WithCancelCause`) that implements `CloseCode() (int, string)`,
+  the server now sends the peer a close frame with that code and reason before
+  closing the socket. An embedder can end one session with a code in the
+  4000–4999 range (for example "session revoked") that a client can tell apart
+  from a network drop. A wrapped cause (`fmt.Errorf("...: %w", cause)`) counts.
+  Only codes 1000 and 3000–4999 are sent; the reason is truncated to 123 bytes
+  and invalid UTF-8 is dropped from it. The peer's input is ignored from the
+  cancel on, and the close frame waits at most one second, so a revoked peer
+  that stops reading cannot keep writing into the room. Any other cause, or an
+  unsendable code, closes the socket exactly as before, with no close frame
+  (abnormal closure, 1006).
+
+## [1.51.13] — 2026-10-20
+
+### Fixed
+
+- **`crdt`: deleting or reading a deeply nested shared type used one stack frame
+  per nesting level.** A peer can build a document of any depth through many
+  small, valid updates. Deleting the outer container, or reading the document
+  with `ToJSON`, `ToSlice`, `Entries` or `ToXML`, recursed once per level, so a
+  deep enough document ended the process with a fatal stack overflow that
+  `recover` cannot catch. At Go's default stack limit that takes millions of
+  levels, tens of megabytes of updates and gigabytes of heap, so this was a
+  costly denial of service rather than a small-payload crash. Deletion now
+  walks the subtree through parent links in the same depth-first order, and
+  the readers walk nested types with an explicit stack. Results and their
+  order are unchanged.
+
+### Performance
+
+- **`crdt`: `YArray.ToJSON` and `YMap.ToJSON` write JSON directly.** They no
+  longer build intermediate slices and maps, and the document's read lock is
+  held only while values are copied out; sorting keys and formatting happen
+  after it is released. On 10,000-element containers the lock is held 52–76%
+  less time than before, `ToJSON` runs 31–87% faster for numbers and 15–17%
+  faster for mixed values, takes about as long for objects (−1% to +2%), and
+  uses 30–89% less memory. Output
+  bytes and errors are unchanged.
+
+## [1.51.12] — 2026-10-20
+
+### Fixed
+
+- **`crdt`: trim partially received ranges when retrying pending updates.**
+  Out-of-order overlapping V1/V2 updates no longer duplicate text or array
+  elements. Orphaned ranges whose containers were garbage-collected are trimmed
+  too, preventing incorrect clocks after checkpoint restore and lost later updates.
+
+### Performance
+
+- **`crdt`: resolve large within-update dependency queues in producer-first order.**
+  An immutable range index and iterative scheduler avoid repeated reverse-chain
+  retries. Contiguous client tails are processed before dependents, preventing
+  deferred tails from scanning a growing set of descendants. Prefix coverage
+  reuses the range index so shorter overlapping copies cannot hide a producer.
+  Small and entirely blocked queues avoid indexing; remaining unresolved items
+  retain the fixed-point fallback and persistent pending limit.
+- **`crdt`: loading, merging and out-of-order applying a text that several
+  peers typed into in turn no longer take seconds** (#311). For five peers
+  taking 20,000 turns (about 149,000 characters), loading the full state went
+  from ~200 ms to ~8 ms, `MergeUpdatesV1` of that state plus 500 updates from
+  ~1.8 s to ~4 ms, and applying the 20,000 updates newest first from ~3.1 s
+  (6.8 GB allocated) to ~12 ms. Each path retried every blocked struct until
+  nothing changed, and with clients interleaved each retry made little
+  progress:
+  - a blocked struct now waits on the one clock it is missing and is retried
+    when that client's clock passes it, both for a single update's queue after
+    the dependency walk above and when parked updates are drained;
+  - `MergeUpdatesV1`/`V2`, `DiffUpdateV1`/`V2`,
+    `EncodeStateVectorFromUpdate`/`V2` and `UpdateV1ToV2`/`UpdateV2ToV1`
+    follow each origin chain once when inferring parents, instead of
+    re-scanning every struct until no parent changes.
+
+  Results are unchanged and match Yjs for randomized multi-peer histories
+  delivered in order, reversed, shuffled, as full state and merged. Reported
+  with a proposed approach by @melodysdreamj.
+
+## [1.51.11] — 2026-10-14
+
+### Fixed
+
+- **`crdt`: a write into a nested type that a concurrent peer deleted no
+  longer stays live.** Yjs drops it: `Item.integrate` deletes an item whose
+  parent is deleted, and an item whose parent was collected becomes a GC
+  struct. ygo kept it live, so `InsertSetFromDoc` and the delete set differed
+  from Yjs while `ToJSON`/`ToXML` matched. A nested type inserted into a
+  collected container also let its own children integrate live. Such items
+  are now deleted, and an orphan is stored as a GC struct with no content or
+  origins, so it is no longer re-encoded with its content and its children are
+  orphaned too. Yjs fixtures in `crdt/testdata/stranded_yjs_fixtures.json`
+  pin the live and deleted sets for V1 and V2.
+
+## [1.51.10] — 2026-10-14
+
+### Fixed
+
+- **`crdt`: a small crafted V2 update could pin a CPU core.** Since v1.51.8,
+  `ApplyUpdateV2` scans group headers before decoding an update with more than
+  one client group. For a JSON item, that scan stepped over each declared value
+  without reading any bytes, so a length the update could never supply cost up
+  to about a million iterations per item. An update of a few dozen bytes could
+  spin for seconds, and a crafted one far longer, before being rejected. The
+  scan now skips V2 JSON content in constant time. V1 updates and valid V2
+  updates are unaffected.
+- **`persistence`: the bundled stores keep large incremental updates instead
+  of refusing them, and every edit after them.** `MemoryPersistence`,
+  `FilePersistence` and `sqlite.Store` check an update in `AppendUpdate` by
+  decoding it alone into a scratch document, which took the crdt default
+  pending cap of 100,000. Decoded without the room's stored state, an update
+  parks every struct that depends on that state, and when its client already
+  has edits stored, that is every struct in it. So an update the room had
+  applied was refused with `crdt: invalid update` whenever more than 100,000
+  of its structs depended on stored state: any update of more than 100,000
+  structs from a client with stored edits, or a batch of smaller updates the
+  server coalesced past that count. With the server's default write
+  coalescing, the refused batch stayed queued and every later edit in the room
+  was merged into it and refused with it, so the room stayed in memory after
+  its last peer left, and every edit since the first refused write was lost
+  when it closed. The scratch document now has no pending cap: it is discarded
+  after the one decode, and the decoder's per-update item limit already bounds
+  what it can park. Updates that do not decode are still refused. The three
+  stores share the check (`internal/updatecheck`), and the `AppendUpdate`
+  godoc says how a custom adapter should build its scratch document.
+- **`provider/websocket`: `BroadcastUpdate` and the cluster relay no longer
+  refuse large incremental updates.** `BroadcastUpdate` checked an update the
+  same way, so it returned `ErrInvalidUpdate` for an update of more than
+  100,000 dependent structs that the room had already applied. A clustered
+  node runs that check after `Server.Inject` applies a relayed update to its
+  room, so such an update reached the room and never the node's own peers.
+  `BroadcastUpdate` now uses the stores' check; each room's document still
+  enforces `MaxPendingItems` when it applies an update.
+- **`crdt`: the comment on the default pending cap no longer says it matches
+  the decoder's per-update limit.** It is 100,000; the per-update limit is
+  2^20.
+
+## [1.51.9] — 2026-10-12
+
+### Performance
+
+- **`crdt`: avoid unrelated-key conflict scans during map integration.** New
+  keys and causal replacements after the current key winner bypass the scan;
+  contended writes consider only the same key. XML children and attributes keep
+  separate conflict orders, so concurrent child order is independent of delivery.
+
+## [1.51.8] — 2026-10-11
+
+### Fixed
+
+- **`crdt`: an update with several groups for one client applied the overlap
+  twice.** When a V1 or V2 update carried more than one wire group for the same
+  client, each group was trimmed only against the state from before the update,
+  so overlapping structs were integrated again: the store held duplicates, the
+  text showed repeated content and the state vector went backwards, with no
+  error. ygo now matches yjs, which keeps only the last group for each client
+  and drops earlier groups without integrating them. An update whose group
+  framing is malformed is rejected before any group is integrated, so a bad
+  later group can no longer leave the earlier ones applied. This is a behaviour
+  change for such updates: content found only in an earlier group for a client
+  is no longer applied. yjs and ygo never encode repeated groups, so their
+  updates are unaffected. The pending-limit preflight counts only the groups
+  that are integrated, so a dropped group can no longer cause a rejection.
+  `MergeUpdatesV1/V2`, `DiffUpdateV1/V2`,
+  `EncodeStateVectorFromUpdate(V2)` and the `ContentMap` constructors apply the
+  same rule, so merging or diffing such an update no longer changes what it
+  applies. (#305, #308)
+- **`crdt`: rejecting some crafted incomplete updates allocated far more than
+  their size.** The pending-limit preflight kept a full decoder copy for every
+  blocked wire group whose dependency was present in the update but could never
+  resolve, such as a dependency cycle or a client that reaches a clock only
+  through a gap or a skip. A 6–10 MiB update could allocate up to 470 MiB
+  before being rejected. Preflight now keeps a small record per blocked group
+  and its blocked structs as compact varints, and rules out dependencies a
+  client can never reach before keeping anything. Rejecting these updates now
+  allocates at most about 11 times their size, and in linear time. Updates that
+  can resolve are still accepted. (#306)
+
+## [1.51.7] — 2026-10-11
+
+### Fixed
+
+- **`crdt`: a complete checkpoint could be rejected by the pending limit.**
+  When a V1/V2 update's structs depended on other structs later in the same
+  update, they were parked as pending and counted against the cross-update
+  pending limit, so a large but complete document state (for example a
+  many-client checkpoint) failed to apply. Dependencies inside the update are
+  now resolved first, and only structs still missing after that count against
+  the limit. A rejected update adds nothing to the persistent pending queue,
+  but changes integrated before the rejection are not rolled back. Preflight
+  keeps one cursor per wire group rather than metadata for every blocked
+  struct, so incomplete updates stay cheap to reject. The pending limit, wire
+  format and public API are unchanged. Thanks to @kovaa-dev.
+
+## [1.51.6] — 2026-10-11
+
+### Performance
+
+- **`crdt`: replacing a map value no longer scans unrelated keys.** Direct
+  replacements after the previous rightmost value skip the shared-list scan.
+  Concurrent and non-adjacent replacements retain conflict resolution.
+
+## [1.51.5] — 2026-10-09
+
+### Performance
+
+- **`crdt`: garbage collection after a transaction no longer rescans each
+  client's history once per deleted range.** `gcTxnDeleteSet` started every
+  range lookup at the start of the client's structs, so many sparse deletions
+  rescanned the same prefix. It now binary-searches for the struct containing
+  the range start; results are unchanged. At 50,000 structs a GC pass over
+  sparse ranges drops from about 212 ms to 0.28 ms. Thanks to @kovaa-dev.
+
+## [1.51.4] — 2026-10-09
+
+### Fixed
+
+- **`crdt`: text inserts picked up formatting yjs clears (#285).** `ApplyDelta`
+  inserts, `InsertEmbed`, and `Insert` with attributes inherited the formatting
+  around the cursor. They now clear every attribute they don't name, as yjs
+  `insertText` does; cleared and restored markers follow yjs's order. `Insert`
+  with nil or empty attributes still inherits, as yjs `insert` does with the
+  argument omitted.
+
+- **`crdt`: formatting emptied by a remote delete was never cleaned up (#284).**
+  yjs deletes format markers left covering no text after a remote transaction;
+  ygo kept them, so later text inherited stale formatting. ygo now runs the same
+  cleanup, as a local transaction with a nil origin, and only on texts yjs would
+  clean (not on a root first accessed after its markers arrived).
+
+- **`crdt`: formatted inserts dropped the right origin yjs keeps (#287).**
+
+- **`crdt`: two identical documents could clean up the same update
+  differently.** Delete sets were applied in map order. They now apply, and
+  retry when parked, in yjs's order, and V1 writes delete-set clients
+  descending like yjs and V2.
+
+### Changed
+
+- Applying a remote update to formatted text may be followed by a local,
+  nil-origin cleanup transaction with its own update and observer events. The
+  default `UndoManager` captures it, as yjs's default tracked origins do.
+- A remote update that adds formatting to a text now walks that whole text, as
+  yjs does (about 170µs per update on a 100k-character document). Plain text is
+  unaffected. A random-position `InsertEmbed` into heavily fragmented formatted
+  text costs a full walk too.
+- V1 encodings list delete-set clients in descending order. Decoders accept
+  either order.
+
+## [1.51.3] — 2026-10-08
+
+### Fixed
+
+- **`crdt`: applying an update no longer merges same-client items that were
+  inserted toward different right neighbours.** `ApplyUpdate`
+  merged adjacent, clock-contiguous items from one client without checking
+  that the right item was inserted directly after the left one and that both
+  had the same right origin, and `RunGC` merged tombstones the same way. The
+  merged item kept only the left item's right origin. A peer that received
+  the items in one apply (a late joiner, an offline client catching up, a
+  server loading a stored state) then placed the next concurrent insert inside
+  that run differently from the peers that received the items one by one, and
+  every later encoding of its state (a sync step 2, a compacted state) gave
+  the right item's characters the wrong right origin, for ygo and Yjs alike.
+  Items now merge only under Yjs's `Item.mergeWith` conditions. States that
+  were already encoded with the merged items keep the wrong right origins.
 
 ## [1.51.2] — 2026-10-08
 

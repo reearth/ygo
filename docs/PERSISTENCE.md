@@ -491,6 +491,14 @@ Semantics:
 
 - **Versions** are dense, per-room, monotonically increasing sequence numbers
   assigned by `AppendUpdate`, starting at 1. `0` is the "empty room" sentinel.
+- **`AppendUpdate`** rejects an update that does not decode, without
+  advancing the version. If your store checks an update by applying it to a
+  scratch document, build that document with
+  `crdt.New(crdt.WithMaxPendingItems(math.MaxInt))`, as the bundled stores do:
+  decoded without the room's stored state, an incremental update parks every
+  item that depends on that state, so a bare `crdt.New()` (pending cap
+  100,000) refuses a large update the room has already applied, and the edit
+  is lost.
 - **`ListVersions`** returns metadata **newest-first**; each entry is a single,
   *non-cumulative* update. An unknown room yields an empty slice (not an error).
 - **`MaterializeAt(v)`** folds every update with version ≤ `v` into a full V1

@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"cmp"
 	"slices"
 	"sort"
 )
@@ -16,8 +17,8 @@ type DeleteRange struct {
 type DeleteSet struct {
 	clients map[ClientID][]DeleteRange
 	// order, when non-nil, lists clients in first-add order (Yjs DeleteSet's
-	// Map order), which UndoManager replays in. Only transaction and undo
-	// stack sets keep it, so sets built from the store compare equal.
+	// Map order; for a decoded set, encoded order), which deletes are applied
+	// and replayed in. Sets built from the store leave it nil.
 	order []ClientID
 }
 
@@ -111,9 +112,9 @@ func (ds *DeleteSet) Clients() []ClientID {
 	return out
 }
 
-// orderedClients returns ds's clients in first-add order, then any unordered
-// ones (all of a decoded set's) ascending. order holds each client of
-// ds.clients at most once.
+// orderedClients returns ds's clients in first-add (for a decoded set,
+// encoded) order, then any unordered ones ascending. order holds each client
+// of ds.clients at most once.
 func (ds *DeleteSet) orderedClients() []ClientID {
 	out := make([]ClientID, len(ds.order), len(ds.clients))
 	copy(out, ds.order)
@@ -134,6 +135,21 @@ func (ds *DeleteSet) orderedClients() []ClientID {
 	return append(out, rest...)
 }
 
+// retryPendingDs reapplies the store's parked deletions in the order Yjs
+// re-reads its encoded pending delete set: clients descending, ranges sorted.
+func retryPendingDs(txn *Transaction) {
+	store := txn.doc.store
+	pending := store.pendingDs
+	store.pendingDs = newDeleteSet()
+	pending.order = make([]ClientID, 0, len(pending.clients))
+	for c := range pending.clients {
+		pending.order = append(pending.order, c)
+		pending.sortAndCompact(c)
+	}
+	slices.SortFunc(pending.order, func(a, b ClientID) int { return cmp.Compare(b, a) })
+	store.pendingDs = pending.applyToPartial(txn)
+}
+
 // applyToPartial applies delete-set entries whose target items are
 // integrated, and returns a new DeleteSet containing entries whose
 // target items are absent (or the uncovered suffix of a range whose
@@ -149,7 +165,8 @@ func (ds *DeleteSet) orderedClients() []ClientID {
 // may under-park ranges spanning a gap.
 func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 	unresolvable := newDeleteSet()
-	for client, ranges := range ds.clients {
+	for _, client := range ds.orderedClients() {
+		ranges := ds.clients[client]
 		items := txn.doc.store.clients[client]
 		if len(items) == 0 {
 			// No items for this client — entire set of ranges is unresolvable.
