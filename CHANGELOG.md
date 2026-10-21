@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (see the release notes). Connections on plain y-websocket framing are
   unchanged. The read-only SyncStep2 answer uses `crdt.DocContainsUpdateV1`,
   so it costs no exclusive lock and no pass over the document.
+- **`provider/websocket`: frames a peer sent after the server queued its close
+  were still handled.** Once the server queues a close for a connection (the
+  1002 above, or 4401 after a failed in-band auth), the read loop handles
+  nothing more from it, including frames it has already received, as it
+  already did after a context-cause close.
 
 ## [1.53.0] — 2026-10-20
 

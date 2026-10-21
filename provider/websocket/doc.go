@@ -47,8 +47,8 @@
 // part that did integrate still reaches the other peers); for a read-only
 // connection, 0 for an Update, and for a SyncStep2 1 when the room already
 // holds everything in it and 0 otherwise. A sync frame that does not decode
-// gets no SyncStatus, and the server closes the connection with 1002
-// (protocol error).
+// gets no SyncStatus: the server closes the connection with 1002 (protocol
+// error) and handles no later frame from it.
 //
 // # Stability
 //

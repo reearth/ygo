@@ -40,7 +40,7 @@ type peer struct {
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
 	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
-	revoked           atomic.Bool   // set when a cancel cause closes the peer; the read loop drops input
+	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -393,7 +393,9 @@ func encodeAuthMessage(subType uint64, s string) []byte {
 // frames already in writeCh. The close control frame is emitted by runWriter
 // on the writer goroutine, preserving ordering (a preceding PermissionDenied
 // data frame is flushed first) and the single-writer invariant. A nil sentinel
-// on writeCh signals runWriter to close.
+// on writeCh signals runWriter to close. From the call on, the read loop
+// handles no further frame from this peer, including ones it has already
+// received: the close means nothing more from the connection lands.
 //
 // Callers MUST invoke enqueueClose only from the peer's own read-loop
 // goroutine (the same goroutine that runs the deferred handleDisconnect).
@@ -405,6 +407,7 @@ func encodeAuthMessage(subType uint64, s string) []byte {
 // runs sequentially after enqueueClose's caller on the same goroutine, this
 // send can never race the channel close today.
 func (p *peer) enqueueClose(code int, reason string) {
+	p.inputClosed.Store(true)
 	p.wmu.Lock()
 	if p.closed {
 		p.wmu.Unlock()

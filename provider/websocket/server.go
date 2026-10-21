@@ -2087,7 +2087,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// closes. The read loop drops input meanwhile, since WriteControl can
 			// wait on a writer stuck on a peer that has stopped reading.
 			if frame := closeFrameFor(context.Cause(ctx)); frame != nil {
-				p.revoked.Store(true)
+				p.inputClosed.Store(true)
 				_ = ws.WriteControl(gws.CloseMessage, frame, time.Now().Add(closeFrameTimeout))
 			}
 			_ = ws.Close() // close errors during teardown are expected; not logged
@@ -2127,8 +2127,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
-		if p.revoked.Load() {
-			// continue, not break: the deferred Close would race the close frame.
+		if p.inputClosed.Load() {
+			// A close is queued or sent: nothing more from this peer lands.
+			// continue, not break: the deferred teardown would drop the
+			// queued close frame or race the one being sent.
 			continue
 		}
 		if firstMessage {

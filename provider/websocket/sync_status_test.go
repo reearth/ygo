@@ -337,6 +337,61 @@ func TestInteg_SyncStatus_UndecodableSyncFrameClosesWithoutAnswer(t *testing.T) 
 	}
 }
 
+// Once the server has queued the 1002 close for an undecodable sync frame, it
+// handles nothing more from that connection: updates the client pipelined
+// behind the bad frame are neither applied nor answered.
+func TestInteg_SyncStatus_FramesAfterTheCloseAreDropped(t *testing.T) {
+	srv, ts := hocuspocusServer(t, nil)
+	doc := crdt.New(crdt.WithClientID(7))
+	conn := hpDial(t, ts, "room", false, doc)
+	// A second peer keeps the room loaded after conn closes.
+	hpDial(t, ts, "room", false, crdt.New(crdt.WithClientID(9)))
+
+	// Bad frame and updates go out in one TCP write, so the server has them
+	// all buffered before it handles the first.
+	var burst []byte
+	burst = appendClientFrame(burst, hpFrame("room", tagSync, []byte{byte(ygsync.MsgSyncStep2), 0x05}))
+	for i := range 5 {
+		burst = appendClientFrame(burst, hpFrame("room", tagSync, ygsync.EncodeUpdate(textUpdate(doc, strconv.Itoa(i)))))
+	}
+	_, err := conn.NetConn().Write(burst)
+	require.NoError(t, err)
+
+	for {
+		tag, _, err := hpRead(conn, "room", 2*time.Second)
+		if err != nil {
+			var closed *gws.CloseError
+			require.ErrorAs(t, err, &closed, "the server closes the socket")
+			assert.Equal(t, gws.CloseProtocolError, closed.Code)
+			break
+		}
+		require.NotEqual(t, tagSyncStatus, tag, "no frame after the bad one is answered")
+	}
+	assert.Empty(t, srv.GetDoc("room").GetText("t").ToString(),
+		"no update sent after the bad frame reaches the room")
+}
+
+// hpFrame encodes one Hocuspocus frame: VarString(room), the outer tag, then
+// body.
+func hpFrame(room string, tag uint64, body []byte) []byte {
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarString(room)
+		enc.WriteVarUint(tag)
+		enc.WriteRaw(body)
+	})
+}
+
+// appendClientFrame appends payload to buf as one masked binary WebSocket
+// frame, as a client sends it, with an all-zero masking key so the payload
+// bytes go out unchanged. payload must be shorter than 126 bytes.
+func appendClientFrame(buf, payload []byte) []byte {
+	if len(payload) >= 126 {
+		panic("appendClientFrame: payload needs an extended length")
+	}
+	buf = append(buf, 0x82, 0x80|byte(len(payload)), 0, 0, 0, 0)
+	return append(buf, payload...)
+}
+
 // A peer on plain y-websocket framing receives no SyncStatus: y-websocket
 // clients do not know tag 8.
 func TestInteg_SyncStatus_NotSentOnYWebsocketFraming(t *testing.T) {

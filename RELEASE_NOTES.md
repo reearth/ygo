@@ -45,7 +45,9 @@ Three answers differ from `@hocuspocus/server` 2.15.3, on purpose:
   read-only Update) or a 4403 close (an unknown or missing sub-type, a SyncStep1,
   a read-only SyncStep2). ygo sends no `SyncStatus` for any of them and closes
   with 1002 (protocol error): an answer of 1 would acknowledge an edit the room
-  never saw, and 4403 would strand the provider.
+  never saw, and 4403 would strand the provider. From the moment ygo queues
+  that close, it handles no later frame from the connection, including frames
+  already received.
 - **A read-only SyncStep2 whose update does not decode.** `@hocuspocus/server`
   closes the connection with 4403, because its `snapshotContainsUpdate` check
   throws. ygo answers 0 and keeps the connection: the room does not hold the
@@ -59,6 +61,11 @@ consults the store only for the update's deletions. The read-only SyncStep2
 answer uses it, so a viewer's handshake does not hold up the room's writers;
 against a document with 20,000 deletions an empty SyncStep2 costs about 0.6µs
 instead of about 590µs.
+
+**Closing a connection now stops its input.** Once the server queues a close
+for a connection (the 1002 above, or 4401 after a failed in-band auth), the
+read loop handles nothing more from it, as it already did after a
+context-cause close.
 
 ## v1.53.0
 
