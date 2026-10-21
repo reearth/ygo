@@ -59,6 +59,47 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 	return applyErr
 }
 
+// ApplyUpdateV1Landed is ApplyUpdateV1 for a caller that must forward what
+// a failed apply left behind. ApplyUpdateV1 integrates an update item by item,
+// so one it rejects (an update that overflows the pending cap, say) can leave
+// part of itself in doc. When the apply fails, landed is a V1 update of exactly
+// what this call integrated: the structs it added to doc's store and the
+// deletions it made, not structs still parked, nor the rest of the document.
+// landed is nil when the apply succeeds or when nothing integrated.
+func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, err error) {
+	doc.Transact(func(txn *Transaction) {
+		txn.Local = false // Yjs readUpdate: transact(..., local=false)
+		if err = applyV1Txn(txn, update); err != nil {
+			landed = encodeTxnV1Locked(txn)
+		}
+	}, origin)
+	return landed, err
+}
+
+// encodeTxnV1Locked encodes the structs txn has added to the store so far and
+// the deletions it has made, or returns nil when there are none. Each client's
+// new structs are found by binary search from txn.beforeState, so the cost is
+// proportional to the clients in the store plus what txn added. Called with
+// the document lock held.
+func encodeTxnV1Locked(txn *Transaction) []byte {
+	store := txn.doc.store
+	perClient := make(map[ClientID][]*Item)
+	for client, items := range store.clients {
+		from := txn.beforeState.Clock(client)
+		i := sort.Search(len(items), func(i int) bool {
+			return items[i].ID.Clock+uint64(items[i].Content.Len()) > from
+		})
+		if i < len(items) {
+			perClient[client] = items[i:]
+		}
+	}
+	ds := cloneDeleteSet(txn.deleteSet)
+	if len(perClient) == 0 && len(ds.clients) == 0 {
+		return nil
+	}
+	return encodeStructStoreV1(perClient, ds, txn.beforeState, store)
+}
+
 // EncodeStateAsUpdateV2 encodes the document state using the Yjs V2
 // column-oriented binary format.  The output is interoperable with
 // Y.applyUpdateV2 / Y.encodeStateAsUpdateV2 from the yjs npm package.
