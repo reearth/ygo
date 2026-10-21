@@ -18,7 +18,7 @@ the frames arrived, so a client can pair each answer with the frame it sent:
 | The client sends | The room | `SyncStatus` |
 |---|---|---|
 | a SyncStep2 or Update | applies it | 1 |
-| a SyncStep2 or Update | refuses it (it overflows `MaxPendingItems`, say) | 0 |
+| a SyncStep2 or Update | does not fully apply it (it overflows `MaxPendingItems`, say) | 0 |
 | an Update, read-only | does not take it | 0 |
 | a SyncStep2, read-only | already holds everything in it | 1 |
 | a SyncStep2, read-only | lacks something in it, and does not take it | 0 |
@@ -26,12 +26,17 @@ the frames arrived, so a client can pair each answer with the frame it sent:
 
 Three answers differ from `@hocuspocus/server` 2.15.3, on purpose:
 
-- **An update the room refuses.** `@hocuspocus/server` answers 1 there: Yjs has
-  no cap on pending structs, so it parks an update that overflows
-  `MaxPendingItems`, and y-protocols swallows any error from an update that does
-  not decode. An answer of 1 tells the client the room holds an edit it does
-  not. ygo answers 0 and keeps the connection, so the client keeps the edit and
-  the next good update on the same connection is answered 1.
+- **An update the room does not fully apply.** `@hocuspocus/server` answers 1
+  there: Yjs has no cap on pending structs, so it parks an update that
+  overflows `MaxPendingItems`, and y-protocols swallows any error from an
+  update that does not decode. An answer of 1 tells the client the room holds
+  an edit it does not. ygo answers 0 and keeps the connection, so the client
+  keeps the edit. ygo integrates an update item by item, so part of one that
+  overflows the cap may already be in the room; that part is broadcast to the
+  room's other peers as any applied update is. An unrelated update on the
+  same connection is answered 1; the client's own next edits may also be
+  answered 0 while the entries parked from the first update still fill the
+  cap.
 - **A sync message that does not decode** (its sub-type is unknown or
   missing, or its payload is cut short). On a read-write connection,
   `@hocuspocus/server` answers a SyncStep2 or Update whose payload is cut short
@@ -40,15 +45,27 @@ Three answers differ from `@hocuspocus/server` 2.15.3, on purpose:
   read-only Update) or a 4403 close (an unknown or missing sub-type, a SyncStep1,
   a read-only SyncStep2). ygo sends no `SyncStatus` for any of them and closes
   with 1002 (protocol error): an answer of 1 would acknowledge an edit the room
-  never saw, and 4403 would strand the provider.
+  never saw, and 4403 would strand the provider. From the moment ygo queues
+  that close, it handles no later frame from the connection, including frames
+  already received.
 - **A read-only SyncStep2 whose update does not decode.** `@hocuspocus/server`
   closes the connection with 4403, because its `snapshotContainsUpdate` check
   throws. ygo answers 0 and keeps the connection: the room does not hold the
   update, and 4403 would strand the provider.
 
 `crdt.SnapshotContainsUpdateV1` is new: it reports whether a snapshot already
-holds everything a V1 update carries, as Yjs `snapshotContainsUpdate` does. The
-read-only SyncStep2 answer uses it.
+holds everything a V1 update carries, as Yjs `snapshotContainsUpdate` does.
+`crdt.DocContainsUpdateV1` is new too: the same check against a live document,
+which decodes the update first, takes only the document's read lock, and
+consults the store only for the update's deletions. The read-only SyncStep2
+answer uses it, so a viewer's handshake does not hold up the room's writers;
+against a document with 20,000 deletions an empty SyncStep2 costs about 0.6µs
+instead of about 590µs.
+
+**Closing a connection now stops its input.** Once the server queues a close
+for a connection (the 1002 above, or 4401 after a failed in-band auth), the
+read loop handles nothing more from it, as it already did after a
+context-cause close.
 
 **Who is affected: servers that want to look at a read-write peer's update
 before it applies** — a per-document size bound, schema validation, write

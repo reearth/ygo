@@ -154,6 +154,59 @@ func SnapshotContainsUpdateV1(snap *Snapshot, update []byte) (bool, error) {
 	return true, nil
 }
 
+// DocContainsUpdateV1 reports whether doc already holds everything the V1
+// update carries, as SnapshotContainsUpdateV1(CaptureSnapshot(doc), update)
+// does, without building a snapshot: update is decoded before doc is locked,
+// doc is held under its read lock only, its structs are compared against
+// doc's clocks, and the store is consulted only for the deletions update
+// carries. update is not integrated; one that does not decode returns an
+// error wrapping ErrInvalidUpdate.
+func DocContainsUpdateV1(doc *Doc, update []byte) (bool, error) {
+	structs, ds, err := decodeStructsV1(New(), update)
+	if err != nil {
+		return false, err
+	}
+	doc.mu.RLock()
+	defer doc.mu.RUnlock()
+	for client, items := range structs {
+		held := doc.store.NextClock(client)
+		for _, item := range items {
+			if item.ID.Clock+uint64(item.Content.Len()) > held {
+				return false, nil
+			}
+		}
+	}
+	for client, ranges := range ds.clients {
+		for _, r := range ranges {
+			if !storeDeletes(doc.store, client, r) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+// storeDeletes reports whether every clock in r is held by a deleted struct
+// of client in s, the condition buildDeleteSet records.
+func storeDeletes(s *StructStore, client ClientID, r DeleteRange) bool {
+	items := s.clients[client]
+	clock, end := r.Clock, r.Clock+r.Len
+	i := sort.Search(len(items), func(i int) bool { return items[i].ID.Clock > clock }) - 1
+	for clock < end {
+		if i < 0 || i >= len(items) {
+			return false
+		}
+		item := items[i]
+		itemEnd := item.ID.Clock + uint64(item.Content.Len())
+		if item.ID.Clock > clock || itemEnd <= clock || !item.Deleted {
+			return false
+		}
+		clock = itemEnd
+		i++
+	}
+	return true
+}
+
 // deleteSetCovers reports whether ds marks every clock in r deleted for
 // client. It relies on ds being sorted and compacted (sortAndCompact), as every
 // DeleteSet buildDeleteSet or decodeDeleteSet returns is, so a covered range

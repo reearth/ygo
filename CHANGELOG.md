@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already holds everything a V1 update carries (every struct below its state
   vector, every deletion in its delete set), without integrating the update.
   Matches Yjs `snapshotContainsUpdate`.
+- **`crdt.DocContainsUpdateV1(doc, update)`** answers the same question for a
+  live document without building a snapshot: it decodes the update first,
+  holds the document's read lock only, and looks at the store only for the
+  deletions the update carries.
 - **`provider/websocket`: `Server.OnPeerUpdate`, a hook that runs in place of
   the room's own apply of a read-write peer's SyncStep2 or Update.** The hook is
   handed the room, its document, the update's V1 bytes and the origin, and an
@@ -44,12 +48,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arrived: 1 once the room applied it, and for a read-only connection 0 for an
   Update and, for a SyncStep2, 1 when the room already holds everything in it
   and 0 otherwise. Where those updates decode, this is how `@hocuspocus/server`
-  answers. ygo answers 0 when the room refused the update (it overflows
-  `MaxPendingItems`, say). For a sync frame that does not decode, ygo sends no
-  `SyncStatus` and closes the connection with 1002 (protocol error). For a
-  read-only SyncStep2 whose update does not decode, ygo answers 0 and keeps the
-  connection. All three differ from `@hocuspocus/server` on purpose (see the
-  release notes). Connections on plain y-websocket framing are unchanged.
+  answers. ygo answers 0 when the room did not fully apply the update (it
+  overflows `MaxPendingItems`, say); whatever part of it did integrate still
+  reaches the room's other peers. For a sync frame that does not decode, ygo
+  sends no `SyncStatus` and closes the connection with 1002 (protocol error).
+  For a read-only SyncStep2 whose update does not decode, ygo answers 0 and
+  keeps the connection. All three differ from `@hocuspocus/server` on purpose
+  (see the release notes). Connections on plain y-websocket framing are
+  unchanged. The read-only SyncStep2 answer uses `crdt.DocContainsUpdateV1`,
+  so it costs no exclusive lock and no pass over the document.
+- **`provider/websocket`: frames a peer sent after the server queued its close
+  were still handled.** Once the server queues a close for a connection (the
+  1002 above, or 4401 after a failed in-band auth), the read loop handles
+  nothing more from it, including frames it has already received, as it
+  already did after a context-cause close.
 
 ## [1.53.0] — 2026-10-20
 

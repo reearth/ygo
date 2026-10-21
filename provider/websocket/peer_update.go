@@ -77,7 +77,7 @@ func (c *PeerClose) Error() string {
 func (p *peer) applyPeerUpdate(update []byte) (applied bool, closeWith *PeerClose) {
 	hook := p.server.OnPeerUpdate
 	if hook == nil {
-		if err := crdt.ApplyUpdateV1(p.room.doc, update, p); err != nil {
+		if err := p.applyToRoom(update); err != nil {
 			p.server.log().Debug("discarded unappliable sync message",
 				"room", p.roomName, "err", err)
 			return false, nil
@@ -101,7 +101,7 @@ func (p *peer) applyPeerUpdate(update []byte) (applied bool, closeWith *PeerClos
 			return ErrPeerUpdateApplied
 		}
 		called = true
-		applyErr = crdt.ApplyUpdateV1(p.room.doc, update, p)
+		applyErr = p.applyToRoom(update)
 		return applyErr
 	}
 	var hookErr error
