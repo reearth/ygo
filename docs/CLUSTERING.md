@@ -122,8 +122,10 @@ When a remote change arrives, the relay calls `srv.Inject(ctx, Inbound)`:
 
 `Inject` auto-creates the room if it is not yet resident, so a node with no
 local peers for a room still materialises the converged state (a peer that later
-connects there receives it via sync step-2). Such rooms linger like
-`Apply`-created ones until `CloseRoom` or process exit.
+connects there receives it via sync step-2). Like `Apply`-created rooms, they
+stay until `CloseRoom` or process exit when `RoomIdleTimeout` is zero (the
+default); with `RoomIdleTimeout > 0` the idle sweeper reclaims them once they
+have been idle that long.
 
 ---
 

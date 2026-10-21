@@ -143,7 +143,8 @@ func (s *Server) sweepIdleRooms(now time.Time) {
 // commits only if, under rm.mu, the room is STILL empty AND idleSince is
 // unchanged AND no caller is mid-join (inflight == 0). A rejoin clears
 // idleSince (→ zero); any join/leave churn restamps it to a different
-// time.Now(); relay/Apply activity clears it via clearIdle. All three make the
+// time.Now(); relay/Apply activity clears it via clearIdle and restamps it to
+// a later time.Now() on return (markIdleIfEmpty). All three make the
 // Equal check fail, so the sweeper never evicts a room that became active — it
 // evicts on emptiness, never on the stale stamp alone. The inflight guard
 // additionally covers the #192 orphan-reap paths (ServeHTTP pre-registration
