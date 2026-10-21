@@ -267,8 +267,8 @@ func TestInteg_OnPeerUpdate_LongCloseReasonIsCut(t *testing.T) {
 	assert.Equal(t, long[:122], closed.Text, "cut on the last whole rune within the frame")
 }
 
-// A *PeerClose code a peer may not receive closes with 4205 instead; 1000 and
-// 3000-4999 are sent as given, as for a context cause's close code.
+// A *PeerClose code outside 1000 and 3000-4999 closes with 4205 instead; those
+// are sent as given, the rule ServeHTTP applies to a context cause's code.
 func TestInteg_OnPeerUpdate_PeerCloseCodeOutsideTheSendableRangeIsReset(t *testing.T) {
 	tests := []struct {
 		code     int
@@ -427,4 +427,56 @@ func TestInteg_OnPeerUpdate_NilHookAppliesAsBefore(t *testing.T) {
 	assert.Equal(t, []uint64{1}, syncStatuses(t, editor, "room"))
 	assert.Equal(t, "plain", srv.GetDoc("room").GetText("t").ToString())
 	assert.Contains(t, tagsUntilPong(t, watcher, "room"), tagSync)
+}
+
+// An apply called while the first one is still running, from a document
+// observer that apply fires, returns ErrPeerUpdateApplied instead of waiting
+// on the first: the update is applied once and the room's later writes go
+// through.
+func TestInteg_OnPeerUpdate_ApplyFromAnObserverOfTheApplyReturnsApplied(t *testing.T) {
+	nested := make(chan error, 1)
+	srv, ts := hocuspocusServer(t, func(srv *ygws.Server) {
+		srv.OnPeerUpdate = func(info ygws.PeerUpdateInfo, apply func() error) error {
+			unsubscribe := info.Doc.OnUpdate(func([]byte, any) {
+				select {
+				case nested <- apply():
+				default:
+				}
+			})
+			defer unsubscribe()
+			return apply()
+		}
+	})
+	editorDoc := crdt.New(crdt.WithClientID(7))
+	editor := hpDial(t, ts, "room", false, editorDoc)
+
+	hpSend(t, editor, "room", tagSync, ygsync.EncodeUpdate(textUpdate(editorDoc, "once")))
+	select {
+	case err := <-nested:
+		require.ErrorIs(t, err, ygws.ErrPeerUpdateApplied)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the nested apply never returned")
+	}
+	assert.Equal(t, []uint64{1}, syncStatuses(t, editor, "room"))
+	assert.Equal(t, "once", srv.GetDoc("room").GetText("t").ToString())
+}
+
+// A nil *PeerClose the hook returns as its error refuses like a plain error:
+// the peer is closed with 4205.
+func TestInteg_OnPeerUpdate_NilPeerCloseClosesWithResetConnection(t *testing.T) {
+	_, ts := hocuspocusServer(t, func(srv *ygws.Server) {
+		srv.OnPeerUpdate = func(ygws.PeerUpdateInfo, func() error) error {
+			var refusal *ygws.PeerClose
+			return refusal
+		}
+	})
+	doc := crdt.New(crdt.WithClientID(7))
+	conn := hpDial(t, ts, "room", false, doc)
+
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(textUpdate(doc, "x")))
+	_ = conn.WriteMessage(gws.BinaryMessage, hpFrame("room", tagPing, nil))
+	statuses, closed := closeAfterStatuses(t, conn, "room")
+	assert.Equal(t, []uint64{0}, statuses)
+	require.NotNil(t, closed, "the refusal must close the connection")
+	assert.Equal(t, 4205, closed.Code)
 }

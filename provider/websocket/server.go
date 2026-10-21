@@ -75,9 +75,9 @@ func closeFrameFor(cause error) []byte {
 }
 
 // sendableClose returns the code and reason a close frame carries for code
-// and reason: ok is false for a code other than 1000 or 3000–4999, which a
-// peer may not receive; the reason loses invalid UTF-8 and is cut to
-// maxCloseReasonBytes.
+// and reason: ok is false for a code other than 1000 or 3000–4999 (the rest
+// are reserved for the WebSocket protocol and its implementations, or out of
+// range); the reason loses invalid UTF-8 and is cut to maxCloseReasonBytes.
 func sendableClose(code int, reason string) (int, string, bool) {
 	if code != gws.CloseNormalClosure && (code < 3000 || code > 4999) {
 		return 0, "", false

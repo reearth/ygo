@@ -61,11 +61,13 @@ var ErrPeerUpdateHookReturned = errors.New("ygo/websocket: apply called after On
 
 // PeerClose is an error Server.OnPeerUpdate returns to close the peer whose
 // update it refused, with Code and Reason in the close frame. Code should be
-// an application code (4000-4999). Only 1000 and 3000-4999 are sent, as for a
-// context cause's close code (see ServeHTTP): a peer may not receive any other
-// code, so with one the peer is closed with 4205 "Reset Connection" instead,
-// as for a plain error. Invalid UTF-8 is dropped from Reason, and a Reason
-// longer than a close frame carries (123 bytes) is cut at a rune boundary.
+// an application code (4000-4999). Only 1000 and 3000-4999 are sent, the rule
+// ServeHTTP applies to a context cause's close code: the codes below 3000
+// other than 1000 are reserved for the WebSocket protocol and its
+// implementations, so with one (or 5000 and above) the peer is closed with
+// 4205 "Reset Connection" instead, as for a plain error. A nil *PeerClose is a
+// plain error too. Invalid UTF-8 is dropped from Reason, and a Reason longer
+// than a close frame carries (123 bytes) is cut at a rune boundary.
 type PeerClose struct {
 	Code   int
 	Reason string
@@ -90,23 +92,29 @@ func (p *peer) applyPeerUpdate(update []byte) (applied bool, closeWith *PeerClos
 		}
 		return true, nil
 	}
-	// mu orders apply against the hook's return: a call that started first
-	// counts, and one after the return applies nothing.
+	// mu orders apply's start against the hook's return: a call that started
+	// first counts, and one after the return applies nothing. It is not held
+	// while the update applies, so a call made while the first one runs (from a
+	// document observer, say) returns ErrPeerUpdateApplied instead of blocking.
 	var (
 		mu               sync.Mutex
 		called, returned bool
 		applyErr         error
+		applyDone        = make(chan struct{})
 	)
 	apply := func() error {
 		mu.Lock()
-		defer mu.Unlock()
 		switch {
 		case returned:
+			mu.Unlock()
 			return ErrPeerUpdateHookReturned
 		case called:
+			mu.Unlock()
 			return ErrPeerUpdateApplied
 		}
 		called = true
+		mu.Unlock()
+		defer close(applyDone)
 		applyErr = p.applyToRoom(update)
 		return applyErr
 	}
@@ -118,13 +126,16 @@ func (p *peer) applyPeerUpdate(update []byte) (applied bool, closeWith *PeerClos
 	returned = true
 	ranApply := called
 	mu.Unlock()
+	if ranApply {
+		<-applyDone // an apply that started before the return finishes first
+	}
 	if ranApply && applyErr == nil {
 		return true, nil
 	}
 	p.server.log().Debug("peer update refused", "room", p.roomName,
 		"hookErr", hookErr, "applyErr", applyErr)
 	var refusal *PeerClose
-	if errors.As(hookErr, &refusal) {
+	if errors.As(hookErr, &refusal) && refusal != nil {
 		if code, reason, ok := sendableClose(refusal.Code, refusal.Reason); ok {
 			return false, &PeerClose{Code: code, Reason: reason}
 		}
