@@ -89,7 +89,7 @@ func TestUnit_ApplyUpdateV1Landed(t *testing.T) {
 	require.NoError(t, ApplyUpdateV1(peer, landed, nil))
 	assert.Equal(t, room.GetText("t").ToString(), peer.GetText("t").ToString())
 
-	t.Run("an apply that succeeds lands nil", func(t *testing.T) {
+	t.Run("an update that does not decode, and one that applies, land nil", func(t *testing.T) {
 		landed, err := ApplyUpdateV1Landed(newRoom(), EncodeStateAsUpdateV1(editor, nil)[:0], nil)
 		require.Error(t, err, "an empty byte slice does not decode")
 		assert.Nil(t, landed, "nothing integrated")
