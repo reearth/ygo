@@ -3,7 +3,6 @@ package websocket
 import (
 	"context"
 	"fmt"
-	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -243,11 +242,11 @@ func (p *peer) handleMessage(data []byte) {
 // not decode, or it overflows MaxPendingItems) is answered 0, where
 // @hocuspocus/server answers 1, since Yjs has no pending cap and y-protocols
 // swallows the decode error; 1 would tell the client the room holds an edit it
-// does not, and whatever part of the update did integrate is still broadcast;
-// (2) a read-only peer's SyncStep2 whose update does not decode is answered 0,
-// where @hocuspocus/server closes with 4403, which would stop
-// @hocuspocus/provider from reconnecting. A sync message whose own framing does
-// not decode never reaches here: see discardMalformedSync.
+// does not. Whatever part of such an update did integrate is still broadcast,
+// on either framing. (2) A read-only peer's SyncStep2 whose update does not
+// decode is answered 0, where @hocuspocus/server closes with 4403, which would
+// stop @hocuspocus/provider from reconnecting. A sync message whose own framing
+// does not decode never reaches here: see discardMalformedSync.
 func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 	if p.readOnly {
 		if p.hocuspocusFraming {
@@ -269,14 +268,12 @@ func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 
 // applyToRoom applies update to the room's document. ApplyUpdateV1 integrates
 // item by item, so an update that overflows MaxPendingItems can leave part of
-// itself in the room; when it fails, applyToRoom broadcasts that part to the
-// room's other peers. An edit another peer made between the two state vectors
-// may reach them twice, which applying tolerates.
+// itself in the room; when it fails, applyToRoom broadcasts that part, and only
+// that part, to the room's other peers.
 func (p *peer) applyToRoom(update []byte) error {
-	before := p.room.doc.StateVector()
-	err := crdt.ApplyUpdateV1(p.room.doc, update, p)
-	if err != nil && !maps.Equal(p.room.doc.StateVector(), before) {
-		p.broadcastSync(ygsync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(p.room.doc, before)))
+	landed, err := crdt.ApplyUpdateV1Landed(p.room.doc, update, p)
+	if err != nil && landed != nil {
+		p.broadcastSync(ygsync.EncodeUpdate(landed))
 	}
 	return err
 }

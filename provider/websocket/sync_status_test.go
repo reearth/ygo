@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -257,6 +258,75 @@ func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
 		}
 	}
 	assert.Equal(t, "abc", watcherDoc.GetText("t").ToString())
+}
+
+// The broadcast for a partly applied update carries only what that update
+// landed, not the room's parked structs or its delete set: a room with 40
+// parked entries and 100 deletions forwards the three characters that
+// integrated and nothing more.
+func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing.T) {
+	_, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 50 })
+	editor := crdt.New(crdt.WithClientID(7))
+	conn := hpDial(t, ts, "room", false, editor)
+	watcherDoc := crdt.New(crdt.WithClientID(9))
+	watcher := hpDial(t, ts, "room", false, watcherDoc)
+
+	// 100 deletions and 40 parked entries in the room, all answered 1.
+	txt := editor.GetText("t")
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(textUpdate(editor, strings.Repeat("x", 200))))
+	before := editor.StateVector()
+	editor.Transact(func(txn *crdt.Transaction) {
+		for i := range 100 {
+			txt.Delete(txn, i, 1)
+		}
+	})
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(editor, before)))
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(parkingUpdate(t, 40)))
+	require.Equal(t, []uint64{1, 1, 1}, syncStatuses(t, conn, "room"))
+	watcherSyncBytes(t, watcher, watcherDoc)
+
+	// "abc" integrates; eleven entries on a map the room never received
+	// overflow the ten pending slots left.
+	author := crdt.New(crdt.WithClientID(1))
+	root := author.GetMap("m")
+	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
+	require.NoError(t, crdt.ApplyUpdateV1(editor, crdt.EncodeStateAsUpdateV1(author, nil), nil))
+	v, _ := editor.GetMap("m").Get("nested")
+	nested := v.(*crdt.YMap)
+	before = editor.StateVector() // includes the author's map, so it is not sent
+	editor.Transact(func(txn *crdt.Transaction) {
+		txt.Insert(txn, 0, "abc", nil)
+		for i := range 11 {
+			nested.Set(txn, "e"+strconv.Itoa(i), i)
+		}
+	})
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(editor, before)))
+	require.Equal(t, []uint64{0}, syncStatuses(t, conn, "room"))
+
+	got := watcherSyncBytes(t, watcher, watcherDoc)
+	assert.Equal(t, "abc"+strings.Repeat("x", 100), watcherDoc.GetText("t").ToString(),
+		"the watcher gets the text that landed")
+	assert.Less(t, got, 64, "the broadcast carries what landed, not the parked entries or the delete set")
+}
+
+// watcherSyncBytes reads conn's frames up to the Pong of a Ping it sends,
+// applies every sync frame to doc, and returns the sync frames' total size.
+func watcherSyncBytes(t *testing.T, conn *gws.Conn, doc *crdt.Doc) int {
+	t.Helper()
+	hpSend(t, conn, "room", tagPing, nil)
+	total := 0
+	for {
+		tag, body, err := hpRead(conn, "room", 2*time.Second)
+		require.NoError(t, err)
+		switch tag {
+		case tagPong:
+			return total
+		case tagSync:
+			total += len(body)
+			_, err := ygsync.ApplySyncMessage(doc, body, nil)
+			require.NoError(t, err)
+		}
+	}
 }
 
 // A read-only peer's Update is answered SyncStatus(0) and the room is

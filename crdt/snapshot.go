@@ -158,9 +158,9 @@ func SnapshotContainsUpdateV1(snap *Snapshot, update []byte) (bool, error) {
 // update carries, as SnapshotContainsUpdateV1(CaptureSnapshot(doc), update)
 // does, without building a snapshot: update is decoded before doc is locked,
 // doc is held under its read lock only, its structs are compared against
-// doc's clocks, and the store is consulted only for the deletions update
-// carries. update is not integrated; one that does not decode returns an
-// error wrapping ErrInvalidUpdate.
+// doc's clocks, and its deletion ranges are checked against doc's store in
+// one forward pass per client. update is not integrated; one that does not
+// decode returns an error wrapping ErrInvalidUpdate.
 func DocContainsUpdateV1(doc *Doc, update []byte) (bool, error) {
 	structs, ds, err := decodeStructsV1(New(), update)
 	if err != nil {
@@ -177,34 +177,58 @@ func DocContainsUpdateV1(doc *Doc, update []byte) (bool, error) {
 		}
 	}
 	for client, ranges := range ds.clients {
-		for _, r := range ranges {
-			if !storeDeletes(doc.store, client, r) {
-				return false, nil
-			}
+		if !storeDeletes(doc.store.clients[client], ranges) {
+			return false, nil
 		}
 	}
 	return true, nil
 }
 
-// storeDeletes reports whether every clock in r is held by a deleted struct
-// of client in s, the condition buildDeleteSet records.
-func storeDeletes(s *StructStore, client ClientID, r DeleteRange) bool {
-	items := s.clients[client]
-	clock, end := r.Clock, r.Clock+r.Len
-	i := sort.Search(len(items), func(i int) bool { return items[i].ID.Clock > clock }) - 1
-	for clock < end {
-		if i < 0 || i >= len(items) {
-			return false
+// storeDeletes reports whether every clock in ranges is held by a deleted
+// struct in items, the condition buildDeleteSet records. ranges must be sorted
+// by clock, as a decoded delete set's are. The cursor into items only moves
+// forward, by a galloping search from where the previous range ended, so the
+// cost grows with the log of each gap between ranges rather than with the
+// log of the store, and a delete set covering the whole store costs one pass.
+func storeDeletes(items []*Item, ranges []DeleteRange) bool {
+	i := 0
+	for _, r := range ranges {
+		if r.Len == 0 {
+			continue
 		}
-		item := items[i]
-		itemEnd := item.ID.Clock + uint64(item.Content.Len())
-		if item.ID.Clock > clock || itemEnd <= clock || !item.Deleted {
-			return false
+		clock, end := r.Clock, r.Clock+r.Len
+		i = seekItem(items, i, clock)
+		for {
+			if i < 0 || i >= len(items) || !items[i].Deleted || !itemHolds(items[i], clock) {
+				return false
+			}
+			clock = items[i].ID.Clock + uint64(items[i].Content.Len())
+			if clock >= end {
+				break
+			}
+			i++
 		}
-		clock = itemEnd
-		i++
 	}
 	return true
+}
+
+// seekItem returns the index of the last struct in items, at from or after it,
+// that starts at or before clock, or from-1 when none does. It gallops forward
+// from from and then binary-searches the last step.
+func seekItem(items []*Item, from int, clock uint64) int {
+	lo, step := from, 1
+	for lo+step < len(items) && items[lo+step].ID.Clock <= clock {
+		lo += step
+		step *= 2
+	}
+	hi := min(lo+step, len(items))
+	window := items[lo:hi]
+	return lo + sort.Search(len(window), func(k int) bool { return window[k].ID.Clock > clock }) - 1
+}
+
+// itemHolds reports whether clock lies within item's clock range.
+func itemHolds(item *Item, clock uint64) bool {
+	return item.ID.Clock <= clock && clock < item.ID.Clock+uint64(item.Content.Len())
 }
 
 // deleteSetCovers reports whether ds marks every clock in r deleted for
