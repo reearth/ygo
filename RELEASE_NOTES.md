@@ -20,7 +20,9 @@ connected. The sweeper then evicts the room `RoomIdleTimeout` after the last
 call, flushing it durably first as it does for any idle room, and
 `MaxResidentRooms` counts it. A room is never evicted while a call on it is
 still running, and a peer that joins clears the stamp as before. No API or
-wire format changes.
+wire format changes. Without a persistence adapter an evicted room's state is
+discarded, so a server that keeps state in memory through `Apply` alone should
+configure persistence or leave `RoomIdleTimeout` at zero.
 
 ## v1.53.0
 
