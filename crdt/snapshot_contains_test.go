@@ -81,8 +81,9 @@ func testContainsUpdateV1(t *testing.T, contains func(*Doc, []byte) (bool, error
 }
 
 // BenchmarkContainsUpdateV1_LargeDeleteSet measures the read-only SyncStep2
-// check against a document with 20k deletions, for an empty update: the
-// snapshot form walks the whole store, the doc form only decodes.
+// check against a document with 20k deletions: for an empty update, for the
+// delete set alone (what a reconnecting viewer that holds the document sends:
+// Yjs always writes its whole delete set), and for the whole state.
 func BenchmarkContainsUpdateV1_LargeDeleteSet(b *testing.B) {
 	doc := New(WithClientID(1))
 	txt := doc.GetText("t")
@@ -93,11 +94,12 @@ func BenchmarkContainsUpdateV1_LargeDeleteSet(b *testing.B) {
 		doc.Transact(func(txn *Transaction) { txt.Delete(txn, i, 1) })
 	}
 	empty := EncodeStateAsUpdateV1(New(), nil)
+	deletes := EncodeStateAsUpdateV1(doc, doc.StateVector())
 	whole := EncodeStateAsUpdateV1(doc, nil)
 	for _, bc := range []struct {
 		name   string
 		update []byte
-	}{{"empty", empty}, {"whole", whole}} {
+	}{{"empty", empty}, {"deletes", deletes}, {"whole", whole}} {
 		b.Run("snapshot/"+bc.name, func(b *testing.B) {
 			for range b.N {
 				_, _ = SnapshotContainsUpdateV1(CaptureSnapshot(doc), bc.update)

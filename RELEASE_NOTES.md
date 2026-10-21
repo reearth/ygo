@@ -57,9 +57,9 @@ Three answers differ from `@hocuspocus/server` 2.15.3, on purpose:
 holds everything a V1 update carries, as Yjs `snapshotContainsUpdate` does.
 `crdt.DocContainsUpdateV1` is new too: the same check against a live document,
 which decodes the update first, takes only the document's read lock, and
-consults the store only for the update's deletions. The read-only SyncStep2
-answer uses it, so a viewer's handshake no longer takes the room's exclusive
-lock.
+checks the update's deletion ranges against the store in one forward pass per
+client. The read-only SyncStep2 answer uses it, so a viewer's handshake no
+longer takes the room's exclusive lock.
 
 **The part of a partly applied update now reaches the other peers.** ygo
 integrates an update item by item, so one that overflows `MaxPendingItems` can

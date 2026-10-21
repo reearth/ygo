@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Matches Yjs `snapshotContainsUpdate`.
 - **`crdt.DocContainsUpdateV1(doc, update)`** answers the same question for a
   live document without building a snapshot: it decodes the update first,
-  holds the document's read lock only, and looks at the store only for the
-  deletions the update carries.
+  holds the document's read lock only, and checks the update's deletion ranges
+  against the store in one forward pass per client.
 - **`crdt.ApplyUpdateV1Landed(doc, update, origin)`** applies a V1 update as
   `ApplyUpdateV1` does and, when the apply fails after part of the update
   integrated, also returns a V1 update of exactly that part: the structs this
