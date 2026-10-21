@@ -52,8 +52,13 @@ Three answers differ from `@hocuspocus/server` 2.15.3, on purpose:
   update, and 4403 would strand the provider.
 
 `crdt.SnapshotContainsUpdateV1` is new: it reports whether a snapshot already
-holds everything a V1 update carries, as Yjs `snapshotContainsUpdate` does. The
-read-only SyncStep2 answer uses it.
+holds everything a V1 update carries, as Yjs `snapshotContainsUpdate` does.
+`crdt.DocContainsUpdateV1` is new too: the same check against a live document,
+which decodes the update first, takes only the document's read lock, and
+consults the store only for the update's deletions. The read-only SyncStep2
+answer uses it, so a viewer's handshake does not hold up the room's writers;
+against a document with 20,000 deletions an empty SyncStep2 costs about 0.6µs
+instead of about 590µs.
 
 ## v1.53.0
 

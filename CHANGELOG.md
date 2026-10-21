@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already holds everything a V1 update carries (every struct below its state
   vector, every deletion in its delete set), without integrating the update.
   Matches Yjs `snapshotContainsUpdate`.
+- **`crdt.DocContainsUpdateV1(doc, update)`** answers the same question for a
+  live document without building a snapshot: it decodes the update first,
+  holds the document's read lock only, and looks at the store only for the
+  deletions the update carries.
 
 ### Fixed
 
@@ -33,7 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   For a read-only SyncStep2 whose update does not decode, ygo answers 0 and
   keeps the connection. All three differ from `@hocuspocus/server` on purpose
   (see the release notes). Connections on plain y-websocket framing are
-  unchanged.
+  unchanged. The read-only SyncStep2 answer uses `crdt.DocContainsUpdateV1`,
+  so it costs no exclusive lock and no pass over the document.
 
 ## [1.53.0] — 2026-10-20
 

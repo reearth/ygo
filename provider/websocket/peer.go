@@ -273,7 +273,7 @@ func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 // roomHolds reports whether the room's document already holds everything the
 // V1 update carries. An update that does not decode is not held.
 func (p *peer) roomHolds(update []byte) bool {
-	held, err := crdt.SnapshotContainsUpdateV1(crdt.CaptureSnapshot(p.room.doc), update)
+	held, err := crdt.DocContainsUpdateV1(p.room.doc, update)
 	if err != nil {
 		p.server.log().Debug("read-only sync message does not decode",
 			"room", p.roomName, "err", err)
