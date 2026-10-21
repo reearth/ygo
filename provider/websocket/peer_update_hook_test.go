@@ -157,7 +157,7 @@ func TestInteg_OnPeerUpdate_ApplyRunsOnce(t *testing.T) {
 	assert.Equal(t, []uint64{1}, syncStatuses(t, editor, "room"))
 	assert.Equal(t, "hello", srv.GetDoc("room").GetText("t").ToString())
 	assert.Equal(t, int32(1), applied.Load(), "the room applies the update once")
-	assert.ErrorIs(t, second, ygws.ErrPeerUpdateApplied)
+	require.ErrorIs(t, second, ygws.ErrPeerUpdateApplied)
 	assert.Equal(t, "room", seen.Room)
 	assert.Same(t, srv.GetDoc("room"), seen.Doc)
 	assert.Equal(t, update, seen.Update)
@@ -389,7 +389,7 @@ func TestInteg_OnPeerUpdate_ApplyAfterReturnAppliesNothing(t *testing.T) {
 	assert.Equal(t, []uint64{0}, statuses)
 	select {
 	case err := <-late:
-		assert.ErrorIs(t, err, ygws.ErrPeerUpdateHookReturned)
+		require.ErrorIs(t, err, ygws.ErrPeerUpdateHookReturned)
 	case <-time.After(2 * time.Second):
 		t.Fatal("the late apply never returned")
 	}
