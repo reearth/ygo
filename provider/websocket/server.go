@@ -67,16 +67,27 @@ func closeFrameFor(cause error) []byte {
 	if !errors.As(cause, &cc) {
 		return nil
 	}
-	code, reason := cc.CloseCode()
-	if code != gws.CloseNormalClosure && (code < 3000 || code > 4999) {
+	code, reason, ok := sendableClose(cc.CloseCode())
+	if !ok {
 		return nil
+	}
+	return gws.FormatCloseMessage(code, reason)
+}
+
+// sendableClose returns the code and reason a close frame carries for code
+// and reason: ok is false for a code other than 1000 or 3000–4999, which a
+// peer may not receive; the reason loses invalid UTF-8 and is cut to
+// maxCloseReasonBytes.
+func sendableClose(code int, reason string) (int, string, bool) {
+	if code != gws.CloseNormalClosure && (code < 3000 || code > 4999) {
+		return 0, "", false
 	}
 	reason = strings.ToValidUTF8(reason, "")
 	if len(reason) > maxCloseReasonBytes {
 		// Re-validate to drop a character split by the cut.
 		reason = strings.ToValidUTF8(reason[:maxCloseReasonBytes], "")
 	}
-	return gws.FormatCloseMessage(code, reason)
+	return code, reason, true
 }
 
 // Outer message type codes. Tags 0-3 are the y-protocols / y-websocket
@@ -122,6 +133,13 @@ const (
 	// full error text is carried only in the PermissionDenied data frame.
 	// Matches Hocuspocus's CloseEvents.Unauthorized.reason.
 	wsReasonUnauthorized = "Unauthorized"
+
+	// wsCodeResetConnection and wsReasonResetConnection close a peer whose
+	// update Server.OnPeerUpdate refused without a sendable *PeerClose.
+	// Matches Hocuspocus's CloseEvents.ResetConnection, which
+	// @hocuspocus/server closes with on a beforeHandleMessage rejection.
+	wsCodeResetConnection   = 4205
+	wsReasonResetConnection = "Reset Connection"
 )
 
 // maxWSMessageBytes is the maximum size of a single WebSocket frame accepted
@@ -934,13 +952,15 @@ type Server struct {
 	// SyncStep2 or Update a read-write peer sent, under Sync (tag 0) or
 	// SyncReply (tag 4), so the embedder can refuse it before it reaches the
 	// room or any other peer, or hold a lock of its own across the apply.
-	// apply applies the update exactly as the room does without a hook. An
-	// update apply did not apply is not broadcast and is answered
-	// SyncStatus(0) on a Hocuspocus-framed connection; when the hook's error is
-	// or wraps a *PeerClose, the peer is closed with its code after that
-	// answer. An update apply applied is broadcast and answered SyncStatus(1)
-	// whatever the hook returns. A read-only peer's update never reaches the
-	// hook. Nil keeps the behaviour without a hook. See PeerUpdateHook.
+	// apply applies the update exactly as the room does without a hook, and
+	// must be called before the hook returns. An update apply did not apply
+	// is not broadcast and is answered SyncStatus(0) on a Hocuspocus-framed
+	// connection; when the hook refused it, the peer is then closed, with the
+	// code of a *PeerClose the hook's error is or wraps and with 4205 "Reset
+	// Connection" otherwise. An update apply applied is broadcast and answered
+	// SyncStatus(1) whatever the hook returns. A read-only peer's update never
+	// reaches the hook. Nil keeps the behaviour without a hook. See
+	// PeerUpdateHook.
 	OnPeerUpdate PeerUpdateHook
 
 	// OnTokenAuth, if non-nil, validates the token from a Hocuspocus in-band

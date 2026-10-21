@@ -229,8 +229,8 @@ func (p *peer) handleMessage(data []byte) {
 // the update to the room, through Server.OnPeerUpdate when one is set, and
 // broadcasts payload to the room's other peers once the room has applied it. A
 // read-only peer's update is neither applied nor broadcast (#59). An update the
-// hook refused is not broadcast, and the peer is closed when the hook asked for
-// it (PeerClose).
+// hook refused is not broadcast, and the peer is then closed (see
+// PeerUpdateHook).
 //
 // On a connection using Hocuspocus framing it answers every such frame with
 // exactly one SyncStatus (tag 8), in the order the frames arrived, so a client
@@ -257,7 +257,7 @@ func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 	if !applied {
 		p.sendSyncStatus(false)
 		if closeWith != nil {
-			p.enqueueClose(closeWith.Code, closeReason(closeWith.Reason))
+			p.enqueueClose(closeWith.Code, closeWith.Reason)
 		}
 		return
 	}

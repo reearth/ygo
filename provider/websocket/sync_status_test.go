@@ -43,14 +43,19 @@ func hocuspocusServer(t *testing.T, configure func(*ygws.Server)) (*ygws.Server,
 	return srv, ts
 }
 
-// hpSend writes one Hocuspocus frame: VarString(room), the outer tag, then body.
-func hpSend(t *testing.T, conn *gws.Conn, room string, tag uint64, body []byte) {
-	t.Helper()
-	require.NoError(t, conn.WriteMessage(gws.BinaryMessage, encoding.EncodeBytes(func(enc *encoding.Encoder) {
+// hpFrame is one Hocuspocus frame: VarString(room), the outer tag, then body.
+func hpFrame(room string, tag uint64, body []byte) []byte {
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
 		enc.WriteVarString(room)
 		enc.WriteVarUint(tag)
 		enc.WriteRaw(body)
-	})))
+	})
+}
+
+// hpSend writes one Hocuspocus frame (see hpFrame).
+func hpSend(t *testing.T, conn *gws.Conn, room string, tag uint64, body []byte) {
+	t.Helper()
+	require.NoError(t, conn.WriteMessage(gws.BinaryMessage, hpFrame(room, tag, body)))
 }
 
 // hpRead reads one Hocuspocus frame and returns its outer tag and body, or
