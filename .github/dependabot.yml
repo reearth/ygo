@@ -24,6 +24,15 @@ updates:
       day: monday
     open-pull-requests-limit: 0
 
+  # mobile/ is a separate module (Go 1.26 floor, set by golang.org/x/mobile).
+  # Security updates only, like the root module.
+  - package-ecosystem: gomod
+    directory: "/mobile"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 0
+
   # Every action is pinned to a major tag (actions/checkout@v5 and friends), so
   # updates are rare and always mergeable. Grouped so a week's worth of bumps
   # arrives as a single pull request instead of one each.

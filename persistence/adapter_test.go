@@ -3,6 +3,7 @@ package persistence_test
 import (
 	"context"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -79,6 +80,127 @@ func TestLegacyAdapter_PluggedIntoServer(t *testing.T) {
 	connB := dialWS(t, ts, "room")
 	drainWS(t, connB, docB)
 	assert.Equal(t, "persisted", docB.GetText("t").ToString())
+}
+
+// End to end at the server's default settings, write coalescing included, in a
+// room whose state is already stored: the updates reach the store and survive
+// a reload, although decoded on its own each batch the server writes parks more
+// entries than crdt's default pending cap (100,000), all waiting for the stored
+// map. A one-key edit after them must reach the store too: a refused batch
+// stays queued, and every later edit is merged into it.
+func TestLegacyAdapter_PluggedIntoServer_StoresLargeIncrementalUpdates(t *testing.T) {
+	cases := []struct {
+		name  string
+		sizes []int // keys set by each update the peer sends before the one-key edit
+	}{
+		{"one update over the cap", []int{100_001}},
+		{"two updates under the cap, coalesced into one batch over it", []int{50_001, 50_001}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base, updates := nestedMapUpdates(t, append(tc.sizes, 1)...)
+			large, edit := updates[:len(tc.sizes)], updates[len(tc.sizes)]
+			entries := 0
+			for _, n := range tc.sizes {
+				entries += n
+			}
+
+			ctx := context.Background()
+			store := persistence.NewMemoryPersistence()
+			_, err := store.AppendUpdate(ctx, "room", base)
+			require.NoError(t, err)
+			srv := ygws.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
+			ts := httptest.NewServer(srv)
+			defer ts.Close()
+			// Called from require.Eventually's goroutine, so it reports, never fails.
+			versions := func() int {
+				metas, err := store.ListVersions(ctx, "room")
+				if err != nil {
+					return -1
+				}
+				return len(metas)
+			}
+
+			connA := dialWS(t, ts, "room")
+			drainWS(t, connA, crdt.New())
+			for _, u := range large {
+				sendV1Update(t, connA, u)
+			}
+			require.Eventually(t, func() bool { return versions() >= 2 }, 15*time.Second, 20*time.Millisecond,
+				"the updates never reached the store")
+			v, got := storedNestedEntries(t, store)
+			require.Equal(t, persistence.Version(2), v, "the updates were written in more than one batch")
+			require.Equal(t, entries, got, "the first batch does not hold every update")
+
+			// CloseRoom writes the edit as the next batch once the room has it.
+			sendV1Update(t, connA, edit)
+			require.Eventually(t, func() bool { return nestedEntries(srv.GetDoc("room")) == entries+1 },
+				15*time.Second, 20*time.Millisecond, "the room never applied the edit")
+			require.NoError(t, srv.CloseRoom("room", true))
+			require.Equal(t, 3, versions(), "the edit after them never reached the store")
+
+			docB := crdt.New()
+			connB := dialWS(t, ts, "room")
+			drainWS(t, connB, docB)
+			assert.Equal(t, entries+1, nestedEntries(docB), "the reloaded room lost entries")
+		})
+	}
+}
+
+// nestedMapUpdates returns base, in which client 1 creates the map "nested"
+// under root map "m", and one incremental update per size, in which client 2
+// sets that many more keys on it. Each update is encoded against the state
+// before it, so decoded on its own every entry of it parks, waiting for the
+// map and, after the first update, for client 2's earlier clocks.
+func nestedMapUpdates(t *testing.T, sizes ...int) (base []byte, updates [][]byte) {
+	t.Helper()
+	author := crdt.New(crdt.WithClientID(1))
+	root := author.GetMap("m")
+	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
+	base = crdt.EncodeStateAsUpdateV1(author, nil)
+
+	editor := crdt.New(crdt.WithClientID(2))
+	require.NoError(t, crdt.ApplyUpdateV1(editor, base, nil))
+	v, _ := editor.GetMap("m").Get("nested")
+	nested, ok := v.(*crdt.YMap)
+	require.True(t, ok, "nested is %T", v)
+	next := 0
+	for _, n := range sizes {
+		sv := editor.StateVector()
+		editor.Transact(func(txn *crdt.Transaction) {
+			for range n {
+				nested.Set(txn, "k"+strconv.Itoa(next), next)
+				next++
+			}
+		})
+		updates = append(updates, crdt.EncodeStateAsUpdateV1(editor, sv))
+	}
+	return base, updates
+}
+
+// nestedEntries returns how many keys the map "nested" under root map "m"
+// holds in doc, or -1 when doc has no such map.
+func nestedEntries(doc *crdt.Doc) int {
+	v, ok := doc.GetMap("m").Get("nested")
+	if !ok {
+		return -1
+	}
+	nested, ok := v.(*crdt.YMap)
+	if !ok {
+		return -1
+	}
+	return len(nested.Keys())
+}
+
+// storedNestedEntries loads "room" from p and returns the version it loaded
+// and how many keys the map "nested" under root map "m" holds there.
+func storedNestedEntries(t *testing.T, p persistence.VersionedPersistence) (persistence.Version, int) {
+	t.Helper()
+	lr, err := p.Load(context.Background(), "room")
+	require.NoError(t, err)
+	doc := crdt.New()
+	require.NoError(t, crdt.ApplyUpdateV1(doc, lr.Update, nil))
+	return lr.Version, nestedEntries(doc)
 }
 
 func TestLegacyAdapter_CompactForwardsWithKeep(t *testing.T) {

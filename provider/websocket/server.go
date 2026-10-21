@@ -52,6 +52,33 @@ func (s *Server) safeHook(name string, fn func()) {
 // a slow-reader from blocking the broadcast loop for all other peers.
 const writeTimeout = 10 * time.Second
 
+// closeFrameTimeout bounds the close frame sent for a cancel cause. A peer that
+// cannot take a control frame this quickly is not reading anyway.
+const closeFrameTimeout = time.Second
+
+// maxCloseReasonBytes is the largest reason a close frame can carry: a control
+// frame payload is at most 125 bytes, two of them the code.
+const maxCloseReasonBytes = 123
+
+// closeFrameFor returns the close frame a cancel cause asks for, or nil when
+// the cause names no sendable close code.
+func closeFrameFor(cause error) []byte {
+	var cc interface{ CloseCode() (int, string) }
+	if !errors.As(cause, &cc) {
+		return nil
+	}
+	code, reason := cc.CloseCode()
+	if code != gws.CloseNormalClosure && (code < 3000 || code > 4999) {
+		return nil
+	}
+	reason = strings.ToValidUTF8(reason, "")
+	if len(reason) > maxCloseReasonBytes {
+		// Re-validate to drop a character split by the cut.
+		reason = strings.ToValidUTF8(reason[:maxCloseReasonBytes], "")
+	}
+	return gws.FormatCloseMessage(code, reason)
+}
+
 // Outer message type codes. Tags 0-3 are the y-protocols / y-websocket
 // core; tags 4-10 are the Hocuspocus protocol extensions ygo accepts
 // from clients (#55). See the StatelessHook godoc for the application-
@@ -1858,6 +1885,16 @@ func (s *Server) failRoomLoad(r *room, name string, loadErr error) {
 // ServeHTTP upgrades the request to WebSocket and runs the peer sync loop.
 // Room name is taken from the {room} path variable (Go 1.22 ServeMux) or
 // falls back to the last path segment.
+//
+// Cancelling the request context ends the connection. If the context was
+// cancelled with a cause (context.WithCancelCause) that implements
+// CloseCode() (int, string), directly or wrapped, ServeHTTP first sends the
+// peer a close frame with that code and reason, so an embedder can end one
+// session with an application close code (4000–4999) such as "session
+// revoked". Only 1000 and 3000–4999 are sent; the reason is truncated to 123
+// bytes and invalid UTF-8 is dropped from it. The peer's input is ignored from
+// the cancel on. Any other cause, or an unsendable code, closes the socket
+// without a close frame, as before.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Authorize (issue #59) takes precedence over AuthFunc when both are set: it
 	// both accepts/rejects and reports per-connection config (read-only). AuthFunc
@@ -2046,6 +2083,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		select {
 		case <-ctx.Done():
+			// A cause naming a close code is sent to the peer before the socket
+			// closes. The read loop drops input meanwhile, since WriteControl can
+			// wait on a writer stuck on a peer that has stopped reading.
+			if frame := closeFrameFor(context.Cause(ctx)); frame != nil {
+				p.revoked.Store(true)
+				_ = ws.WriteControl(gws.CloseMessage, frame, time.Now().Add(closeFrameTimeout))
+			}
 			_ = ws.Close() // close errors during teardown are expected; not logged
 		case <-s.shutdownCh:
 			_ = ws.Close() // close errors during teardown are expected; not logged
@@ -2082,6 +2126,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, data, err := ws.ReadMessage()
 		if err != nil {
 			break
+		}
+		if p.revoked.Load() {
+			// continue, not break: the deferred Close would race the close frame.
+			continue
 		}
 		if firstMessage {
 			// Clear the handshake deadline; subsequent reads can take as long

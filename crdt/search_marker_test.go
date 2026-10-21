@@ -795,13 +795,12 @@ func TestSearchMarker_Format_MatchesCold(t *testing.T) {
 	}
 }
 
-// TestSearchMarker_CurrentAttributesAt_MatchesCold exercises
-// YText.currentAttributesAt's !hasFormatting short-circuit (returns empty
-// without walking, ytext.go) together with its ordinary full-walk fallback
-// once formatting exists — both are consulted by Insert whenever attrs is
-// non-empty. Attrs-carrying inserts happen before, at the hasFormatting
-// transition, and after, on a large document.
-func TestSearchMarker_CurrentAttributesAt_MatchesCold(t *testing.T) {
+// TestSearchMarker_AttrsInsert_FormattingTransition_MatchesCold exercises
+// findTextPos's !hasFormatting fast path (ytext.go) together with its
+// formatted-text path once formatting exists — both resolve Insert's cursor
+// whenever attrs is non-empty. Attrs-carrying inserts happen before, at the
+// hasFormatting transition, and after, on a large document.
+func TestSearchMarker_AttrsInsert_FormattingTransition_MatchesCold(t *testing.T) {
 	// 500-char blocks (well above maxSearchMarker=80) keep the O(n^2)
 	// force-cold single-char-append build below under the CI race budget
 	// while still exercising multiple markers and the hasFormatting
@@ -815,14 +814,14 @@ func TestSearchMarker_CurrentAttributesAt_MatchesCold(t *testing.T) {
 				txt.Insert(tr, txt.Len(), "a", nil)
 			}
 			// First attrs-carrying insert: hasFormatting is still false when
-			// currentAttributesAt is consulted here (it flips true only once
+			// findTextPos is consulted here (it flips true only once
 			// this call's own opening marker integrates).
 			txt.Insert(tr, txt.Len(), "BOLD", Attributes{"bold": true})
 			for i := 0; i < 500; i++ {
 				txt.Insert(tr, txt.Len(), "b", nil)
 			}
-			// hasFormatting is now true: exercises the full walk from
-			// txt.start, at a position before the only existing marker.
+			// hasFormatting is now true: exercises the formatted path at a
+			// position before the only existing marker.
 			txt.Insert(tr, 125, "MID", Attributes{"bold": true})
 			txt.Insert(tr, txt.Len(), "END", Attributes{"italic": true})
 		})
@@ -1296,5 +1295,168 @@ func TestSearchMarker_ConcurrentReadersNoRace(t *testing.T) {
 	// t.markers could plausibly desync these even though nothing panicked.
 	if got, want := len(arr.ToSlice()), arr.Len(); got != want {
 		t.Fatalf("post-race inconsistency: len(ToSlice())=%d Len()=%d", got, want)
+	}
+}
+
+// An insert just after a live format marker must not mis-shift a search marker
+// sitting on that format marker: random formatted edits keep every marker at
+// its item's rendered start and read back as on a cold (marker-free) text.
+func TestSearchMarker_FormattedInserts_MatchCold(t *testing.T) {
+	for seed := uint64(0); seed < uint64(raceSeeds(300)); seed++ {
+		hot, cold := New(WithClientID(1)), New(WithClientID(1))
+		cold.GetText("t").baseType().disableMarkers = true
+		r := rand.New(rand.NewSource(int64(seed)))
+		for step := 0; step < 60; step++ {
+			n := hot.GetText("t").Len()
+			i := r.Intn(n + 1)
+			k := r.Intn(6)
+			l := 1 + r.Intn(3)
+			var v any = true
+			if r.Intn(2) == 0 {
+				v = nil
+			}
+			for _, d := range []*Doc{hot, cold} {
+				txt := d.GetText("t")
+				d.Transact(func(txn *Transaction) {
+					switch {
+					case k == 0:
+						txt.Insert(txn, i, "xy", nil)
+					case k == 1:
+						txt.Insert(txn, i, "z", Attributes{"bold": true})
+					case k == 2 && i < n:
+						txt.Format(txn, i, min(l, n-i), Attributes{"bold": v})
+					case k == 3 && i < n:
+						txt.Delete(txn, i, min(l, n-i))
+					case k == 4:
+						txt.InsertEmbed(txn, i, 1, nil)
+					default:
+						txt.ApplyDelta(txn, []Delta{{Op: DeltaOpRetain, Retain: i}, {Op: DeltaOpInsert, Insert: "q"}})
+					}
+				})
+			}
+			ht := hot.GetText("t").baseType()
+			for _, m := range ht.markers {
+				idx := 0
+				for it := ht.start; it != nil && it != m.item; it = it.Right {
+					if c, n, _ := ht.renderedStep(it); c {
+						idx += n
+					}
+				}
+				if idx != m.index {
+					t.Fatalf("seed %d step %d op %d: marker on %T at %d, rendered at %d", seed, step, k, m.item.Content, m.index, idx)
+				}
+			}
+			if got, want := hot.GetText("t").ToDelta(), cold.GetText("t").ToDelta(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("seed %d step %d op %d i=%d l=%d: markers %v, cold %v", seed, step, k, i, l, got, want)
+			}
+		}
+	}
+}
+
+// Formatted edits resolve the attributes at the cursor from a cache when they
+// can; with local and remote format changes interleaved, and edits clustered
+// around a moving cursor as typing is, every item must stay identical to a
+// cold (marker- and cache-free) text's.
+func TestSearchMarker_FormattedEdits_CachedAttrsMatchCold(t *testing.T) {
+	attrSets := []Attributes{nil, {}, {"bold": true}, {"italic": true}, {"bold": nil}, {"bold": true, "color": "red"}}
+	for seed := uint64(0); seed < uint64(raceSeeds(100)); seed++ {
+		hot, cold, peer := New(WithClientID(1)), New(WithClientID(1)), New(WithClientID(2))
+		cold.GetText("t").baseType().disableMarkers = true
+		r := rand.New(rand.NewSource(int64(seed)))
+		edit := func(d *Doc, k, i, l int, a Attributes) (end int) {
+			txt := d.GetText("t")
+			n := txt.Len()
+			i = min(i, n)
+			l = min(l, n-i)
+			end = i
+			d.Transact(func(txn *Transaction) {
+				switch {
+				case k < 3:
+					txt.Insert(txn, i, "xy"[:1+k%2], a)
+					end += 1 + k%2
+				case k == 3:
+					txt.InsertEmbed(txn, i, 1, a)
+					end++
+				case k == 4 && l > 0 && len(a) > 0:
+					txt.Format(txn, i, l, a)
+				case k == 5 && l > 0:
+					txt.Delete(txn, i, l)
+				default:
+					txt.ApplyDelta(txn, []Delta{{Op: DeltaOpRetain, Retain: i}, {Op: DeltaOpInsert, Insert: "q", Attributes: a}})
+					end++
+				}
+			})
+			return end
+		}
+		cursor := 0
+		for step := 0; step < 80; step++ {
+			k, i, l, a := r.Intn(7), r.Intn(40), 1+r.Intn(3), attrSets[r.Intn(len(attrSets))]
+			if r.Intn(2) == 0 {
+				i = max(0, cursor-1+r.Intn(3))
+			}
+			switch r.Intn(5) {
+			case 0:
+				edit(peer, k, i, l, a)
+			case 1:
+				u := EncodeStateAsUpdateV1(peer, hot.StateVector())
+				for _, d := range []*Doc{hot, cold} {
+					if err := ApplyUpdateV1(d, u, nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := ApplyUpdateV1(peer, EncodeStateAsUpdateV1(hot, peer.StateVector()), nil); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				cursor = edit(hot, k, i, l, a)
+				edit(cold, k, i, l, a)
+			}
+			if step%8 != 7 {
+				continue
+			}
+			if got, want := EncodeStateAsUpdateV1(hot, nil), EncodeStateAsUpdateV1(cold, nil); !sameUpdate(t, got, want) {
+				t.Fatalf("seed %d step %d (op %d at %d): cached\n%v\ncold\n%v", seed, step, k, i, textFormatUnits(t, got), textFormatUnits(t, want))
+			}
+		}
+	}
+}
+
+// A format marker integrated or deleted before the cached item, locally or
+// by a remote update, invalidates the cached attributes.
+func TestSearchMarker_CachedAttrs_InvalidatedByFormatChanges(t *testing.T) {
+	bold, italic := Attributes{"bold": true}, Attributes{"italic": true}
+	scripts := map[string]func(d, peer *Doc){
+		"local delete": func(d, _ *Doc) {
+			txt := d.GetText("t")
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "a", bold) })
+			d.Transact(func(txn *Transaction) { txt.Format(txn, 0, 1, Attributes{"bold": nil}) })
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 1, "b", italic) })
+		},
+		"remote integrate": func(d, peer *Doc) {
+			txt := d.GetText("t")
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "ab", italic) })
+			if err := ApplyUpdateV1(peer, EncodeStateAsUpdateV1(d, nil), nil); err != nil {
+				t.Fatal(err)
+			}
+			pt := peer.GetText("t")
+			peer.Transact(func(txn *Transaction) { pt.Format(txn, 0, 2, bold) })
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 2, "c", italic) })
+			if err := ApplyUpdateV1(d, EncodeStateAsUpdateV1(peer, d.StateVector()), nil); err != nil {
+				t.Fatal(err)
+			}
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 3, "d", italic) })
+			d.Transact(func(txn *Transaction) { txt.Insert(txn, 2, "e", nil) })
+		},
+	}
+	for name, script := range scripts {
+		t.Run(name, func(t *testing.T) {
+			hot, cold := New(WithClientID(1)), New(WithClientID(1))
+			cold.GetText("t").baseType().disableMarkers = true
+			script(hot, New(WithClientID(2)))
+			script(cold, New(WithClientID(2)))
+			if got, want := EncodeStateAsUpdateV1(hot, nil), EncodeStateAsUpdateV1(cold, nil); !sameUpdate(t, got, want) {
+				t.Fatalf("cached\n%v\ncold\n%v", textFormatUnits(t, got), textFormatUnits(t, want))
+			}
+		})
 	}
 }

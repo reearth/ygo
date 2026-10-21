@@ -1,4 +1,4 @@
-.PHONY: all test lint fuzz bench bench-heavy coverage vet tools fixtures fmt clean
+.PHONY: all test lint fuzz bench bench-heavy coverage vet tools fixtures fmt clean mobile-test mobile-android mobile-ios
 
 GOTEST  := go test -race -timeout 120s
 PACKAGES := ./...
@@ -9,7 +9,7 @@ test:
 	$(GOTEST) $(PACKAGES)
 
 coverage:
-	$(GOTEST) -coverprofile=coverage.txt -covermode=atomic $(PACKAGES)
+	go test -timeout 120s -coverprofile=coverage.txt -covermode=set $(PACKAGES)
 	go tool cover -html=coverage.txt -o coverage.html
 
 lint:
@@ -55,10 +55,24 @@ fixtures:
 	node testutil/gen_fixtures_prelim.js
 	node testutil/gen_fixtures_gc.js
 	node testutil/gen_fixtures_undo.js
+	node testutil/gen_fixtures_stranded.js
 	node testutil/gen_fixtures_ywebsocket_envelope.js
 	node testutil/gen_fixtures_contentjson.js
 	node testutil/gen_fixtures_multivalue.js
 	node testutil/gen_fixtures_applydelta.js
+	node testutil/gen_fixtures_textformat.js
+	node testutil/gen_fixtures_dupgroups.js
+	node testutil/gen_fixtures_interleaved.js
+
+# mobile/ is its own module (see mobile/README.md); these need Go 1.26+.
+mobile-test:
+	cd mobile && $(GOTEST) ./... && go vet ./...
+
+mobile-android:
+	cd mobile && go install tool && gomobile bind -target=android -androidapi 21 .
+
+mobile-ios:
+	cd mobile && go install tool && gomobile bind -target=ios .
 
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
