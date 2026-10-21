@@ -38,11 +38,17 @@ type PeerUpdateInfo struct {
 // or panics before that — closes the peer: with the code and reason of a
 // *PeerClose when the hook's error is or wraps one, and with 4205 "Reset
 // Connection" otherwise, as @hocuspocus/server closes on a beforeHandleMessage
-// rejection. The close is needed because the client's later edits build on
-// the refused one, so the room could not integrate them; a client that
-// reconnects syncs from the room's state instead. When apply ran and the room
-// itself did not take the update (apply returned an error), the peer is
-// answered as it would be without a hook, and closed only for a *PeerClose.
+// rejection. When apply ran and the room itself did not take the update
+// (apply returned an error), the peer is answered as it would be without a
+// hook, and closed only for a *PeerClose.
+//
+// The close is needed because the client's later edits build on the refused
+// one, so the room could not integrate them. The client still holds the
+// refused edit, so when it reconnects it sends it again, with any edit built
+// on it, and the hook sees each of them again; an edit the hook applies that
+// builds on a refused one parks in the room (Doc.PendingStats).
+// @hocuspocus/provider 2.x reconnects at once after a 4205 close; a
+// *PeerClose with 4401 stops it reconnecting.
 type PeerUpdateHook func(info PeerUpdateInfo, apply func() error) error
 
 // ErrPeerUpdateApplied is what apply returns when the hook calls it again

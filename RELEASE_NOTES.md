@@ -93,14 +93,20 @@ Hocuspocus-framed connection, and closes the peer after that answer:
 The close is needed because the client's later edits build on the refused
 one, so the room could not integrate them: without it they would park in the
 room, be answered `SyncStatus(1)` and reach the other peers, who would park
-them too. A client that reconnects syncs from the room's state. Plain
-y-websocket connections are closed the same way. When the hook calls `apply`
-and the room itself does not take the update (it overflows `MaxPendingItems`,
-say), the peer is answered as without a hook and keeps the connection, unless
-the hook returns a `*PeerClose`. An update `apply` applied is broadcast and
-answered `SyncStatus(1)` whatever the hook returns afterward. Read-only peers
-never reach the hook, as before. Nil, the default, leaves every peer's update
-applied exactly as it was.
+them too. The client still holds the refused edit, so when it reconnects it
+sends it again, with any edit built on it, and the hook sees each of them
+again; an edit the hook applies that builds on a refused one parks in the
+room. `@hocuspocus/provider` 2.x reconnects at once after a 4205 close, so a
+hook that keeps refusing a 2.x client keeps closing it; a `*PeerClose` with
+4401 stops it reconnecting. 4.x waits its configured `delay` first. Plain
+y-websocket connections are closed the same way.
+
+When the hook calls `apply` and the room itself does not take the update (it
+overflows `MaxPendingItems`, say), the peer is answered as without a hook and
+keeps the connection, unless the hook returns a `*PeerClose`. An update
+`apply` applied is broadcast and answered `SyncStatus(1)` whatever the hook
+returns afterward. Read-only peers never reach the hook, as before. Nil, the
+default, leaves every peer's update applied exactly as it was.
 
 This is the counterpart of `@hocuspocus/server`'s `beforeHandleMessage`
 (`packages/server/src/Connection.ts`), which runs before the message
