@@ -191,6 +191,53 @@ func TestInteg_OnPeerUpdate_PeerCloseClosesWithItsCode(t *testing.T) {
 	assert.Empty(t, room.GetText("t").ToString(), "a refused update must not reach the room")
 }
 
+// Frames that arrived behind a refused update are not handled once the close
+// is queued: they reach neither the hook nor the room, however long the hook
+// took to refuse.
+func TestInteg_OnPeerUpdate_FramesBehindARefusalAreDropped(t *testing.T) {
+	tests := []struct {
+		name     string
+		refusal  error
+		wantCode int
+	}{
+		{name: "PeerClose", refusal: &ygws.PeerClose{Code: 4413, Reason: "too large"}, wantCode: 4413},
+		{name: "plain error", refusal: errors.New("refused"), wantCode: 4205},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			srv, ts := hocuspocusServer(t, func(srv *ygws.Server) {
+				srv.OnPeerUpdate = func(_ ygws.PeerUpdateInfo, apply func() error) error {
+					if calls.Add(1) == 1 {
+						time.Sleep(50 * time.Millisecond)
+						return tt.refusal
+					}
+					return apply()
+				}
+			})
+			doc := crdt.New(crdt.WithClientID(7))
+			conn := hpDial(t, ts, "room", false, doc)
+			// The close leaves the room with no peer, which evicts it, so its
+			// document is taken first.
+			room := srv.GetDoc("room")
+
+			hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(textUpdate(doc, "refused")))
+			// Five updates the room could take on their own, each from a
+			// client of its own, sent while the hook is still deciding.
+			for i := range 5 {
+				other := crdt.New(crdt.WithClientID(crdt.ClientID(100 + i)))
+				hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(textUpdate(other, "z")))
+			}
+			statuses, closed := closeAfterStatuses(t, conn, "room")
+			assert.Equal(t, []uint64{0}, statuses, "only the refused update is answered")
+			require.NotNil(t, closed, "the refusal must close the connection")
+			assert.Equal(t, tt.wantCode, closed.Code)
+			assert.Equal(t, int32(1), calls.Load(), "the hook runs once")
+			assert.Empty(t, room.GetText("t").ToString(), "nothing behind the refusal lands")
+		})
+	}
+}
+
 // A close reason longer than a close frame carries is cut at a rune boundary,
 // so the close still reaches the peer.
 func TestInteg_OnPeerUpdate_LongCloseReasonIsCut(t *testing.T) {
