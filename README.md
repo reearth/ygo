@@ -228,8 +228,9 @@ explicitly or reconcile peers via a sync step 1/2 exchange.
 ### `CloseRoom(name, force)`
 
 Explicit teardown for rooms created by `Apply` that never accumulated
-peer connections. Without `CloseRoom`, such rooms linger until process
-exit.
+peer connections. With `RoomIdleTimeout` at zero (the default), such rooms
+linger until process exit without `CloseRoom`; with `RoomIdleTimeout > 0`
+the idle sweeper reclaims them once they have been idle that long.
 
 ```go
 if err := server.CloseRoom("my-room", false); err != nil { /* ... */ }
