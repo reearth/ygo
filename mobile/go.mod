@@ -2,7 +2,7 @@ module github.com/reearth/ygo/mobile
 
 go 1.26.0
 
-require github.com/reearth/ygo v1.53.0
+require github.com/reearth/ygo v1.53.1
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
