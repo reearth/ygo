@@ -1,3 +1,7 @@
+## v1.54.1
+
+Accessing a named document root through a different shared type now panics instead of silently replacing the existing root and losing its contents.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully
