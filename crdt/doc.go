@@ -916,6 +916,7 @@ func (d *Doc) getXmlFragmentLocked(name string) *YXmlFragment {
 // not exist. It takes the document lock — inside a Transact callback use
 // txn.GetXmlFragment instead (see Transact and GetText for the locking
 // contract; issue #138).
+// It panics if that name already belongs to a different root type.
 func (d *Doc) GetXmlFragment(name string) *YXmlFragment {
 	checkUTF8("Doc.GetXmlFragment", "name", name)
 	d.mu.Lock()
