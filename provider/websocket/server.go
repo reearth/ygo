@@ -205,6 +205,32 @@ const (
 // builds the removal slice (N-H4).
 const maxAwarenessClientsPerPeer = 10_000
 
+// defaultMaxAwarenessClientsPerConn is the per-connection introduction cap used
+// when MaxAwarenessClientsPerConn is unset. A browser tab speaks for one client
+// ID; 64 leaves room for reconnect churn and multi-document clients while still
+// containing a flood.
+const defaultMaxAwarenessClientsPerConn = 64
+
+// maxAwarenessEntriesPerFrame and maxAwarenessStateBytesPerEntry mirror the
+// awareness package's own per-update ceilings. The admission gate must refuse
+// every frame the apply refuses wholesale: a frame it lets through but the
+// apply then rejects would have freed the sender's slots while leaving the
+// clients it retired live in the room. TestConnAwarenessCap_FrameLimitsMatch
+// pins both against the applier itself.
+const (
+	maxAwarenessEntriesPerFrame    = 100_000
+	maxAwarenessStateBytesPerEntry = 1 << 20
+)
+
+// maxAwarenessClientsPerConn returns the configured per-connection
+// introduction cap or the default. Negative disables the gate.
+func (s *Server) maxAwarenessClientsPerConn() int {
+	if s.MaxAwarenessClientsPerConn == 0 {
+		return defaultMaxAwarenessClientsPerConn
+	}
+	return s.MaxAwarenessClientsPerConn
+}
+
 // defaultPeerWriteQueueSize is the default capacity of each peer's broadcast
 // write channel when PeerWriteQueueSize is not set. 512 gives transiently-slow
 // peers more slack before the queue overflows (matching the yrs shared broadcast
@@ -1242,6 +1268,46 @@ type Server struct {
 	// default) disables the cap. Suggested production value: 10,000.
 	MaxAwarenessClientsPerRoom int
 
+	// MaxForeignAwarenessClients caps the live awareness entries admitted into
+	// one room from presence injected over the cluster relay, so a presence
+	// flood on one node cannot take the room budget from clients connected to
+	// this one. It is a threshold on all live entries in the room, local and
+	// relayed alike: relayed presence is refused once the room holds this many,
+	// while local presence is admitted up to MaxAwarenessClientsPerRoom. Zero
+	// (the default) disables the sub-cap and relayed presence shares the whole
+	// room budget. A value above a non-zero MaxAwarenessClientsPerRoom is clamped to
+	// it, and the sub-cap is honoured when that room cap is unlimited. In an
+	// N-node cluster legitimate foreign presence is about (N-1)/N of a room, so
+	// size this as a large fraction of MaxAwarenessClientsPerRoom, not a
+	// minority quota.
+	MaxForeignAwarenessClients int
+
+	// MaxAwarenessClientsPerConn caps how many awareness client IDs one
+	// connection may introduce to its room, containing a presence flood at the
+	// connection that sends it. A frame that would exceed the cap is rejected
+	// whole: it is neither applied nor relayed. Zero (the default) selects the
+	// built-in default of 64; a negative value disables the gate and restores
+	// the previous behaviour, including the 10,000-ID tracking ceiling that
+	// bounds the disconnect removal slice. Note the inverted convention: unlike
+	// the caps above, which zero disables, this gate is on by default and only
+	// a negative value turns it off.
+	//
+	// Only IDs this connection introduced and that are still live count, so a
+	// y-protocols timeout-removal broadcast (all nulls) and a full-state echo
+	// (IDs the room already holds) are both free, while reviving an ID the
+	// connection removed spends a slot again. A connection speaking for one
+	// browser tab needs a single ID; a trusted bridge fanning many users
+	// through one socket needs as many as it carries. The escape hatch is
+	// server-wide, so an operator running such a bridge alongside untrusted
+	// browsers must raise the cap for everyone.
+	//
+	// Disconnect behaviour narrows with the gate on: a connection's departure
+	// removes the IDs it introduced and still holds, not every ID it ever
+	// named. Presence it only re-asserted — an ID another connection or the
+	// relay introduced — belongs to whoever introduced it and stays until that
+	// owner leaves, AwarenessExpiry sweeps it, or the room is evicted.
+	MaxAwarenessClientsPerConn int
+
 	// AwarenessExpiry, when > 0, starts a per-room background sweep that marks a
 	// remote client's presence as removed if no update for it arrives within this
 	// duration. It reclaims "ghost" presence from peers that died silently
@@ -1743,6 +1809,12 @@ func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	}
 	if s.MaxAwarenessClientsPerRoom > 0 {
 		aw.SetMaxClients(s.MaxAwarenessClientsPerRoom)
+	}
+	if foreign := s.MaxForeignAwarenessClients; foreign > 0 {
+		if roomCap := s.MaxAwarenessClientsPerRoom; roomCap > 0 && foreign > roomCap {
+			foreign = roomCap
+		}
+		aw.SetMaxForeignClients(foreign)
 	}
 	if s.AwarenessExpiry > 0 {
 		// Background sweep; stopped via aw.Destroy() when the room is evicted, or

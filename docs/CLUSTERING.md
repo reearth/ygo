@@ -127,6 +127,63 @@ stay until `CloseRoom` or process exit when `RoomIdleTimeout` is zero (the
 default); with `RoomIdleTimeout > 0` the idle sweeper reclaims them once they
 have been idle that long.
 
+### Bounding awareness (presence) admission
+
+A client can claim any awareness client ID, and the relay hands every node that
+holds the room each ID the others admit, so two bounds apply, at two points.
+
+**Per connection (on by default).** `Server.MaxAwarenessClientsPerConn` caps how
+many awareness client IDs one websocket connection may introduce to its room,
+so a flood is stopped at the connection that sends it and never reaches the
+room or the relay. A frame that would exceed the cap is dropped whole (debug
+logged), not applied and not broadcast. This protects single-node deployments
+too.
+
+- `0` (the default) selects 64, a negative value disables the gate, and a
+  positive value is used as given. This inverts the `0 = unlimited` convention
+  of `MaxAwarenessBytesPerRoom` and `MaxAwarenessClientsPerRoom`.
+- Only IDs the connection introduces that are not live in the room count, and
+  an ID stops counting once the connection removes it (or disconnects). A
+  browser tab introduces one. The
+  timeout-removal broadcasts y-protocols clients send (nulls that name other
+  clients' IDs) and full-state echoes (IDs the room already holds live) cost
+  nothing, so the cap is not a limit on room size: a room of any size works.
+- The escape hatch is server-wide. An embedder that bridges many clients over
+  one connection must raise the cap or disable it for every connection; there
+  is no per-connection override.
+
+**Relayed presence (opt-in).** `Server.MaxForeignAwarenessClients` reserves part
+of a room's presence budget for local clients by refusing relayed presence for
+a client ID that is not currently live (new, or removed and returning) once the
+room holds this many live entries. `0` (the default)
+disables it and relayed presence shares the whole room budget, as before. A
+positive value is clamped to `MaxAwarenessClientsPerRoom` when that is bounded,
+and is honoured when it is not. The relay applies a `KindAwareness` payload
+through `Awareness.ApplyUpdateForeign`; a refused entry is skipped silently, not
+returned as an error, so `Inject` does not report a routine refusal to the relay
+as a delivery failure. A client that is live keeps updating, and can be removed,
+after the sub-cap is reached; one that left and returns is refused like a new
+one. `Awareness.SetMaxForeignClients` sets
+the same bound on a standalone `Awareness`.
+
+Size it as a **large fraction of `MaxAwarenessClientsPerRoom`**. Reserving
+roughly 1/8 of the cap for local clients is a reasonable starting point, and
+setting it as a fraction of the room cap is what makes that reservation hold.
+
+- In an N-node cluster, relayed presence is legitimately about (N-1)/N of a
+  room's users, so the reservation you want is the *small* side. A sub-cap
+  sized like a minority quota shuts out most of the room.
+- `Inject` creates a room with no local peers when it is not resident, and all
+  presence in it is relayed. There the sub-cap is that node's entire presence
+  ceiling for the room. Without it the ceiling is `MaxAwarenessClientsPerRoom`,
+  or none when that is unset.
+- The threshold counts all live entries, local and relayed, not relayed ones
+  alone. Once local clients fill the room, relayed presence is shut out sooner
+  than a true per-origin quota would shut it out.
+- Unlike `MaxAwarenessClientsPerRoom`, it counts live entries only, not
+  removal tombstones. Tombstones are reclaimed only while `AwarenessExpiry` is
+  set, so counting them would let churn fill the sub-cap for good.
+
 ---
 
 ## The echo guard (origin sentinel)
@@ -145,7 +202,7 @@ ygo breaks this with an **origin sentinel**, the same pointer-identity trick
 1. `AttachRelay` allocates a private sentinel value (`new(struct{})`) per server.
 2. When the relay injects a remote change, it applies it with that sentinel as
    the `origin` (`crdt.ApplyUpdateV1(doc, data, sentinel)` /
-   `aw.ApplyUpdate(data, sentinel)`).
+   `aw.ApplyUpdateForeign(data, sentinel)`).
 3. The per-room `doc.OnUpdate` / `awareness.OnChange` observers that drive
    `Publish` compare the change's origin against the sentinel **by pointer
    identity** and **drop matches** — a relay-injected change is never

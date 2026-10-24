@@ -1104,3 +1104,33 @@ func TestUnit_EncodeUpdate_InvalidUTF8RawMessage_EncodesAsNull(t *testing.T) {
 	assert.Equal(t, "null", seen[1], "state with invalid-UTF-8 RawMessage must encode as null")
 	assert.JSONEq(t, `{"name":"bob"}`, seen[2], "a normal state alongside it must be unaffected")
 }
+
+// TestUnit_ClientView_ReportsClockKnownAndLive covers the three states the
+// accessor distinguishes: never seen, live, and removal tombstone.
+func TestUnit_ClientView_ReportsClockKnownAndLive(t *testing.T) {
+	a := awareness.New(1)
+
+	clock, known, live := a.ClientView(42)
+	assert.False(t, known, "an unseen client must not be known")
+	assert.False(t, live)
+	assert.Zero(t, clock)
+
+	remote := awareness.New(42)
+	remote.SetLocalState(map[string]any{"cursor": 7})
+	require.NoError(t, a.ApplyUpdate(remote.EncodeUpdate([]uint64{42}), nil))
+
+	clock, known, live = a.ClientView(42)
+	require.True(t, known)
+	assert.True(t, live, "a client with state must read as live")
+	wantClock, ok := a.Meta(42)
+	require.True(t, ok)
+	assert.Equal(t, wantClock.Clock, clock, "clock must match Meta's")
+
+	remote.SetLocalState(nil)
+	require.NoError(t, a.ApplyUpdate(remote.EncodeUpdate([]uint64{42}), nil))
+
+	clock, known, live = a.ClientView(42)
+	assert.True(t, known, "a tombstone is still known")
+	assert.False(t, live, "a tombstone must not read as live")
+	assert.Greater(t, clock, wantClock.Clock, "the tombstone keeps the newer clock")
+}

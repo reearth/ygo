@@ -788,7 +788,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
-		if err := rm.awareness.ApplyUpdate(in.Data, s.relaySentinel); err != nil {
+		if err := rm.awareness.ApplyUpdateForeign(in.Data, s.relaySentinel); err != nil {
 			return err
 		}
 		// Fan the awareness update out to local peers (the OnUpdate-driven relay

@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.0] — 2026-10-25
+
+### Added
+
+- **`provider/websocket`: `Server.MaxAwarenessClientsPerConn` bounds the
+  awareness client IDs one connection may introduce to its room (#204).** A
+  client can claim any ID, so one connection could fill a room's presence
+  budget and, in a cluster, have the relay fan the fabricated IDs to every node
+  holding the room. A frame that would take a connection past the cap is now
+  dropped whole, not applied and not broadcast (debug logged). Only IDs the
+  connection introduces that are not live in the room count, and an ID stops
+  counting once the connection removes it (or disconnects), so a y-protocols
+  timeout-removal broadcast and a full-state echo cost nothing and a room of
+  any size is unaffected. `0` (the default) selects 64, a negative value
+  disables the gate, and a positive value is used as given. This inverts the
+  `0 = unlimited` convention of the neighbouring `Max*` fields. The cap is
+  server-wide; there is no per-connection override. Disconnect behaviour
+  narrows with it: a connection's departure now removes the IDs it introduced
+  and still holds, not every ID it ever named in a frame.
+- **`provider/websocket`: `Server.MaxForeignAwarenessClients` reserves part of a
+  room's presence budget for local clients.** Once the room holds this many
+  live awareness entries, presence relayed from another node is refused for a
+  client ID that is not currently live (new, or removed and returning); a live
+  client keeps updating. `0` (the default)
+  disables it. A positive value is clamped to `MaxAwarenessClientsPerRoom` when
+  that is bounded, and is honoured when it is not. Size it as a large fraction
+  of `MaxAwarenessClientsPerRoom`, because in an N-node cluster relayed
+  presence is about (N-1)/N of a room, and note that in a room `Inject`
+  created with no local peers it is that node's whole presence ceiling. See
+  `docs/CLUSTERING.md`.
+- **`awareness`: `Awareness.ApplyUpdateForeign(update, origin)` and
+  `Awareness.SetMaxForeignClients(n)`.** `ApplyUpdateForeign` is `ApplyUpdate`
+  held to the foreign sub-cap; a refused entry is skipped and the call still
+  returns nil. `SetMaxForeignClients` sets the sub-cap and counts live entries
+  only, not removal tombstones, which are reclaimed only while
+  `StartAutoExpiry` runs. The relay's awareness inject path now uses
+  `ApplyUpdateForeign`.
+- **`awareness`: `Awareness.ClientView(clientID)`** returns a client's clock,
+  whether it is known (a removal tombstone counts), and whether it is live, in
+  one read-locked lookup.
+
+### Changed
+
+- **`provider/websocket`: a connection that introduces more than 64 awareness
+  client IDs the room does not hold live now has that frame dropped.**
+  `MaxAwarenessClientsPerConn` is on by default. A browser tab introduces one
+  ID, so ordinary clients are unaffected; an embedder that bridges many clients
+  over a single connection must raise the cap or set it negative.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
