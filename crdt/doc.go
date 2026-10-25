@@ -368,7 +368,7 @@ func (d *Doc) getArrayLocked(name string) *YArray {
 			d.upgradeRawType(raw, arr, name)
 			return arr
 		}
-		panicRootTypeMismatch(name, t, "*YArray")
+		panicRootTypeMismatch(name, t, "*crdt.YArray")
 	}
 	arr := &YArray{}
 	arr.doc = d
@@ -402,7 +402,7 @@ func (d *Doc) getMapLocked(name string) *YMap {
 			d.upgradeRawType(raw, m, name)
 			return m
 		}
-		panicRootTypeMismatch(name, t, "*YMap")
+		panicRootTypeMismatch(name, t, "*crdt.YMap")
 	}
 	m := &YMap{}
 	m.doc = d
@@ -436,7 +436,7 @@ func (d *Doc) getTextLocked(name string) *YText {
 			d.upgradeRawType(raw, txt, name)
 			return txt
 		}
-		panicRootTypeMismatch(name, t, "*YText")
+		panicRootTypeMismatch(name, t, "*crdt.YText")
 	}
 	txt := &YText{}
 	txt.doc = d
@@ -901,7 +901,7 @@ func (d *Doc) getXmlFragmentLocked(name string) *YXmlFragment {
 			d.upgradeRawType(raw, f, name)
 			return f
 		}
-		panicRootTypeMismatch(name, t, "*YXmlFragment")
+		panicRootTypeMismatch(name, t, "*crdt.YXmlFragment")
 	}
 	f := &YXmlFragment{}
 	f.doc = d
@@ -913,10 +913,10 @@ func (d *Doc) getXmlFragmentLocked(name string) *YXmlFragment {
 }
 
 // GetXmlFragment returns the named root YXmlFragment, creating it if it does
-// not exist. It takes the document lock — inside a Transact callback use
+// not exist. It panics if that name already belongs to a different root type.
+// It takes the document lock — inside a Transact callback use
 // txn.GetXmlFragment instead (see Transact and GetText for the locking
 // contract; issue #138).
-// It panics if that name already belongs to a different root type.
 func (d *Doc) GetXmlFragment(name string) *YXmlFragment {
 	checkUTF8("Doc.GetXmlFragment", "name", name)
 	d.mu.Lock()
