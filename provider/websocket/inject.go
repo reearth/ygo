@@ -465,11 +465,13 @@ func encodeBroadcastWire(update []byte) []byte {
 // that subsequent GetDoc / BroadcastUpdate / Apply calls do not see it.
 //
 // If peers are connected:
-//   - force=false: returns ErrRoomHasPeers without modifying state. This
-//     includes a peer that joins while CloseRoom runs.
-//   - force=true:  closes each peer connection, waits for disconnect
-//     handlers to run, then deletes the room. A peer that joins while
-//     CloseRoom runs is closed the same way before CloseRoom returns.
+//   - force=false: returns ErrRoomHasPeers without modifying state. A peer
+//     that joins while CloseRoom runs counts too.
+//   - force=true:  closes each peer connection and waits for its read loop
+//     to exit, then deletes the room. A peer that joins while CloseRoom runs
+//     is closed the same way before the CloseRoom call that deletes the room
+//     returns. A closed peer's disconnect handler, and so OnLastPeer, can
+//     still be running when CloseRoom returns.
 //
 // CloseRoom is primarily intended for releasing rooms created by Apply
 // that never accumulated peer connections — without it, such rooms
@@ -544,14 +546,14 @@ func (s *Server) CloseRoom(name string, force bool) error {
 	// Unlike handleDisconnect, CloseRoom is a FORCED admin removal: it proceeds to
 	// evict regardless of flush success. The close(persistStop) below drives the
 	// worker's exit-flush as the retry, so a false result here is not fatal — we
-	// only log it (best effort) and do not abort.
+	// only log it (best effort) and do not abort. Without force, a peer that
+	// joined meanwhile keeps the room open below, and its worker keeps running.
 	if rm.flushReq != nil {
 		ack := make(chan bool, 1)
 		select {
 		case rm.flushReq <- ack:
 			if !<-ack {
-				s.log().Warn("CloseRoom flush did not fully persist; relying on exit-flush retry",
-					"room", name)
+				s.log().Warn("CloseRoom flush did not fully persist", "room", name)
 			}
 		case <-rm.persistDone:
 		}
@@ -575,12 +577,13 @@ func (s *Server) CloseRoom(name string, force bool) error {
 	}
 	// A peer can join rm after the peer list above was taken: ServeHTTP
 	// admits a peer while s.rooms[name] is still rm, and rm stayed in
-	// s.rooms through the flush. Such a peer is in rm.peers now, and so may
-	// be a peer closed above whose disconnect handler has not removed it
-	// yet. Without force, a room with a peer stays open. With force, rm
-	// leaves s.rooms here, under s.rmu, which a join holds while it checks
-	// s.rooms and adds itself: no join reaches rm after this, so the peers
-	// taken here are the last. Closing a peer closed above again is harmless.
+	// s.rooms through the wait and the flush above. Such a peer is in
+	// rm.peers now. rm.peers may also still hold a peer closed above whose
+	// disconnect handler has not removed it yet. Without force, a room with a
+	// peer stays open. With force, rm leaves s.rooms here, under s.rmu, which
+	// a join holds while it checks s.rooms and adds itself: no join reaches rm
+	// after this, so the peers taken here are the last. Closing a peer closed
+	// above again is harmless.
 	rm.mu.Lock()
 	if len(rm.peers) > 0 && !force {
 		rm.mu.Unlock()
