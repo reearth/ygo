@@ -1,3 +1,22 @@
+## v1.54.1
+
+**Who is affected: servers that call `CloseRoom` on a room that peers can
+still connect to.**
+
+`CloseRoom` closes a room's peers, makes the room's pending writes durable
+while the room can still be found, and then removes the room. A peer that
+connected while those writes were stored joined the room after `CloseRoom`
+had taken its list of peers. `CloseRoom` never closed that peer, so it stayed
+connected to a room the server no longer had. No later update from `Apply`,
+`BroadcastUpdate`, another peer or the cluster relay reached it, and no other
+peer received its edits, until it reconnected for some other reason. Without
+`force`, such a peer also made `CloseRoom` remove a room that had a peer.
+
+`CloseRoom(name, true)` now closes that peer as well before it returns, so
+the client's usual reconnect takes it to a live room. `CloseRoom(name, false)`
+now returns `ErrRoomHasPeers` in that case and leaves the room open. No API or
+wire format changes.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a
