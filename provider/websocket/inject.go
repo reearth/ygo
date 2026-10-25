@@ -13,6 +13,7 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/reearth/ygo/internal/updatecheck"
 	ygsync "github.com/reearth/ygo/sync"
 )
 
@@ -164,6 +165,12 @@ func (s *Server) effectiveMaxUpdateBytes() int {
 // peers joining after the broadcast receive the server's stale state
 // via sync step 2.
 //
+// The update is checked first by decoding it into a scratch document; bytes
+// that do not decode return ErrInvalidUpdate. The check does not apply
+// MaxPendingItems: decoded without the room's state, an incremental update
+// parks every item that depends on that state, and the room's document, which
+// holds that state, enforces MaxPendingItems when it applies the update.
+//
 // Peer write failures during fan-out do not produce an error: writes
 // are dispatched in goroutines with a per-write deadline (writeTimeout),
 // matching the existing peer-broadcast path. A slow peer cannot block
@@ -195,10 +202,13 @@ func (s *Server) broadcastUpdate(ctx context.Context, room string, update []byte
 	if len(update) > s.effectiveMaxUpdateBytes() {
 		return ErrUpdateTooLarge
 	}
-	// Validate by applying to a throwaway doc. If the bytes are
+	// Validate by decoding into a throwaway doc. If the bytes are
 	// malformed, peers would reject them anyway; catching at the
-	// server boundary surfaces caller bugs eagerly.
-	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+	// server boundary surfaces caller bugs eagerly. This is the bundled
+	// stores' check, with no pending cap: the room's document has already
+	// applied the update (callers apply first, and Inject applies before it
+	// rebroadcasts), so refusing here would only keep it from the peers.
+	if err := updatecheck.ValidateV1(update); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidUpdate, err)
 	}
 	if fireHook && s.OnInject != nil {
@@ -326,6 +336,8 @@ func (s *Server) Apply(
 	// (#193 review). Also protects rm from a concurrent eviction while in use.
 	defer s.releaseInflight(rm)
 	rm.clearIdle() // #183: Apply mutates the doc immediately; no registration delay.
+	// see markIdleIfEmpty
+	defer s.markIdleIfEmpty(rm)
 
 	origin := &applyOriginSentinel{}
 	var (
@@ -474,8 +486,10 @@ func encodeBroadcastWire(update []byte) []byte {
 //     still be running when CloseRoom returns.
 //
 // CloseRoom is primarily intended for releasing rooms created by Apply
-// that never accumulated peer connections — without it, such rooms
-// linger until process exit.
+// that never accumulated peer connections. In eager-evict mode
+// (RoomIdleTimeout == 0) such rooms linger until process exit without
+// it; with RoomIdleTimeout > 0 the idle sweeper reclaims them once they
+// have been idle that long.
 func (s *Server) CloseRoom(name string, force bool) error {
 	select {
 	case <-s.shutdownCh:

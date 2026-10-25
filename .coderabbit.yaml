@@ -1,0 +1,89 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  sequence_diagrams: false
+  changed_files_summary: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+
+  path_filters:
+    - "!**/go.sum"
+    - "!testutil/package-lock.json"
+    - "!benchmarks/testdata/editing-trace.json"
+    - "!testutil/go_fixtures/**"
+    - "!**/*.bin"
+
+  path_instructions:
+    - path: "crdt/**/*.go"
+      instructions: |
+        ygo is a pure-Go port of Yjs and must stay byte-for-byte wire compatible
+        with it. Flag any change that could make two peers diverge, or make ygo's
+        V1/V2 encoding differ from what yjs would produce for the same operations.
+        Watch for integration order, origin/rightOrigin handling, delete-set
+        merging, pending-struct parking, and GC. Inside a Transact callback, root
+        types must come from txn.GetText/GetMap/GetArray/GetXmlFragment; the Doc
+        methods of the same name take the document lock and self-deadlock there.
+    - path: "**/testdata/*_fixtures.json"
+      instructions: |
+        These fixtures are generated from yjs by the testutil/gen_*.js scripts and
+        are the conformance oracle. Flag any change that is not a regeneration by
+        those scripts, especially an expected value edited to match Go output.
+    - path: "{encoding,sync,awareness,internal/anycodec}/**/*.go"
+      instructions: |
+        Wire decoders for bytes from untrusted peers. Check bounds, length
+        prefixes, allocation sizes and UTF-8 validity before use, and never panic
+        on malformed bytes.
+    - path: "provider/**/*.go"
+      instructions: |
+        Network-facing code handling untrusted peers. Check for goroutine leaks,
+        lock ordering, unbounded queues or memory growth, and that gorilla
+        websocket connections have a single reader and a single writer.
+    - path: "cluster/**/*.go"
+      instructions: |
+        Cross-node relay. A slow or failing room must not block other rooms.
+        Check context cancellation and shutdown draining.
+    - path: "persistence/**/*.go"
+      instructions: |
+        Storage adapters. Flag any path where an acknowledged update could be
+        lost on flush, eviction or shutdown.
+    - path: "mobile/**/*.go"
+      instructions: |
+        Separate Go module bound with gomobile. Exported functions and methods may
+        only use string, int64, bool, []byte, error, pointers to the package's
+        exported structs, and its exported observer interfaces. Flag unsigned
+        ints, maps, non-byte slices, any, channels, variadics, func-typed
+        parameters, and more than one non-error return value. Client IDs cross
+        the boundary as int64 within [0, 2^53 - 1].
+    - path: "**/*_test.go"
+      instructions: |
+        Tests should fail without the fix they cover. Prefer deterministic
+        synchronisation over sleeps and timeouts.
+    - path: "**/*.go"
+      instructions: |
+        Code comments should be terse: one sentence for the why, and no issue
+        or PR numbers in comments.
+    - path: "{CHANGELOG.md,RELEASE_NOTES.md}"
+      instructions: |
+        No [Unreleased] section: entries go under the version they ship in, and
+        both files must name the same newest version. Exported API additions are
+        a MINOR bump even in a bug-fix PR.
+
+  tools:
+    golangci-lint:
+      enabled: true
+    markdownlint:
+      enabled: false
+
+chat:
+  auto_reply: true

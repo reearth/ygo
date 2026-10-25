@@ -111,6 +111,29 @@ func TestUnit_Item_Delete_Cascade_PropagatesToOtherPeers(t *testing.T) {
 			"(≥3 = 1 outer + 2 nested); pre-fix only the outer arrives in the delete-set")
 }
 
+func TestUnit_Item_Delete_CascadeKeepsDepthFirstDeleteSetOrder(t *testing.T) {
+	doc := newTestDoc(1)
+	fragment := doc.GetXmlFragment("root")
+	root := NewYXmlElement("a")
+	doc.Transact(func(txn *Transaction) { fragment.InsertElement(txn, 0, root) })
+	doc.Transact(func(txn *Transaction) {
+		left := NewYXmlElement("b")
+		root.InsertElement(txn, 0, left)
+		left.InsertElement(txn, 0, NewYXmlElement("d"))
+		root.InsertElement(txn, 1, NewYXmlElement("c"))
+	})
+
+	var deleted []DeleteRange
+	unsubscribe := doc.OnAfterTransaction(func(txn *Transaction) {
+		deleted = append([]DeleteRange(nil), txn.deleteSet.clients[1]...)
+	})
+	defer unsubscribe()
+	doc.Transact(func(txn *Transaction) { fragment.Delete(txn, 0, 1) })
+
+	require.Equal(t, []DeleteRange{{Clock: 0, Len: 4}}, deleted,
+		"nested deletion must visit the root, first child, its descendants, and then the next sibling")
+}
+
 // B2 (HIGH) — DeleteSet.applyToPartial must split items at range boundaries
 // before tombstoning. Pre-fix, a partial-range delete on a locally-squashed
 // run wiped the entire item, including content outside the declared range.
@@ -182,4 +205,37 @@ func TestUnit_DeleteSet_ExactMatch_NoSpuriousSplit(t *testing.T) {
 	itemsAfter := len(docA.store.clients[1])
 	assert.Equal(t, itemsBefore, itemsAfter,
 		"no spurious splits when the range exactly matches an item")
+}
+
+// The cascade stops at the deleted item: its live siblings to the right, and
+// their children, stay live.
+func TestUnit_Item_Delete_CascadeLeavesRightSiblingsLive(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("outer")
+	deleted, kept := NewMapPrelim(), NewMapPrelim()
+	inner := NewArrayPrelim()
+	doc.Transact(func(txn *Transaction) {
+		arr.PushType(txn, deleted)
+		deleted.Set(txn, "inner", inner)
+		inner.Push(txn, []any{1, 2})
+		arr.PushType(txn, kept)
+		kept.Set(txn, "k", "v")
+		arr.Push(txn, []any{"plain"})
+	})
+
+	doc.Transact(func(txn *Transaction) { arr.Delete(txn, 0, 1) })
+
+	require.True(t, deleted.item.Deleted)
+	require.True(t, inner.item.Deleted)
+	require.False(t, kept.item.Deleted)
+	require.False(t, kept.itemMap["k"].Deleted)
+	assert.Equal(t, []any{map[string]any{"k": "v"}, "plain"}, arr.ToSlice())
+}
+
+// nextDeleteItem stops at a top-level item even if root is not its ancestor.
+func TestUnit_NextDeleteItem_StopsAtTopLevel(t *testing.T) {
+	doc := newTestDoc(1)
+	arr := doc.GetArray("a")
+	doc.Transact(func(txn *Transaction) { arr.Push(txn, []any{1}) })
+	assert.Nil(t, nextDeleteItem(arr.start, &Item{}))
 }

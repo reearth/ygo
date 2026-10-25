@@ -52,6 +52,44 @@ func (s *Server) safeHook(name string, fn func()) {
 // a slow-reader from blocking the broadcast loop for all other peers.
 const writeTimeout = 10 * time.Second
 
+// closeFrameTimeout bounds the close frame sent for a cancel cause. A peer that
+// cannot take a control frame this quickly is not reading anyway.
+const closeFrameTimeout = time.Second
+
+// maxCloseReasonBytes is the largest reason a close frame can carry: a control
+// frame payload is at most 125 bytes, two of them the code.
+const maxCloseReasonBytes = 123
+
+// closeFrameFor returns the close frame a cancel cause asks for, or nil when
+// the cause names no sendable close code.
+func closeFrameFor(cause error) []byte {
+	var cc interface{ CloseCode() (int, string) }
+	if !errors.As(cause, &cc) {
+		return nil
+	}
+	code, reason, ok := sendableClose(cc.CloseCode())
+	if !ok {
+		return nil
+	}
+	return gws.FormatCloseMessage(code, reason)
+}
+
+// sendableClose returns the code and reason a close frame carries for code
+// and reason: ok is false for a code other than 1000 or 3000–4999 (the rest
+// are reserved for the WebSocket protocol and its implementations, or out of
+// range); the reason loses invalid UTF-8 and is cut to maxCloseReasonBytes.
+func sendableClose(code int, reason string) (int, string, bool) {
+	if code != gws.CloseNormalClosure && (code < 3000 || code > 4999) {
+		return 0, "", false
+	}
+	reason = strings.ToValidUTF8(reason, "")
+	if len(reason) > maxCloseReasonBytes {
+		// Re-validate to drop a character split by the cut.
+		reason = strings.ToValidUTF8(reason[:maxCloseReasonBytes], "")
+	}
+	return code, reason, true
+}
+
 // Outer message type codes. Tags 0-3 are the y-protocols / y-websocket
 // core; tags 4-10 are the Hocuspocus protocol extensions ygo accepts
 // from clients (#55). See the StatelessHook godoc for the application-
@@ -74,7 +112,7 @@ const (
 	msgStateless          = uint64(5)  // arbitrary VarString payload, surfaced via Server.OnStateless
 	msgBroadcastStateless = uint64(6)  // VarString payload, fanned out to other peers as msgStateless
 	msgClose              = uint64(7)  // peer-requested graceful close (optional VarString reason)
-	msgSyncStatus         = uint64(8)  // server→client update-applied ack; if a client sends it, no-op consume
+	msgSyncStatus         = uint64(8)  // server→client ack of each SyncStep2/Update, sent with HocuspocusFraming; a client's is consumed
 	msgPing               = uint64(9)  // liveness check; replies with msgPong
 	msgPong               = uint64(10) // liveness reply to a server-sent Ping; no-op
 )
@@ -95,6 +133,13 @@ const (
 	// full error text is carried only in the PermissionDenied data frame.
 	// Matches Hocuspocus's CloseEvents.Unauthorized.reason.
 	wsReasonUnauthorized = "Unauthorized"
+
+	// wsCodeResetConnection and wsReasonResetConnection close a peer whose
+	// update Server.OnPeerUpdate refused without a sendable *PeerClose.
+	// Matches Hocuspocus's CloseEvents.ResetConnection, which
+	// @hocuspocus/server closes with on a beforeHandleMessage rejection.
+	wsCodeResetConnection   = 4205
+	wsReasonResetConnection = "Reset Connection"
 )
 
 // maxWSMessageBytes is the maximum size of a single WebSocket frame accepted
@@ -681,9 +726,11 @@ type room struct {
 	// the room has peers, or RoomIdleTimeout is 0 (eager-evict mode, in which
 	// case an empty room is deleted from s.rooms rather than stamped). Set by
 	// handleDisconnect's teardown path when the room goes empty and the
-	// durable flush succeeds; cleared at peer REGISTRATION (ServeHTTP) — not at
-	// room lookup — so it tracks true occupancy, and by the immediate-mutation
-	// relay/admin callers via clearIdle. Guarded by mu. Rooms stamped idle here
+	// durable flush succeeds, and by markIdleIfEmpty when an immediate-mutation
+	// caller (relay Inject, admin Apply) returns to a room with no peers;
+	// cleared at peer REGISTRATION (ServeHTTP) — not at room lookup — so it
+	// tracks true occupancy, and by those immediate-mutation callers via
+	// clearIdle while they run. Guarded by mu. Rooms stamped idle here
 	// are reclaimed by the background sweeper (idle_sweep.go, started lazily via
 	// ensureIdleSweeper when RoomIdleTimeout > 0): it evicts any room idle longer
 	// than RoomIdleTimeout and, when MaxResidentRooms > 0, the least-recently-idle
@@ -705,13 +752,29 @@ type room struct {
 
 // clearIdle marks the room as non-idle. Used by the immediate-mutation callers
 // (relay Inject, admin Apply) that make the room active without registering a
-// peer, so there is no lookup→registration window to worry about. Takes rm.mu
-// itself; must NOT be called while already holding rm.mu. The WS join path does
-// NOT use this — it clears idleSince inside the same rm.mu section that adds the
-// peer (see ServeHTTP) so the clear is ordered against handleDisconnect's stamp.
+// peer, so there is no lookup→registration window to worry about; each pairs it
+// with a deferred markIdleIfEmpty. Takes rm.mu itself; must NOT be called while
+// already holding rm.mu. The WS join path does NOT use this — it clears
+// idleSince inside the same rm.mu section that adds the peer (see ServeHTTP) so
+// the clear is ordered against handleDisconnect's stamp.
 func (r *room) clearIdle() {
 	r.mu.Lock()
 	r.idleSince = time.Time{}
+	r.mu.Unlock()
+}
+
+// markIdleIfEmpty stamps the room idle when RoomIdleTimeout > 0 and no peer is
+// connected. Apply and Inject defer it after clearIdle so rooms only they touch
+// are still swept; it runs before releaseInflight, so the room is not evicted
+// mid-call.
+func (s *Server) markIdleIfEmpty(r *room) {
+	if s.RoomIdleTimeout <= 0 {
+		return
+	}
+	r.mu.Lock()
+	if len(r.peers) == 0 {
+		r.idleSince = time.Now()
+	}
 	r.mu.Unlock()
 }
 
@@ -839,6 +902,10 @@ type Server struct {
 	// VarString(docName) + <y-websocket frame>. Enables real @hocuspocus/provider
 	// interop. One room per connection is still enforced (no multi-document
 	// multiplexing); the inbound docName is read and used only for logging.
+	// Such a connection is also answered one SyncStatus (tag 8) frame for every
+	// SyncStep2 or Update it sends, in order, and closed with 1002 when it sends
+	// a sync frame that does not decode (see the package documentation for the
+	// answers).
 	// Leave false (default) for native y-websocket clients — the two framings
 	// cannot be auto-detected on one endpoint.
 	HocuspocusFraming bool
@@ -898,6 +965,21 @@ type Server struct {
 	// (Tiptap comments, custom presence metadata, application heartbeats)
 	// to the embedding application.
 	OnStateless StatelessHook
+
+	// OnPeerUpdate, if non-nil, runs in place of the room's own apply of a
+	// SyncStep2 or Update a read-write peer sent, under Sync (tag 0) or
+	// SyncReply (tag 4), so the embedder can refuse it before it reaches the
+	// room or any other peer, or hold a lock of its own across the apply.
+	// apply applies the update exactly as the room does without a hook, and
+	// must be called before the hook returns. An update apply did not apply
+	// is not broadcast and is answered SyncStatus(0) on a Hocuspocus-framed
+	// connection; when the hook refused it, the peer is then closed, with the
+	// code of a *PeerClose the hook's error is or wraps and with 4205 "Reset
+	// Connection" otherwise. An update apply applied is broadcast and answered
+	// SyncStatus(1) whatever the hook returns. A read-only peer's update never
+	// reaches the hook. Nil keeps the behaviour without a hook. See
+	// PeerUpdateHook.
+	OnPeerUpdate PeerUpdateHook
 
 	// OnTokenAuth, if non-nil, validates the token from a Hocuspocus in-band
 	// Auth message (tag 2). A nil error accepts the connection and replies
@@ -1032,7 +1114,10 @@ type Server struct {
 	// this timeout is done by a separate background sweeper; setting this
 	// field alone only stops eager eviction and marks rooms idle — without a
 	// sweeper an idle room simply stays resident indefinitely, which is safe
-	// (just extra memory) but never reclaims it on its own.
+	// (just extra memory) but never reclaims it on its own. A room that Apply
+	// or a relay delivery (Inject) touched is stamped idle when that call
+	// returns if no peer is connected, so rooms only server-side writers touch
+	// are reclaimed the same way.
 	//
 	// Zero (the default) preserves the original eager-evict behaviour: the
 	// room is deleted from the server map and OnUnloadDocument fires the
@@ -1623,7 +1708,8 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, bool,
 	// So the JOIN path clears idleSince in the SAME rm.mu section that mutates
 	// rm.peers (see ServeHTTP), tying "not idle" to "a peer is present." The
 	// immediate-mutation callers (relay Inject, admin Apply) that mutate the doc
-	// with no registration delay clear it themselves right after this returns.
+	// with no registration delay clear it themselves right after this returns,
+	// and restamp it on return when no peer is present (markIdleIfEmpty).
 	return r, created, nil
 }
 
@@ -1857,6 +1943,16 @@ func (s *Server) failRoomLoad(r *room, name string, loadErr error) {
 // ServeHTTP upgrades the request to WebSocket and runs the peer sync loop.
 // Room name is taken from the {room} path variable (Go 1.22 ServeMux) or
 // falls back to the last path segment.
+//
+// Cancelling the request context ends the connection. If the context was
+// cancelled with a cause (context.WithCancelCause) that implements
+// CloseCode() (int, string), directly or wrapped, ServeHTTP first sends the
+// peer a close frame with that code and reason, so an embedder can end one
+// session with an application close code (4000–4999) such as "session
+// revoked". Only 1000 and 3000–4999 are sent; the reason is truncated to 123
+// bytes and invalid UTF-8 is dropped from it. The peer's input is ignored from
+// the cancel on. Any other cause, or an unsendable code, closes the socket
+// without a close frame, as before.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Authorize (issue #59) takes precedence over AuthFunc when both are set: it
 	// both accepts/rejects and reports per-connection config (read-only). AuthFunc
@@ -2045,6 +2141,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		select {
 		case <-ctx.Done():
+			// A cause naming a close code is sent to the peer before the socket
+			// closes. The read loop drops input meanwhile, since WriteControl can
+			// wait on a writer stuck on a peer that has stopped reading.
+			if frame := closeFrameFor(context.Cause(ctx)); frame != nil {
+				p.inputClosed.Store(true)
+				_ = ws.WriteControl(gws.CloseMessage, frame, time.Now().Add(closeFrameTimeout))
+			}
 			_ = ws.Close() // close errors during teardown are expected; not logged
 		case <-s.shutdownCh:
 			_ = ws.Close() // close errors during teardown are expected; not logged
@@ -2081,6 +2184,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, data, err := ws.ReadMessage()
 		if err != nil {
 			break
+		}
+		if p.inputClosed.Load() {
+			// A close is queued or sent: nothing more from this peer lands.
+			// continue, not break: the deferred teardown would drop the
+			// queued close frame or race the one being sent.
+			continue
 		}
 		if firstMessage {
 			// Clear the handshake deadline; subsequent reads can take as long

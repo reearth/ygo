@@ -46,7 +46,8 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 		if err != nil {
 			return nil, DeleteSet{}, wrapUpdateErr(err)
 		}
-		structs := out[client]
+		// A later group for the client replaces earlier ones, as in apply (yjs parity).
+		var structs []*Item
 		for j := uint64(0); j < numStructs; j++ {
 			info, err := dec.readInfo()
 			if err != nil {

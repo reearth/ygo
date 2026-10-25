@@ -46,8 +46,8 @@ type abstractType struct {
 
 	// stagedOn is the container whose staged (prelim) content currently holds
 	// this DETACHED type, nil otherwise. It exists so the staging entry points
-	// (PushType/InsertType/YMap.Set) can reject a handle that is already
-	// staged on a DIFFERENT container at the call site (#222) — without it,
+	// (PushType/InsertType/YMap.Set/YXmlFragment.Insert) can reject a handle
+	// already staged on a DIFFERENT container at the call site — without it,
 	// both stagings succeeded and the loser's attach later panicked inside
 	// flushPrelim, blaming a function the caller never used. Set when a handle
 	// enters a container's staged content, cleared when it leaves it (map
@@ -84,6 +84,16 @@ type abstractType struct {
 	// have never had formatting applied — the dominant cost on head-delete
 	// workloads in plain-text documents. Once true, stays true.
 	hasFormatting bool
+
+	// cleanFormatting is Yjs's _hasFormatting, which gates the remote format
+	// cleanup. Unlike hasFormatting it is not carried over when a root
+	// placeholder is first accessed, as Yjs's new YText starts without it.
+	cleanFormatting bool
+
+	// fmtGen counts integrations and deletions of this type's format
+	// markers; attrCache is valid only for the generation it was taken at.
+	fmtGen    uint64
+	attrCache attrsAfterCache
 
 	// markers is a small cache of (rendered index → *Item) search markers,
 	// modelled on Yjs's ArraySearchMarker, replacing the old posCache. Capped

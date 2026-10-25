@@ -22,6 +22,7 @@ func TestUnit_NewUndoManager_UsableFromExternalPackage(t *testing.T) {
 	require.NotNil(t, um)
 
 	d.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "x", nil) })
+	um.StopCapturing()
 	d.Transact(func(txn *crdt.Transaction) { txt.Delete(txn, 0, 1) })
 	require.True(t, um.Undo())
 	require.Equal(t, "x", txt.ToString(), "undo restores via the external UndoManager")

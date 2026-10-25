@@ -95,8 +95,10 @@ func WithCollectionID(id string) DocOption {
 }
 
 // defaultMaxPendingItems is the default cap on items parked in the per-doc
-// pending queue waiting for out-of-order dependencies. Matches the per-update
-// limit (maxV2Items) used by the decoder. See WithMaxPendingItems and #46.
+// pending queue waiting for out-of-order dependencies. It is smaller than the
+// decoder's per-update item limit (maxV2Items, 1<<20), so one legal update
+// applied to a document that lacks the state it depends on can exceed it. See
+// WithMaxPendingItems and #46.
 const defaultMaxPendingItems = 100_000
 
 // WithMaxPendingItems caps the per-doc pending queue depth — items parked
@@ -325,18 +327,26 @@ func (d *Doc) getOrCreateType(name string) *abstractType {
 	return &r.abstractType
 }
 
-// upgradeRawType copies a rawType's abstractType into dst, rewires all item
-// Parent pointers to dst, and stores dst in d.share[name].
+// upgradeRawType moves raw's state into dst, stores dst in d.share[name], and
+// repoints every struct parented to raw: integrated ones all sit on its list,
+// and parked ones would otherwise integrate into the discarded placeholder.
 // Must be called with d.mu held.
-func upgradeRawType(raw *rawType, dst sharedType, name string, share map[string]sharedType) {
+func (d *Doc) upgradeRawType(raw *rawType, dst sharedType, name string) {
 	at := dst.baseType()
 	*at = raw.abstractType // copy all fields (doc, start, itemMap, length, item, name)
 	at.owner = dst
-	// Rewire every item's Parent pointer.
+	at.cleanFormatting = false
 	for item := at.start; item != nil; item = item.Right {
 		item.Parent = at
 	}
-	share[name] = dst
+	if d.store.pending != nil {
+		for _, item := range d.store.pending.items {
+			if item.Parent == &raw.abstractType {
+				item.Parent = at
+			}
+		}
+	}
+	d.share[name] = dst
 }
 
 // getArrayLocked is the lock-free body of GetArray. Callers must hold d.mu —
@@ -348,7 +358,7 @@ func (d *Doc) getArrayLocked(name string) *YArray {
 		}
 		if raw, ok := t.(*rawType); ok {
 			arr := &YArray{}
-			upgradeRawType(raw, arr, name, d.share)
+			d.upgradeRawType(raw, arr, name)
 			return arr
 		}
 	}
@@ -380,7 +390,7 @@ func (d *Doc) getMapLocked(name string) *YMap {
 		}
 		if raw, ok := t.(*rawType); ok {
 			m := &YMap{}
-			upgradeRawType(raw, m, name, d.share)
+			d.upgradeRawType(raw, m, name)
 			return m
 		}
 	}
@@ -412,7 +422,7 @@ func (d *Doc) getTextLocked(name string) *YText {
 		}
 		if raw, ok := t.(*rawType); ok {
 			txt := &YText{}
-			upgradeRawType(raw, txt, name, d.share)
+			d.upgradeRawType(raw, txt, name)
 			return txt
 		}
 	}
@@ -467,6 +477,7 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 			}
 		}
 	}
+	txn.typeObserved = len(fireFns) > 0
 
 	// Snapshot deep-observer chains.
 	type deepEntry struct {
@@ -538,6 +549,9 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 		for _, fn := range fireFns {
 			fn()
 		}
+		if txn.afterTypeObservers != nil {
+			txn.afterTypeObservers()
+		}
 		for _, de := range deepSnap {
 			for _, fn := range de.fns {
 				fn(txn)
@@ -582,7 +596,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		doc:         d,
 		Origin:      orig,
 		Local:       true,
-		deleteSet:   newDeleteSet(),
+		deleteSet:   newOrderedDeleteSet(),
 		beforeState: d.store.StateVector(),
 		// Pre-size changed to common-case capacity (#54 A): most transactions
 		// touch 1-3 types, and the zero-hint alloc forces immediate rehashing
@@ -616,6 +630,24 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			phase2 = buildPhase2(d, txn)
 		}
 
+		// Yjs cleans up the format markers a remote change left redundant
+		// after the change's observers, in a follow-up local transaction,
+		// and GCs the change only then. A type observer may give a text its
+		// first marker, so with type observers to fire the gate waits.
+		deferGC := false
+		if r == nil && !txn.Local {
+			if needsFormattingCleanup(txn) {
+				txn.formatCleanup, deferGC = true, true
+			} else if txn.typeObserved && changedText(txn) {
+				txn.afterTypeObservers = func() {
+					d.mu.Lock()
+					txn.formatCleanup = needsFormattingCleanup(txn)
+					d.mu.Unlock()
+				}
+				deferGC = true
+			}
+		}
+
 		// #78 H1 — Auto-GC at transaction commit. Runs AFTER buildPhase2 so
 		// the observer Deltas have already been computed against the original
 		// content; runs BEFORE Unlock so other goroutines never see partially-
@@ -627,7 +659,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		// Yjs handles this with a per-item keep flag; we take the conservative
 		// position of disabling auto-GC entirely while any UndoManager is
 		// registered. RunGC remains available as the explicit manual entry point.
-		if d.gc && d.undoManagerCount == 0 {
+		if d.gc && d.undoManagerCount == 0 && !deferGC {
 			gcTxnDeleteSet(d, txn)
 		}
 
@@ -638,6 +670,10 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		txn.done = true
 		d.mu.Unlock()
 
+		if deferGC {
+			// Runs even if an observer panics, as Yjs runs the cleanup.
+			defer d.afterRemoteObservers(txn)
+		}
 		if phase2 != nil {
 			phase2()
 		}
@@ -649,6 +685,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 
 	retErr = fn(txn)
 
+	rearbitrateMoves(txn)
 	txn.afterState = d.store.StateVector()
 
 	squashRuns(txn)
@@ -848,7 +885,7 @@ func (d *Doc) getXmlFragmentLocked(name string) *YXmlFragment {
 		}
 		if raw, ok := t.(*rawType); ok {
 			f := &YXmlFragment{}
-			upgradeRawType(raw, f, name, d.share)
+			d.upgradeRawType(raw, f, name)
 			return f
 		}
 	}

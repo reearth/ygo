@@ -12,7 +12,7 @@ import (
 type Transaction struct {
 	doc         *Doc
 	Origin      any  // user-supplied tag forwarded to update observers
-	Local       bool // true when the change originated on this peer
+	Local       bool // true when the change originated on this peer; false while applying a remote update
 	deleteSet   DeleteSet
 	beforeState StateVector
 	afterState  StateVector
@@ -27,6 +27,12 @@ type Transaction struct {
 	// transient (no item was inserted between them). Mirrors Yjs JS's
 	// `_mergeStructs` and powers gap #78 H2.
 	mergeStructs []*Item
+	// rearbitrate queues, per parent, move targets whose winning ContentMove
+	// was tombstoned; rearbitrateMoves resolves them in one pass at commit.
+	rearbitrate map[*abstractType]map[*Item]struct{}
+	// movedBefore holds each move target's MovedBy as it was before this
+	// transaction first changed it, so YArray deltas can diff the old render.
+	movedBefore map[*Item]*Item
 	// subdocsAdded/subdocsRemoved/subdocsLoaded track subdocument lifecycle
 	// changes made during this transaction (#63). Populated by Item.integrate
 	// and Item.delete when the item's Content is a *ContentDoc. Reconciled
@@ -53,6 +59,13 @@ type Transaction struct {
 	// TransactContext. Exposed via the Ctx() method so fn can poll for
 	// cancellation.
 	ctx context.Context
+	// formatCleanup marks a remote transaction whose format cleanup runs
+	// once its observers have fired; afterTypeObservers, when set, decides
+	// it after the type observers (typeObserved: there are some), where
+	// Yjs does.
+	formatCleanup      bool
+	typeObserved       bool
+	afterTypeObservers func()
 }
 
 // Ctx returns the context associated with this transaction. Transactions
@@ -132,17 +145,24 @@ func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
 // ensuring pre-existing items (which snapshot clock boundaries reference) are
 // never modified.
 //
-// squashRuns runs only for LOCAL transactions. For remote updates (bulk decode)
-// items arrive already compacted from the sender or are left as individual
-// units — the cost of squashing 182k remote items outweighs the benefit, since
-// subsequent local edits will squash their own new items incrementally.
+// A merged item is encoded as one struct carrying the left item's Origin and
+// OriginRight, so two items are merged only when that struct still places
+// every character where it was: the right item's Origin is the last character
+// of the run and both items share an OriginRight. These are Yjs's
+// Item.mergeWith conditions. Merging items with different right origins makes
+// every later encoding move the right item's characters on decode, and makes
+// a later insert whose origin is inside the run split it with the wrong
+// right origin.
+//
+// squashRuns runs for remote applies too, so a peer's per-keystroke history
+// loads as one item per run, as Yjs's transaction cleanup does.
 //
 // Performance: uses a two-pointer (run) approach with strings.Builder so that
 // string concatenation is O(total_run_length) rather than O(n²), and tracks
 // the expected next-clock without calling left.Content.Len() on the growing
 // merged string. Store compaction is a single O(n) filter pass per client.
 func squashRuns(txn *Transaction) {
-	if !txn.Local || len(txn.newItems) == 0 {
+	if len(txn.newItems) == 0 {
 		return
 	}
 
@@ -200,6 +220,14 @@ func squashRuns(txn *Transaction) {
 					break
 				}
 				if left.Right != right {
+					break
+				}
+				// right must continue the run: inserted directly after the
+				// run's last character, toward the same right origin.
+				if right.Origin == nil || right.Origin.Client != client || right.Origin.Clock != expectedClock-1 {
+					break
+				}
+				if !originIDEquals(left.OriginRight, right.OriginRight) {
 					break
 				}
 				// right is directly adjacent and clock-contiguous: absorb it.
@@ -332,6 +360,7 @@ func tryMergeWithLefts(txn *Transaction) {
 //   - left.Right == item (still directly adjacent in the linked list)
 //   - clocks are contiguous: left.ID.Clock + left.Content.Len() == item.ID.Clock
 //   - item.Origin points to the last clock of left (Yjs origin invariant)
+//   - both items share an OriginRight (Yjs right-origin invariant)
 //   - content types match and support merging (ContentString, ContentAny,
 //     ContentJSON, ContentDeleted)
 //
@@ -363,6 +392,10 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if left.MovedBy != item.MovedBy {
 		return false
 	}
+	// A merge would drop the right half's redone link (Yjs mergeWith parity).
+	if left.redone != nil || item.redone != nil {
+		return false
+	}
 	// item.Origin must reference the last clock of left for the split to be
 	// reversible. (splitItem always sets Origin this way; foreign updates may
 	// set Origin differently, in which case we leave the items split.)
@@ -371,6 +404,12 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	}
 	expectedLast := left.ID.Clock + uint64(left.Content.Len()) - 1
 	if item.Origin.Client != left.ID.Client || item.Origin.Clock != expectedLast {
+		return false
+	}
+	// The merged item keeps left's OriginRight. splitItem copies it to the
+	// right half, so a split being reversed always matches; the check keeps
+	// this merge to Yjs's Item.mergeWith conditions.
+	if !originIDEquals(left.OriginRight, item.OriginRight) {
 		return false
 	}
 
@@ -408,7 +447,10 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		return false
 	}
 
-	// Splice item out of the linked list.
+	// Splice item out of the linked list; a key entry moves to the merged item.
+	if item.ParentSub != nil && item.Parent != nil && item.Parent.itemMap[*item.ParentSub] == item {
+		item.Parent.itemMap[*item.ParentSub] = left
+	}
 	left.Right = item.Right
 	if item.Right != nil {
 		item.Right.Left = left

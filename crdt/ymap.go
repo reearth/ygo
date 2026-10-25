@@ -1,7 +1,5 @@
 package crdt
 
-import "encoding/json"
-
 // contentForValue wraps a YMap value into Content. A *Doc becomes a ContentDoc
 // (subdocument embedding, Yjs parity: ymap.set(k, new Y.Doc())); everything else
 // becomes ContentAny.
@@ -151,15 +149,10 @@ func (m *YMap) computeKeys(txn *Transaction, keysChanged map[string]struct{}) ma
 // when computing KeyChange.OldValue. Matches the unwrap rules in
 // entriesLocked so consumers see consistent shapes.
 func extractMapValue(item *Item) any {
+	if v, ok := lastPlainVal(item.Content); ok {
+		return v
+	}
 	switch c := item.Content.(type) {
-	case *ContentAny:
-		if len(c.Vals) > 0 {
-			return c.Vals[0]
-		}
-	case *ContentJSON:
-		if len(c.Vals) > 0 {
-			return c.Vals[0]
-		}
 	case *ContentEmbed:
 		return c.Val
 	case *ContentType:
@@ -174,8 +167,9 @@ func extractMapValue(item *Item) any {
 // A DETACHED shared type passed as value is staged (or attached, if this map
 // is live) as a nested type. A shared type attaches once: Set panics if the
 // value is already attached, staged under another key of this map, or staged
-// on any other container (#222). Overwriting or deleting a staged entry
-// releases its handle, making it stageable elsewhere.
+// on any other container (#222), and if it is m itself or holds m in its
+// staged content (a cycle). Overwriting or deleting a staged entry releases
+// its handle, making it stageable elsewhere.
 func (m *YMap) Set(txn *Transaction, key string, value any) {
 	checkUTF8("YMap.Set", "key", key)
 	checkAnyUTF8("YMap.Set", "value", value)
@@ -226,7 +220,7 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 	var origin *ID
 	if existing, ok := t.itemMap[key]; ok {
 		left = existing
-		id := existing.ID
+		id := existing.lastID()
 		origin = &id
 	}
 
@@ -297,11 +291,7 @@ func (m *YMap) Get(key string) (any, bool) {
 	if ct, ok := item.Content.(*ContentType); ok {
 		return ct.Type.owner, ct.Type.owner != nil
 	}
-	ca, ok := item.Content.(*ContentAny)
-	if !ok || len(ca.Vals) == 0 {
-		return nil, false
-	}
-	return ca.Vals[0], true
+	return lastPlainVal(item.Content)
 }
 
 // Has reports whether key has a live (non-deleted) entry.
@@ -342,7 +332,7 @@ func (m *YMap) Keys() []string {
 }
 
 // Entries returns a snapshot of all live key-value pairs. Nested shared
-// types are recursively unwrapped (#75): nested YArray → []any, nested
+// types are iteratively unwrapped (#75): nested YArray → []any, nested
 // YMap → map[string]any, nested YText → string. Pre-fix these were
 // silently dropped from the output.
 //
@@ -355,42 +345,12 @@ func (m *YMap) Entries() map[string]any {
 	return m.entriesLocked()
 }
 
-// entriesLocked is the lock-free body of Entries; callers must already
-// hold the doc lock. Used by Entries (top-level) and toJSONValue (during
-// recursive unwrap of nested types).
+// entriesLocked is the lock-free body of Entries; callers must already hold
+// the doc lock.
 func (m *YMap) entriesLocked() map[string]any {
-	if m.detached() {
-		out := make(map[string]any, len(m.prelim))
-		for k, v := range m.prelim {
-			out[k] = prelimJSONValue(v)
-		}
-		return out
-	}
-	t := &m.abstractType
-	out := make(map[string]any, len(t.itemMap))
-	for k, item := range t.itemMap {
-		if item.Deleted {
-			continue
-		}
-		switch c := item.Content.(type) {
-		case *ContentAny:
-			if len(c.Vals) > 0 {
-				out[k] = c.Vals[0]
-			}
-		case *ContentJSON:
-			// ContentJSON is the legacy JSON wire variant (tag wireJSON=2);
-			// functionally equivalent to ContentAny. Without this case,
-			// keys received via JS-peer updates would be silently dropped.
-			if len(c.Vals) > 0 {
-				out[k] = c.Vals[0]
-			}
-		case *ContentEmbed:
-			out[k] = c.Val
-		case *ContentType:
-			out[k] = toJSONValue(c)
-		}
-	}
-	return out
+	value := nestedJSONValue(m)
+	entries, _ := value.(map[string]any)
+	return entries
 }
 
 // ForEach calls fn for every live (non-deleted) key-value pair in the map,
@@ -417,16 +377,20 @@ func (m *YMap) ForEach(fn func(key string, value any)) {
 		if item.Deleted {
 			continue
 		}
-		if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-			fn(k, ca.Vals[0])
+		if v, ok := lastPlainVal(item.Content); ok {
+			fn(k, v)
 		}
 	}
 }
 
-// ToJSON returns the map serialised as a JSON object.
+// ToJSON returns the map serialised as a JSON object with sorted keys: the
+// bytes json.Marshal(m.Entries()) would produce, without recursing once per
+// nested shared type. Values are copied out under the document's read lock and
+// formatted after it is released, so a MarshalJSON method may read or write
+// the document.
 // Must not be called from inside a Transact callback.
 func (m *YMap) ToJSON() ([]byte, error) {
-	return json.Marshal(m.Entries())
+	return marshalSharedJSON(m.doc, m)
 }
 
 // Observe registers fn to be called after every transaction that modifies this

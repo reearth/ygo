@@ -296,9 +296,10 @@ func TestClient_Close_JoinsLoopBeforeReturning(t *testing.T) {
 	})
 	defer unsub()
 
-	go func() { _ = c.Connect(ctx) }()
-
+	// Armed before Connect starts (see statusWaiter's doc): OnStatus does not
+	// replay, so a handshake that completes first would never be heard.
 	waitSynced := statusWaiter(t, c, StateSynced)
+	go func() { _ = c.Connect(ctx) }()
 	waitSynced()
 
 	require.NoError(t, c.Close())
