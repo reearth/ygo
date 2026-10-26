@@ -2,7 +2,7 @@
 
 **Who is affected: callers that access the same named document root through different shared types, including clients applying updates from peers.** The first accessor fixes the root's type for the document's lifetime; a later accessor using another type now panics instead of silently replacing the root and losing its contents.
 
-Accessing a named document root through a different shared type now panics instead of silently replacing the existing root and losing its contents.
+Accessing a named document root through a different shared type now panics instead of silently replacing the existing root and losing its contents. The mobile bindings convert that panic to an error (or an empty string for `GetText`) so a mismatch cannot crash the iOS or Android host app.
 
 ## v1.54.0
 

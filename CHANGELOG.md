@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Root accessors now panic when a named root is accessed with a different shared type, preserving the existing document contents.
+- Mobile bindings convert root-type mismatch panics to errors, avoiding crashes in host apps.
 
 ## [1.54.0] — 2026-10-22
 
