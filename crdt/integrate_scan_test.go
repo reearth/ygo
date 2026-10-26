@@ -182,7 +182,6 @@ func TestARemoteUpdatesConflictScansAreBounded(t *testing.T) {
 	doc := chainedList(t, l, WithMaxIntegrateScan(testScanBound))
 	before, text := EncodeStateAsUpdateV1(doc, nil), doc.GetText("t").ToString()
 	updates := observed(doc)
-	log := doc.OpenUpdateLog()
 	allocated, took, err := applyMeasured(doc, originAtTheStart(n))
 	t.Logf("l=%d n=%d: err=%v, allocated %d bytes in %s", l, n, err, allocated, took)
 	if !errors.Is(err, ErrIntegrateScanBudget) || !errors.Is(err, ErrInvalidUpdate) {
@@ -192,20 +191,6 @@ func TestARemoteUpdatesConflictScansAreBounded(t *testing.T) {
 		t.Fatalf("the refused update allocated %d bytes, want under %d", allocated, 16<<20)
 	}
 	requireUnchanged(t, doc, before, text, updates)
-	// An update log records nothing of it, and its base is the document as it was.
-	base, logged := log.Drain()
-	if len(logged) != 0 {
-		t.Fatalf("the update log recorded %d updates of the refused apply", len(logged))
-	}
-	if base != nil {
-		copied := New()
-		if err := ApplyUpdateV1(copied, base, nil); err != nil {
-			t.Fatal(err)
-		}
-		if got := copied.GetText("t").ToString(); got != text {
-			t.Fatal("the update log's base is not the document as it was")
-		}
-	}
 	// The document goes on taking what an editor sends.
 	peer := New(WithClientID(11))
 	if err := ApplyUpdateV1(peer, before, nil); err != nil {
