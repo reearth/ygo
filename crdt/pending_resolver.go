@@ -261,18 +261,22 @@ func resolvePendingWaiters(txn *Transaction, pending []*Item) []*Item {
 
 // parkWithinUpdatePending charges only unresolved items to the persistent cap.
 func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
+	s := txn.doc.store
 	for _, item := range pending {
-		if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
+		if s.pending != nil && len(s.pending.items) >= txn.doc.maxPendingItemsLimit() {
 			return wrapUpdateErr(ErrInvalidUpdate)
 		}
-		if txn.doc.store.pending == nil {
-			txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
+		if s.pending == nil {
+			s.pending = &pendingUpdate{missing: make(StateVector)}
 		}
-		txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
-		if client, parkedAt, future := itemFutureDep(item, txn.doc.store); future {
-			mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
+		s.pending.items = append(s.pending.items, item)
+		// parkedMissing copies the map the journal of a bounded document's
+		// apply keeps, so an update the document refuses leaves the clocks its
+		// parked items wait on as they were (apply_rollback.go).
+		if client, parkedAt, future := itemFutureDep(item, s); future {
+			mergePendingMissing(parkedMissing(txn), client, parkedAt)
 		} else {
-			mergePendingMissing(txn.doc.store.pending.missing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
+			mergePendingMissing(parkedMissing(txn), item.ID.Client, s.NextClock(item.ID.Client))
 		}
 	}
 	return nil

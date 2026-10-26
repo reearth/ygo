@@ -35,7 +35,19 @@ import (
 //   - root types named since the point;
 //   - the transaction's record of what changed;
 //   - for the whole apply, the pending queue, pending deletes and pending moves
-//     as they stood, and which move holds each target (movedBefore).
+//     as they stood, and which move holds each target (movedBefore). The
+//     parked items, the clocks the queue waits on (its missing map) and the
+//     pending deletes are kept by reference, not copied, so an apply costs
+//     nothing in proportion to what earlier updates parked. The apply only
+//     appends to the parked items' slice, past the length the journal keeps,
+//     or replaces it with a slice of its own (drainPending); it writes the
+//     missing map only to park an item (resolveWithinUpdatePending), and its
+//     first such write copies the map (parkedMissing); and it replaces the
+//     pending deletes rather than writing into them, but for the merge of a
+//     delete range it parks (parkDeletes), which writes into copies of the
+//     clients it names. The parked items themselves are not touched before
+//     the drain, the apply's last step, and a drain that fails drops the
+//     queue rather than restoring it, so their fields need no record.
 //
 // Splits of items the document already held stay: a split leaves the same
 // content, and the transaction's commit merges each split back
@@ -51,8 +63,11 @@ type applyJournal struct {
 	pending      *pendingUpdate
 	pendingItems []*Item
 	missing      StateVector
-	pendingDs    DeleteSet
-	pendingMoves map[ClientID][]*Item
+	// missingCopied is whether pending's missing map is the apply's own copy
+	// (parkedMissing).
+	missingCopied bool
+	pendingDs     DeleteSet
+	pendingMoves  map[ClientID][]*Item
 	// drain is the point the drain began at, once it has; at is the point a
 	// map key's previous value is recorded on.
 	drain *applyPoint
@@ -97,7 +112,9 @@ func pointNow(txn *Transaction, sv StateVector) applyPoint {
 }
 
 // beginRemoteApply starts txn's journal when its document has a scan bound;
-// before is the store's state vector as the apply begins.
+// before is the store's state vector as the apply begins. The parked items,
+// their missing map and the pending deletes are kept as they are, by reference
+// (see the top of this file).
 func beginRemoteApply(txn *Transaction, before StateVector) {
 	d := txn.doc
 	if d.integrateScanLimit() == 0 {
@@ -108,10 +125,10 @@ func beginRemoteApply(txn *Transaction, before StateVector) {
 	j.at = &j.start
 	if s.pending != nil {
 		j.pending = s.pending
-		j.pendingItems = append([]*Item(nil), s.pending.items...)
-		j.missing = maps.Clone(s.pending.missing)
+		j.pendingItems = s.pending.items
+		j.missing = s.pending.missing
 	}
-	j.pendingDs = copyDeleteSet(s.pendingDs)
+	j.pendingDs = s.pendingDs
 	if s.pendingMoves != nil {
 		j.pendingMoves = make(map[ClientID][]*Item, len(s.pendingMoves))
 		for c, moves := range s.pendingMoves {
@@ -119,6 +136,43 @@ func beginRemoteApply(txn *Transaction, before StateVector) {
 		}
 	}
 	txn.journal = j
+}
+
+// parkedMissing is the pending queue's missing map, for a write that parks an
+// item. On a document with a scan bound the journal shares the map the apply
+// found, so the apply's first write goes to a copy of it.
+func parkedMissing(txn *Transaction) StateVector {
+	p := txn.doc.store.pending
+	if j := txn.journal; j != nil && p == j.pending && !j.missingCopied {
+		p.missing = maps.Clone(p.missing)
+		j.missingCopied = true
+	}
+	return p.missing
+}
+
+// parkDeletes merges ds, delete ranges whose targets the store does not hold
+// yet, into the store's pending deletes. The merge appends to each client's
+// ranges and sorts them in place, so on a document with a scan bound, whose
+// journal shares the pending deletes as the apply found them, it writes into a
+// set whose map is a copy and whose ranges are copies for the clients ds names.
+func parkDeletes(txn *Transaction, ds DeleteSet) {
+	s := txn.doc.store
+	if txn.journal != nil {
+		shared := s.pendingDs
+		s.pendingDs = DeleteSet{clients: maps.Clone(shared.clients)}
+		if s.pendingDs.clients == nil {
+			s.pendingDs.clients = make(map[ClientID][]DeleteRange)
+		}
+		if shared.order != nil {
+			s.pendingDs.order = append([]ClientID{}, shared.order...)
+		}
+		for c := range ds.clients {
+			if ranges, ok := shared.clients[c]; ok {
+				s.pendingDs.clients[c] = append([]DeleteRange(nil), ranges...)
+			}
+		}
+	}
+	s.pendingDs.Merge(ds)
 }
 
 // endRemoteApply ends txn's journal, rolling the whole apply back when it
@@ -143,7 +197,9 @@ func drainParked(txn *Transaction, drain func()) {
 	}
 	s := txn.doc.store
 	point := pointNow(txn, s.StateVector())
-	pendingDs := copyDeleteSet(s.pendingDs)
+	// The drain replaces the pending deletes rather than writing into them, so
+	// they are kept as they are, by reference.
+	pendingDs := s.pendingDs
 	j.drain, j.at = &point, &point
 	txn.scanned = 0
 	defer func() {
@@ -191,6 +247,9 @@ func (j *applyJournal) rollBack(txn *Transaction) {
 		}
 	}
 	if j.pending != nil {
+		// What the apply appended past the length kept is dropped, and its
+		// slots cleared so the backing array holds none of the refused items.
+		clear(j.pendingItems[len(j.pendingItems):cap(j.pendingItems)])
 		j.pending.items = j.pendingItems
 		j.pending.missing = j.missing
 	}

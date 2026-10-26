@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.55.0] — 2026-10-26
 
+### Fixed
+
+- **`crdt`: a bounded document's remote apply no longer copies what earlier
+  updates parked.** To restore them when it refuses an update, the apply of a
+  document with a scan bound (`WithMaxIntegrateScan`) copied the pending queue's
+  items, the clocks it waits on and the pending deletes as it began, and the
+  drain copied the pending deletes again, so every remote apply cost time and
+  memory in proportion to what sat parked: one keystroke allocated 2,806,176
+  bytes on a bounded document holding 349,517 parked structs (2,880 unbounded)
+  and 25,171,104 bytes on one holding 524,280 parked delete ranges (8,391,872
+  unbounded). The apply now keeps them by reference: it only appends to the
+  parked items past the length it keeps, copies the map of clocks the queue
+  waits on at its first write to it, and merges a delete range it parks into
+  copies of the clients that range names, so a refused update still leaves the
+  parked items, the clocks they wait on and the pending deletes exactly as they
+  were. With 100,000 parked items a keystroke now allocates 3,176 bytes on a
+  bounded document against 1,608 unbounded (806,264 before), and with 100,000
+  parked delete ranges 1,609,192 against 1,607,624 (4,821,112 before).
+
 ### Added
 
 - **`crdt`: `WithMaxIntegrateScan`, `Doc.SetMaxIntegrateScan` and

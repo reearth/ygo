@@ -567,3 +567,200 @@ func TestTheConflictScanBoundIsSetOnlyWhereAsked(t *testing.T) {
 		t.Fatalf("the text holds %d characters after a local insert, want %d", got, l+1)
 	}
 }
+
+// parkedDeletes is an update of no structs whose delete set names n one-clock
+// ranges of client, every other clock from 0, which a document that never heard
+// from client parks, every range, as pending deletes.
+func parkedDeletes(client ClientID, n int) []byte {
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(0) // clients
+	enc.WriteVarUint(1) // delete set: one client
+	enc.WriteVarUint(uint64(client))
+	enc.WriteVarUint(uint64(n))
+	for i := range n {
+		enc.WriteVarUint(uint64(2 * i))
+		enc.WriteVarUint(1)
+	}
+	return append([]byte(nil), enc.Bytes()...)
+}
+
+// typedInto is the update of one character a peer of state types into its
+// text.
+func typedInto(t *testing.T, state []byte) []byte {
+	t.Helper()
+	peer := New(WithClientID(11))
+	if err := ApplyUpdateV1(peer, state, nil); err != nil {
+		t.Fatal(err)
+	}
+	sv := peer.StateVector()
+	text := peer.GetText("t")
+	peer.Transact(func(txn *Transaction) { text.Insert(txn, 3, "k", nil) })
+	return EncodeStateAsUpdateV1(peer, sv)
+}
+
+// A bounded document applies a keystroke for what it costs an unbounded one,
+// whatever earlier updates left parked: the apply's journal keeps the parked
+// items, the clocks they wait on and the pending deletes as they are, by
+// reference, rather than copying them so a refusal can restore them. In
+// v1.51.3-sami.5 it copied all three on every apply, and the drain copied the
+// pending deletes again: with 100,000 parked items the keystroke allocated
+// 806,264 bytes on the bounded document against 1,608 on the unbounded one,
+// and with 100,000 parked delete ranges 4,821,112 against 1,607,624 (the
+// unbounded drain's own retry of the pending deletes).
+func TestABoundedDocumentsApplyCostsNothingForWhatIsParked(t *testing.T) {
+	const l, n = 100, 100_000
+	state := EncodeStateAsUpdateV1(chainedList(t, l), nil)
+	keystroke := typedInto(t, state)
+	for _, parked := range []struct {
+		name   string
+		update []byte
+	}{
+		{"items", parkedBehindAGap(n)},
+		{"delete ranges", parkedDeletes(98, n)},
+	} {
+		t.Run(parked.name, func(t *testing.T) {
+			var allocated [2]uint64
+			for i, opts := range [][]DocOption{nil, {WithMaxIntegrateScan(testScanBound)}} {
+				doc := New(opts...)
+				for _, update := range [][]byte{state, parked.update} {
+					if err := ApplyUpdateV1(doc, update, nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if stats := doc.PendingStats(); stats.Items+stats.DeleteRanges != n {
+					t.Fatalf("%d items and %d delete ranges are parked, want %d in all", stats.Items, stats.DeleteRanges, n)
+				}
+				var took time.Duration
+				var err error
+				allocated[i], took, err = applyMeasured(doc, keystroke)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := doc.StateVector().Clock(11); got != 1 {
+					t.Fatalf("client 11's clock is %d, want the keystroke applied", got)
+				}
+				t.Logf("bounded=%t: allocated %d bytes in %s", i == 1, allocated[i], took)
+			}
+			if unbounded, bounded := allocated[0], allocated[1]; bounded > unbounded+64<<10 {
+				t.Fatalf("with %d %s parked, the keystroke allocated %d bytes on the bounded document and %d on the unbounded one, want within %d of it",
+					n, parked.name, bounded, unbounded, 64<<10)
+			}
+		})
+	}
+}
+
+// parkingAndBroken is an update that parks items of its own before its delete
+// set fails to decode: client 99's clocks from n+2, behind a gap at n+1, and
+// one item of client 76 whose left origin is client 77's clock 0, which adds
+// client 77 to the clocks the pending queue waits on.
+func parkingAndBroken(n int) []byte {
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(2) // clients
+	enc.WriteVarUint(3)
+	enc.WriteVarUint(99)
+	enc.WriteVarUint(uint64(n + 2))
+	for range 3 {
+		enc.WriteUint8(wireString | flagHasOrigin)
+		enc.WriteVarUint(5)
+		enc.WriteVarUint(0)
+		enc.WriteVarString("x")
+	}
+	enc.WriteVarUint(1)
+	enc.WriteVarUint(76)
+	enc.WriteVarUint(0)
+	enc.WriteUint8(wireString | flagHasOrigin)
+	enc.WriteVarUint(77)
+	enc.WriteVarUint(0)
+	enc.WriteVarString("x")
+	enc.WriteUint8(0xff) // delete set: a client count cut short
+	enc.WriteUint8(0xff)
+	enc.WriteUint8(0xff)
+	return append([]byte(nil), enc.Bytes()...)
+}
+
+// A bounded document that refuses an update leaves what earlier updates parked
+// as it was: the parked items, the clients they wait on and the pending
+// deletes, though the refused update parked items of its own into the same
+// queue before it was refused. So it goes on like an unbounded twin that never
+// saw the update: an update that fills every gap applies the same on both.
+func TestABoundedDocumentsRefusalLeavesWhatIsParkedAsItWas(t *testing.T) {
+	const l, n, k = 100, 50, 40
+	state := EncodeStateAsUpdateV1(chainedList(t, l), nil)
+	doc := New(WithClientID(1), WithMaxIntegrateScan(testScanBound))
+	twin := New(WithClientID(2))
+	for _, d := range []*Doc{doc, twin} {
+		for _, update := range [][]byte{state, parkedBehindAGap(n), parkedDeletes(98, k)} {
+			if err := ApplyUpdateV1(d, update, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	text := doc.GetText("t")
+	if stats := doc.PendingStats(); stats.Items != n || stats.DeleteRanges != k {
+		t.Fatalf("%d items and %d delete ranges are parked, want %d and %d", stats.Items, stats.DeleteRanges, n, k)
+	}
+	// On a document with no bound, which keeps what an update did before it
+	// failed, the first refused update leaves its items parked.
+	keeps := New()
+	for _, update := range [][]byte{state, parkedBehindAGap(n), parkingAndBroken(n)} {
+		_ = ApplyUpdateV1(keeps, update, nil)
+	}
+	if stats := keeps.PendingStats(); stats.Items != n+4 || fmt.Sprint(stats.MissingFor) != "[77 99]" {
+		t.Fatalf("the update that fails to decode parked %d items waiting on %v, want 4 waiting on [77 99]", stats.Items-n, stats.MissingFor)
+	}
+	for _, refusal := range []struct {
+		name   string
+		update []byte
+		bound  int
+	}{
+		{"a delete set that does not decode, after items it parked", parkingAndBroken(n), testScanBound},
+		{"scans past the bound", originAtTheStartOf(text, 400), 1},
+	} {
+		before, textBefore := EncodeStateAsUpdateV1(doc, nil), text.ToString()
+		stats := fmt.Sprintf("%+v", doc.PendingStats())
+		updates := observed(doc)
+		doc.SetMaxIntegrateScan(refusal.bound)
+		err := ApplyUpdateV1(doc, refusal.update, nil)
+		doc.SetMaxIntegrateScan(testScanBound)
+		if err == nil {
+			t.Fatalf("%s: the bounded document applied the update", refusal.name)
+		}
+		requireUnchanged(t, doc, before, textBefore, updates)
+		if got := fmt.Sprintf("%+v", doc.PendingStats()); got != stats {
+			t.Fatalf("%s: the pending queue is %s, want %s as it was", refusal.name, got, stats)
+		}
+		if got, want := fmt.Sprintf("%+v", doc.PendingStats()), fmt.Sprintf("%+v", twin.PendingStats()); got != want {
+			t.Fatalf("%s: the pending queue is %s, the twin's %s", refusal.name, got, want)
+		}
+		if a, b := EncodeStateAsUpdateV1(doc, nil), EncodeStateAsUpdateV1(twin, nil); string(a) != string(b) {
+			t.Fatalf("%s: the document's state, parked items included, differs from the twin's", refusal.name)
+		}
+	}
+	// Client 99's clock 0, and client 98's clocks every pending delete names.
+	last := text.start
+	for last.Right != nil {
+		last = last.Right
+	}
+	writer := New(WithClientID(98))
+	if err := ApplyUpdateV1(writer, state, nil); err != nil {
+		t.Fatal(err)
+	}
+	sv := writer.StateVector()
+	written := writer.GetText("t")
+	writer.Transact(func(txn *Transaction) { written.Insert(txn, 0, strings.Repeat("d", 2*k), nil) })
+	fill := mergedUpdate(t, fillTheGap(last), EncodeStateAsUpdateV1(writer, sv))
+	for _, d := range []*Doc{doc, twin} {
+		if err := ApplyUpdateV1(d, fill, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stats := doc.PendingStats(); stats.Items != 0 || stats.DeleteRanges != 0 {
+		t.Fatalf("after the update filling every gap, %d items and %d delete ranges are still parked", stats.Items, stats.DeleteRanges)
+	}
+	if a, b := EncodeStateAsUpdateV1(doc, nil), EncodeStateAsUpdateV1(twin, nil); string(a) != string(b) {
+		t.Fatal("after the update filling every gap, the document's state differs from the twin's")
+	}
+	if a, b := text.ToString(), twin.GetText("t").ToString(); a != b {
+		t.Fatalf("after the update filling every gap, the text diverged from the twin's:\n%s\n%s", a, b)
+	}
+}
