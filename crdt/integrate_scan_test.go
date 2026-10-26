@@ -51,9 +51,9 @@ func leftOriginsOnly(n int, withRightOrigins bool) []byte {
 	return append([]byte(nil), enc.Bytes()...)
 }
 
-// applyMeasured applies update to doc and reports the error, the bytes the apply
-// allocated and how long it took.
-func applyMeasured(doc *Doc, update []byte) (error, uint64, time.Duration) {
+// applyMeasured applies update to doc and reports the bytes the apply
+// allocated, how long it took and the error.
+func applyMeasured(doc *Doc, update []byte) (uint64, time.Duration, error) {
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
@@ -61,7 +61,7 @@ func applyMeasured(doc *Doc, update []byte) (error, uint64, time.Duration) {
 	err := ApplyUpdateV1(doc, update, nil)
 	took := time.Since(start)
 	runtime.ReadMemStats(&after)
-	return err, after.TotalAlloc - before.TotalAlloc, took
+	return after.TotalAlloc - before.TotalAlloc, took, err
 }
 
 // An update that splits a long run many times, and leaves each half where it
@@ -76,7 +76,7 @@ func TestASplitRunMergedBackAtCommitCostsItsLengthOnce(t *testing.T) {
 	const n = 20_000
 	doc := scanDoc(t, n)
 	update := leftOriginsOnly(n, false)
-	err, allocated, took := applyMeasured(doc, update)
+	allocated, took, err := applyMeasured(doc, update)
 	t.Logf("n=%d: err=%v, allocated %d bytes in %s", n, err, allocated, took)
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +183,7 @@ func TestARemoteUpdatesConflictScansAreBounded(t *testing.T) {
 	before, text := EncodeStateAsUpdateV1(doc, nil), doc.GetText("t").ToString()
 	updates := observed(doc)
 	log := doc.OpenUpdateLog()
-	err, allocated, took := applyMeasured(doc, originAtTheStart(n))
+	allocated, took, err := applyMeasured(doc, originAtTheStart(n))
 	t.Logf("l=%d n=%d: err=%v, allocated %d bytes in %s", l, n, err, allocated, took)
 	if !errors.Is(err, ErrIntegrateScanBudget) || !errors.Is(err, ErrInvalidUpdate) {
 		t.Fatalf("the update was applied with err %v, want ErrIntegrateScanBudget", err)
@@ -507,7 +507,7 @@ func TestABoundedDocumentsStateLoadsWhereverItsHistoryPassesTheBound(t *testing.
 func TestAnUpdateWhoseItemsScanNothingIsNotBounded(t *testing.T) {
 	const n = 20_000
 	doc := scanDoc(t, n)
-	err, allocated, took := applyMeasured(doc, leftOriginsOnly(n, true))
+	allocated, took, err := applyMeasured(doc, leftOriginsOnly(n, true))
 	t.Logf("n=%d with right origins: err=%v, allocated %d bytes in %s", n, err, allocated, took)
 	if err != nil {
 		t.Fatal(err)
@@ -529,7 +529,7 @@ func TestConcurrentInsertsAtOnePositionStillConverge(t *testing.T) {
 	baseText := base.GetText("t")
 	base.Transact(func(txn *Transaction) { baseText.Insert(txn, 0, "ab", nil) })
 	state := EncodeStateAsUpdateV1(base, nil)
-	var updates [][]byte
+	updates := make([][]byte, 0, clients)
 	for c := range clients {
 		peer := New(WithClientID(ClientID(100 + c)))
 		if err := ApplyUpdateV1(peer, state, nil); err != nil {
