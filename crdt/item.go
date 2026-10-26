@@ -126,32 +126,54 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		// against). beforeOrigin tracks every item we have scanned past, so we
 		// can detect whether a later item's origin lies inside the conflict zone.
 		//
-		// Both maps are allocated here rather than unconditionally so that the
-		// common (no-conflict) case pays zero allocation cost.
-		conflicting := make(map[*Item]struct{})
-		beforeOrigin := make(map[*Item]struct{})
+		// Both sets are kept as one map of marks for the whole transaction
+		// (Transaction.scanMarks): an item is in beforeOrigin when its mark is
+		// this scan's, and in conflicting when it is also at or past the step
+		// the group last restarted at. A new scan, and a group restarting (Yjs's
+		// conflictingItems.clear()), is a new number rather than a clear, so the
+		// map is never cleared or remade: the common (no-conflict) case
+		// allocates nothing, a transaction's scans allocate one entry for each
+		// distinct item they pass, and no scan pays for the size of an earlier
+		// one (#54-C).
+		marks := txn.scanMarkMap()
+		txn.scanSerial++
+		scan, step, groupFrom := txn.scanSerial, uint32(0), uint32(1)
+
+		// A remote update's scans together pass at most the document's bound
+		// (WithMaxIntegrateScan): an item naming a left origin early in a list
+		// and no right origin scans to the list's end, and an update of many of
+		// them would otherwise pass a number of items that grows with its length
+		// times the list's. The scan is refused before this item is linked, and
+		// the apply's journal takes out what integrated before it.
+		limit := 0
+		if !txn.Local {
+			limit = txn.doc.integrateScanLimit()
+		}
 
 		// Scan right until we hit our right origin (item.Right) or the end.
 		for o != nil && o != item.Right {
+			// Every item the scan passes counts toward the bound, including
+			// one it steps over for a different key.
+			if limit > 0 {
+				txn.scanned++
+				if txn.scanned > limit {
+					panic(integrateScanBudgetExceeded{})
+				}
+			}
 			// Children and keyed attributes have independent conflict orders.
 			if !parentSubEqual(item.ParentSub, o.ParentSub) {
 				o = o.Right
 				continue
 			}
-			beforeOrigin[o] = struct{}{}
-			conflicting[o] = struct{}{}
+			step++
+			marks[o] = scanMark{scan: scan, step: step}
 
 			if originIDEquals(item.Origin, o.Origin) {
 				// Case 1: o has the same left origin as us — concurrent insert at
 				// the same position. Lower ClientID wins (placed to the left).
 				if o.ID.Client < item.ID.Client {
 					left = o
-					// Reuse the map instead of reallocating (Yjs does
-					// conflictingItems.clear() here). Under high same-position
-					// contention this fires O(group size) times per integrate, so
-					// a fresh make() each time made conflict-scan allocation
-					// quadratic in the conflict-group size (#54-C).
-					clear(conflicting)
+					groupFrom = step + 1 // conflicting starts again, o not in it
 				} else if originIDEquals(item.OriginRight, o.OriginRight) {
 					// Same left and right origin — truly symmetric; stop.
 					break
@@ -164,10 +186,10 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 				if oOriginItem == nil {
 					break
 				}
-				if _, inBefore := beforeOrigin[oOriginItem]; inBefore {
-					if _, inConflict := conflicting[oOriginItem]; !inConflict {
+				if mark, seen := marks[oOriginItem]; seen && mark.scan == scan {
+					if mark.step < groupFrom {
 						left = o
-						clear(conflicting) // reuse the map, not realloc (see above / Yjs parity)
+						groupFrom = step + 1
 					}
 				} else {
 					break
@@ -181,6 +203,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	}
 
 	// Insert item between left and left.Right.
+	if txn.journal != nil {
+		txn.journal.integrating = item
+	}
 	item.Left = left
 	if left == nil {
 		item.Right = item.Parent.start
@@ -235,6 +260,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 
 	// Register in the document store.
 	txn.doc.store.Append(item)
+	if txn.journal != nil {
+		txn.journal.integrating = nil
+	}
 
 	// #63 — register an embedded subdocument (Content has no integrate hook).
 	// This MUST run here, before the ParentSub last-writer-wins block below,
@@ -373,6 +401,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 			// We are the rightmost item for this key; delete the previous winner.
 			if existing, ok := item.Parent.itemMap[key]; ok && existing != item && !existing.Deleted {
 				existing.delete(txn)
+			}
+			if txn.journal != nil {
+				txn.journal.tookMapKey(item.Parent, key)
 			}
 			item.Parent.itemMap[key] = item
 		}

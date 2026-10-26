@@ -1,7 +1,9 @@
 package crdt
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -27,6 +29,19 @@ type Transaction struct {
 	// transient (no item was inserted between them). Mirrors Yjs JS's
 	// `_mergeStructs` and powers gap #78 H2.
 	mergeStructs []*Item
+	// scanned counts the items the conflict scans of this transaction's
+	// integrates have passed, against the document's integrateScanLimit when
+	// the transaction applies a remote update. scanMarks holds what those scans
+	// mark (Item.integrate): made by the first scan that needs it, kept for the
+	// transaction and dropped when it commits; scanSerial numbers the scans.
+	scanned    int
+	scanMarks  map[*Item]scanMark
+	scanSerial uint32
+	// journal is the record a remote apply on a document with a scan bound
+	// keeps to undo itself on failure, and rolledBack whether it did, so the
+	// commit fires nothing (apply_rollback.go).
+	journal    *applyJournal
+	rolledBack bool
 	// rearbitrate queues, per parent, move targets whose winning ContentMove
 	// was tombstoned; rearbitrateMoves resolves them in one pass at commit.
 	rearbitrate map[*abstractType]map[*Item]struct{}
@@ -348,9 +363,79 @@ func tryMergeWithLefts(txn *Transaction) {
 	if len(txn.mergeStructs) == 0 {
 		return
 	}
+	// The right halves are merged in clock order, so a run of halves of one
+	// client merges left to right, each into the run already merged before it:
+	// a merge's conditions are all local to the two items, so the runs it
+	// leaves do not depend on the order. Merged left to right, each merge adds
+	// only its own half to the run: a ContentAny or ContentJSON run appends the
+	// half's values, and a ContentString run's text is joined once, when every
+	// half has been merged (merging.strings), rather than copied whole by each
+	// merge. The merged halves leave their clients' store slices in one pass
+	// each (merging.removed) rather than one search and shift each. A
+	// transaction that split a long run n times, each half merged back at
+	// commit, otherwise copied the run's text and its client's store slice n
+	// times: n = 20,000 halves of a 40,000-character run allocated 407 MB.
+	slices.SortFunc(txn.mergeStructs, func(a, b *Item) int {
+		if c := cmp.Compare(a.ID.Client, b.ID.Client); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ID.Clock, b.ID.Clock)
+	})
 	store := txn.doc.store
+	merging := &mergeRuns{}
 	for _, item := range txn.mergeStructs {
-		tryMergeWithLeft(item, store)
+		tryMergeWithLeft(item, store, merging)
+	}
+	merging.finish(store)
+}
+
+// mergeRuns is what tryMergeWithLefts defers to the end of its merges: the
+// text each ContentString run gains, joined once, and the merged halves, which
+// leave their clients' store slices together.
+type mergeRuns struct {
+	strings map[*ContentString]*strings.Builder
+	removed map[ClientID]map[*Item]struct{}
+}
+
+// appendString adds right's text to left's run.
+func (m *mergeRuns) appendString(left, right *ContentString) {
+	if m.strings == nil {
+		m.strings = make(map[*ContentString]*strings.Builder)
+	}
+	b := m.strings[left]
+	if b == nil {
+		b = &strings.Builder{}
+		b.WriteString(left.Str)
+		m.strings[left] = b
+	}
+	b.WriteString(right.Str)
+	left.utf16Len += right.utf16Len
+}
+
+// remove records item, merged into its left neighbour, to leave the store.
+func (m *mergeRuns) remove(item *Item) {
+	if m.removed == nil {
+		m.removed = make(map[ClientID]map[*Item]struct{})
+	}
+	gone := m.removed[item.ID.Client]
+	if gone == nil {
+		gone = make(map[*Item]struct{})
+		m.removed[item.ID.Client] = gone
+	}
+	gone[item] = struct{}{}
+}
+
+// finish joins each ContentString run's text and removes the merged halves
+// from their clients' store slices.
+func (m *mergeRuns) finish(store *StructStore) {
+	for content, b := range m.strings {
+		content.Str = b.String()
+	}
+	for client, gone := range m.removed {
+		store.clients[client] = slices.DeleteFunc(store.clients[client], func(it *Item) bool {
+			_, merged := gone[it]
+			return merged
+		})
 	}
 }
 
@@ -366,7 +451,7 @@ func tryMergeWithLefts(txn *Transaction) {
 //
 // On success: left's content is extended in place, the linked list is spliced
 // past item, and item is removed from the store.
-func tryMergeWithLeft(item *Item, store *StructStore) bool {
+func tryMergeWithLeft(item *Item, store *StructStore, merging *mergeRuns) bool {
 	left := item.Left
 	if left == nil {
 		return false
@@ -420,8 +505,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		if !ok {
 			return false
 		}
-		lc.Str += rc.Str
-		lc.utf16Len += rc.utf16Len
+		merging.appendString(lc, rc)
 	case *ContentAny:
 		rc, ok := item.Content.(*ContentAny)
 		if !ok {
@@ -463,13 +547,20 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		left.Parent.clearMarkers()
 	}
 
-	// Remove item from the store's per-client slice.
-	storeItems := store.clients[item.ID.Client]
-	for i, it := range storeItems {
-		if it == item {
-			store.clients[item.ID.Client] = append(storeItems[:i], storeItems[i+1:]...)
-			break
-		}
-	}
+	// Remove item from the store's per-client slice, with the run's other
+	// merged halves (mergeRuns.finish).
+	merging.remove(item)
 	return true
+}
+
+// scanMark is a conflict scan's mark on an item it passed: which scan of the
+// transaction, and at which step of it (Item.integrate).
+type scanMark struct{ scan, step uint32 }
+
+// scanMarkMap returns the transaction's scan marks, made on first use.
+func (txn *Transaction) scanMarkMap() map[*Item]scanMark {
+	if txn.scanMarks == nil {
+		txn.scanMarks = make(map[*Item]scanMark)
+	}
+	return txn.scanMarks
 }

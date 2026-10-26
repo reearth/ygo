@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.0] — 2026-10-26
+
+### Added
+
+- **`crdt`: `WithMaxIntegrateScan`, `Doc.SetMaxIntegrateScan` and
+  `ErrIntegrateScanBudget`: a document can bound the conflict scans of a remote
+  update, and then applies every remote update whole or not at all.** YATA
+  places an item by scanning right from its left origin past every item whose
+  own origin lies in what the scan has passed, so an item naming an early left
+  origin and no right origin scans to the end of a list, and an update of n of
+  them scans n times the list: 2,000 such items (about 12 KB) into a list of
+  20,000 unmerged items took 20.8 s and allocated 2,365,640,192 bytes. With a
+  bound, the scans of one remote update together pass at most that many items;
+  past it, `ApplyUpdateV1` and `ApplyUpdateV2` return `ErrIntegrateScanBudget`
+  (which wraps `ErrInvalidUpdate`). A bounded document takes out what such an
+  update, or any remote update whose apply fails, integrated before it failed,
+  so the document is left as it was and the transaction fires no observer:
+  nothing of the update is persisted or relayed. A bounded document refuses a
+  remote update carrying a subdocument or a move. Local transactions are never
+  bounded. No bound is set by default. Bounded or not, a transaction's
+  conflict scans share one map of marks, made by the first scan that needs it
+  and kept until the transaction commits: each mark records which scan, and
+  which step of it, passed the item, so a new scan reuses the map without
+  clearing it.
+
+### Fixed
+
+- **`crdt`: merging split runs back at commit is linear in the run.** An update
+  that splits one run n times and leaves each half where it merges back at
+  commit made each merge append the half to the run's whole text and search and
+  shift the client's store slice: 20,000 halves of a 40,000-character run
+  allocated 440,968,992 bytes in one apply, 11,384,168 bytes with this change.
+  The halves merge in clock order, each run's text is joined once, and the
+  merged halves leave their store slices in one pass per client.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
