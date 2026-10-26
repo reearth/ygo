@@ -152,7 +152,7 @@ func (s *StructStore) addPendingMove(targetClient ClientID, move *Item) {
 // resolvePendingMoves retries every deferred ContentMove whose target belongs to
 // client. Called after an item for that client integrates: the target may now be
 // present, letting the move claim it. Moves that resolve are dropped from the
-// pending set; the arbitration rule (lowest ClientID wins) is order-independent,
+// pending set; the arbitration rule (moveBeats) is order-independent,
 // so retrying deferred moves yields the same MovedBy on every peer regardless of
 // the order in which moves and targets were integrated.
 func (s *StructStore) resolvePendingMoves(txn *Transaction, client ClientID) {
@@ -173,8 +173,8 @@ func (s *StructStore) resolvePendingMoves(txn *Transaction, client ClientID) {
 			remaining = append(remaining, mv)
 			continue
 		}
-		if target.MovedBy == nil || mv.ID.Client < target.MovedBy.ID.Client {
-			target.MovedBy = mv
+		if moveBeats(mv, target.MovedBy) {
+			txn.setMovedBy(target, mv)
 			// Setting MovedBy re-renders the target at the move's destination and
 			// blanks its original slot, so any cached position marker is stale.
 			if mv.Parent != nil {

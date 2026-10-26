@@ -43,31 +43,54 @@ The bound surface is:
 
 ## Building the bindings
 
-`gomobile bind` is a **build-time tool**, not a runtime dependency — it is not in
-`go.mod`, and you install it separately. Generate the native artifacts with:
+`mobile/` is a **separate Go module** from the rest of ygo. `gomobile bind`
+needs `golang.org/x/mobile` in the module it binds, and `golang.org/x/mobile`
+requires Go 1.26, so keeping it here leaves the root module's Go 1.23 floor and
+dependency list alone. Inside this repository, `mobile/go.mod` builds against
+the surrounding checkout through `replace github.com/reearth/ygo => ../`. Go
+code that imports the package from elsewhere requires the module as usual:
+`go get github.com/reearth/ygo/mobile@v1.53.0`.
+
+Each release tags the module as `mobile/vX.Y.Z` next to the root `vX.Y.Z`, and
+`mobile/go.mod`'s `require github.com/reearth/ygo` must name that same root
+version, so an importer gets the root code the bindings were tested against.
+
+`gomobile` and `gobind` are pinned as `tool` directives in `mobile/go.mod`.
+From the `mobile/` directory:
 
 ```sh
+go install tool    # installs the pinned gomobile and gobind into $GOBIN
+
 # iOS → Mobile.xcframework
-gomobile bind -target=ios ./mobile
+gomobile bind -target=ios .
 
 # Android → mobile.aar (minimum API level 21)
-gomobile bind -target=android -androidapi 21 ./mobile
+gomobile bind -target=android -androidapi 21 .
 ```
+
+`make mobile-ios` and `make mobile-android` run the same commands from the
+repository root.
 
 ### Pinned toolchain matrix
 
 | Component                | Version / setting                          |
 | ------------------------ | ------------------------------------------ |
-| Go                       | 1.23                                       |
-| `golang.org/x/mobile`    | a recent release (build-time only — not in `go.mod`) |
+| Go                       | 1.26+ (`mobile/go.mod`)                    |
+| `golang.org/x/mobile`    | pinned in `mobile/go.mod`                  |
 | Android NDK              | a recent installed NDK                     |
 | Android min API level    | `-androidapi 21`                           |
 
-`gomobile bind` is **verified manually** — it needs Xcode (iOS) and the Android
-NDK, which are not available in CI. **CI only guards the CGo-free build**
-(`CGO_ENABLED=0 go build ./mobile/...`), which catches the most common breakage
-(accidentally pulling in CGo or a non-pure-Go dependency). Run the actual
-`gomobile bind` locally on a machine with the SDKs before shipping.
+CI runs the `mobile/` tests and a real `gomobile bind -target=android` on every
+pull request, which catches generated JNI code that fails to compile even when
+the Go code is fine. The iOS bind needs Xcode and is **verified manually**; run
+it on a Mac before shipping.
+
+### Naming exported parameters
+
+gobind's generated JNI code declares the method receiver as a local `o`, plus
+`env`, `r0`, `r1`, … and an underscore-prefixed copy of each parameter, in every
+bound method. An exported parameter with one of those names compiles in Go but
+breaks the Android build, so avoid them.
 
 ## Threading / ANR
 

@@ -19,6 +19,112 @@ type xmlNode interface {
 	baseXMLType() *abstractType
 }
 
+type xmlRenderFrameKind uint8
+
+const (
+	xmlRenderNode xmlRenderFrameKind = iota
+	xmlRenderSibling
+	xmlRenderClose
+)
+
+type xmlRenderFrame struct {
+	kind  xmlRenderFrameKind
+	node  xmlNode
+	item  *Item
+	close string
+}
+
+func nextXMLChild(item *Item) (xmlNode, *Item) {
+	for item != nil {
+		next := item.Right
+		if !item.Deleted && item.ParentSub == nil {
+			if content, ok := item.Content.(*ContentType); ok {
+				if node, ok := content.Type.owner.(xmlNode); ok {
+					return node, next
+				}
+			}
+		}
+		item = next
+	}
+	return nil, nil
+}
+
+func appendXMLChildren(stack []xmlRenderFrame, fragment *YXmlFragment) []xmlRenderFrame {
+	if fragment.detached() {
+		for index := len(fragment.prelimChildren) - 1; index >= 0; index-- {
+			stack = append(stack, xmlRenderFrame{
+				kind: xmlRenderNode,
+				node: fragment.prelimChildren[index],
+			})
+		}
+		return stack
+	}
+
+	child, next := nextXMLChild(fragment.start)
+	if child == nil {
+		return stack
+	}
+	if next != nil {
+		stack = append(stack, xmlRenderFrame{kind: xmlRenderSibling, item: next})
+	}
+	return append(stack, xmlRenderFrame{kind: xmlRenderNode, node: child})
+}
+
+// renderXML walks XML children with an explicit stack. Remote updates can
+// accumulate arbitrary XML nesting, so serializing an element must not grow the
+// Go stack with the document depth.
+func renderXML(root xmlNode, locked bool) string {
+	var output strings.Builder
+	var inline [16]xmlRenderFrame
+	stack := inline[:1]
+	stack[0] = xmlRenderFrame{kind: xmlRenderNode, node: root}
+
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		frame := stack[last]
+		stack = stack[:last]
+
+		switch frame.kind {
+		case xmlRenderClose:
+			output.WriteString(frame.close)
+		case xmlRenderSibling:
+			child, next := nextXMLChild(frame.item)
+			if child == nil {
+				continue
+			}
+			if next != nil {
+				stack = append(stack, xmlRenderFrame{kind: xmlRenderSibling, item: next})
+			}
+			stack = append(stack, xmlRenderFrame{kind: xmlRenderNode, node: child})
+		case xmlRenderNode:
+			switch node := frame.node.(type) {
+			case *YXmlFragment:
+				stack = appendXMLChildren(stack, node)
+			case *YXmlElement:
+				attrs := node.GetAttributes()
+				output.WriteByte('<')
+				output.WriteString(node.NodeName)
+				for _, key := range xmlSortedKeys(attrs) {
+					fmt.Fprintf(&output, ` %s="%s"`, key, xmlEscapeAttr(attrs[key]))
+				}
+				output.WriteByte('>')
+				stack = append(stack, xmlRenderFrame{
+					kind:  xmlRenderClose,
+					close: "</" + node.NodeName + ">",
+				})
+				stack = appendXMLChildren(stack, &node.YXmlFragment)
+			case *YXmlText:
+				if locked {
+					output.WriteString(xmlEscapeText(node.toStringLocked()))
+				} else {
+					output.WriteString(node.ToXML())
+				}
+			}
+		}
+	}
+	return output.String()
+}
+
 // xmlSub pairs a unique subscription ID with a YXmlEvent callback.
 type xmlSub struct {
 	id uint64
@@ -84,8 +190,14 @@ func (f *YXmlFragment) Len() int {
 // While the fragment/element is detached the nodes are only buffered
 // (prelimChildren) and materialised when the subtree attaches — see
 // prelimFlusher. (#yxml-wire)
+//
+// A node attaches once: Insert panics if a node is already attached, staged
+// on any parent, or passed twice, and if it is f itself or buffers f in its
+// subtree (a cycle). Deleting a buffered node from its detached parent
+// makes it stageable again.
 func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 	t := &f.abstractType
+	claimXMLNodes(t, nodes)
 	if t.detached() {
 		if index < 0 || index > len(f.prelimChildren) {
 			index = len(f.prelimChildren)
@@ -169,10 +281,59 @@ func (f *YXmlFragment) Delete(txn *Transaction, index, length int) {
 			return
 		}
 		end := min(index+length, len(f.prelimChildren))
+		for _, n := range f.prelimChildren[index:end] {
+			n.baseXMLType().stagedOn = nil // re-stageable once removed
+		}
 		f.prelimChildren = append(f.prelimChildren[:index], f.prelimChildren[end:]...)
 		return
 	}
 	deleteChildRange(&f.abstractType, txn, index, length)
+}
+
+// claimXMLNodes enforces Insert's attach-once and cycle rules, validating
+// every node before claiming any so a rejected call leaves no partial claim.
+// The cycle check walks t's stagedOn chain in O(depth), as claimForStage does.
+func claimXMLNodes(t *abstractType, nodes []xmlNode) {
+	staging := t.detached()
+	var seen map[*abstractType]struct{}
+	if len(nodes) > 1 {
+		seen = make(map[*abstractType]struct{}, len(nodes))
+	}
+	for _, n := range nodes {
+		bt := n.baseXMLType()
+		if staging {
+			for c := t; c != nil; c = c.stagedOn {
+				if c == bt {
+					panic("crdt: Insert: staging this node here would create a cycle (a node cannot contain itself)")
+				}
+			}
+		}
+		if !bt.detached() {
+			panic("crdt: Insert requires a detached node (use NewYXmlElement/NewYXmlText)")
+		}
+		switch {
+		case staging && bt.stagedOn == t:
+			panic("crdt: Insert: this node is already staged on this parent (a node attaches once)")
+		case staging && bt.stagedOn != nil:
+			panic("crdt: Insert: this node is already staged on another parent (a node attaches once; Delete it there first to move it)")
+		case !staging && bt.stagedOn != nil && bt.stagedOn != t:
+			// t's own flushPrelim re-enters Insert with its staged children.
+			panic("crdt: Insert: this node is staged on another parent (a node attaches once; Delete it there first to move it)")
+		}
+		if seen != nil {
+			if _, dup := seen[bt]; dup {
+				panic("crdt: Insert: a node is passed twice (a node attaches once)")
+			}
+			seen[bt] = struct{}{}
+		}
+	}
+	var owner *abstractType
+	if staging {
+		owner = t
+	}
+	for _, n := range nodes {
+		n.baseXMLType().stagedOn = owner
+	}
 }
 
 // flushPrelim materialises children buffered while this fragment was detached.
@@ -188,10 +349,7 @@ func (f *YXmlFragment) flushPrelim(txn *Transaction) {
 // Children returns all non-deleted child XML nodes in document order. A
 // DETACHED fragment/element returns a copy of its buffered prelim children (the
 // same node values that were inserted), so iteration and ToXML reflect the
-// subtree before it attaches. As everywhere in this package, buffer only FRESH
-// nodes into a detached parent: inserting an already-attached node is the usual
-// re-parenting misuse, and reading the detached parent's ToXML would then
-// recurse into that attached child's lock-taking serialisation. (#yxml-wire)
+// subtree before it attaches. (#yxml-wire)
 func (f *YXmlFragment) Children() []xmlNode {
 	if f.detached() {
 		return append([]xmlNode(nil), f.prelimChildren...)
@@ -212,21 +370,13 @@ func (f *YXmlFragment) Children() []xmlNode {
 
 // ToXML returns the XML serialisation of this fragment's children concatenated.
 func (f *YXmlFragment) ToXML() string {
-	var sb strings.Builder
-	for _, child := range f.Children() {
-		sb.WriteString(child.ToXML())
-	}
-	return sb.String()
+	return renderXML(f, false)
 }
 
 // toXMLLocked is the lock-free body of ToXML; safe to call from a context
 // holding the doc lock. See the xmlNode interface comment.
 func (f *YXmlFragment) toXMLLocked() string {
-	var sb strings.Builder
-	for _, child := range f.Children() {
-		sb.WriteString(child.toXMLLocked())
-	}
-	return sb.String()
+	return renderXML(f, true)
 }
 
 // Observe registers fn to be called after every transaction that modifies this
@@ -361,7 +511,7 @@ func (e *YXmlElement) setAttributeValue(op string, txn *Transaction, key string,
 	var origin *ID
 	if existing, ok := t.itemMap[key]; ok {
 		left = existing
-		id := existing.ID
+		id := existing.lastID()
 		origin = &id
 	}
 	item := &Item{
@@ -436,10 +586,7 @@ func (e *YXmlElement) GetAttributeValue(key string) (any, bool) {
 	if !ok || item.Deleted {
 		return nil, false
 	}
-	if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-		return ca.Vals[0], true
-	}
-	return nil, false
+	return lastPlainVal(item.Content)
 }
 
 // GetAttributes returns all live attributes as a string-keyed map. Non-string
@@ -473,8 +620,8 @@ func (e *YXmlElement) GetAttributeValues() map[string]any {
 		if item.Deleted {
 			continue
 		}
-		if ca, ok := item.Content.(*ContentAny); ok && len(ca.Vals) > 0 {
-			result[k] = ca.Vals[0]
+		if v, ok := lastPlainVal(item.Content); ok {
+			result[k] = v
 		}
 	}
 	return result
@@ -483,38 +630,13 @@ func (e *YXmlElement) GetAttributeValues() map[string]any {
 // ToXML serialises the element as <NodeName attrs>children</NodeName>.
 // Attribute keys are sorted alphabetically for deterministic output.
 func (e *YXmlElement) ToXML() string {
-	attrs := e.GetAttributes()
-	var sb strings.Builder
-	sb.WriteByte('<')
-	sb.WriteString(e.NodeName)
-	for _, k := range xmlSortedKeys(attrs) {
-		fmt.Fprintf(&sb, ` %s="%s"`, k, xmlEscapeAttr(attrs[k]))
-	}
-	sb.WriteByte('>')
-	sb.WriteString(e.YXmlFragment.ToXML())
-	sb.WriteString("</")
-	sb.WriteString(e.NodeName)
-	sb.WriteByte('>')
-	return sb.String()
+	return renderXML(e, false)
 }
 
-// toXMLLocked is the lock-free body of ToXML; calls the locked variant of
-// YXmlFragment so the recursion into YXmlText descendants doesn't re-enter
-// the doc lock. See the xmlNode interface comment.
+// toXMLLocked is the lock-free body of ToXML. See the xmlNode interface
+// comment.
 func (e *YXmlElement) toXMLLocked() string {
-	attrs := e.GetAttributes()
-	var sb strings.Builder
-	sb.WriteByte('<')
-	sb.WriteString(e.NodeName)
-	for _, k := range xmlSortedKeys(attrs) {
-		fmt.Fprintf(&sb, ` %s="%s"`, k, xmlEscapeAttr(attrs[k]))
-	}
-	sb.WriteByte('>')
-	sb.WriteString(e.YXmlFragment.toXMLLocked())
-	sb.WriteString("</")
-	sb.WriteString(e.NodeName)
-	sb.WriteByte('>')
-	return sb.String()
+	return renderXML(e, true)
 }
 
 // Observe registers fn to be called after every transaction that modifies this

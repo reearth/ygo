@@ -140,8 +140,7 @@ func TestUnit_MergeUpdatesV2_MapKeyChain(t *testing.T) {
 	m := doc.GetMap("meta")
 	var updates [][]byte
 	// Capture each transaction's incremental V2 update directly from the
-	// integrated doc (EncodeStateAsUpdateV2 with the prior state vector) — NOT
-	// via UpdateV1ToV2, which has the very drop bug this batch fixes.
+	// integrated doc (EncodeStateAsUpdateV2 with the prior state vector).
 	prevSV := doc.StateVector()
 	for i := 0; i < 3; i++ {
 		doc.Transact(func(txn *Transaction) { m.Set(txn, "title", i) })

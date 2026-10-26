@@ -34,6 +34,10 @@ func GenerateWith(seed uint64, opts GenOpts) Scenario {
 		{"t", KindText}, {"a", KindArray}, {"m", KindMap}, {"x", KindXmlFragment},
 	}
 	s := Scenario{Seed: seed, NumPeers: numPeers}
+	lastTo := make([]int, numPeers) // per-peer last move destination, -1 = none
+	for i := range lastTo {
+		lastTo[i] = -1
+	}
 	for i := 0; i < numSteps; i++ {
 		switch {
 		case r.Intn(100) < 15: // 15% sync
@@ -42,7 +46,7 @@ func GenerateWith(seed uint64, opts GenOpts) Scenario {
 			s.Steps = append(s.Steps, Step{Kind: StepGC, Peer: r.Intn(numPeers)})
 		default:
 			root := roots[r.Intn(len(roots))]
-			s.Steps = append(s.Steps, genLocalOp(r, numPeers, root.name, root.kind, opts))
+			s.Steps = append(s.Steps, genLocalOp(r, numPeers, root.name, root.kind, opts, lastTo))
 		}
 	}
 	return s
@@ -56,7 +60,7 @@ func genSync(r *rand.Rand, n int) Step {
 	return Step{Kind: StepSync, From: from, To: to, Method: methods[r.Intn(len(methods))]}
 }
 
-func genLocalOp(r *rand.Rand, n int, root string, kind TypeKind, opts GenOpts) Step {
+func genLocalOp(r *rand.Rand, n int, root string, kind TypeKind, opts GenOpts, lastTo []int) Step {
 	st := Step{Kind: StepLocalOp, Peer: r.Intn(n), Root: root, TypeKind: kind}
 	switch kind {
 	case KindText:
@@ -80,8 +84,12 @@ func genLocalOp(r *rand.Rand, n int, root string, kind TypeKind, opts GenOpts) S
 			st.Op, st.JSONVal = OpPush, randScalarJSON(r)
 		case 2:
 			st.Op, st.PosHint, st.LenHint = OpDelete, r.Intn(50), 1+r.Intn(3)
-		default: // move
+		default: // move; half re-move this peer's last moved element
 			st.Op, st.PosHint, st.ToHint = OpMove, r.Intn(50), r.Intn(50)
+			if last := lastTo[st.Peer]; last >= 0 && r.Intn(2) == 0 {
+				st.PosHint = last
+			}
+			lastTo[st.Peer] = st.ToHint
 		}
 	case KindMap:
 		if r.Intn(100) < 70 {

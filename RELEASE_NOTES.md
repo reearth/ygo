@@ -17,14 +17,614 @@ first, or whether a later observer has already caught its copy up.
 document lock is still held. An observer that calls `Drain` therefore finds
 its own transaction's update, after every update committed before it,
 whatever order the observers run in. The first transaction to commit after
-the log opens also records the document's whole state just before it, as a V1
-update; applying that base and then each logged update, in order, reproduces
-the document as it stood after each commit. `Pending` counts what no `Drain`
-has taken, `Reset` hands that over and starts again from a fresh base (for a
-reader whose copy failed to apply an update), and `Close` stops logging.
+the log opens also records the document's whole state just before it, parked
+structs included, as a V1 update; applying that base and then each logged
+update, in order, reproduces the document as it stood after each commit. The
+format cleanup a remote update can trigger is a commit of its own and is
+logged like one. `Pending` counts what no `Drain` has taken, `Reset` hands
+that over and starts again from a fresh base (for a reader whose copy failed
+to apply an update), and `Close` stops logging.
 
 A log keeps everything until it is drained, so drain it (from an `OnUpdate`
 observer, typically) or close it.
+
+## v1.54.0
+
+**Who is affected: anyone who applies updates from peers they do not fully
+trust, which includes every `provider/websocket` server.**
+
+A V1 update whose delete set contains a range of length 0 deleted the whole
+item at that clock. Any connected peer could send a 6-byte update that wiped
+text or array content another client wrote, and Yjs peers, which delete
+nothing for such a range, diverged from ygo. Zero-length ranges are now
+ignored, matching Yjs. Converting such an update to V2 with `UpdateV1ToV2`
+also produced an update that failed to decode; the V2 encoder now drops these
+ranges, since they delete nothing. No API or wire format changes.
+
+**Who is affected: servers that set `HocuspocusFraming` for
+`@hocuspocus/provider` clients.** Connections on plain y-websocket framing get
+no `SyncStatus`. On either framing, a partly applied update now reaches the
+room's other peers (below).
+
+`@hocuspocus/provider` counts the edits it has sent and lowers the count only
+when the server answers one with a `SyncStatus` (tag 8) message, which
+`@hocuspocus/server` sends after every SyncStep2 or Update. ygo defined the tag
+but never sent it, so against ygo the provider's `hasUnsyncedChanges` stayed
+true for as long as the connection lived, and an editor could never tell its
+edits had reached the server.
+
+With `HocuspocusFraming` set, ygo now answers every SyncStep2 or Update, under
+Sync (tag 0) or SyncReply (tag 4), with exactly one `SyncStatus`, in the order
+the frames arrived, so a client can pair each answer with the frame it sent:
+
+| The client sends | The room | `SyncStatus` |
+|---|---|---|
+| a SyncStep2 or Update | applies it | 1 |
+| a SyncStep2 or Update | does not fully apply it (it overflows `MaxPendingItems`, say) | 0 |
+| an Update, read-only | does not take it | 0 |
+| a SyncStep2, read-only | already holds everything in it | 1 |
+| a SyncStep2, read-only | lacks something in it, and does not take it | 0 |
+| a sync frame that does not decode | closes the connection with 1002 | none |
+
+Three answers differ from `@hocuspocus/server` 2.15.3, on purpose:
+
+- **An update the room does not fully apply.** `@hocuspocus/server` answers 1
+  there: Yjs has no cap on pending structs, so it parks an update that
+  overflows `MaxPendingItems`, and y-protocols swallows any error from an
+  update that does not decode. An answer of 1 tells the client the room holds
+  an edit it does not. ygo answers 0 and keeps the connection, so the client
+  keeps the edit. An unrelated update on the same connection is answered 1.
+  The client's own next edits come after the part the room never took, so
+  the room parks them waiting for it: each is answered 1 while it fits under
+  the cap, as any update that parks is, and 0 once the cap is full. The room
+  shows none of them until the part it lacks arrives.
+- **A sync message that does not decode** (its sub-type is unknown or
+  missing, or its payload is cut short). On a read-write connection,
+  `@hocuspocus/server` answers a SyncStep2 or Update whose payload is cut short
+  with 1 and keeps the connection, because y-protocols' `readSyncStep2` catches
+  the read error along with the apply error. Other such messages get 0 (a
+  read-only Update) or a 4403 close (an unknown or missing sub-type, a SyncStep1,
+  a read-only SyncStep2). ygo sends no `SyncStatus` for any of them and closes
+  with 1002 (protocol error): an answer of 1 would acknowledge an edit the room
+  never saw, and 4403 would strand the provider. From the moment ygo queues
+  that close, it handles no later frame from the connection, including frames
+  already received.
+- **A read-only SyncStep2 whose update does not decode.** `@hocuspocus/server`
+  closes the connection with 4403, because its `snapshotContainsUpdate` check
+  throws. ygo answers 0 and keeps the connection: the room does not hold the
+  update, and 4403 would strand the provider.
+
+`crdt.SnapshotContainsUpdateV1` is new: it reports whether a snapshot already
+holds everything a V1 update carries, as Yjs `snapshotContainsUpdate` does.
+`crdt.DocContainsUpdateV1` is new too: the same check against a live document,
+which decodes the update first, takes only the document's read lock, and
+checks the update's deletion ranges against the store in one forward pass per
+client. The read-only SyncStep2 answer uses it, so the answer to a viewer's
+SyncStep2 no longer takes the room's exclusive lock.
+
+**The part of a partly applied update now reaches the other peers.** ygo
+integrates an update item by item, so one that overflows `MaxPendingItems` can
+leave part of itself in the room. The server used to broadcast nothing for
+such an update; it now broadcasts exactly the part that integrated, on either
+framing. `crdt.ApplyUpdateV1Landed` is new: it applies an update as
+`ApplyUpdateV1` does and, when the apply fails, returns that part as a V1
+update.
+
+**Closing a connection now stops its input.** Once the server queues a close
+for a connection (the 1002 above, or 4401 after a failed in-band auth), the
+read loop handles nothing more from it, as it already did after a
+context-cause close.
+
+**Who is affected: servers that want to look at a read-write peer's update
+before it applies** — a per-document size bound, schema validation, write
+moderation — or that want a lock of their own held across the apply.
+
+`Server.OnPeerUpdate`, if set, runs in place of the room's own apply of a
+read-write peer's SyncStep2 or Update (Sync/SyncReply, tags 0/4). It is handed
+the room name, its document, the update's V1 bytes and the transaction origin,
+and an `apply` function that applies the update exactly as the room does
+without a hook. A second call to `apply` returns `ErrPeerUpdateApplied`.
+`apply` must be called before the hook returns: a call after that applies
+nothing and returns `ErrPeerUpdateHookReturned`, since by then the peer has
+been answered and the update would reach no other peer.
+
+An update the hook refuses (it returns, or panics, without `apply` having
+applied it) is not broadcast, is answered `SyncStatus(0)` on a
+Hocuspocus-framed connection, and closes the peer after that answer:
+
+| The hook | Close |
+|---|---|
+| returns or wraps a `*PeerClose{Code, Reason}`, Code 1000 or 3000-4999 | Code and Reason, the reason cut to 123 bytes at a rune boundary |
+| returns a `*PeerClose` with any other code | 4205 "Reset Connection" |
+| returns any other error, or panics | 4205 "Reset Connection" |
+
+The close is needed because the client's later edits build on the refused
+one, so the room could not integrate them: without it they would park in the
+room, be answered `SyncStatus(1)` and reach the other peers, who would park
+them too. The client still holds the refused edit, so when it reconnects it
+sends it again, with any edit built on it, and the hook sees each of them
+again; an edit the hook applies that builds on a refused one parks in the
+room. `@hocuspocus/provider` 2.x reconnects at once after a 4205 close, so a
+hook that keeps refusing a 2.x client keeps closing it; a `*PeerClose` with
+4401 stops it reconnecting. 4.x waits its configured `delay` first. Plain
+y-websocket connections are closed the same way.
+
+When the hook calls `apply` and the room itself does not take the update (it
+overflows `MaxPendingItems`, say), the peer is answered as without a hook and
+keeps the connection, unless the hook returns a `*PeerClose`. An update
+`apply` applied is broadcast and answered `SyncStatus(1)` whatever the hook
+returns afterward. Read-only peers never reach the hook, as before. Nil, the
+default, leaves every peer's update applied exactly as it was.
+
+This is the counterpart of `@hocuspocus/server`'s `beforeHandleMessage`
+(`packages/server/src/Connection.ts`), which runs before the message
+handler's own apply and closes the connection on a rejection with the error's
+code and reason, or with `ResetConnection` (4205) when it has none.
+
+## v1.53.1
+
+**Who is affected: servers that set `RoomIdleTimeout` and write to rooms with
+`Apply`, or run a cluster relay.** With `RoomIdleTimeout` at zero (the
+default), nothing changes.
+
+With `RoomIdleTimeout` set, the background sweeper evicts an empty room once it
+has been idle that long, but it only considers rooms carrying an idle stamp,
+and only the last peer leaving set one. `Apply` and the relay's `Inject` clear
+the stamp while they run and never set it again. So a room that only `Apply`
+wrote to, or that a relay delivery created on a node where no peer had joined
+it, stayed in memory until the process exited, and `MaxResidentRooms` did not
+count it. Worse, a single `Apply` on a room whose last peer had already left
+wiped that room's stamp, so a server that answers reads or writes through
+`Apply` kept every room it ever touched.
+
+`Apply` and `Inject` now stamp the room idle when they return — on success, on
+`ErrNoChanges`, on any other error and when `fn` panics — if no peer is
+connected. The sweeper then evicts the room `RoomIdleTimeout` after the last
+call, flushing it durably first as it does for any idle room, and
+`MaxResidentRooms` counts it. A room is never evicted while a call on it is
+still running, and a peer that joins clears the stamp as before. No API or
+wire format changes. Without a persistence adapter an evicted room's state is
+discarded, so a server that keeps state in memory through `Apply` alone should
+configure persistence or leave `RoomIdleTimeout` at zero.
+
+## v1.53.0
+
+**Who is affected:** anyone building the iOS or Android bindings with
+`gomobile bind`. Server and library users see no change.
+
+**The Android bindings build again.** Following the README's
+`gomobile bind -target=android` failed twice over: current `gomobile` refuses
+to run unless `golang.org/x/mobile` is in the module's dependencies, and once
+that was added, the generated JNI code did not compile because
+`SyncClient.SetOnStatus`'s parameter name clashed with a name gobind uses
+internally. The parameter is renamed, which changes nothing for callers.
+
+**`mobile/` is now a separate Go module.** `golang.org/x/mobile` requires
+Go 1.26, and putting it in the root module would have forced every user of
+ygo onto Go 1.26. Instead `mobile/` has its own `go.mod`, which pins the
+`gomobile` and `gobind` tools and builds against your checkout. The build
+commands now run from inside `mobile/`:
+
+```sh
+cd mobile
+go install tool
+gomobile bind -target=ios .
+gomobile bind -target=android -androidapi 21 .
+```
+
+The root module still requires only Go 1.23, with the same dependencies.
+
+**This is a minor release because a package moved.** The root module no longer
+contains `github.com/reearth/ygo/mobile`. Go code that imported it directly,
+rather than binding it, must now require the new module, which needs Go 1.26:
+
+```sh
+go get github.com/reearth/ygo/mobile@v1.53.0
+```
+
+CI now runs a real Android bind on every pull request, so this cannot
+silently break again. Closes #315.
+
+## v1.52.0
+
+**Who is affected: nobody, unless you choose to be.** If your server never
+cancels a request context with a cause of its own, nothing changes.
+
+**What is new.** A server that embeds `provider/websocket` can now end a single
+peer's session with an application close code. Cancel that peer's request
+context with `context.WithCancelCause`, passing a cause that implements
+`CloseCode() (int, string)`. The peer then receives a close frame with that code
+and reason instead of the connection simply dropping.
+
+This is for cases where the client needs to know *why* it was disconnected —
+for example, a user whose access was revoked while their document was open.
+Without a close code, the client sees an abnormal closure (1006), which looks
+like a network failure, so it reconnects. With one (say 4001, "session
+revoked"), the client can stop and tell the user what happened.
+
+The cause may be wrapped, as in `fmt.Errorf("revoking %s: %w", user, cause)`.
+Only codes 1000 and 3000–4999 are sent, since a client rejects the others as a
+protocol error. The reason is truncated to 123 bytes, the most a close frame can
+carry, and invalid UTF-8 is dropped from it. From the cancel on, the server
+ignores everything the peer sends, so a revoked client cannot keep editing by
+not reading its socket; the close frame waits at most one second.
+
+**What stays the same.** A context cancelled with any other cause, with no
+cause, or with a code that cannot be sent closes the socket exactly as before,
+with no close frame. No exported API was added. Closes #264.
+
+## v1.51.13
+
+**Who is affected:** servers that apply updates from peers they do not trust,
+and code that deletes nested shared types or reads documents with `ToJSON`,
+`ToSlice`, `Entries` or `ToXML`.
+
+**A very deep document can no longer crash the process.** Deleting a nested
+shared type, or reading a document as JSON or XML, used one goroutine stack
+frame per nesting level. A peer could build a document millions of levels deep
+through many small updates, and deleting or reading it then ended the whole
+process, every room on a server included, with a fatal stack overflow that
+`recover` cannot catch. Building such a document takes tens of megabytes of
+updates and gigabytes of heap at Go's default stack limit. These operations no
+longer grow the goroutine stack with depth, and give the same results in the
+same order.
+
+**`ToJSON` is faster and holds the document lock for less time.**
+`YArray.ToJSON` and `YMap.ToJSON` write JSON directly instead of building
+intermediate slices and maps. They copy values out under the read lock and
+format them after releasing it, so concurrent writers wait less than before:
+52–76% less lock time on 10,000-element containers. Output bytes are
+unchanged.
+
+**Upgrading.** No API change. Thanks to @sjawhar for the fix.
+
+## v1.51.12
+
+**Overlapping updates no longer duplicate content.** When out-of-order V1/V2
+updates partially overlap a pending text or array range, the retry now skips
+its already received prefix and inserts only the new suffix. This also applies
+to orphaned ranges after container garbage collection, preserving correct clocks
+across checkpoint restore so later updates are not silently skipped.
+
+**Large dependency queues restore faster.** The V1/V2 within-update resolver
+processes producers before their dependents and completes contiguous client tails
+before returning to consumers. This accelerates reverse client chains, including
+updates with multiple structs per client, without leaving ready tails for costly
+later insertion. The same range index tracks prefix coverage, preventing shorter
+overlapping copies from hiding a producer and forcing repeated retries.
+
+Small queues and queues making no progress avoid the dependency index. Complex
+queues use temporary memory proportional to their size; remaining unresolved
+items retain the fixed-point fallback and the configured persistent pending limit.
+The public API and update encodings remain compatible.
+
+**Documents several people typed into load, merge and catch up in
+milliseconds.** When peers take turns editing one text, each peer's structs
+depend on the others', and loading the document, merging its updates or
+receiving them out of order used to take seconds once it grew to tens of
+thousands of edits. For five peers and 20,000 turns:
+
+| | before | after |
+|---|---:|---:|
+| load the full state | ~200 ms | ~8 ms |
+| `MergeUpdatesV1` of the state and 500 updates | ~1.8 s | ~4 ms |
+| apply the 20,000 updates newest first | ~3.1 s | ~12 ms |
+
+A blocked struct now waits for the one clock it is missing instead of being
+retried after every other struct, and merges infer each struct's parent by
+following its origin chain once. Documents end up exactly as before, and as
+in Yjs. Thanks to @melodysdreamj for the report and the proposed approach
+(#311).
+
+## v1.51.11
+
+**Who is affected:** anyone reading ygo's record of live and deleted items
+(`InsertSetFromDoc`, the delete set) after concurrent edits. `ToJSON` and
+`ToXML` already matched Yjs.
+
+**What changed.** When one peer deletes a nested type while another is still
+writing into it, Yjs discards the late write. ygo kept it as a live item that
+nothing could reach. It now discards it too, in V1 and V2, whether or not the
+deleted container has been garbage collected. With garbage collection on (the
+default), the discarded content is also no longer included when the document
+is encoded.
+
+**Do I need to do anything?** No. Documents saved by earlier versions load as
+before.
+
+## v1.51.10
+
+**Crafted V2 updates can no longer pin a CPU core.** This affects servers
+on v1.51.8 or v1.51.9 that apply V2 updates from untrusted peers. v1.51.8 added
+a scan of an update's group headers before decoding. For JSON content in a V2
+update, the scan did work proportional to the item's declared length, up to
+about a million steps per item, without reading any input. An update of a few
+dozen bytes could keep a core busy for seconds, and a crafted one for much
+longer, before being rejected. The scan now skips that content in constant
+time.
+
+**Who is affected: anyone who stores rooms with `persistence.MemoryPersistence`,
+`persistence.FilePersistence` or `persistence/sqlite` (for example through
+`NewServerWithPersistence(persistence.NewLegacyAdapter(...))`), and anyone who
+calls `Server.BroadcastUpdate` or runs a cluster relay.** Custom persistence
+adapters are not changed.
+
+**Large edits are stored, and so is everything after them.** These
+stores check each update before writing it by decoding it on its own, and that
+check held at most 100,000 structs waiting for state it did not have. Decoded
+on its own, an update from a client whose earlier edits are already stored is
+missing everything it builds on, so all of its structs wait. Any such update
+of more than 100,000 structs, or a batch of smaller ones the server coalesced
+past that count, was refused with `crdt: invalid update` although the room had
+applied it. With the default write coalescing, the refused batch stayed queued
+and each later edit joined it, so nothing more in that room was stored: the
+room stayed in memory after its last peer left, and every edit since the
+refused one was lost when it closed. The check now has no such limit. Updates
+that do not decode are still refused.
+
+**Large relayed updates reach every peer.** `BroadcastUpdate` ran the same
+check, so it refused such an update with `ErrInvalidUpdate` after the room had
+applied it, and a clustered node that received one from another node applied
+it to its room but never sent it to its own peers. It now uses the stores'
+check. `MaxPendingItems` still caps each room's document.
+
+**Custom adapters.** A `VersionedPersistence` that checks updates by applying
+them to a bare `crdt.New()` refuses the same updates; the `AppendUpdate` godoc
+shows how to build the scratch document instead. No API or wire format
+changes.
+
+## v1.51.9
+
+**Map updates avoid unrelated-key conflict scans.** New keys and replacements
+immediately after their current winner bypass the scan; concurrent writes
+resolve against the same key. XML attributes and child elements use separate
+conflict orders, preserving child order regardless of update delivery order.
+The public API and wire format are unchanged.
+
+## v1.51.8
+
+**Who is affected:** servers that apply updates from untrusted peers. Updates
+encoded by yjs or ygo are unaffected by the behaviour change below.
+
+**Repeated client groups now behave like yjs.** An update can carry more than
+one wire group for the same client, although no standard encoder produces
+one. ygo used to integrate every such group, and overlapping groups put
+duplicate structs in the document, showed repeated text and moved the state
+vector backwards, without an error. ygo now keeps only the last group for each
+client and drops the earlier ones, exactly as yjs does, so both reach the same
+document. Content that appears only in an earlier group for a client is no
+longer applied. `MergeUpdates`, `DiffUpdate` and `EncodeStateVectorFromUpdate`
+follow the same rule, so they agree with applying the update. (#305, #308)
+
+**Crafted incomplete updates are cheap to reject again.** Since v1.51.7 the
+pending-limit preflight kept a full decoder copy for each blocked wire group
+when the missing dependency was present in the update but could never resolve,
+for example in a dependency cycle. Such an update could allocate dozens of
+times its own size before being rejected. Preflight now keeps only a compact
+record per blocked group, so rejection costs at most about 11 times the
+update's size, and updates that can resolve are still accepted. (#306)
+
+**Upgrading.** No API change.
+
+## v1.51.7
+
+**Who is affected:** servers that store or exchange large full-document updates,
+such as checkpoints from documents with many clients, where structs refer to
+other structs later in the same update.
+
+**Complete checkpoints no longer fail the pending limit.** ygo parked any
+struct whose dependency had not been integrated yet, and counted it against
+the limit on pending structs. A complete but large checkpoint could therefore
+be rejected, so the document could not be loaded from it. ygo now resolves
+dependencies inside the update first; only structs that are still missing
+afterwards count against the limit. If an update is rejected, none of its structs are added to
+the pending queue, but changes already applied before the rejection stay.
+Incomplete or crafted updates are still rejected quickly and with little
+memory. The pending limit, wire format and public API are unchanged. Thanks
+to @kovaa-dev.
+
+## v1.51.6
+
+**Replacing a map value no longer scans unrelated keys.** Direct replacements
+skip the shared-list scan when placed immediately after the key's previous
+rightmost value. Concurrent and non-adjacent replacements retain conflict
+resolution.
+
+## v1.51.5
+
+**Who is affected:** documents with long editing histories where a transaction
+deletes many separate ranges, for example clearing scattered text or many
+array items at once.
+
+**Faster cleanup after deletes.** After each transaction ygo garbage-collects
+the content it deleted. For every deleted range it used to scan the client's
+history from the beginning; it now jumps straight to the right place. A pass
+over 50,000 structs with sparse deletions went from about 212 ms to under a
+millisecond. Nothing else changes. Thanks to @kovaa-dev for the fix.
+
+**Upgrading.** No API change.
+
+## v1.51.4
+
+**Who is affected:** anyone using rich text (`YText` with formatting), embeds,
+or `ApplyDelta`, especially alongside yjs clients.
+
+**Formatting now behaves like yjs.** Inserting text or an embed with attributes
+inside formatted text used to keep the surrounding formatting too; it now gets
+exactly the attributes you pass, as in yjs. `Insert` with no attributes still
+continues the formatting around it. `ApplyDelta` follows the delta exactly.
+
+**Stale formatting is cleaned up after remote deletes.** When a collaborator
+deleted all the text a format covered, ygo kept the leftover markers, so text
+typed there later came out bold or italic unexpectedly. It now removes them the
+way yjs does.
+
+**What you might notice:**
+
+- After a remote update to formatted text, you may see a second, local update
+  and observer round with a nil origin: that is the cleanup, and it is broadcast
+  like any edit. The default `UndoManager` records it, as yjs does.
+- Servers applying many remote formatting edits to very large documents do more
+  work per update (a walk of the text, as yjs does). Plain text is unaffected.
+
+**Upgrading.** No API change.
+
+## v1.51.3
+
+**Who is affected:** anyone whose documents get concurrent text inserts, once
+a peer receives several of one client's inserts in a single apply: a late
+joiner's sync step 2, an offline client catching up, a server loading a stored
+state. Any state that peer then encodes (a sync step 2 it answers, a compacted
+log, `RunGC` followed by an encode) passes the problem to every peer that
+loads it.
+
+**Concurrent inserts could end up in different places on different peers.**
+Applying an update merged adjacent items from one client into a single item
+whenever their clocks were contiguous and nothing sat between them. Yjs merges
+two items only when the right one was inserted directly after the left one and
+both were inserted toward the same right neighbour (their right origin),
+because the merged item keeps only the left item's origins. ygo did not check
+the right origins. The peer that merged them then placed the next concurrent
+insert inside that run differently from the peers that had received the items
+one at a time, and any state it encoded gave the right item's characters a
+right origin they never had, so ygo and Yjs alike decoded them elsewhere.
+`RunGC`'s tombstone merge had the same gap and could move live text whose
+origin was inside the second tombstone.
+
+Both merges now require the right item's origin to be the left item's last
+character and the two right origins to be equal, as `Item.mergeWith` does.
+Items that do not qualify stay separate, so such a document keeps a few more
+items than before.
+
+**Upgrading.** No API or wire format change. A state that an earlier version
+already encoded or compacted keeps its merged items and their wrong right
+origins: this release stops new ones from being written but does not repair
+stored ones.
+
+## v1.51.2
+
+**Who is affected:** servers and clients that call `GetText`, `GetArray`,
+`GetMap` or `GetXmlFragment` only after applying updates, for example after a
+sync step.
+
+**Edits that arrived out of order could vanish.** If an update for a document
+root arrived before an edit it depends on, and the code then accessed that root
+for the first time before the missing edit arrived, the waiting update was
+attached to a placeholder and never showed up. That peer stayed different from
+everyone else for good. Accessing a root now picks up waiting updates too.
+
+**Upgrading.** No API change.
+
+## v1.51.1
+
+**Who is affected:** anyone using `UndoManager` or `YArray.Move`, and anyone
+exchanging V1 updates with yjs peers that carry legacy JSON content.
+
+**Undo no longer touches other people's edits.** Undo groups edits made close
+together into one step. That step used to cover every change in its time
+span, including a collaborator's insert that arrived in between, so pressing
+undo could delete their work. It could also overwrite a map entry a
+collaborator had changed since. Undo now tracks exactly which edits it
+recorded, as yjs does, and leaves everything else alone. Every transaction
+also claimed to be local, so a default `UndoManager` recorded remote updates
+as your own; `Transaction.Local` is now `false` for applied updates.
+
+**Undo restores nested content.** Deleting an entry that held a nested text,
+map or array and pressing undo brought it back empty. It now comes back with
+its contents. Edits inside nested types are now recorded for undo too, and
+undoing two quick edits on a fresh document no longer leaves the first behind.
+
+**`YArray.Get` no longer panics after undo, redo or a move.** Reads could
+crash with an index out of range, or return the wrong element. Undoing a move
+could also make the element disappear from reads while still counting in
+`Len`.
+
+**V1 legacy JSON content is readable both ways.** Older yjs content stored as
+JSON failed to decode in the V1 format, in either direction. It now matches
+yjs, and data an older ygo stored in its previous format still loads.
+
+**Staging a type into itself panics instead of crashing later.**
+
+**`YArray.Move` fixes.** Moving an element you already moved now takes effect,
+undoing the delete of a moved element puts it back where you moved it, and
+array change events now report undone moves, so an editor bound to the events
+stays in step.
+
+**`RunGC` no longer makes maps diverge.** Garbage collection could merge
+deleted entries belonging to different keys, after which peers disagreed on a
+key's value.
+
+**A map write could vanish on other peers.** Setting a key whose previous
+value arrived from yjs as a merged run could keep the new value locally while
+every other peer dropped it. Copying text with `ApplyDelta` also lost embeds;
+both now behave as in yjs.
+
+**Undo matches yjs more closely**, including which value wins when two
+collaborators' restored values compete for one key.
+
+**XML and JSON edge cases.** An XML node can no longer be put into two parents
+at once, legacy JSON attributes read correctly, and Go values that JSON cannot
+represent (functions, channels) are rejected instead of silently replacing the
+whole value with `null`.
+
+**Upgrading.** No API change, but check these behaviour changes:
+
+- Observers reading `Transaction.Local` now see `false` for remote changes.
+- `Undo`/`Redo` skip steps that would no longer change anything, so one call
+  may undo an older step, and they return `false` when nothing changed.
+- Something inserted and deleted within one undo step stays deleted on undo.
+  Call `StopCapturing` between the two if you want separate steps.
+- XML `Insert` panics on a node that is already attached or staged elsewhere
+  (including a child of a detached node you never attached: delete it from that
+  node first), and text inserts panic on functions, channels or shared types
+  passed as values. Both used to be
+  accepted and corrupted the document.
+- **Rolling upgrades:** ygo 1.51.0 and older cannot read V1 updates carrying
+  legacy JSON content written by this version. Upgrade all nodes before
+  relaying such documents in V1, or use V2.
+
+## v1.51.0
+
+**Who is affected:** anyone who applies *merged* updates one at a time with
+`ApplyUpdateV1` or `ApplyUpdateV2` — for example a custom persistence adapter
+that replays its stored log on load, or a peer that receives the output of
+`MergeUpdatesV1` / yjs `mergeUpdates`. If your adapter rebuilds documents by
+merging its whole log first (every adapter bundled with ygo does), you were not
+affected on load. Applications that compact a stored log by merging rows were
+affected, and so were yjs clients loading a snapshot such a document produced.
+
+**What went wrong.** Merging two updates from the same client that are not
+consecutive — say its 1st and 3rd edits — produces an update with a marker
+saying "clocks withheld here". ygo read that marker the wrong way round, as
+"the receiver already has these". So when the 2nd edit arrived, ygo believed it
+already had it and threw it away. Nothing reported an error; the document was
+just missing that edit, permanently. Worse, a snapshot of that document
+(`EncodeStateAsUpdateV1`) was malformed, and yjs threw a `TypeError` loading it.
+
+The websocket server can produce these merges itself: it batches persistence
+writes, and when several goroutines commit to one room concurrently their
+updates can reach the batcher out of order.
+
+**What changed.** Edits after the marker now wait until the missing range
+arrives, then apply — the same outcome as yjs, in either arrival order.
+
+**Upgrading.** No API change. Documents already rebuilt with an edit missing
+are not repaired by upgrading; if the original update log is still stored,
+reloading from it with this version restores the edit.
+
+**Also fixed: the V1/V2 format converters.** `UpdateV1ToV2` and
+`UpdateV2ToV1` only worked on a document's *first* update. Anything later — an
+ordinary incremental edit, or an update that only deletes — came back as an
+empty update, with no error. If you convert updates between formats at an edge
+(for example to talk to a V2 client), those edits never reached the other side.
+Both now produce exactly the bytes yjs's own converters do.
+
+**Also fixed: snapshots taken while an update is waiting.** When an update
+arrives before one it depends on, ygo holds it until the missing one shows up.
+`EncodeStateAsUpdateV1`/`V2` used to leave held updates out, so a snapshot
+taken in that window — a compaction, or a sync reply to a new peer — lost them
+for good. Snapshots now include them, byte for byte as yjs does. Thanks to
+@sjawhar for the report and reproduction.
 
 ## v1.50.0
 

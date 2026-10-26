@@ -1,6 +1,10 @@
 package crdt
 
-import "sort"
+import (
+	"cmp"
+	"slices"
+	"sort"
+)
 
 // DeleteRange is a contiguous range of deleted clocks for a single client.
 type DeleteRange struct {
@@ -12,16 +16,28 @@ type DeleteRange struct {
 // ranges per client. This compact representation is what travels on the wire.
 type DeleteSet struct {
 	clients map[ClientID][]DeleteRange
+	// order, when non-nil, lists clients in first-add order (Yjs DeleteSet's
+	// Map order; for a decoded set, encoded order), which deletes are applied
+	// and replayed in. Sets built from the store leave it nil.
+	order []ClientID
 }
 
 func newDeleteSet() DeleteSet {
 	return DeleteSet{clients: make(map[ClientID][]DeleteRange)}
 }
 
+// newOrderedDeleteSet returns a set that records client first-add order.
+func newOrderedDeleteSet() DeleteSet {
+	return DeleteSet{clients: make(map[ClientID][]DeleteRange), order: []ClientID{}}
+}
+
 // add records that item (client, clock) with the given length has been deleted.
 // Adjacent ranges are merged eagerly to keep the set compact.
 func (ds *DeleteSet) add(id ID, length int) {
-	ranges := ds.clients[id.Client]
+	ranges, seen := ds.clients[id.Client]
+	if !seen && ds.order != nil {
+		ds.order = append(ds.order, id.Client)
+	}
 	if len(ranges) > 0 {
 		last := &ranges[len(ranges)-1]
 		if last.Clock+last.Len == id.Clock {
@@ -46,8 +62,16 @@ func (ds *DeleteSet) IsDeleted(id ID) bool {
 	return false
 }
 
-// Merge incorporates all ranges from other into ds.
+// Merge incorporates all ranges from other into ds, appending other's new
+// clients after ds's (Yjs mergeDeleteSets order).
 func (ds *DeleteSet) Merge(other DeleteSet) {
+	if ds.order != nil {
+		for _, client := range other.orderedClients() {
+			if _, ok := ds.clients[client]; !ok {
+				ds.order = append(ds.order, client)
+			}
+		}
+	}
 	for client, ranges := range other.clients {
 		ds.clients[client] = append(ds.clients[client], ranges...)
 	}
@@ -88,6 +112,44 @@ func (ds *DeleteSet) Clients() []ClientID {
 	return out
 }
 
+// orderedClients returns ds's clients in first-add (for a decoded set,
+// encoded) order, then any unordered ones ascending. order holds each client
+// of ds.clients at most once.
+func (ds *DeleteSet) orderedClients() []ClientID {
+	out := make([]ClientID, len(ds.order), len(ds.clients))
+	copy(out, ds.order)
+	if len(out) == len(ds.clients) {
+		return out
+	}
+	listed := make(map[ClientID]struct{}, len(out))
+	for _, c := range out {
+		listed[c] = struct{}{}
+	}
+	var rest []ClientID
+	for c := range ds.clients {
+		if _, ok := listed[c]; !ok {
+			rest = append(rest, c)
+		}
+	}
+	slices.Sort(rest)
+	return append(out, rest...)
+}
+
+// retryPendingDs reapplies the store's parked deletions in the order Yjs
+// re-reads its encoded pending delete set: clients descending, ranges sorted.
+func retryPendingDs(txn *Transaction) {
+	store := txn.doc.store
+	pending := store.pendingDs
+	store.pendingDs = newDeleteSet()
+	pending.order = make([]ClientID, 0, len(pending.clients))
+	for c := range pending.clients {
+		pending.order = append(pending.order, c)
+		pending.sortAndCompact(c)
+	}
+	slices.SortFunc(pending.order, func(a, b ClientID) int { return cmp.Compare(b, a) })
+	store.pendingDs = pending.applyToPartial(txn)
+}
+
 // applyToPartial applies delete-set entries whose target items are
 // integrated, and returns a new DeleteSet containing entries whose
 // target items are absent (or the uncovered suffix of a range whose
@@ -103,14 +165,25 @@ func (ds *DeleteSet) Clients() []ClientID {
 // may under-park ranges spanning a gap.
 func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 	unresolvable := newDeleteSet()
-	for client, ranges := range ds.clients {
+	for _, client := range ds.orderedClients() {
+		ranges := ds.clients[client]
 		items := txn.doc.store.clients[client]
 		if len(items) == 0 {
 			// No items for this client — entire set of ranges is unresolvable.
-			unresolvable.clients[client] = append(unresolvable.clients[client], ranges...)
+			for _, r := range ranges {
+				if r.Len > 0 {
+					unresolvable.clients[client] = append(unresolvable.clients[client], r)
+				}
+			}
 			continue
 		}
 		for _, r := range ranges {
+			// A zero-length range deletes nothing (Yjs readAndApplyDeleteSet).
+			// Without this skip the loop below tombstones the item containing
+			// r.Clock, since no boundary split isolates an empty range.
+			if r.Len == 0 {
+				continue
+			}
 			// Split at the range boundaries so each overlapping item lies
 			// entirely inside [r.Clock, r.Clock+r.Len). Pre-#72 we deleted
 			// overlapping items whole, which wiped content outside the range
@@ -145,10 +218,9 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 				}
 				item.delete(txn)
 				// Search-marker invalidation for the remote delete-apply path
-				// (the v1.31.6 stale-cache class, #181). Remote applies run with
-				// txn.Local==true (transactInternal hardcodes it), so
-				// item.delete's own marker invalidation (guarded on !txn.Local)
-				// is dead here. The rendered index of the tombstoned item is not
+				// (the v1.31.6 stale-cache class, #181). item.delete clears only
+				// when !txn.Local, and Local is a caller-writable field, so do
+				// not rely on it here. The rendered index of the tombstoned item is not
 				// tracked by this delete-set walk, so a precise
 				// updateMarkerChanges(index, -len) is not available — we clear all
 				// markers, which is always safe (the next lookup repopulates via a

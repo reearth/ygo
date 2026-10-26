@@ -290,7 +290,7 @@ func (s *SyncClient) Doc() *Doc {
 	return s.doc
 }
 
-// SetOnStatus registers o to receive this SyncClient's connection-lifecycle
+// SetOnStatus registers observer to receive this SyncClient's connection-lifecycle
 // notifications from here on (no replay of states already reported before
 // this call, mirroring provider/client.Client.OnStatus's own no-replay
 // contract). A later call replaces the previous observer rather than adding
@@ -298,9 +298,11 @@ func (s *SyncClient) Doc() *Doc {
 // matching the "thin binding" scope this type exists for; an app that wants
 // to fan a status out to multiple listeners can do so on its own side of the
 // boundary. Passing nil detaches the current observer.
-func (s *SyncClient) SetOnStatus(o SyncStatusObserver) {
+// The parameter must not be named o: gobind's generated JNI code declares
+// the receiver's refnum as a local o in every method.
+func (s *SyncClient) SetOnStatus(observer SyncStatusObserver) {
 	s.statusMu.Lock()
-	s.observer = o
+	s.observer = observer
 	s.statusMu.Unlock()
 }
 
