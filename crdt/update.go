@@ -41,6 +41,12 @@ var ErrInvalidUpdate = errors.New("crdt: invalid update")
 func EncodeStateAsUpdateV1(doc *Doc, sv StateVector) []byte {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
+	return encodeStateAsUpdateV1Locked(doc, sv)
+}
+
+// encodeStateAsUpdateV1Locked is EncodeStateAsUpdateV1's body, for a caller
+// that holds doc.mu.
+func encodeStateAsUpdateV1Locked(doc *Doc, sv StateVector) []byte {
 	return encodeV1Locked(doc, sv)
 }
 

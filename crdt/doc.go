@@ -182,6 +182,11 @@ type Doc struct {
 	// Deleted=false on items it captured — which requires their original
 	// Content to still be present. Mutated under d.mu.
 	undoManagerCount int
+
+	// updateLogs are the open update logs (OpenUpdateLog). A committing
+	// transaction appends its update to each under d.mu; a closed log is
+	// dropped at the next commit.
+	updateLogs []*UpdateLog
 }
 
 // ClientID returns the document's client identifier (read-only after creation).
@@ -449,10 +454,14 @@ func (d *Doc) GetText(name string) *YText {
 // Returns nil only if there is nothing to fire (no observers of any kind).
 func buildPhase2(d *Doc, txn *Transaction) func() {
 	// Encode the incremental update and snapshot observer slices while still
-	// holding the lock so we get a consistent view.
+	// holding the lock so we get a consistent view. The update logs take the
+	// update here, under the lock, so they hold updates in commit order.
 	var updateBytes []byte
-	if len(d.onUpdate) > 0 {
+	if d.wantsUpdateBytes() {
 		updateBytes = encodeV1Locked(d, txn.beforeState)
+		if len(d.updateLogs) > 0 {
+			d.appendUpdateLogs(updateBytes, txn.Origin)
+		}
 	}
 
 	// Snapshot per-type observer closures while the write lock is held.
@@ -646,6 +655,12 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			panic(r)
 		}
 	}()
+
+	// An update log opened (or Reset) since the last commit records the
+	// state as it stands before fn, under the lock: its base.
+	if len(d.updateLogs) > 0 {
+		d.recordUpdateLogBases()
+	}
 
 	retErr = fn(txn)
 
@@ -999,6 +1014,7 @@ func (d *Doc) Destroy() {
 	defer d.mu.Unlock()
 	d.onUpdate = nil
 	d.onAfterTxn = nil
+	d.updateLogs = nil
 	d.share = make(map[string]sharedType)
 	d.store = newStructStore()
 }

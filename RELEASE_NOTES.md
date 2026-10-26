@@ -1,3 +1,31 @@
+## v1.55.0
+
+**Who is affected: nobody, unless you open an update log.** This release adds
+`Doc.OpenUpdateLog` to `crdt`. A document with no open log commits exactly as
+before.
+
+**Why.** `OnUpdate` observers run after the transaction has released the
+document lock, so another goroutine can commit before they run. When two
+transactions commit close together, their observers can run in either order:
+the second commit's observer can run while the first commit's has not yet
+started. An application that renders or classifies each update against a
+copy of the document cannot tell, from `OnUpdate` alone, which update came
+first, or whether a later observer has already caught its copy up.
+
+**What it gives.** An `UpdateLog` receives each committed transaction's update
+(the same bytes its `OnUpdate` observers are handed) and origin while the
+document lock is still held. An observer that calls `Drain` therefore finds
+its own transaction's update, after every update committed before it,
+whatever order the observers run in. The first transaction to commit after
+the log opens also records the document's whole state just before it, as a V1
+update; applying that base and then each logged update, in order, reproduces
+the document as it stood after each commit. `Pending` counts what no `Drain`
+has taken, `Reset` hands that over and starts again from a fresh base (for a
+reader whose copy failed to apply an update), and `Close` stops logging.
+
+A log keeps everything until it is drained, so drain it (from an `OnUpdate`
+observer, typically) or close it.
+
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a
