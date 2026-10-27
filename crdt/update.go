@@ -587,6 +587,9 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 	unresolvableDs := ds.applyToPartial(txn)
 	if len(unresolvableDs.clients) > 0 {
+		if err := checkParkedDeletes(txn.doc, unresolvableDs); err != nil {
+			return err
+		}
 		txn.doc.store.pendingDs.Merge(unresolvableDs)
 	}
 

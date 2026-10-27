@@ -135,19 +135,59 @@ func (ds *DeleteSet) orderedClients() []ClientID {
 	return append(out, rest...)
 }
 
-// retryPendingDs reapplies the store's parked deletions in the order Yjs
-// re-reads its encoded pending delete set: clients descending, ranges sorted.
+// retryPendingDs reapplies the store's parked deletions whose structs have
+// arrived since they were parked, in the order Yjs re-reads its encoded
+// pending delete set: clients descending, ranges sorted.
+//
+// A client's ranges are retried only once the store's next clock for it has
+// passed its lowest parked range. A retry tries every range below that clock
+// and parks what lies at or past it, so until the clock moves none of the
+// client's ranges can apply, and an apply that brings nothing for a client
+// costs nothing for its parked ranges, however many there are. Without the
+// gate every apply, in a document holding a client's ranges nothing resolves,
+// sorted and copied all of them: with 100,000 parked ranges one keystroke
+// allocated about 1.6 MB.
 func retryPendingDs(txn *Transaction) {
 	store := txn.doc.store
-	pending := store.pendingDs
-	store.pendingDs = newDeleteSet()
-	pending.order = make([]ClientID, 0, len(pending.clients))
-	for c := range pending.clients {
-		pending.order = append(pending.order, c)
-		pending.sortAndCompact(c)
+	var ready DeleteSet
+	for client, ranges := range store.pendingDs.clients {
+		if len(ranges) > 0 && store.NextClock(client) > lowestClock(ranges) {
+			if ready.clients == nil {
+				ready = newDeleteSet()
+			}
+			ready.clients[client] = ranges
+		}
 	}
-	slices.SortFunc(pending.order, func(a, b ClientID) int { return cmp.Compare(b, a) })
-	store.pendingDs = pending.applyToPartial(txn)
+	if ready.clients == nil {
+		return
+	}
+	kept := store.pendingDs
+	store.pendingDs = newDeleteSet()
+	ready.order = make([]ClientID, 0, len(ready.clients))
+	for c := range ready.clients {
+		ready.order = append(ready.order, c)
+		ready.sortAndCompact(c)
+	}
+	slices.SortFunc(ready.order, func(a, b ClientID) int { return cmp.Compare(b, a) })
+	still := ready.applyToPartial(txn)
+	for client, ranges := range kept.clients {
+		if _, retried := ready.clients[client]; !retried && len(ranges) > 0 {
+			still.clients[client] = ranges
+		}
+	}
+	store.pendingDs = still
+}
+
+// lowestClock is the lowest clock the ranges name. They are sorted wherever
+// they come from a merge or a retry, so this reads the first; it walks them
+// rather than trusting that, since the cost is the client's own ranges once
+// per apply and a wrong answer would hold a range back for good.
+func lowestClock(ranges []DeleteRange) uint64 {
+	lowest := ranges[0].Clock
+	for _, r := range ranges[1:] {
+		lowest = min(lowest, r.Clock)
+	}
+	return lowest
 }
 
 // applyToPartial applies delete-set entries whose target items are
@@ -242,4 +282,73 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 		}
 	}
 	return unresolvable
+}
+
+// checkParkedDeletes refuses an update whose delete ranges, ds, the store
+// cannot apply yet, when parking them would grow the parked delete ranges past
+// the cap the pending queue has for parked items (WithMaxPendingItems): the
+// same ErrInvalidUpdate, before anything is parked, that an update parking too
+// many items is refused with. An update that adds no range is never refused,
+// so a delete set a peer sends again, as its sync does after a reconnect, or
+// ranges that join parked ones, pass even on a document that already holds
+// more than the cap.
+func checkParkedDeletes(doc *Doc, ds DeleteSet) error {
+	pending := doc.store.pendingDs
+	after := parkedDeleteRangesAfter(pending, ds)
+	if after <= doc.maxPendingItemsLimit() {
+		return nil
+	}
+	before := 0
+	for _, ranges := range pending.clients {
+		before += len(ranges)
+	}
+	if after <= before {
+		return nil
+	}
+	return wrapUpdateErr(ErrInvalidUpdate)
+}
+
+// parkedDeleteRangesAfter is how many delete ranges pending would hold once ds
+// is merged into it: Merge sorts each client's ranges and joins those that
+// overlap or touch, so ranges ds names again, or that fill the gap between two
+// parked ranges, add nothing or take ranges away.
+func parkedDeleteRangesAfter(pending, ds DeleteSet) int {
+	n := 0
+	for client, ranges := range pending.clients {
+		if _, merged := ds.clients[client]; !merged {
+			n += len(ranges)
+		}
+	}
+	for client, add := range ds.clients {
+		n += mergedRangeCount(pending.clients[client], add)
+	}
+	return n
+}
+
+// mergedRangeCount is how many ranges sortAndCompact leaves of have and add
+// together. Both are sorted here, on copies, so the count costs what they hold
+// and changes neither.
+func mergedRangeCount(have, add []DeleteRange) int {
+	byClock := func(a, b DeleteRange) int { return cmp.Compare(a.Clock, b.Clock) }
+	have, add = slices.Clone(have), slices.Clone(add)
+	slices.SortFunc(have, byClock)
+	slices.SortFunc(add, byClock)
+	count, end := 0, uint64(0)
+	for i, j := 0, 0; i < len(have) || j < len(add); {
+		var r DeleteRange
+		if j == len(add) || (i < len(have) && have[i].Clock <= add[j].Clock) {
+			r = have[i]
+			i++
+		} else {
+			r = add[j]
+			j++
+		}
+		if count > 0 && end >= r.Clock {
+			end = max(end, r.Clock+r.Len)
+			continue
+		}
+		count++
+		end = r.Clock + r.Len
+	}
+	return count
 }

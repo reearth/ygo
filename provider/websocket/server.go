@@ -1211,8 +1211,9 @@ type Server struct {
 
 	// MaxPendingItems caps the per-document pending-items queue depth. The
 	// queue holds items whose dependencies have not yet arrived, waiting for
-	// out-of-order delivery to resolve. Zero or negative uses the crdt default
-	// (100,000). See crdt.WithMaxPendingItems and issue #46.
+	// out-of-order delivery to resolve. It caps, separately, the delete ranges
+	// parked waiting for the structs they delete. Zero or negative uses the
+	// crdt default (100,000). See crdt.WithMaxPendingItems and issue #46.
 	MaxPendingItems int
 
 	// HandshakeTimeout caps how long a peer may stay connected without sending
@@ -1733,10 +1734,9 @@ func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	if s.MaxRooms > 0 && len(s.rooms) >= s.MaxRooms {
 		return nil, false, ErrTooManyRooms
 	}
-	docOpts := []crdt.DocOption{}
-	if s.MaxPendingItems > 0 {
-		docOpts = append(docOpts, crdt.WithMaxPendingItems(s.MaxPendingItems))
-	}
+	// The room's document loads its stored state with the pending cap lifted,
+	// and loadRoom sets MaxPendingItems once the state is in (see there).
+	docOpts := []crdt.DocOption{crdt.WithMaxPendingItems(math.MaxInt)}
 	aw := awareness.New(0)
 	if s.MaxAwarenessBytesPerRoom > 0 {
 		aw.SetMaxBytes(s.MaxAwarenessBytesPerRoom)
@@ -1801,6 +1801,12 @@ func (s *Server) releaseInflight(rm *room) {
 // leak that administrative CloseRoom cannot even clear (#182 follow-up).
 func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 	loadErr := s.loadRoomDoc(r, name)
+	// The stored state loaded with the pending cap lifted: it carries what was
+	// parked when it was written, which can be more than MaxPendingItems, and a
+	// room whose state is refused never loads. Peers' updates, the
+	// OnLoadDocument hook's and every later apply are capped: nothing else
+	// touches r.doc before ready closes.
+	r.doc.SetMaxPendingItems(s.MaxPendingItems)
 	// #60 — fire OnLoadDocument AFTER persistence bootstrap but BEFORE the
 	// persistence worker starts, so a hook returning an error fails room creation
 	// cleanly. Runs off-lock now (#182), so a slow hook no longer stalls other

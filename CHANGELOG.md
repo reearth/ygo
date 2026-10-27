@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.0] — 2026-10-27
+
+### Fixed
+
+- **`crdt`: a remote apply no longer pays for every parked delete range.**
+  Every remote apply retried every parked delete range, re-sorting and copying
+  each range of a client the store does not hold, so one keystroke allocated
+  about 1.6 MB with 100,000 ranges parked. A client's parked ranges are now
+  retried only once the store's next clock for it has passed the lowest of
+  them, since until then none of them can apply: an apply that brings nothing
+  for a client costs nothing for its parked ranges, and a parked range still
+  applies, part by part, as the structs it names arrive.
+
+### Changed
+
+- **`crdt`: parked delete ranges are capped as parked items are.** Nothing
+  bounded the delete ranges parked waiting for their structs, so a peer could
+  grow them without limit with delete sets naming clocks of a client nobody
+  holds, taxing every later apply in the room and surviving into every
+  snapshot. `WithMaxPendingItems` (and `Server.MaxPendingItems`) now also caps
+  them, counted separately from parked items with the same default of 100,000:
+  an update whose delete set would grow the parked ranges past the cap returns
+  `ErrInvalidUpdate` before it parks anything, at the point and in the way an
+  update that would park too many items is refused. The count is taken after
+  the merge, and an update that adds no range is never refused, so a delete set
+  a peer sends again, or ranges that join parked ones, pass. An honest peer
+  deletes only what it holds and sends a struct before or with any delete of
+  it, so its deletes park only while its updates arrive out of order, and only
+  until the structs they name do.
+- **`crdt`: `Doc.SetMaxPendingItems`, and `provider/websocket` loads a room's
+  stored state with the pending cap lifted.** A stored state carries what was
+  parked when it was written, which can be more than the cap, so a document
+  capped before such a state arrives refuses it, and the room never loads. The
+  server now makes each room's document with the cap lifted and sets
+  `MaxPendingItems` with `SetMaxPendingItems` once the stored state is in,
+  before the `OnLoadDocument` hook and before any peer's update. A document
+  over the cap, whether from a loaded state or a lowered cap, is refused only
+  growth of what it has parked, items and delete ranges alike, so it still
+  applies an update whose items resolve within it.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

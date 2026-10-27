@@ -95,22 +95,45 @@ func WithCollectionID(id string) DocOption {
 }
 
 // defaultMaxPendingItems is the default cap on items parked in the per-doc
-// pending queue waiting for out-of-order dependencies. It is smaller than the
-// decoder's per-update item limit (maxV2Items, 1<<20), so one legal update
+// pending queue waiting for out-of-order dependencies, and separately on the
+// delete ranges parked waiting for the structs they delete. It is smaller than
+// the decoder's per-update item limit (maxV2Items, 1<<20), so one legal update
 // applied to a document that lacks the state it depends on can exceed it. See
 // WithMaxPendingItems and #46.
 const defaultMaxPendingItems = 100_000
 
 // WithMaxPendingItems caps the per-doc pending queue depth — items parked
-// waiting for out-of-order dependencies. Once the cap is reached, further
-// items that would be parked cause ApplyUpdate to return ErrInvalidUpdate.
-// Zero or negative uses the default (100,000).
+// waiting for out-of-order dependencies — and, separately, the delete ranges
+// parked waiting for the structs they delete (PendingStats.DeleteRanges).
+// Once the cap is reached, further items that would be parked cause
+// ApplyUpdate to return ErrInvalidUpdate, and so does an update whose delete
+// set would grow the parked ranges past the cap; ranges an update names again,
+// or that join parked ones, count once, and an update that adds no range is
+// never refused. Zero or negative uses the default (100,000). To load stored
+// state, which can hold more than the cap, see SetMaxPendingItems.
 //
 // This is a defence against a malicious peer crafting an update full of
 // far-future-clock items, which would otherwise grow the pending queue
-// without bound. See issue #46.
+// without bound (issue #46), or a run of updates whose delete sets name clocks
+// of a client nobody holds, which would otherwise grow the pending deletes
+// without bound. An honest peer deletes only what it holds and sends a struct
+// before or with any delete of it, so its deletes park only while its updates
+// arrive out of order, and only until the structs they name do.
 func WithMaxPendingItems(n int) DocOption {
 	return func(d *Doc) { d.maxPendingItems = n }
+}
+
+// SetMaxPendingItems sets the cap of WithMaxPendingItems on a document already
+// made, for an owner that loads stored state first and caps what arrives after
+// it. A stored state carries what was parked when it was written
+// (EncodeStateAsUpdateV1 includes it), which can be more than the cap, so a
+// document capped before such a state arrives refuses it. Load it with the cap
+// lifted (WithMaxPendingItems(math.MaxInt)), then set the cap here. It takes
+// the document lock.
+func (d *Doc) SetMaxPendingItems(n int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.maxPendingItems = n
 }
 
 // updateSub pairs a unique subscription ID with its callback so that

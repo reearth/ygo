@@ -27,10 +27,15 @@ type pendingBudget struct {
 	groupsKnown bool
 }
 
+// newPendingBudget starts the budget with what the pending cap leaves for
+// doc's parked items, and no less than none: a document can hold more parked
+// items than its cap when it loaded a stored state with the cap lifted
+// (SetMaxPendingItems), and such a document still applies an update whose
+// items resolve within it. Only growth of the parked items is refused.
 func newPendingBudget(doc *Doc, initial StateVector, update []byte, v2 bool) pendingBudget {
 	remaining := doc.maxPendingItemsLimit()
 	if doc.store.pending != nil {
-		remaining -= len(doc.store.pending.items)
+		remaining = max(remaining-len(doc.store.pending.items), 0)
 	}
 	return pendingBudget{initial: initial, update: update, remaining: remaining, v2: v2}
 }
@@ -56,9 +61,6 @@ func (b *pendingBudget) scanner() *pendingScanner {
 func (b *pendingBudget) check(count int) error {
 	if b.checked || count < b.remaining {
 		return nil
-	}
-	if b.remaining < 0 {
-		return ErrInvalidUpdate
 	}
 	if !b.groupsKnown {
 		v2, rest := b.v2Start, b.v2Rest
