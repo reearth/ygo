@@ -3,10 +3,20 @@ package crdt
 // SharedType is the public interface satisfied by every exported CRDT type
 // (YArray, YMap, YText, YXmlFragment, …). It exists so external callers can
 // name the element type of NewUndoManager's scope slice
-// (`[]crdt.SharedType{txt, arr}`). Its methods are unexported, so only ygo's own
-// types can satisfy it — external code can pass and hold values, but not
-// implement it. It is a type alias for the internal sharedType, so existing
-// in-package call sites are unaffected.
+// (`[]crdt.SharedType{txt, arr}`) and of Transaction.ChangedTypes, and walk a
+// type's containers with Parent. Its other methods are unexported, so only
+// ygo's own types can satisfy it — external code can pass and hold values, but
+// not implement it. It is a type alias for the internal sharedType, so
+// existing in-package call sites are unaffected.
+//
+// Parent returns the type that contains this one, or nil for a root, a
+// detached type, or a type whose container is a root not yet opened by name
+// or a type of a class ygo does not know. It does not take the document lock.
+// Walking it inside a Transact callback is safe. OnAfterTransaction observers
+// run after the transaction released the lock, so walking Parent there, or
+// anywhere else outside a Transact callback, races any other goroutine
+// writing the document; it is safe there only in a document no other
+// goroutine writes, for example a copy one goroutine applies updates to.
 type SharedType = sharedType
 
 // sharedType is implemented by every exported CRDT type (YArray, YMap, YText).
@@ -22,6 +32,10 @@ type sharedType interface {
 	// This pattern eliminates the data race between concurrent Observe() calls
 	// and the observer fire loop (N-C1).
 	prepareFire(txn *Transaction, keysChanged map[string]struct{}) func()
+	// Parent returns the shared type that contains this one (see SharedType
+	// and abstractType.Parent, also for the locking rules). Exported so it can
+	// be called on a SharedType value.
+	Parent() SharedType
 }
 
 // deepSub pairs a unique subscription ID with an ObserveDeep callback.
@@ -134,6 +148,37 @@ type prelimFlusher interface {
 // parents, so Y.applyUpdate crashes on such an update). (#yxml-wire)
 func (t *abstractType) detached() bool {
 	return t.item == nil && t.name == ""
+}
+
+// Parent returns the shared type that contains this one: the YXmlElement a
+// YXmlText is a child of, the YMap a nested YArray is a value of, and so on.
+// It returns nil for a root type (Doc.GetXmlFragment, Doc.GetMap, …), for a
+// detached type that is not yet inserted into a document, and for a type
+// whose container ygo holds as an internal placeholder: a root nobody has
+// opened by name yet, or a nested type of a class ygo does not know (a Yjs
+// YXmlHook, say). Once that root is opened by name, Parent returns the type
+// its Get* returned. Otherwise it matches Yjs `type.parent`. A Parent walk
+// ends at nil: past a root, or below a placeholder.
+//
+// The container link is set when the type is integrated and never cleared:
+// a type deleted from the document, also one whose container item the
+// garbage collector has since freed, still returns the type it was deleted
+// from.
+//
+// Parent does not take the document lock. Walking it inside a Transact
+// callback is safe. OnAfterTransaction observers run after the transaction
+// released the lock, so walking Parent there, or anywhere else outside a
+// Transact callback, races any other goroutine writing the document; it is
+// safe there only in a document no other goroutine writes, for example a copy
+// one goroutine applies updates to.
+func (t *abstractType) Parent() SharedType {
+	if t.item == nil || t.item.Parent == nil {
+		return nil
+	}
+	if _, ok := t.item.Parent.owner.(*rawType); ok {
+		return nil
+	}
+	return t.item.Parent.owner
 }
 
 // firstLiveFromStart returns the first non-deleted item reachable from t.start

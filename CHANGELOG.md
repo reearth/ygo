@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.0] — 2026-10-28
+
+### Added
+
+- **`crdt`: `(*Transaction).ChangedTypes()` and `Parent()` on every shared
+  type.** `ChangedTypes` returns every shared type an item was integrated into
+  or deleted from in the transaction, once per type and in no particular
+  order. It is not the key set of Yjs `transaction.changed`: it also names the
+  types the transaction itself created, the types it deleted, and types
+  deleted earlier that a concurrent remote change still writes into, all of
+  which Yjs leaves out, so a caller that wants only live types that existed
+  before the transaction filters those entries out (a type whose own item is
+  deleted no longer appears among its `Parent()`'s children or values).
+  `Parent()`, on every shared type and on the `SharedType` interface, returns
+  the type that contains it, as Yjs `type.parent` does; a deleted type keeps
+  it also after the garbage collector freed its container item. Neither hands
+  out ygo's internal placeholder for a root nobody has opened by name or for a
+  nested type of a class ygo does not know (a Yjs `YXmlHook`): `ChangedTypes`
+  leaves such a type out, and `Parent()` returns nil for a root, a detached
+  type, or a type whose container is such a placeholder. Once the root is
+  opened by name, `Parent()` and later transactions' `ChangedTypes` name the
+  type the `Get*` call returned. Together they let an owner that applies
+  remote updates learn which nested types an apply changed, and which
+  top-level children they sit in, without a subscription on every node, for
+  example to re-render only the blocks of a document an update touched.
+  Neither takes the document lock: reading `ChangedTypes` from an
+  `OnAfterTransaction` observer, which runs after the transaction released the
+  lock, is safe, but walking `Parent()` there, or anywhere else outside a
+  `Transact` callback, races any other goroutine writing the document. It is
+  safe inside a `Transact` callback, or in an observer of a document no other
+  goroutine writes, for example a copy one goroutine applies updates to.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
