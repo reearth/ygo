@@ -1,3 +1,24 @@
+## v1.54.1
+
+**Who is affected: anyone who observes a `YText` with `Observe` (a
+`YXmlText` too) while its formats can hold maps or slices, as link, comment
+and colour marks from y-prosemirror, Tiptap or Quill do.**
+
+The next edit of such a text, local or applied from a peer, panicked while
+the commit built the observer's delta: "comparing uncomparable type
+map[string]interface {}". The panic left the document lock held, so every
+later call on that document, from any goroutine, blocked forever. One peer's
+edit was enough to hang a server's room.
+
+- The delta now compares format values with `reflect.DeepEqual`, as the rest
+  of the formatting code does, so a map- or slice-valued format diffs like
+  any other.
+- A panic while a committed transaction's observer events are built now
+  releases the document lock before it reaches the caller, as a panic in the
+  `Transact` callback already did. No observer fires for that transaction.
+
+No API or wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

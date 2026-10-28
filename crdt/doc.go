@@ -627,7 +627,13 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 				phase2 = buildPhase2(d, txn)
 			}()
 		} else {
-			phase2 = buildPhase2(d, txn)
+			// A panic while the events are built (a type's prepareFire) must
+			// not escape with d.mu held: it is re-raised below, after the
+			// unlock, like a panic in fn, and no observer fires.
+			func() {
+				defer func() { r = recover() }()
+				phase2 = buildPhase2(d, txn)
+			}()
 		}
 
 		// Yjs cleans up the format markers a remote change left redundant
@@ -755,6 +761,9 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 //   - If fn panics and an observer callback also panics during the partial
 //     firing, the observer's panic reaches the caller and the original
 //     fn panic value is lost.
+//   - If building the observer events panics after fn returned (a type's
+//     event preparation, under the lock), d.mu is released too, no observer
+//     fires, and that panic reaches the caller.
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 	_ = d.transactInternal(context.Background(), func(t *Transaction) error {
 		fn(t)
