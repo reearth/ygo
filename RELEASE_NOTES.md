@@ -1,3 +1,33 @@
+## v1.55.0
+
+**Who is affected: owners that apply remote updates and want to know where in
+the document an update landed**, for example a server that re-renders only
+the top-level blocks of a ProseMirror document an update touched.
+
+Yjs exposes `transaction.changed` and `type.parent`; ygo kept both private, so
+the only way to learn which part of a document an apply changed was a
+subscription on every node, kept up to date as nodes came and went.
+
+- **`(*Transaction).ChangedTypes()`** returns every shared type an item was
+  integrated into or deleted from in the transaction, once per type. Unlike
+  Yjs `transaction.changed`, it also names the types the transaction created,
+  the types it deleted, and types deleted earlier that a concurrent remote
+  change still writes into; a caller that wants only live, pre-existing types
+  filters those out, since a type whose own item is deleted no longer appears
+  among its `Parent()`'s children or values.
+- **`Parent()`**, on every shared type and on the `SharedType` interface,
+  returns the type that contains it, or nil for a root or a detached type, as
+  Yjs `type.parent` does. A deleted type keeps it after garbage collection.
+- Neither hands out ygo's internal placeholder for a root nobody has opened by
+  name or for a type of a class ygo does not know (a Yjs `YXmlHook`).
+- Neither takes the document lock. Reading `ChangedTypes()` in an
+  `OnAfterTransaction` observer is safe; walking `Parent()` there races any
+  other goroutine writing the document, and is safe inside a `Transact`
+  callback or on a document only one goroutine writes.
+
+No wire format changes. `SharedType` gains the exported method `Parent()`; its
+other methods stay unexported, so no type outside ygo implemented it.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully
