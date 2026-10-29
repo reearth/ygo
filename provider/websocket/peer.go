@@ -37,7 +37,7 @@ type peer struct {
 	closeCode         int           // #104: WS close code queued via enqueueClose (0 = none)
 	closeReason       string        // #104: WS close reason accompanying closeCode
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
-	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
+	readOnly          bool          // #59: sync updates and awareness do not change the room; awareness gets an empty response
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
 	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
 
@@ -48,6 +48,11 @@ type peer struct {
 	// per-operation guards in broadcast/write/runWriter.
 	disconnectOnce sync.Once
 }
+
+// readOnlyAwarenessResponse is a complete native awareness frame with no
+// client states. It keeps a read-only Hocuspocus provider connected without
+// allocating or queuing its untrusted payload.
+var readOnlyAwarenessResponse = [...]byte{byte(msgAwareness), 1, 0}
 
 // handleMessage decodes the outer message type and dispatches accordingly.
 func (p *peer) handleMessage(data []byte) {
@@ -98,14 +103,17 @@ func (p *peer) handleMessage(data []byte) {
 		p.sendSync(reply)
 
 	case msgAwareness:
-		if p.readOnly {
-			return // #59: read-only peers' inbound awareness is dropped.
-		}
 		// Awareness payload is VarBytes-wrapped (y-websocket protocol).
 		awBytes, err := dec.ReadVarBytes()
 		if err != nil {
 			p.server.log().Debug("discarded malformed awareness frame",
 				"room", p.roomName, "err", err)
+			return
+		}
+		if p.readOnly {
+			// A viewer cannot change shared awareness. This bounded response
+			// keeps its provider connected without retaining the input.
+			p.write(readOnlyAwarenessResponse[:])
 			return
 		}
 		p.trackAwarenessClients(awBytes)
@@ -671,7 +679,7 @@ func (p *peer) handleDisconnect() {
 		if err := p.room.awareness.ApplyUpdate(removalBytes, nil); err != nil {
 			p.server.log().Warn("apply removal awareness failed", "room", p.roomName, "err", err)
 		}
-		p.broadcastAwarenessFromRoom(removalBytes)
+		p.broadcastAwareness(removalBytes)
 	})
 }
 
@@ -758,17 +766,10 @@ func (p *peer) broadcastSync(syncMsg []byte) {
 	}), true)
 }
 
-// broadcastAwareness sends an awareness message to all OTHER peers in the room.
+// broadcastAwareness sends an awareness update to every current room peer.
+// An accepted inbound update still has its sender in the room; a disconnect
+// removal has already removed its source.
 func (p *peer) broadcastAwareness(awMsg []byte) {
-	p.broadcast(encoding.EncodeBytes(func(enc *encoding.Encoder) {
-		enc.WriteVarUint(msgAwareness)
-		enc.WriteVarBytes(awMsg)
-	}), true)
-}
-
-// broadcastAwarenessFromRoom sends an awareness message to ALL peers (called
-// from disconnect handler which has already removed itself from the room).
-func (p *peer) broadcastAwarenessFromRoom(awMsg []byte) {
 	p.broadcast(encoding.EncodeBytes(func(enc *encoding.Encoder) {
 		enc.WriteVarUint(msgAwareness)
 		enc.WriteVarBytes(awMsg)

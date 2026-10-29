@@ -9,6 +9,7 @@ package websocket
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	gws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 
+	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/encoding"
 )
 
@@ -61,6 +63,88 @@ func TestHocuspocusFraming_RoundTrip(t *testing.T) {
 	require.Equal(t, room, name, "server frames are docName-prefixed")
 	_, err = dec.ReadVarUint() // a valid message tag follows
 	require.NoError(t, err)
+}
+
+func TestHocuspocusFraming_AwarenessEchoesToSender(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		readOnly bool
+	}{
+		{name: "read-write"},
+		{name: "read-only", readOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewServer()
+			srv.HocuspocusFraming = true
+			srv.Authorize = func(*http.Request) (ConnectionConfig, bool) {
+				return ConnectionConfig{ReadOnly: tc.readOnly}, true
+			}
+			ts := httptest.NewServer(srv)
+			defer ts.Close()
+			defer func() { _ = srv.Shutdown(context.Background()) }()
+
+			room := "doc-room"
+			c := dialRoomInternal(t, ts, room)
+			drainHandshake := func(conn *gws.Conn) {
+				t.Helper()
+				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				for range 3 {
+					_, data, err := conn.ReadMessage()
+					require.NoError(t, err)
+					dec := encoding.NewDecoder(data)
+					name, err := dec.ReadVarString()
+					require.NoError(t, err)
+					require.Equal(t, room, name)
+				}
+				_ = conn.SetReadDeadline(time.Time{})
+			}
+			drainHandshake(c)
+			var other *gws.Conn
+			if tc.readOnly {
+				other = dialRoomInternal(t, ts, room)
+				drainHandshake(other)
+			}
+
+			sender := awareness.New(42)
+			sender.SetLocalState(map[string]any{"cursor": float64(5)})
+			require.NoError(t, c.WriteMessage(gws.BinaryMessage, encoding.EncodeBytes(func(enc *encoding.Encoder) {
+				enc.WriteVarString(room)
+				enc.WriteVarUint(msgAwareness)
+				enc.WriteVarBytes(sender.EncodeUpdate(nil))
+			})))
+
+			_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+			_, data, err := c.ReadMessage()
+			require.NoError(t, err)
+			_ = c.SetReadDeadline(time.Time{})
+			dec := encoding.NewDecoder(data)
+			name, err := dec.ReadVarString()
+			require.NoError(t, err)
+			require.Equal(t, room, name)
+			kind, err := dec.ReadVarUint()
+			require.NoError(t, err)
+			require.Equal(t, msgAwareness, kind)
+			update, err := dec.ReadVarBytes()
+			require.NoError(t, err)
+
+			received := awareness.New(99)
+			require.NoError(t, received.ApplyUpdate(update, nil))
+			if tc.readOnly {
+				require.Empty(t, received.GetStates(), "a read-only peer receives an empty awareness response")
+			} else {
+				state, found := received.GetStates()[42]
+				require.True(t, found)
+				require.InEpsilon(t, float64(5), state.State["cursor"], 1e-9)
+			}
+
+			if other != nil {
+				_ = other.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+				_, _, err := other.ReadMessage()
+				require.Error(t, err, "a read-only awareness update must not reach another peer")
+				_ = other.SetReadDeadline(time.Time{})
+			}
+		})
+	}
 }
 
 // TestInbandAuth_Authenticated_ReadWrite verifies the success path of the

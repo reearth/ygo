@@ -1,3 +1,19 @@
+## v1.54.1
+
+**Who is affected: a ygo server with an idle `@hocuspocus/provider` editor or
+viewer.**
+
+The provider sends an awareness renewal every 15 seconds. It reconnects after
+30 seconds without a received message. ygo sent a read-write editor's renewal
+only to other peers and dropped a read-only viewer's renewal, so a lone peer
+received nothing after its initial sync.
+
+ygo now sends each valid awareness update from a read-write peer to every peer,
+including the sender. A read-only peer still cannot change shared awareness; it
+gets an empty awareness response, without retaining its input, to keep its
+provider connected. This matches Hocuspocus liveness. No API or wire format
+changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

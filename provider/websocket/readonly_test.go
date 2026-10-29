@@ -125,8 +125,9 @@ func TestReadOnly_SyncStep1StillAnswered(t *testing.T) {
 		"read-only peer's SyncStep1 must be answered with SyncStep2")
 }
 
-// #59 — a read-only peer's inbound awareness must NOT be recorded server-side.
-func TestReadOnly_InboundAwarenessDropped(t *testing.T) {
+// #59 — a read-only peer's inbound awareness returns an empty response and is
+// not recorded server-side.
+func TestReadOnly_InboundAwarenessGetsEmptyResponseButIsNotRecorded(t *testing.T) {
 	srv := ygws.NewServer()
 	srv.Authorize = func(*http.Request) (ygws.ConnectionConfig, bool) {
 		return ygws.ConnectionConfig{ReadOnly: true}, true
@@ -139,7 +140,11 @@ func TestReadOnly_InboundAwarenessDropped(t *testing.T) {
 
 	const roClient = uint64(7777)
 	sendAwareness(t, conn, makeAwareness(roClient))
-	time.Sleep(100 * time.Millisecond)
+	outerType, payload := readOne(t, conn, 2*time.Second)
+	require.Equal(t, uint64(1), outerType)
+	received := awareness.New(99)
+	require.NoError(t, received.ApplyUpdate(payload, nil))
+	assert.Empty(t, received.GetStates(), "read-only peer must receive an empty awareness response")
 
 	aw, ok := srv.GetAwareness("room")
 	require.True(t, ok)

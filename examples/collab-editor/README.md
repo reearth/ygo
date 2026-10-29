@@ -126,21 +126,23 @@ MSB as continuation flag).
 
 ### Awareness protocol
 
-Awareness messages carry **ephemeral** state — it is not stored in the CRDT
-document and is not replayed to new joiners. Each peer maintains a local state
-object:
+Awareness messages carry **ephemeral** state. They are not stored in the CRDT
+document or durable persistence. A peer joining a resident room receives its
+in-memory awareness snapshot; a room eviction or server restart loses it. Each
+peer maintains a local state object:
 
 ```js
 { user: { name: "User-1234", color: "#7c83fd" } }
 ```
 
-When any field changes, the peer broadcasts an awareness update. The server
-relays it to all other connected peers. When a tab closes, the WebSocket
+When any field changes, a read-write peer sends an awareness update. The server
+applies it to the room's awareness state and relays the valid update to every
+connected peer, including its sender. When a tab closes, the WebSocket
 disconnects and the peer's state is removed from the awareness map.
 
-The Go server does not parse awareness payloads — it simply forwards them as-is.
-This matches the reference y-websocket server behaviour and means any future
-awareness fields added by the JS client work automatically.
+The WebSocket server does not interpret application-specific awareness fields.
+The awareness protocol carries them as state, so future fields from a JavaScript
+client continue to work.
 
 ---
 

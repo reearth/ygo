@@ -953,7 +953,7 @@ func (s *session) handleFrame(frame []byte) error {
 			// on. That is not a universal rule, though (#228: an earlier
 			// version of this comment stated it as one): that broadcast's
 			// excludeSelf is false — see peer.go's
-			// broadcastAwarenessFromRoom — so a peer that has already
+			// broadcastAwareness — so a peer that has already
 			// RECONNECTED under the SAME clientID before the broadcast
 			// fires, a genuine race rather than the ordinary case, IS a
 			// live recipient of its own removal notice) makes our
