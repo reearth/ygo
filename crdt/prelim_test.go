@@ -668,3 +668,53 @@ func FuzzPrelimNestedRoundTrip(f *testing.F) {
 		}
 	})
 }
+
+// TestUnit_NewXmlFragmentPrelim_NestedInMap: a detached fragment stages its children (readable
+// before attach), attaches under a map key, reads back as a live *YXmlFragment, and arrives whole
+// in another document through an update.
+func TestUnit_NewXmlFragmentPrelim_NestedInMap(t *testing.T) {
+	doc := New()
+	slides := doc.GetMap("slides")
+	doc.Transact(func(txn *Transaction) {
+		el := NewMapPrelim()
+		body := NewXmlFragmentPrelim()
+		p := NewYXmlElement("paragraph")
+		p.SetAttributeValue(txn, "blockId", "b1")
+		text := NewYXmlText()
+		text.Insert(txn, 0, "hello", nil)
+		p.InsertText(txn, 0, text)
+		body.InsertElement(txn, 0, p)
+		if n := len(body.Children()); n != 1 {
+			t.Fatalf("detached children = %d, want 1", n)
+		}
+		el.Set(txn, "body", body)
+		slides.Set(txn, "s1", el)
+	})
+	const want = `<paragraph blockId="b1">hello</paragraph>`
+	read := func(d *Doc) string {
+		t.Helper()
+		el, ok := d.GetMap("slides").Get("s1")
+		if !ok {
+			t.Fatal("s1 missing")
+		}
+		body, ok := el.(*YMap).Get("body")
+		if !ok {
+			t.Fatal("body missing")
+		}
+		f, ok := body.(*YXmlFragment)
+		if !ok {
+			t.Fatalf("body is %T, want *YXmlFragment", body)
+		}
+		return f.ToXML()
+	}
+	if got := read(doc); got != want {
+		t.Fatalf("live = %q, want %q", got, want)
+	}
+	dst := New()
+	if err := dst.ApplyUpdate(doc.EncodeStateAsUpdate()); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(dst); got != want {
+		t.Fatalf("replayed = %q, want %q", got, want)
+	}
+}

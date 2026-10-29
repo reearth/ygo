@@ -90,6 +90,13 @@
       "clientID": 3735928559,
       "updateV1": "0103effdb6f50d00070104726f6f74012700effdb6f50d00076f757470757473000800effdb6f50d010277036f6e65770374776f00",
       "expectedJSON": "{\"root\":[{\"outputs\":[\"one\",\"two\"]}]}"
+    },
+    {
+      "name": "xml_fragment_nested_in_map",
+      "description": "Y.Map holding a Y.XmlFragment (a paragraph with an attribute and text), built detached: a rich-text body inside a map, as a slide element holds one.",
+      "clientID": 3735928559,
+      "updateV1": "0107effdb6f50d00070104726f6f74012800effdb6f50d00046b696e64017704746578742700effdb6f50d0004626f6479040700effdb6f50d0203097061726167726170680700effdb6f50d03060400effdb6f50d040568656c6c6f2800effdb6f50d0307626c6f636b4964017702623100",
+      "expectedJSON": "{\"root\":[{\"kind\":\"text\",\"body\":\"<paragraph blockId=\\\"b1\\\">hello</paragraph>\"}]}"
     }
   ]
 }

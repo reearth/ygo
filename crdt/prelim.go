@@ -65,6 +65,16 @@ func NewArrayPrelim() *YArray {
 	return a
 }
 
+// NewXmlFragmentPrelim returns a DETACHED YXmlFragment. Children inserted before it attaches are
+// staged and materialised at attach, as a YXmlElement's are, so a Y.XmlFragment can be nested in a
+// YMap or YArray (a rich-text body inside a map, as y-prosemirror editors embed one).
+func NewXmlFragmentPrelim() *YXmlFragment {
+	f := &YXmlFragment{}
+	f.owner = f
+	f.itemMap = make(map[string]*Item)
+	return f
+}
+
 // PushType appends a DETACHED shared type to the array as its own nested item.
 // Plain values go through Push, which batches them into one ContentAny item; a
 // nested type must occupy an item of its own, hence the separate entry point

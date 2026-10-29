@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`crdt.NewXmlFragmentPrelim()`** returns a detached `YXmlFragment`, like
+  `NewMapPrelim`, `NewArrayPrelim` and `NewTextPrelim`: its children are staged
+  until it attaches, so a `Y.XmlFragment` can be nested in a `YMap` or `YArray`
+  (a y-prosemirror rich-text body inside a map, such as a slide element's).
+  Byte-identical with yjs (prelim fixture `xml_fragment_nested_in_map`).
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
