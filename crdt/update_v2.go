@@ -372,7 +372,7 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 			if i == 0 && g.startClock > item.ID.Clock {
 				offset = int(g.startClock - item.ID.Clock)
 			}
-			encodeItemV2(enc, item, offset, doc.store)
+			encodeItemV2(enc, item, offset)
 		}
 	}
 
@@ -380,7 +380,7 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 	return enc.toBytes()
 }
 
-func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
+func encodeItemV2(enc *v2Encoder, item *Item, offset int) {
 	// Orphaned items (no parent) came from GC wire format where the parent
 	// type name is lost. Encode as GC struct for valid clock accounting.
 	//
@@ -413,20 +413,6 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 	} else {
 		origin = item.Origin
 		originRight = item.OriginRight
-	}
-
-	// If the origin item is a GC placeholder (no Parent), the receiver can't
-	// infer this item's parent from it. Clear the origin so explicit parent
-	// info is encoded instead.
-	if origin != nil {
-		if oi := store.Find(*origin); oi != nil && oi.isGCOrphan() {
-			origin = nil
-		}
-	}
-	if originRight != nil {
-		if ori := store.Find(*originRight); ori != nil && ori.isGCOrphan() {
-			originRight = nil
-		}
 	}
 
 	contentTag := contentTagOf(item.Content)
@@ -462,19 +448,13 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 			// Deferred parent-by-ID: decoded but not yet integrated (its container
 			// is in a later client group), so Parent is still nil while parentID
 			// holds the container's ID. Re-emit the explicit parent-by-ID so the
-			// receiver can defer and resolve it too, instead of falling through to
-			// the root-named branch and writing an empty name (silent data loss).
-			// Mirrors the V1 encodeItem fix. (#140)
+			// receiver can defer and resolve it too. Mirrors encodeItem.
 			enc.writeParentInfo(false)
 			enc.writeLeftID(*item.parentID)
 		} else {
-			// Root named type.
+			// Root named type; an item with no parent is a GC struct, written above.
 			enc.writeParentInfo(true)
-			name := ""
-			if item.Parent != nil {
-				name = item.Parent.name
-			}
-			enc.writeString(name)
+			enc.writeString(item.Parent.name)
 		}
 		if item.ParentSub != nil {
 			enc.writeString(*item.ParentSub)

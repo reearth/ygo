@@ -4,16 +4,34 @@
 the content of a deleted nested type.**
 
 Yjs stores an item as a GC struct when the struct to its left or to its right
-is a GC struct. ygo did so only when both were. With one live neighbour, ygo
-put the item in that neighbour's type: at the wrong position, or stored but
-not linked. Two Yjs clients reach this when one inserts into a nested type
-that the other deletes; there ygo kept the insert as a deleted item where Yjs
-keeps a GC struct. A GC struct next to live content, which no Yjs client
-sends, made the document and a replica loaded from its encoded state show
-different text with the same state vector.
+is a GC struct. ygo did so only when the item had no live neighbour. With one
+live neighbour, ygo put the item in that neighbour's type: at the wrong
+position, or stored but not linked. Two Yjs clients reach this when one
+inserts into a nested type that the other deletes, and the server gets that
+part of the type from the deleter as GC structs. There ygo kept the insert as
+a deleted item where Yjs keeps a GC struct. A GC struct next to live content,
+which no Yjs client sends, made ygo show text that Yjs does not: with a GC
+right origin the document showed the item, and with a GC origin a replica
+loaded from the document's encoded state showed it while the document did
+not, with the same state vector.
 
-Such an item now waits until both neighbours are present, as in Yjs, and is
-then stored as a GC struct. No API or wire format changes.
+Such an item now becomes a GC struct once both neighbours are present, as in
+Yjs, and ygo no longer splits a GC struct, as Yjs does not. Encoders now keep
+an origin that names a GC struct, as Yjs does. They dropped it, so
+`MergeUpdatesV1/V2`, `DiffUpdateV1/V2`, the update format converters, and an
+encoded state that holds a parked item produced an update that put the item
+into the text where applying the original updates makes it a GC struct. A
+state that an earlier ygo wrote carries no such origin and loads as before.
+No API or wire format changes.
+
+An array move whose target had not arrived waits until the target's client
+reaches that clock. A target that arrived as a GC struct did not release such
+a move until another struct of its client arrived, and every struct an update
+added rescanned all the moves that waited for its client. Waiting moves are
+now indexed by target clock, a move never claims a GC struct, and deleted
+waiting moves are dropped once they outnumber the live ones. So many moves for
+an absent target no longer cost time on every later struct, and deleted ones
+never hold more memory than the moves still waiting.
 
 ## v1.55.0
 

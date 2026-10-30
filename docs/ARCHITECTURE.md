@@ -85,7 +85,7 @@ The fundamental unit of the CRDT. Each insertion creates one `Item`.
 
 When integrating a new item:
 
-1. Resolve `Right` from `OriginRight` via `getItemCleanStart` (splitting the target item if it contains the right-origin clock mid-content). The conflict-scan loop in step 3 uses `Right` as its upper bound — without this resolution the scan has no termination and can place items past their declared right boundary (fixed in v1.8.1, see #65/#68).
+1. Resolve `Right` from `OriginRight` via `getItemCleanStart`. It splits a non-GC target that contains the right-origin clock mid-content; a GC struct stays whole, as in Yjs. The conflict-scan loop in step 3 uses `Right` as its upper bound — without this resolution the scan has no termination and can place items past their declared right boundary (fixed in v1.8.1, see #65/#68).
 2. Locate the position immediately after `Origin` in the current list.
 3. Scan right past any concurrent items that have the same `Origin` and a **lower** `ClientID` (they win the tie-break). The scan terminates at `Right` (resolved in step 1).
 4. Insert the new item at the resolved position.
