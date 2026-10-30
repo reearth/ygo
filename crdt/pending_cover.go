@@ -6,28 +6,14 @@ import (
 	"sort"
 )
 
-// A struct the pending queue already holds is not parked again. A peer that
-// reconnects sends again what the room has not acknowledged, its parked tail
-// included, and a stored state carries the parked structs it was saved with,
-// so the same structs arrive more than once while their predecessor is still
-// missing. Yjs merges its pending structs with each such arrival and holds
-// each clock once.
-//
-// Struct IDs are unique to their content, so a struct whose clocks the queue
-// already spans is the struct the queue holds. What an update leaves to park
-// is merged with the queue (parkWithinUpdatePending), after the update has
-// integrated what it can: a struct the queue holds parks no second time, one
-// whose first or last clocks it holds parks only the clocks it lacks, as Yjs
-// slices it, and the pending budget does not count a struct it holds.
+// The pending queue holds each clock once, as Yjs does, because reconnects
+// and stored states re-send structs it already parks.
 
 // clockSpan is the clocks [start, end) of one client.
 type clockSpan struct{ start, end uint64 }
 
-// pendingCover is the clocks a pending queue's items span, per client, as
-// sorted, disjoint, non-adjacent spans: spans for every parked struct, gc for
-// the parked GC structs alone. A GC struct waits only for its client's clocks
-// before it, so a GC copy of clocks the queue holds as an item can integrate
-// where the item cannot: a GC struct is held only by a parked GC struct.
+// pendingCover is the clock spans a pending queue holds per client, with GC
+// structs kept apart because only a parked GC struct holds a GC copy.
 type pendingCover struct {
 	spans map[ClientID][]clockSpan
 	gc    map[ClientID][]clockSpan
@@ -43,8 +29,7 @@ func (c *pendingCover) of(gc bool) map[ClientID][]clockSpan {
 	return c.spans
 }
 
-// coverOf is p's cover, built when first asked for and kept by addCover.
-// Every other writer of a queue builds a new pendingUpdate, with no cover.
+// coverOf is p's cover, built on first use and kept current by addCover.
 func (p *pendingUpdate) coverOf() *pendingCover {
 	if p.cover == nil {
 		p.cover = &pendingCover{spans: sortedSpans(p.items, false), gc: sortedSpans(p.items, true)}
@@ -52,11 +37,8 @@ func (p *pendingUpdate) coverOf() *pendingCover {
 	return p.cover
 }
 
-// sortedSpans is the merged spans of items (of its GC structs alone when
-// gcOnly), per client. A struct that starts at or after its client's last
-// span joins or follows it in place, so items in clock order, as a load or a
-// drain parks them, cost one pass and one span per run; a client whose
-// structs arrived out of order is sorted and merged once at the end.
+// sortedSpans is the merged spans of items (GC structs only when gcOnly) per
+// client, built in one pass for structs in clock order.
 func sortedSpans(items []*Item, gcOnly bool) map[ClientID][]clockSpan {
 	spans := make(map[ClientID][]clockSpan)
 	var unsorted map[ClientID]bool
@@ -114,17 +96,11 @@ func coalesce(list []clockSpan) []clockSpan {
 	return merged
 }
 
-// coverInsertWork bounds the spans addCover moves inserting structs one by
-// one: each insertion copies the spans after it, so k structs among s spans
-// of their client move up to k·s, with almost no allocation, where one merge
-// per client costs O(s + k log k) and allocates the merged lists. They cost
-// the same near k·s = 460,000 at 10,000 spans (k = 46) and 650,000 at 100,000
-// (k = 6.5) (BenchmarkPendingParkBatch).
+// coverInsertWork is the span-move count above which addCover merges per
+// client, since insertion stops being cheaper there.
 const coverInsertWork = 1 << 19
 
-// addCover adds the clocks of items, structs just parked in p, to p's cover
-// when p has one: by insertion while the spans that moves stay under
-// coverInsertWork, otherwise by one merge per client.
+// addCover adds the clocks of items just parked in p to p's cover, if any.
 func (p *pendingUpdate) addCover(items []*Item) {
 	if p.cover == nil {
 		return
@@ -157,8 +133,7 @@ func (p *pendingUpdate) addCover(items []*Item) {
 	}
 }
 
-// insertSpan adds its clocks to m wherever they fall, merging the spans they
-// overlap or touch.
+// insertSpan adds its clocks to m, merging the spans they overlap or touch.
 func insertSpan(m map[ClientID][]clockSpan, it *Item) {
 	start := it.ID.Clock
 	end := start + uint64(it.Content.Len())
@@ -206,10 +181,8 @@ func mergeSpans(a, b []clockSpan) []clockSpan {
 	return out
 }
 
-// heldUntil is the first clock of [max(clock, from), end) of client that no
-// struct parked in p holds (no parked GC struct, when gc), or end when parked
-// structs hold them all. from is the clock below which the clocks are the
-// store's. p may be nil.
+// heldUntil is the first clock of [max(clock, from), end) of client that p
+// does not hold (as GC structs, when gc), or end; p may be nil.
 func (p *pendingUpdate) heldUntil(client ClientID, clock, from, end uint64, gc bool) uint64 {
 	start := max(clock, from)
 	if p == nil || start >= end {
@@ -229,9 +202,8 @@ func (p *pendingUpdate) holds(client ClientID, clock, from, end uint64, gc bool)
 	return p.heldUntil(client, clock, from, end, gc) >= end
 }
 
-// heldTailFrom is the first clock of the span of p (of p's GC structs, when
-// gc) that holds the end of [start, end) of client, when that span starts
-// after start, or end when no span holds end-1 or one holds start too.
+// heldTailFrom is where the span of p holding end-1 of [start, end) starts,
+// when it starts after start, or else end.
 func (p *pendingUpdate) heldTailFrom(client ClientID, start, end uint64, gc bool) uint64 {
 	spans := p.coverOf().of(gc)[client]
 	i := sort.Search(len(spans), func(k int) bool { return spans[k].end >= end })
@@ -241,13 +213,8 @@ func (p *pendingUpdate) heldTailFrom(client ClientID, start, end uint64, gc bool
 	return spans[i].start
 }
 
-// unparked is item, a struct an update leaves to park, without the clocks the
-// store's pending queue already holds at its start and at its end, as Yjs
-// merges a pending struct with the pending structs it holds. A GC struct
-// waits only for its client's earlier clocks, so it is held only by parked
-// GC structs: a GC copy of clocks the queue holds as an item parks, and
-// integrates once the clocks before it arrive, as in Yjs. from is the store's
-// next clock for item's client.
+// unparked is item without the clocks the pending queue already holds at its
+// start and end, as Yjs merges pending structs.
 func unparked(s *StructStore, item *Item, from uint64) *Item {
 	p := s.pending
 	if p == nil {

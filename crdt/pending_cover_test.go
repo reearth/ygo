@@ -381,12 +381,8 @@ func TestUnit_PendingCover_ABatchParkJoinsTheSpanItTouches(t *testing.T) {
 	require.Equal(t, clockSpan{0, 101}, p.cover.spans[2][0], "the batch joins the span at clock 100")
 }
 
-// sortedSpans, built in one pass for items in clock order, gives the spans a
-// sort and merge of every item's clocks gives, for items in any order, of
-// several clients, GC structs and others mixed.
-// A GC struct that parks behind a gap, in a queue that already holds an item,
-// is added to the index's GC spans, so the same GC struct sent again parks no
-// second time.
+// A GC struct parked behind a gap is added to the cover's GC spans, so a
+// resend of it parks no second time.
 func TestUnit_PendingQueue_AResentParkedGCStructParksOnce(t *testing.T) {
 	for _, v2 := range []bool{false, true} {
 		room := New(WithClientID(1))
@@ -398,6 +394,7 @@ func TestUnit_PendingQueue_AResentParkedGCStructParksOnce(t *testing.T) {
 	}
 }
 
+// sortedSpans gives the same spans as a sort and merge, for items in any order.
 func TestUnit_PendingCover_SortedSpansMatchesASortAndMerge(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 11))
 	for range 500 {
