@@ -45,9 +45,7 @@ func contentIDs(t *testing.T, update []byte) crdt.ContentIDs {
 	return ids
 }
 
-// truncatedEdit returns "hello" written by client 1 and that client's next
-// edit ("!" at 5, delete 1..3) with its last byte cut off: its struct
-// integrates, then its delete set does not decode.
+// truncatedEdit returns a seed and a next edit cut short so that its struct integrates and then its delete set fails to decode.
 func truncatedEdit() (seed, edit []byte) {
 	doc := crdt.New(crdt.WithClientID(1))
 	text := doc.GetText("t")
@@ -62,11 +60,7 @@ func truncatedEdit() (seed, edit []byte) {
 	return seed, whole[:len(whole)-1]
 }
 
-// invalidStringEdit returns client 2's update holding two structs, "hello"
-// and then "xyz" inserted before it, with the second's bytes replaced by
-// ones that are not UTF-8: the first struct integrates, then the second does
-// not decode. No check before the apply reads a struct's string, so the
-// apply alone refuses it, at that struct.
+// invalidStringEdit returns an update whose first struct integrates and whose second carries non-UTF-8 bytes that only the apply rejects.
 func invalidStringEdit(t *testing.T) []byte {
 	t.Helper()
 	doc := crdt.New(crdt.WithClientID(2))
@@ -78,12 +72,7 @@ func invalidStringEdit(t *testing.T) []byte {
 	return bytes.Replace(update, []byte("xyz"), []byte{0xff, 0xfe, 0xfd}, 1)
 }
 
-// A relay-injected update that fails after part of it integrated leaves that
-// part in this node's room and tells the room's update observers, so the
-// node's locally connected peers must get exactly that part too. An update
-// that integrates nothing, or one whose landed part a redelivery already
-// brought, relays nothing: the next frame the peer reads is a later, whole
-// update's.
+// A relay-injected update that partly integrates before failing must reach local peers as exactly its landed part, and as nothing when nothing new landed.
 func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 	seed, truncated := truncatedEdit()
 	cases := []struct {
@@ -120,8 +109,7 @@ func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 			var observed atomic.Int32
 			room.OnUpdate(func([]byte, any) { observed.Add(1) })
 
-			// Inject reports the apply's failure, and never a broadcast of an
-			// empty part.
+			// Inject must report the apply's failure without broadcasting an empty part.
 			injectFails := func() {
 				t.Helper()
 				err := srv.Inject(ctx, cluster.Inbound{Room: "room", Kind: cluster.KindSync, Data: tc.update})
@@ -143,13 +131,11 @@ func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 				require.Equal(t, crdt.EncodeStateAsUpdateV1(room, nil), crdt.EncodeStateAsUpdateV1(peerDoc, nil),
 					"the local peer holds what the room holds")
 
-				// Redelivered, the update integrates nothing new: it fails
-				// again and relays nothing more.
+				// A redelivery integrates nothing new, so it must relay nothing more.
 				injectFails()
 			}
 
-			// A later, whole update from another writer is the next frame the
-			// peer reads, so nothing was relayed in between.
+			// A later whole update must be the peer's next frame, proving nothing else was relayed.
 			later := crdt.New(crdt.WithClientID(5))
 			lt := later.GetText("u")
 			later.Transact(func(txn *crdt.Transaction) { lt.Insert(txn, 0, "later", nil) })
