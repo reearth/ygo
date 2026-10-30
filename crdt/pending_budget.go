@@ -25,6 +25,10 @@ type pendingBudget struct {
 	v2Rest      encoding.Decoder
 	superseded  groupSet
 	groupsKnown bool
+	// deleteSetBytes is the rest of the update past its structs once walked is
+	// set, which implies groupsKnown.
+	deleteSetBytes []byte
+	walked         bool
 }
 
 func newPendingBudget(doc *Doc, initial StateVector, update []byte, v2 bool) pendingBudget {
@@ -145,6 +149,15 @@ func (b *pendingBudget) knowSuperseded() error {
 	if b.groupsKnown {
 		return nil
 	}
+	return b.walkGroups()
+}
+
+// walkGroups records, in one walk of the update's structs, the groups the
+// decoder drops and where the delete set starts, returning an unwrapped error.
+func (b *pendingBudget) walkGroups() error {
+	if b.walked {
+		return nil
+	}
 	v2, rest := b.v2Start, b.v2Rest
 	if b.v2 && v2 == nil {
 		dec, err := newV2Decoder(b.update)
@@ -153,12 +166,22 @@ func (b *pendingBudget) knowSuperseded() error {
 		}
 		v2, rest = dec, *dec.restDec
 	}
-	superseded, err := supersededGroups(b.update, v2, rest)
+	superseded, deleteSetBytes, err := supersededGroups(b.update, v2, rest)
 	if err != nil {
 		return err
 	}
 	b.setSuperseded(superseded)
+	b.deleteSetBytes, b.walked = deleteSetBytes, true
 	return nil
+}
+
+// deleteSetScanner reads the delete set walkGroups found.
+func (b *pendingBudget) deleteSetScanner() *pendingScanner {
+	s := &pendingScanner{rest: encoding.NewDecoder(b.deleteSetBytes)}
+	if b.v2 {
+		s.v2 = &v2Decoder{restDec: s.rest}
+	}
+	return s
 }
 
 // Strict wire ordering proves that each client occurs in only one group.

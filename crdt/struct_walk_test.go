@@ -1,16 +1,20 @@
 package crdt
 
 import (
+	"bytes"
+	"fmt"
 	"maps"
 	"math/rand/v2"
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/reearth/ygo/encoding"
 )
 
 // walkedUpdate is a random V1 update of every content kind, starting mid-run
 // and sometimes holding skips, with a receiver's state vector.
-func walkedUpdate(t *testing.T, rng *rand.Rand) (update []byte, held StateVector) {
+func walkedUpdate(t testing.TB, rng *rand.Rand) (update []byte, held StateVector) {
 	t.Helper()
 	writers := []*Doc{New(WithClientID(1)), New(WithClientID(2)), New(WithClientID(3))}
 	for range 30 {
@@ -77,9 +81,9 @@ func walkedUpdate(t *testing.T, rng *rand.Rand) (update []byte, held StateVector
 	return update, held
 }
 
-// The framing walk must reach the delete set the full scan reads, and
+// The group walk must reach the delete set the full scan reads, and
 // parkingRangesBound must never undercount.
-func TestUnit_FrameStructs_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
+func TestUnit_WalkGroups_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
 	rng := rand.New(rand.NewPCG(334, 340))
 	skips := 0
 	for round := range 500 {
@@ -92,20 +96,6 @@ func TestUnit_FrameStructs_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
 			update := v1
 			if format.v2 {
 				update = v2
-			}
-			readDS := func(s *pendingScanner) DeleteSet {
-				t.Helper()
-				var ds DeleteSet
-				var err error
-				if format.v2 {
-					ds, err = decodeDeleteSetV2(s.v2)
-				} else {
-					ds, err = decodeDeleteSet(s.rest)
-				}
-				if err != nil || s.err != nil {
-					t.Fatalf("round %d %s: the delete set does not read: %v %v", round, format.name, err, s.err)
-				}
-				return ds
 			}
 			full := newPendingScanner(update, format.v2)
 			for range full.uint() {
@@ -121,21 +111,25 @@ func TestUnit_FrameStructs_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
 			if full.err != nil {
 				t.Fatalf("round %d %s: the full scan fails: %v", round, format.name, full.err)
 			}
-			wantDS := readDS(full)
-
-			walk := newPendingScanner(update, format.v2)
-			if err := frameStructs(walk); err != nil {
-				t.Fatalf("round %d %s: frameStructs: %v", round, format.name, err)
+			var wantDS DeleteSet
+			if format.v2 {
+				wantDS, err = decodeDeleteSetV2(full.v2)
+			} else {
+				wantDS, err = decodeDeleteSet(full.rest)
 			}
-			if gotDS := readDS(walk); !reflect.DeepEqual(gotDS, wantDS) {
+			if err != nil {
+				t.Fatalf("round %d %s: the full scan's delete set does not read: %v", round, format.name, err)
+			}
+
+			b := pendingBudget{update: update, v2: format.v2}
+			gotDS, err := deleteSetOf(&b)
+			if err != nil {
+				t.Fatalf("round %d %s: deleteSetOf: %v", round, format.name, err)
+			}
+			if !reflect.DeepEqual(gotDS, wantDS) {
 				t.Fatalf("round %d %s: after the walk the delete set is %v, after the full scan %v", round, format.name, gotDS, wantDS)
 			}
-
-			bounded := newPendingScanner(update, format.v2)
-			if err := frameStructs(bounded); err != nil {
-				t.Fatal(err)
-			}
-			bound, err := parkingRangesBound(bounded, held)
+			bound, err := parkingRangesBound(b.deleteSetScanner(), held)
 			if err != nil {
 				t.Fatalf("round %d %s: parkingRangesBound: %v", round, format.name, err)
 			}
@@ -151,4 +145,257 @@ func TestUnit_FrameStructs_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
 	if skips == 0 {
 		t.Fatal("no update held a skip")
 	}
+}
+
+// separateWalks is what the two walks that walkGroups replaced read of an
+// update: the client of each group, the struct count and the bytes past the
+// structs.
+type separateWalks struct {
+	ok             bool
+	clients        []ClientID
+	structs        uint64
+	deleteSetBytes []byte
+}
+
+// walkSeparately runs the two walks the apply ran before walkGroups: the
+// group scan of knowSuperseded, on copies of the column cursors with no rest
+// cursor bound, and the struct walk of checkParkedDeletes, on a fresh scanner.
+func walkSeparately(t testing.TB, update []byte, v2 bool) separateWalks {
+	t.Helper()
+	frame := func(s *pendingScanner) (w separateWalks) {
+		s.frame = true
+		n := s.uint()
+		if n > maxV2Items {
+			return separateWalks{}
+		}
+		for i := uint64(0); i < n && s.err == nil; i++ {
+			items := s.uint()
+			w.structs += items
+			if w.structs > maxV2Items {
+				return separateWalks{}
+			}
+			w.clients = append(w.clients, s.client())
+			s.uint()
+			for j := uint64(0); j < items && s.err == nil; j++ {
+				s.item()
+			}
+		}
+		if s.err != nil {
+			return separateWalks{}
+		}
+		w.ok, w.deleteSetBytes = true, s.rest.RemainingBytes()
+		return w
+	}
+	var groupScan separateWalks
+	if !v2 {
+		groupScan = frame(&pendingScanner{rest: encoding.NewDecoder(update)})
+	} else if dec, err := newV2Decoder(update); err == nil {
+		rest := *dec.restDec
+		dec.restDec = nil
+		groupScan = frame(&pendingScanner{v2: dec, rest: &rest})
+	}
+	structWalk := newPendingScanner(update, v2)
+	if structWalk.err != nil {
+		return separateWalks{}
+	}
+	walked := frame(structWalk)
+	if groupScan.ok != walked.ok || !slices.Equal(groupScan.clients, walked.clients) || groupScan.structs != walked.structs ||
+		!bytes.Equal(groupScan.deleteSetBytes, walked.deleteSetBytes) {
+		t.Fatalf("the two separate walks disagree on update %x", update)
+	}
+	return walked
+}
+
+// checkWalkGroups fails t unless walkGroups, from a fresh budget and from one
+// set up as applyV2Txn sets it up, finds the superseded groups and delete-set
+// position the separate walks find, and its scan counts their groups.
+func checkWalkGroups(t testing.TB, update []byte, v2 bool) (ok bool) {
+	t.Helper()
+	want := walkSeparately(t, update, v2)
+	budgets := []pendingBudget{{update: update, v2: v2}}
+	if dec, err := newV2Decoder(update); v2 && err == nil {
+		start := *dec
+		budgets = append(budgets, pendingBudget{update: update, v2: true, v2Start: &start, v2Rest: *dec.restDec})
+	}
+	for i, b := range budgets {
+		err := b.walkGroups()
+		if (err == nil) != want.ok {
+			t.Fatalf("budget %d V2=%v: walkGroups error %v, separate walks read the update: %v (update %x)", i, v2, err, want.ok, update)
+		}
+		if err != nil {
+			continue
+		}
+		last := make(map[ClientID]int, len(want.clients))
+		for g, client := range want.clients {
+			last[client] = g
+		}
+		for g, client := range want.clients {
+			if superseded := last[client] != g; b.superseded.has(uint64(g)) != superseded {
+				t.Fatalf("budget %d V2=%v: group %d (client %d) superseded %v, separate walks %v (update %x)", i, v2, g, client, b.superseded.has(uint64(g)), superseded, update)
+			}
+		}
+		var rest encoding.Decoder
+		var start *v2Decoder
+		if b.v2Start != nil {
+			start, rest = b.v2Start, b.v2Rest
+		} else if v2 {
+			dec, _ := newV2Decoder(update)
+			start, rest = dec, *dec.restDec
+		}
+		_, groups, _, _ := scanGroupClients(update, start, rest, nil)
+		if groups != uint64(len(want.clients)) {
+			t.Fatalf("budget %d V2=%v: the walk counts %d groups, separate walks %d", i, v2, groups, len(want.clients))
+		}
+		if !bytes.Equal(b.deleteSetBytes, want.deleteSetBytes) {
+			t.Fatalf("budget %d V2=%v: the delete set starts %d bytes from the end, separate walks %d (update %x)", i, v2, len(b.deleteSetBytes), len(want.deleteSetBytes), update)
+		}
+		sv := StateVector{}
+		for _, client := range want.clients {
+			sv[client] = uint64(client % 7)
+		}
+		got, gotErr := parkingRangesBound(b.deleteSetScanner(), sv)
+		wantScanner := pendingScanner{rest: encoding.NewDecoder(want.deleteSetBytes)}
+		if v2 {
+			wantScanner.v2 = &v2Decoder{restDec: wantScanner.rest}
+		}
+		bound, boundErr := parkingRangesBound(&wantScanner, sv)
+		if got != bound || (gotErr == nil) != (boundErr == nil) {
+			t.Fatalf("budget %d V2=%v: parkingRangesBound %d, %v on the shared walk, %d, %v on the separate walks", i, v2, got, gotErr, bound, boundErr)
+		}
+	}
+	return want.ok
+}
+
+// mutate is update with one random byte-level change.
+func mutate(rng *rand.Rand, update []byte) []byte {
+	out := slices.Clone(update)
+	if len(out) == 0 {
+		return []byte{byte(rng.IntN(256))}
+	}
+	i := rng.IntN(len(out))
+	switch rng.IntN(5) {
+	case 0:
+		out[i] ^= 1 << rng.IntN(8)
+	case 1:
+		out[i] = byte(rng.IntN(256))
+	case 2:
+		out = out[:i]
+	case 3:
+		out = slices.Insert(out, i, byte(rng.IntN(256)))
+	default:
+		out = slices.Delete(out, i, i+1)
+	}
+	return out
+}
+
+// walkCorpus is valid V1 and V2 updates: documents of every content kind, and
+// groups in ascending, descending, repeated and shuffled client order, each
+// with a delete set.
+func walkCorpus(t testing.TB, rng *rand.Rand) (updates [][]byte, v2 []bool) {
+	t.Helper()
+	add := func(update []byte, isV2 bool) {
+		updates, v2 = append(updates, update), append(v2, isV2)
+	}
+	for range 40 {
+		v1, _ := walkedUpdate(t, rng)
+		converted, err := UpdateV1ToV2(v1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		add(v1, false)
+		add(converted, true)
+	}
+	source, subdoc := New(), New()
+	t.Cleanup(source.Destroy)
+	t.Cleanup(subdoc.Destroy)
+	contents := []Content{
+		NewContentString("А🐷z"), NewContentDeleted(3), NewContentJSON("a", nil, 7), NewContentBinary([]byte{1, 2}),
+		NewContentEmbed(map[string]any{"n": []any{1, true}}), NewContentFormat("bold", true),
+		NewContentType(&NewMapPrelim().abstractType), NewContentType(&NewYXmlElement("div").abstractType),
+		NewContentAny([]any{1, "a"}, map[string]any{"key": 2}), NewContentDoc(subdoc), NewContentMove(&ID{Client: 9}, 2),
+	}
+	parent := ID{Client: 999}
+	for _, order := range []string{"ascending", "descending", "repeats", "shuffled"} {
+		for range 10 {
+			clients := make([]ClientID, 0, 12)
+			for i := range 1 + rng.IntN(12) {
+				switch order {
+				case "ascending":
+					clients = append(clients, ClientID(i+1))
+				case "descending":
+					clients = append(clients, ClientID(12-i))
+				default:
+					clients = append(clients, ClientID(1+rng.IntN(4)))
+				}
+			}
+			if order == "shuffled" {
+				rng.Shuffle(len(clients), func(i, j int) { clients[i], clients[j] = clients[j], clients[i] })
+			}
+			groups := make([][]*Item, len(clients))
+			skips := map[int]uint64{}
+			for i, c := range clients {
+				var clock uint64
+				for j := range 1 + rng.IntN(3) {
+					key := fmt.Sprint("k", (i+j)%5)
+					content := contents[rng.IntN(len(contents))]
+					groups[i] = append(groups[i], &Item{ID: ID{Client: c, Clock: clock}, parentID: &parent, ParentSub: &key, Content: content})
+					clock += uint64(content.Len())
+				}
+				if rng.IntN(4) == 0 {
+					skips[i] = 1 + uint64(rng.IntN(5))
+				}
+			}
+			ds := newDeleteSet()
+			for range rng.IntN(6) {
+				ds.add(ID{Client: ClientID(1 + rng.IntN(6)), Clock: uint64(rng.IntN(40))}, 1+rng.IntN(5))
+			}
+			for _, version := range []int{1, 2} {
+				add(groupsUpdate(source, groups, skips, ds, version), version == 2)
+			}
+		}
+	}
+	return updates, v2
+}
+
+// Differential fuzz: on valid updates and on byte-level mutations of them, the
+// one group walk finds what the two separate walks found.
+func TestUnit_WalkGroups_MatchesTheSeparateWalks(t *testing.T) {
+	rng := rand.New(rand.NewPCG(334, 1))
+	updates, v2 := walkCorpus(t, rng)
+	read, unordered := 0, 0
+	for i, update := range updates {
+		if ordered, _, _, ok := scanGroupClients(update, nil, encoding.Decoder{}, nil); !v2[i] && ok && !ordered {
+			unordered++
+		}
+		if !checkWalkGroups(t, update, v2[i]) {
+			t.Fatalf("valid update %d (V2=%v) does not walk", i, v2[i])
+		}
+		for range 60 {
+			mutated := update
+			for range 1 + rng.IntN(3) {
+				mutated = mutate(rng, mutated)
+			}
+			if checkWalkGroups(t, mutated, v2[i]) {
+				read++
+			}
+		}
+	}
+	if unordered == 0 || read == 0 {
+		t.Fatalf("the corpus covers %d unordered V1 updates and %d mutations that still walk", unordered, read)
+	}
+	t.Logf("%d updates, %d unordered V1, %d of %d mutations still walk", len(updates), unordered, read, 60*len(updates))
+}
+
+// FuzzWalkGroups runs the comparison of TestUnit_WalkGroups_MatchesTheSeparateWalks
+// on inputs go test -fuzz derives from the same corpus, read as V1 and as V2.
+func FuzzWalkGroups(f *testing.F) {
+	rng := rand.New(rand.NewPCG(334, 2))
+	updates, _ := walkCorpus(f, rng)
+	for _, update := range updates {
+		f.Add(update)
+	}
+	f.Fuzz(func(t *testing.T, update []byte) {
+		checkWalkGroups(t, update, false)
+		checkWalkGroups(t, update, true)
+	})
 }

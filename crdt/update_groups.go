@@ -15,27 +15,28 @@ func (s groupSet) has(i uint64) bool {
 }
 
 // supersededGroups marks wire groups that a later group for the same client
-// replaces. Yjs keeps only the last group per client and never integrates
-// the earlier ones. Encoders sort clients, so a strictly monotonic header
-// sequence proves uniqueness without an index. v2 and rest are the update's
-// initial V2 decoder state (v2 nil for V1); both are copied, never advanced.
-func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (groupSet, error) {
-	ordered, n, ok := scanGroupClients(update, v2, rest, nil)
+// replaces, and returns the bytes past the structs, where the delete set
+// starts. Yjs keeps only the last group per client and never integrates the
+// earlier ones. Encoders sort clients, so a strictly monotonic header sequence
+// proves uniqueness without an index. v2 and rest are the update's initial V2
+// decoder state (v2 nil for V1); both are copied, never advanced.
+func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set groupSet, deleteSetBytes []byte, err error) {
+	ordered, n, deleteSetBytes, ok := scanGroupClients(update, v2, rest, nil)
 	if !ok {
-		return nil, ErrInvalidUpdate
+		return nil, nil, ErrInvalidUpdate
 	}
 	if ordered {
-		return nil, nil
+		return nil, deleteSetBytes, nil
 	}
 	type entry struct {
 		client ClientID
 		index  uint32
 	}
 	entries := make([]entry, 0, n)
-	if _, _, ok := scanGroupClients(update, v2, rest, func(i uint64, client ClientID) {
+	if _, _, _, ok := scanGroupClients(update, v2, rest, func(i uint64, client ClientID) {
 		entries = append(entries, entry{client, uint32(i)})
 	}); !ok {
-		return nil, ErrInvalidUpdate
+		return nil, nil, ErrInvalidUpdate
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].client != entries[j].client {
@@ -43,7 +44,6 @@ func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (grou
 		}
 		return entries[i].index < entries[j].index
 	})
-	var set groupSet
 	for i := 0; i+1 < len(entries); i++ {
 		if entries[i].client == entries[i+1].client {
 			if set == nil {
@@ -52,13 +52,14 @@ func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (grou
 			set[entries[i].index/64] |= 1 << (entries[i].index % 64)
 		}
 	}
-	return set, nil
+	return set, deleteSetBytes, nil
 }
 
 // scanGroupClients walks every group header and struct. It reports whether
-// the clients are strictly monotonic and calls visit, if set, per group.
-// Returning ok rather than an error keeps the decoder copies on the stack.
-func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit func(uint64, ClientID)) (ordered bool, groups uint64, ok bool) {
+// the clients are strictly monotonic, returns the bytes past the structs and
+// calls visit, if set, per group. Returning ok rather than an error keeps the
+// decoder copies on the stack.
+func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit func(uint64, ClientID)) (ordered bool, groups uint64, deleteSetBytes []byte, ok bool) {
 	s := pendingScanner{frame: true}
 	if v2 == nil {
 		rest = *encoding.NewDecoder(update)
@@ -69,10 +70,22 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 		dec.restDec = nil
 		s.v2, s.rest = &dec, &rest
 	}
+	n := s.uint()
+	if n > maxV2Items {
+		return false, 0, nil, false
+	}
 	ordered = true
 	var previous ClientID
 	direction := 0
-	groups, ok = s.frameGroups(func(i uint64, client ClientID) {
+	var total uint64
+	for i := uint64(0); i < n && s.err == nil; i++ {
+		items := s.uint()
+		total += items
+		if total > maxV2Items {
+			return false, 0, nil, false
+		}
+		client := s.client()
+		s.uint()
 		if visit != nil {
 			visit(i, client)
 		}
@@ -87,32 +100,12 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 			direction = d
 		}
 		previous = client
-	})
-	return ordered, groups, ok
-}
-
-// frameGroups steps a framing scanner to the delete set, calling visit, if set,
-// per group.
-func (s *pendingScanner) frameGroups(visit func(uint64, ClientID)) (groups uint64, ok bool) {
-	n := s.uint()
-	if n > maxV2Items {
-		return 0, false
-	}
-	var total uint64
-	for i := uint64(0); i < n && s.err == nil; i++ {
-		items := s.uint()
-		total += items
-		if total > maxV2Items {
-			return 0, false
-		}
-		client := s.client()
-		s.uint()
-		if visit != nil {
-			visit(i, client)
-		}
 		for j := uint64(0); j < items && s.err == nil; j++ {
 			s.item()
 		}
 	}
-	return n, s.err == nil
+	if s.err != nil {
+		return false, 0, nil, false
+	}
+	return ordered, n, s.rest.RemainingBytes(), true
 }

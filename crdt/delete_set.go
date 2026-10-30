@@ -249,19 +249,20 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	pending := doc.store.pendingDs
 	before := doc.store.pendingDsRanges
 	room := max(limit-before, 0)
+	// A delete range takes at least 2 bytes, a clock and a length, so an update
+	// of at most twice the room cannot park past it.
 	if len(b.update)/2 <= room {
 		return nil
 	}
-	s := b.scanner()
-	if err := frameStructs(s); err != nil {
+	if err := b.walkGroups(); err != nil {
 		return wrapUpdateErr(err)
 	}
-	if n, err := parkingRangesBound(s, b.initial); err != nil {
+	if n, err := parkingRangesBound(b.deleteSetScanner(), b.initial); err != nil {
 		return wrapUpdateErr(err)
 	} else if n <= room {
 		return nil
 	}
-	ds, err := deleteSetOf(b.scanner(), b.v2)
+	ds, err := deleteSetOf(b)
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
@@ -276,35 +277,17 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	return ErrInvalidUpdate
 }
 
-// deleteSetOf reads the delete set of the V1 or V2 update s scans, skipping its
-// structs.
-func deleteSetOf(s *pendingScanner, v2 bool) (DeleteSet, error) {
-	if err := frameStructs(s); err != nil {
+// deleteSetOf reads the delete set of b's V1 or V2 update, where the walk of
+// its structs found it.
+func deleteSetOf(b *pendingBudget) (DeleteSet, error) {
+	if err := b.walkGroups(); err != nil {
 		return DeleteSet{}, err
 	}
-	if v2 {
+	s := b.deleteSetScanner()
+	if b.v2 {
 		return decodeDeleteSetV2(s.v2)
 	}
 	return decodeDeleteSet(s.rest)
-}
-
-// frameStructs steps s over the update's structs so that s stands at its delete
-// set.
-func frameStructs(s *pendingScanner) error {
-	if s.err != nil {
-		return s.err
-	}
-	frame := s.frame
-	s.frame = true
-	_, ok := s.frameGroups(nil)
-	s.frame = frame
-	if s.err != nil {
-		return s.err
-	}
-	if !ok {
-		return ErrInvalidUpdate
-	}
-	return nil
 }
 
 // parkingRangesBound counts, without allocating, the ranges of the delete set s

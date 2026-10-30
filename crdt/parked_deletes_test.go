@@ -445,7 +445,7 @@ func TestUnit_ApplyUpdate_RefusedParkedDeletesLeaveTheDocumentUnchanged(t *testi
 // decodeDS is the delete set of a V1 update.
 func decodeDS(t *testing.T, update []byte) DeleteSet {
 	t.Helper()
-	ds, err := deleteSetOf(newPendingScanner(update, false), false)
+	ds, err := deleteSetOf(&pendingBudget{update: update})
 	if err != nil {
 		t.Fatal(err)
 	}
