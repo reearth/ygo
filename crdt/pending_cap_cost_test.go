@@ -1,13 +1,16 @@
 package crdt
 
 import (
+	"errors"
 	"math/rand/v2"
 	"reflect"
 	"testing"
 )
 
 // The pending cap's check costs a keystroke no allocation, in V1 and V2, and
-// leaves the V2 decoder where the apply begins to read.
+// leaves the V2 decoder where the apply begins to read. The same check
+// refuses that keystroke where it would park past the cap, so what is
+// measured is the check that refuses.
 func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *testing.T) {
 	base := New(WithClientID(1))
 	text := base.GetText("t")
@@ -72,6 +75,25 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 	}
 	if got := doc.GetText("t").ToString(); got != "helxlo world" {
 		t.Fatalf("the text is %q", got)
+	}
+
+	// A document without the keystroke's origin parks it, and no room is left.
+	gap := New()
+	refused := newPendingBudget(gap, gap.StateVector(), keystroke, false)
+	refused.remaining = 0
+	if err := refused.checkBeforeApply(len(keystroke)); !errors.Is(err, ErrInvalidUpdate) {
+		t.Fatalf("the V1 check let a keystroke park past the cap: err %v, want ErrInvalidUpdate", err)
+	}
+	gapDec, err := newV2Decoder(keystrokeV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gapStart := *gapDec
+	refusedV2 := newPendingBudget(gap, gap.StateVector(), keystrokeV2, true)
+	refusedV2.v2Start, refusedV2.v2Rest = &gapStart, *gapDec.restDec
+	refusedV2.remaining = 0
+	if err := refusedV2.checkBeforeApply(len(keystrokeV2)); !errors.Is(err, ErrInvalidUpdate) {
+		t.Fatalf("the V2 check let a keystroke park past the cap: err %v, want ErrInvalidUpdate", err)
 	}
 }
 

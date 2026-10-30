@@ -606,15 +606,18 @@ func nonEmptyRanges(ranges []DeleteRange) []DeleteRange {
 func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	// Same panic recovery as applyV1Txn — guard against crafted V2 updates
 	// that force a Splice on non-splittable content types.
+	applying := false
 	defer func() {
 		if r := recover(); r != nil {
 			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
 		}
+		// An apply that fails before it changes anything must tell no observer.
+		txn.refused = retErr != nil && !applying
 	}()
 
 	dec, err := newV2Decoder(update)
 	if err != nil {
-		return txn.refuse(err)
+		return err
 	}
 
 	sv := txn.doc.store.StateVector()
@@ -626,12 +629,12 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	peek := budget.v2Rest
 	numClients, err := peek.ReadVarUint()
 	if err != nil {
-		return txn.refuse(wrapUpdateErr(err))
+		return wrapUpdateErr(err)
 	}
 	// Guard against pathological inputs that encode huge counts via RLE compression.
 	// No realistic update has more client groups than its byte count.
 	if numClients > maxV2Items {
-		return txn.refuse(ErrInvalidUpdate)
+		return ErrInvalidUpdate
 	}
 
 	var pending []*Item
@@ -640,14 +643,15 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		// Fail before integrating anything: a later malformed group must not
 		// leave earlier, superseded groups applied.
 		if superseded, budget.structs, err = supersededGroups(update, &initialV2, budget.v2Rest); err != nil {
-			return txn.refuse(wrapUpdateErr(err))
+			return wrapUpdateErr(err)
 		}
 	}
 	budget.setSuperseded(superseded)
 	if err := budget.checkBeforeApply(len(update)); err != nil {
-		return txn.refuse(err)
+		return err
 	}
 	*dec.restDec = peek
+	applying = true
 
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {

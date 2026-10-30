@@ -550,10 +550,13 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	// (ContentBinary, ContentEmbed, ContentFormat, ContentType, ContentDoc).
 	// A malicious update can encode such a type with a clock offset that forces
 	// a split; without recovery the server would crash instead of returning an error.
+	applying := false
 	defer func() {
 		if r := recover(); r != nil {
 			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
 		}
+		// An apply that fails before it changes anything must tell no observer.
+		txn.refused = retErr != nil && !applying
 	}()
 
 	dec := encoding.NewDecoder(update)
@@ -563,10 +566,10 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 
 	numClients, err := dec.ReadVarUint()
 	if err != nil {
-		return txn.refuse(wrapUpdateErr(err))
+		return wrapUpdateErr(err)
 	}
 	if numClients > uint64(len(update)/2) || numClients > maxV2Items {
-		return txn.refuse(ErrInvalidUpdate)
+		return ErrInvalidUpdate
 	}
 	var superseded groupSet
 	structs := 0
@@ -574,15 +577,16 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		// Fail before integrating anything: a later malformed group must not
 		// leave earlier, superseded groups applied.
 		if superseded, structs, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
-			return txn.refuse(wrapUpdateErr(err))
+			return wrapUpdateErr(err)
 		}
 	}
 	budget := newPendingBudget(txn.doc, sv, update, false)
 	budget.setSuperseded(superseded)
 	budget.structs = structs
 	if err := budget.checkBeforeApply(len(update)); err != nil {
-		return txn.refuse(err)
+		return err
 	}
+	applying = true
 
 	// 1. Decode all items, parking any with future-clock deps or same-client gaps.
 	//    Returns the within-update pending list (items whose parent might resolve

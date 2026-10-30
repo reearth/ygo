@@ -386,9 +386,10 @@ func TestUnit_PendingBudget_V2StringClocksFollowThePoolNotTheLengths(t *testing.
 	}
 }
 
-// An update that fails before the apply changes anything tells no observer,
-// as one the pending cap refuses does not.
-func TestUnit_ApplyUpdate_FailureBeforeAnyChangeTellsNoObserver(t *testing.T) {
+// An update whose header or groups do not read fails before the apply changes
+// anything, so it tells no observer, as one the pending cap refuses does not.
+func TestUnit_ApplyUpdate_UnreadableHeaderOrGroupsTellNoObserver(t *testing.T) {
+	emptyColumns := make([]byte, 10) // the V2 feature flag and nine empty columns
 	for _, tc := range []struct {
 		name    string
 		version int
@@ -397,7 +398,9 @@ func TestUnit_ApplyUpdate_FailureBeforeAnyChangeTellsNoObserver(t *testing.T) {
 		{"V1 truncated header", 1, []byte{0xff}},
 		{"V1 more groups than bytes", 1, []byte{100, 0}},
 		{"V1 malformed later group", 1, repeatedGroupsUpdate(t, 1, true)},
-		{"V2 truncated header", 2, []byte{0xff}},
+		{"V2 truncated columns", 2, []byte{0xff}},
+		{"V2 no group count", 2, emptyColumns},
+		{"V2 group count past the bound", 2, append(append([]byte(nil), emptyColumns...), 0x81, 0x80, 0x40)},
 		{"V2 malformed later group", 2, repeatedGroupsUpdate(t, 2, true)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

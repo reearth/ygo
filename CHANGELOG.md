@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the whole update before the apply integrates any of it. A refused update
   leaves the document unchanged, and no observer is told. An update that the
   check reads and finds malformed is also refused before anything integrates,
-  and an update that fails before the apply changes anything no longer fires
+  and an update whose header or a later group does not read no longer fires
   `OnUpdate` or `OnAfterTransaction`.
 
 ## [1.54.0] — 2026-10-22

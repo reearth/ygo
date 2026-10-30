@@ -66,15 +66,10 @@ type Transaction struct {
 	formatCleanup      bool
 	typeObserved       bool
 	afterTypeObservers func()
-	// refused marks a remote apply that failed before it changed anything, so
+	// refused marks a remote apply that failed before it changed anything
+	// (refused for the pending cap, or its header or groups did not read), so
 	// the commit fires nothing.
 	refused bool
-}
-
-// refuse marks the transaction refused and returns err.
-func (txn *Transaction) refuse(err error) error {
-	txn.refused = true
-	return err
 }
 
 // Ctx returns the context associated with this transaction. Transactions
