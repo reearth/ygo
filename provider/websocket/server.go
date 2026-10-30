@@ -1037,8 +1037,11 @@ type Server struct {
 	// peers — i.e. the last peer just disconnected. Useful for cool-down
 	// tasks (releasing caches, closing downstream connections, scheduling
 	// the eventual OnUnloadDocument). Fires before OnUnloadDocument when
-	// both apply. ctx is context.Background() — the WS request that owned
-	// the peer has already terminated by this point. (#60)
+	// both apply, except under CloseRoom(force): it closes each peer and
+	// waits only for that peer's read loop, so a peer's disconnect handler,
+	// and this hook with it, can run after CloseRoom has removed the room
+	// and fired OnUnloadDocument. ctx is context.Background() — the WS
+	// request that owned the peer has already terminated by this point. (#60)
 	OnLastPeer func(ctx context.Context, room string)
 
 	// MaxUpdateBytes is the maximum size of a single V1 update that

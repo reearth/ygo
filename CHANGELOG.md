@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-25
+
+### Fixed
+
+- **`provider/websocket`: `CloseRoom` no longer leaves a peer that joins while
+  it runs on the room it removes.** `CloseRoom` takes the room's list of
+  peers, closes them and waits for them, makes the room's pending writes
+  durable while the room can still be found, and only then removes the room
+  from the server. A peer that connected after that list was taken and before
+  the room was removed joined the room all the same. `CloseRoom` never closed
+  it, so it stayed on a room the server no longer had and received no update
+  until it reconnected for some other reason. With `force`, `CloseRoom` now
+  closes that peer too before it returns; the peer's disconnect handler, and
+  `OnLastPeer` with it, may still run after `OnUnloadDocument`. Without
+  `force`, `CloseRoom` removed a room that had such a peer and returned nil;
+  it now returns `ErrRoomHasPeers` and leaves the room open, as its doc says.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
