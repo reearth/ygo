@@ -727,15 +727,7 @@ func (s *Server) teardownRelayRoom(r *room, name string) {
 	s.relay.RoomDeactivated(name)
 }
 
-// Inject applies a remote change delivered by the relay. It satisfies
-// cluster.Sink. KindSync updates are applied to the room's doc with the relay
-// sentinel origin (so the local doc.OnUpdate observer does NOT re-publish them)
-// and rebroadcast to local peers via BroadcastUpdate. KindAwareness updates are
-// merged into the room's awareness with the sentinel origin; the awareness
-// fan-out to peers is driven by the awareness OnUpdate path the server already
-// runs for local peers — but inbound merges fire OnUpdate with the sentinel
-// origin, which the relay observer drops, so we additionally fan the awareness
-// update out to local peers here.
+// Inject applies a relay-delivered change with the sentinel origin so it is not re-published, and fans it out to local peers itself (only the landed part when a sync update fails partway).
 //
 // Inject auto-creates the room if it is not yet resident, so a node that has no
 // local peers for a room still materialises the converged state (matching how a
@@ -767,7 +759,14 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
-		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, s.relaySentinel); err != nil {
+		landed, err := crdt.ApplyUpdateV1Landed(rm.doc, in.Data, s.relaySentinel)
+		if err != nil {
+			// The room and its observers already hold landed, so local peers need it too.
+			if landed != nil {
+				if berr := s.broadcastUpdate(ctx, in.Room, landed, false); berr != nil {
+					return errors.Join(err, berr)
+				}
+			}
 			return err
 		}
 		// Rebroadcast to locally-connected peers. broadcastUpdate re-validates

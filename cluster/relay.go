@@ -72,10 +72,7 @@ type Inbound struct {
 // concrete implementation is *websocket.Server, which satisfies this interface
 // directly (Inject, Rooms, GetAwareness, GetDoc).
 type Sink interface {
-	// Inject applies a remote change to the local room. For KindSync the data
-	// is applied to the room's crdt.Doc with the relay sentinel origin and
-	// rebroadcast to local peers; for KindAwareness it is merged into the
-	// room's awareness.Awareness with the relay sentinel origin.
+	// Inject applies a remote sync or awareness change to the local room with the relay sentinel origin and rebroadcasts it to local peers, sending only the landed part when a sync update fails partway.
 	//
 	// Inject MAY BE CALLED CONCURRENTLY for distinct rooms — a relay is not
 	// required to deliver every room from a single goroutine, and every Sink
