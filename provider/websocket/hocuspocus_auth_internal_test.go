@@ -85,33 +85,16 @@ func TestHocuspocusFraming_AwarenessEchoesToSender(t *testing.T) {
 
 			room := "doc-room"
 			c := dialRoomInternal(t, ts, room)
-			drainHandshake := func(conn *gws.Conn) {
-				t.Helper()
-				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-				for range 3 {
-					_, data, err := conn.ReadMessage()
-					require.NoError(t, err)
-					dec := encoding.NewDecoder(data)
-					name, err := dec.ReadVarString()
-					require.NoError(t, err)
-					require.Equal(t, room, name)
-				}
-				_ = conn.SetReadDeadline(time.Time{})
-			}
-			drainHandshake(c)
+			drainHocuspocusHandshake(t, c, room)
 			var other *gws.Conn
 			if tc.readOnly {
 				other = dialRoomInternal(t, ts, room)
-				drainHandshake(other)
+				drainHocuspocusHandshake(t, other, room)
 			}
 
 			sender := awareness.New(42)
 			sender.SetLocalState(map[string]any{"cursor": float64(5)})
-			require.NoError(t, c.WriteMessage(gws.BinaryMessage, encoding.EncodeBytes(func(enc *encoding.Encoder) {
-				enc.WriteVarString(room)
-				enc.WriteVarUint(msgAwareness)
-				enc.WriteVarBytes(sender.EncodeUpdate(nil))
-			})))
+			require.NoError(t, c.WriteMessage(gws.BinaryMessage, hocuspocusAwarenessFrame(room, sender)))
 
 			_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 			_, data, err := c.ReadMessage()
@@ -138,10 +121,24 @@ func TestHocuspocusFraming_AwarenessEchoesToSender(t *testing.T) {
 			}
 
 			if other != nil {
-				_ = other.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-				_, _, err := other.ReadMessage()
-				require.Error(t, err, "a read-only awareness update must not reach another peer")
+				// The server handles c's frames in order, so a marker that reaches
+				// other first shows the awareness update was not forwarded.
+				require.NoError(t, c.WriteMessage(gws.BinaryMessage, encoding.EncodeBytes(func(enc *encoding.Encoder) {
+					enc.WriteVarString(room)
+					enc.WriteVarUint(msgBroadcastStateless)
+					enc.WriteVarString("marker")
+				})))
+				_ = other.SetReadDeadline(time.Now().Add(2 * time.Second))
+				_, data, err := other.ReadMessage()
+				require.NoError(t, err)
 				_ = other.SetReadDeadline(time.Time{})
+				dec := encoding.NewDecoder(data)
+				name, err := dec.ReadVarString()
+				require.NoError(t, err)
+				require.Equal(t, room, name)
+				kind, err := dec.ReadVarUint()
+				require.NoError(t, err)
+				require.Equal(t, msgStateless, kind, "a read-only awareness update must not reach another peer")
 			}
 		})
 	}
@@ -163,22 +160,14 @@ func TestHocuspocusFraming_ReadOnlyAwarenessReplyIsFixed(t *testing.T) {
 
 	room := "doc-room"
 	c := dialRoomInternal(t, ts, room)
-	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
-	for range 3 {
-		_, _, err := c.ReadMessage()
-		require.NoError(t, err)
-	}
-	_ = c.SetReadDeadline(time.Time{})
+	drainHocuspocusHandshake(t, c, room)
 
 	want := []byte{byte(msgAwareness), 1, 0}
 	for i, size := range []int{8, 64 << 10, 900 << 10} {
 		sender := awareness.New(uint64(42 + i))
 		sender.SetLocalState(map[string]any{"blob": strings.Repeat("x", size)})
-		require.NoError(t, c.WriteMessage(gws.BinaryMessage, encoding.EncodeBytes(func(enc *encoding.Encoder) {
-			enc.WriteVarString(room)
-			enc.WriteVarUint(msgAwareness)
-			enc.WriteVarBytes(sender.EncodeUpdate(nil))
-		})), "state of %d bytes", size)
+		require.NoError(t, c.WriteMessage(gws.BinaryMessage, hocuspocusAwarenessFrame(room, sender)),
+			"state of %d bytes", size)
 
 		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, data, err := c.ReadMessage()
@@ -190,6 +179,31 @@ func TestHocuspocusFraming_ReadOnlyAwarenessReplyIsFixed(t *testing.T) {
 		require.Equal(t, room, name)
 		require.Equal(t, want, dec.RemainingBytes(), "state of %d bytes", size)
 	}
+}
+
+// drainHocuspocusHandshake reads the three frames a new connection receives
+// and checks that each one names room.
+func drainHocuspocusHandshake(t *testing.T, conn *gws.Conn, room string) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for range 3 {
+		_, data, err := conn.ReadMessage()
+		require.NoError(t, err)
+		name, err := encoding.NewDecoder(data).ReadVarString()
+		require.NoError(t, err)
+		require.Equal(t, room, name)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+}
+
+// hocuspocusAwarenessFrame encodes aw's full state as a docName-prefixed
+// awareness frame for room.
+func hocuspocusAwarenessFrame(room string, aw *awareness.Awareness) []byte {
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarString(room)
+		enc.WriteVarUint(msgAwareness)
+		enc.WriteVarBytes(aw.EncodeUpdate(nil))
+	})
 }
 
 // TestInbandAuth_Authenticated_ReadWrite verifies the success path of the
