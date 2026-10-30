@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/reearth/ygo/encoding"
@@ -140,6 +141,23 @@ func TestUnit_WalkGroups_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
 			if bound < exact {
 				t.Fatalf("round %d %s: parkingRangesBound = %d, below the %d ranges that park", round, format.name, bound, exact)
 			}
+			if format.v2 {
+				// The delete set lies on the rest cursor, two bytes a range at
+				// least, which checkParkedDeletes's skip relies on.
+				dec, err := newV2Decoder(update)
+				if err != nil {
+					t.Fatal(err)
+				}
+				start := *dec
+				applied := pendingBudget{update: update, v2: true, v2Start: &start, v2Rest: *dec.restDec}
+				ranges, err := parkingRangesBound(b.deleteSetScanner(), StateVector{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if limit := applied.deleteSetLimit(); 2*ranges > limit || len(b.deleteSetBytes) > limit {
+					t.Fatalf("round %d: %d ranges in %d delete-set bytes, past the rest cursor's %d bytes", round, ranges, len(b.deleteSetBytes), limit)
+				}
+			}
 		}
 	}
 	if skips == 0 {
@@ -224,6 +242,10 @@ func checkWalkGroups(t testing.TB, update []byte, v2 bool) (ok bool) {
 		}
 		if err != nil {
 			continue
+		}
+		// Every range that can park, two bytes at least, lies in deleteSetLimit.
+		if n, err := parkingRangesBound(b.deleteSetScanner(), StateVector{}); err == nil && 2*n > b.deleteSetLimit() {
+			t.Fatalf("budget %d V2=%v: %d ranges, past the %d bytes deleteSetLimit allows (update %x)", i, v2, n, b.deleteSetLimit(), update)
 		}
 		last := make(map[ClientID]int, len(want.clients))
 		for g, client := range want.clients {
@@ -398,4 +420,48 @@ func FuzzWalkGroups(f *testing.F) {
 		checkWalkGroups(t, update, false)
 		checkWalkGroups(t, update, true)
 	})
+}
+
+// A V2 update's strings are on its columns, not its rest cursor, so a long
+// one whose delete set fits the room skips the walk, while its V1 form, which
+// holds the strings inline, walks.
+func TestUnit_CheckParkedDeletes_V2SkipsTheWalkWhenItsRestCursorFits(t *testing.T) {
+	author := New(WithClientID(1))
+	text := author.GetText("t")
+	author.Transact(func(txn *Transaction) { text.Insert(txn, 0, strings.Repeat("abcdefgh", 2_000), nil) })
+	for _, at := range []int{9, 7, 5, 3} {
+		author.Transact(func(txn *Transaction) { text.Delete(txn, at, 1) })
+	}
+	v1 := EncodeStateAsUpdateV1(author, nil)
+	v2 := EncodeStateAsUpdateV2(author, nil)
+	dec, err := newV2Decoder(v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest := dec.restDec.Remaining()
+	limit := rest / 2
+	if len(v2)/2 <= limit || len(v1)/2 <= limit {
+		t.Fatalf("the update (V1 %d, V2 %d bytes, rest %d) does not reach past the room", len(v1), len(v2), rest)
+	}
+	for _, format := range applyFormats {
+		doc := New(WithMaxPendingItems(limit))
+		update := v1
+		b := newPendingBudget(doc, doc.store.StateVector(), update, false)
+		if format.v2 {
+			update = v2
+			d, err := newV2Decoder(update)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := *d
+			b = newPendingBudget(doc, doc.store.StateVector(), update, true)
+			b.v2Start, b.v2Rest = &start, *d.restDec
+		}
+		if err := checkParkedDeletes(doc, &b); err != nil {
+			t.Fatalf("%s: checkParkedDeletes: %v", format.name, err)
+		}
+		if b.walked != !format.v2 {
+			t.Fatalf("%s: the check walked the update: %v, want %v", format.name, b.walked, !format.v2)
+		}
+	}
 }

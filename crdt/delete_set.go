@@ -249,9 +249,9 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	pending := doc.store.pendingDs
 	before := doc.store.pendingDsRanges
 	room := max(limit-before, 0)
-	// A delete range takes at least 2 bytes, a clock and a length, so an update
-	// of at most twice the room cannot park past it.
-	if len(b.update)/2 <= room {
+	// A delete range takes at least 2 bytes, a clock and a length, so a delete
+	// set read from at most twice the room in bytes cannot park past it.
+	if b.deleteSetLimit()/2 <= room {
 		return nil
 	}
 	if err := b.walkGroups(); err != nil {

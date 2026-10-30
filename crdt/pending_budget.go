@@ -184,6 +184,16 @@ func (b *pendingBudget) deleteSetScanner() *pendingScanner {
 	return s
 }
 
+// deleteSetLimit bounds the update's delete set in bytes: with the apply's V2
+// decoder (v2Start), the rest cursor's bytes, the only ones decodeDeleteSetV2
+// reads; else the whole update.
+func (b *pendingBudget) deleteSetLimit() int {
+	if b.v2Start != nil {
+		return b.v2Rest.Remaining()
+	}
+	return len(b.update)
+}
+
 // Strict wire ordering proves that each client occurs in only one group.
 // Its endpoints and first gap rule out absent clients without an index.
 // Non-monotonic or repeated clients require the full bounds check instead.
