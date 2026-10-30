@@ -294,7 +294,10 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			s.pending = &pendingUpdate{missing: make(StateVector)}
 		}
 		s.pending.items = append(s.pending.items, item)
-		parked = append(parked, item)
+		if held {
+			// Only a queue that held structs has a cover to keep.
+			parked = append(parked, item)
+		}
 		if client, parkedAt, future := itemFutureDep(item, s); future {
 			mergePendingMissing(s.pending.missing, client, parkedAt)
 		} else {

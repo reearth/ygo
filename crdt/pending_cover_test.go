@@ -1,8 +1,11 @@
 package crdt
 
 import (
+	"cmp"
 	"encoding/base64"
 	"math"
+	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -376,6 +379,41 @@ func TestUnit_PendingCover_ABatchParkJoinsTheSpanItTouches(t *testing.T) {
 	p.addCover(batch)
 	require.Equal(t, sortedSpans(p.items, false), p.cover.spans)
 	require.Equal(t, clockSpan{0, 101}, p.cover.spans[2][0], "the batch joins the span at clock 100")
+}
+
+// sortedSpans, built in one pass for items in clock order, gives the spans a
+// sort and merge of every item's clocks gives, for items in any order, of
+// several clients, GC structs and others mixed.
+func TestUnit_PendingCover_SortedSpansMatchesASortAndMerge(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 11))
+	for range 500 {
+		n := rng.IntN(40)
+		items := make([]*Item, 0, n)
+		for range n {
+			it := &Item{ID: ID{Client: ClientID(rng.IntN(3)), Clock: uint64(rng.IntN(60))}, Content: NewContentDeleted(1 + rng.IntN(4))}
+			if rng.IntN(2) == 0 {
+				it.Deleted = true
+			} else {
+				it.Origin = &ID{Client: 9, Clock: 0}
+			}
+			items = append(items, it)
+		}
+		if rng.IntN(2) == 0 {
+			slices.SortStableFunc(items, func(a, b *Item) int { return cmp.Compare(a.ID.Clock, b.ID.Clock) })
+		}
+		for _, gcOnly := range []bool{false, true} {
+			want := make(map[ClientID][]clockSpan)
+			for _, it := range items {
+				if !gcOnly || isGCStruct(it) {
+					want[it.ID.Client] = append(want[it.ID.Client], clockSpan{it.ID.Clock, it.ID.Clock + uint64(it.Content.Len())})
+				}
+			}
+			for c, list := range want {
+				want[c] = coalesce(list)
+			}
+			require.Equal(t, want, sortedSpans(items, gcOnly))
+		}
+	}
 }
 
 func TestUnit_PendingCover_Spans(t *testing.T) {

@@ -53,19 +53,49 @@ func (p *pendingUpdate) coverOf() *pendingCover {
 }
 
 // sortedSpans is the merged spans of items (of its GC structs alone when
-// gcOnly), per client.
+// gcOnly), per client. A struct that starts at or after its client's last
+// span joins or follows it in place, so items in clock order, as a load or a
+// drain parks them, cost one pass and one span per run; a client whose
+// structs arrived out of order is sorted and merged once at the end.
 func sortedSpans(items []*Item, gcOnly bool) map[ClientID][]clockSpan {
 	spans := make(map[ClientID][]clockSpan)
+	var unsorted map[ClientID]bool
+	var client ClientID
+	var list []clockSpan
+	have := false
 	for _, it := range items {
 		if gcOnly && !isGCStruct(it) {
 			continue
 		}
-		if end := it.ID.Clock + uint64(it.Content.Len()); end > it.ID.Clock {
-			spans[it.ID.Client] = append(spans[it.ID.Client], clockSpan{it.ID.Clock, end})
+		start := it.ID.Clock
+		end := start + uint64(it.Content.Len())
+		if end <= start {
+			continue
+		}
+		if !have || it.ID.Client != client {
+			if have {
+				spans[client] = list
+			}
+			client, list, have = it.ID.Client, spans[it.ID.Client], true
+		}
+		switch n := len(list); {
+		case n > 0 && start >= list[n-1].start && start <= list[n-1].end:
+			list[n-1].end = max(list[n-1].end, end)
+		case n > 0 && start < list[n-1].start:
+			if unsorted == nil {
+				unsorted = make(map[ClientID]bool)
+			}
+			unsorted[client] = true
+			list = append(list, clockSpan{start, end})
+		default:
+			list = append(list, clockSpan{start, end})
 		}
 	}
-	for client, list := range spans {
-		spans[client] = coalesce(list)
+	if have {
+		spans[client] = list
+	}
+	for c := range unsorted {
+		spans[c] = coalesce(spans[c])
 	}
 	return spans
 }
