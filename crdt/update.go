@@ -43,6 +43,12 @@ var ErrInvalidUpdate = errors.New("crdt: invalid update")
 func EncodeStateAsUpdateV1(doc *Doc, sv StateVector) []byte {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
+	return encodeStateAsUpdateV1Locked(doc, sv)
+}
+
+// encodeStateAsUpdateV1Locked is EncodeStateAsUpdateV1's body, for a caller
+// that holds doc.mu.
+func encodeStateAsUpdateV1Locked(doc *Doc, sv StateVector) []byte {
 	return withParked(doc, sv, encodeV1Locked(doc, sv), encodeStructStoreV1, MergeUpdatesV1)
 }
 
@@ -275,6 +281,32 @@ func (item *Item) isGCOrphan() bool {
 	return item.Parent == nil && item.Origin == nil && item.OriginRight == nil && item.parentID == nil
 }
 
+// dropGCOrigins returns item's effective origins for the wire, without one
+// that names a GC struct in store: a receiver cannot infer a parent from a GC
+// struct, so encodeItem and encodeItemV2 write item's parent in its place.
+// They can only when item has a parent to write (Parent, or a deferred
+// parentID). An item with neither, one still parked on a missing dependency,
+// keeps both origins, so a receiver parks it, or turns it into a GC struct,
+// exactly as the document that holds it does. Clearing them wrote the empty
+// root name instead: the receiver integrated the content into a root type
+// named "", or at another position than the sender's.
+func dropGCOrigins(item *Item, origin, originRight *ID, store *StructStore) (*ID, *ID) {
+	if item.Parent == nil && item.parentID == nil {
+		return origin, originRight
+	}
+	if origin != nil {
+		if oi := store.Find(*origin); oi != nil && oi.isGCOrphan() {
+			origin = nil
+		}
+	}
+	if originRight != nil {
+		if ori := store.Find(*originRight); ori != nil && ori.isGCOrphan() {
+			originRight = nil
+		}
+	}
+	return origin, originRight
+}
+
 // markGCOrphan turns an item whose parent cannot be resolved into the GC struct
 // Yjs integrates it as: deleted, length-only content, and no parent or origins.
 // It then encodes as a GC struct, and nothing can resolve a parent through it,
@@ -354,20 +386,7 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 		originRight = item.OriginRight
 	}
 
-	// If the origin item is a GC placeholder (no Parent), the receiver can't
-	// infer this item's parent from it. Clear the origin so that explicit
-	// parent info is encoded instead, allowing the receiver to resolve the
-	// parent directly from the named root type or container item ID.
-	if origin != nil {
-		if oi := store.Find(*origin); oi != nil && oi.isGCOrphan() {
-			origin = nil
-		}
-	}
-	if originRight != nil {
-		if ori := store.Find(*originRight); ori != nil && ori.isGCOrphan() {
-			originRight = nil
-		}
-	}
+	origin, originRight = dropGCOrigins(item, origin, originRight, store)
 
 	info := tag
 	if origin != nil {
@@ -588,6 +607,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	unresolvableDs := ds.applyToPartial(txn)
 	if len(unresolvableDs.clients) > 0 {
 		txn.doc.store.pendingDs.Merge(unresolvableDs)
+		txn.noteParkedDeletes(unresolvableDs)
 	}
 
 	drainPending(txn)

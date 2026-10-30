@@ -66,6 +66,33 @@ type Transaction struct {
 	formatCleanup      bool
 	typeObserved       bool
 	afterTypeObservers func()
+	// parkedItems and parkedDeletes are what this transaction parked in the
+	// store's pending queue and pending deletes: structs and deletions that
+	// wait for something the document lacks. They are kept only while an
+	// update log is open, whose logged update carries them (parkedUpdate),
+	// as the OnUpdate update does not.
+	parkedItems   []*Item
+	parkedDeletes DeleteSet
+}
+
+// noteParkedItem records item, which this transaction parked, for the open
+// update logs.
+func (t *Transaction) noteParkedItem(item *Item) {
+	if len(t.doc.updateLogs) > 0 {
+		t.parkedItems = append(t.parkedItems, item)
+	}
+}
+
+// noteParkedDeletes records ds, deletions this transaction parked, for the
+// open update logs.
+func (t *Transaction) noteParkedDeletes(ds DeleteSet) {
+	if len(t.doc.updateLogs) == 0 {
+		return
+	}
+	if t.parkedDeletes.clients == nil {
+		t.parkedDeletes = newDeleteSet()
+	}
+	t.parkedDeletes.Merge(ds)
 }
 
 // Ctx returns the context associated with this transaction. Transactions

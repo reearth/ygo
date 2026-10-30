@@ -269,6 +269,7 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
 		}
 		txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
+		txn.noteParkedItem(item)
 		if client, parkedAt, future := itemFutureDep(item, txn.doc.store); future {
 			mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
 		} else {
