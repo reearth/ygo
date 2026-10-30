@@ -49,9 +49,8 @@ type peer struct {
 	disconnectOnce sync.Once
 }
 
-// readOnlyAwarenessResponse is a complete native awareness frame with no
-// client states. It keeps a read-only Hocuspocus provider connected without
-// allocating or queuing its untrusted payload.
+// readOnlyAwarenessResponse is an awareness frame with no client states that
+// keeps a read-only Hocuspocus provider connected without queuing its payload.
 var readOnlyAwarenessResponse = [...]byte{byte(msgAwareness), 1, 0}
 
 // handleMessage decodes the outer message type and dispatches accordingly.
@@ -111,8 +110,7 @@ func (p *peer) handleMessage(data []byte) {
 			return
 		}
 		if p.readOnly {
-			// A viewer cannot change shared awareness. This bounded response
-			// keeps its provider connected without retaining the input.
+			// A viewer cannot change shared awareness, but its provider needs a reply to stay connected.
 			p.write(readOnlyAwarenessResponse[:])
 			return
 		}
@@ -766,9 +764,7 @@ func (p *peer) broadcastSync(syncMsg []byte) {
 	}), true)
 }
 
-// broadcastAwareness sends an awareness update to every current room peer.
-// An accepted inbound update still has its sender in the room; a disconnect
-// removal has already removed its source.
+// broadcastAwareness sends an awareness update to every current room peer, including its sender.
 func (p *peer) broadcastAwareness(awMsg []byte) {
 	p.broadcast(encoding.EncodeBytes(func(enc *encoding.Encoder) {
 		enc.WriteVarUint(msgAwareness)

@@ -782,9 +782,8 @@ func (s *Server) markIdleIfEmpty(r *room) {
 // Server.Authorize (issue #59). Additional per-connection settings can be added
 // here in a backward-compatible way.
 type ConnectionConfig struct {
-	// ReadOnly, when true, makes the peer read-only: it receives document and
-	// awareness broadcasts, and its awareness update gets an empty response.
-	// Its sync updates and awareness update do not change the room or reach others.
+	// ReadOnly makes the peer receive broadcasts while its sync and awareness
+	// updates do not change the room, and its awareness update gets an empty response.
 	ReadOnly bool
 }
 
@@ -910,15 +909,9 @@ type Server struct {
 	// cannot be auto-detected on one endpoint.
 	HocuspocusFraming bool
 
-	// Authorize, if non-nil, is the richer alternative to AuthFunc: it both
-	// accepts/rejects the connection (second return value; false → 401) and
-	// returns a ConnectionConfig describing the accepted connection — notably
-	// whether it is read-only (issue #59). When Authorize is set it takes
-	// precedence over AuthFunc. A read-only peer receives document and awareness
-	// broadcasts; its sync updates and awareness update do not change the room
-	// or reach other peers, and its awareness update gets an empty response. It
-	// can still request state (SyncStep1 is answered) and query awareness.
-	// Stateless signals are not gated by read-only.
+	// Authorize, if non-nil, takes precedence over AuthFunc and accepts or
+	// rejects the connection (false → 401) while returning its ConnectionConfig,
+	// such as whether it is read-only.
 	Authorize func(r *http.Request) (ConnectionConfig, bool)
 
 	// AllowedOrigins is the list of origins permitted to open WebSocket

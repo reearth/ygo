@@ -145,9 +145,8 @@ func TestHocuspocusFraming_AwarenessEchoesToSender(t *testing.T) {
 }
 
 // TestHocuspocusFraming_ReadOnlyAwarenessReplyIsFixed checks that a read-only
-// peer's awareness update, however large, is answered with the same three
-// bytes after the docName prefix: an awareness message naming no client. The
-// reply never carries the peer's own payload.
+// peer's awareness update, however large, is answered with the same empty
+// awareness message and never with the peer's own payload.
 func TestHocuspocusFraming_ReadOnlyAwarenessReplyIsFixed(t *testing.T) {
 	srv := NewServer()
 	srv.HocuspocusFraming = true
