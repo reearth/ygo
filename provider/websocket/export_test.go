@@ -76,3 +76,33 @@ func MemoryPersistenceBackoffState(m *MemoryPersistence, room string) (failures 
 	}
 	return l.failures, l.retryAt
 }
+
+// PeerQueuedBytes reports how many peers room holds and how many bytes are
+// charged to them together — the frames queued for them and not yet written,
+// the one each writer is writing included. Returns (0, 0) for a room the
+// server does not hold.
+//
+// Test-only, and the only way to see the byte accounting at all: it is a
+// per-peer field under the peer's write mutex, and the alternative — reading
+// the process's heap — cannot tell the bytes a peer still holds from the ones
+// the collector has not reaped yet.
+func PeerQueuedBytes(s *Server, room string) (bytes int64, peers int) {
+	s.rmu.RLock()
+	rm, ok := s.rooms[room]
+	s.rmu.RUnlock()
+	if !ok {
+		return 0, 0
+	}
+	rm.mu.Lock()
+	targets := make([]*peer, 0, len(rm.peers))
+	for p := range rm.peers {
+		targets = append(targets, p)
+	}
+	rm.mu.Unlock()
+	for _, p := range targets {
+		p.wmu.Lock()
+		bytes += p.queuedBytes
+		p.wmu.Unlock()
+	}
+	return bytes, len(targets)
+}

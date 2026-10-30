@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.0] — 2026-10-30
+
+### Added
+
+- **`provider/websocket`: `Server.PeerWriteQueueBytes`, a per-peer bound on the
+  bytes queued for a peer and not yet written to it.** `PeerWriteQueueSize`
+  bounds that queue in frames only, so what one connection can make the server
+  hold is that count (512 by default) times the largest frame the room
+  produces. A peer that sends SyncStep1 and never reads is answered the room's
+  full state each time: on a 4 MiB document, 100 such frames — 400 bytes
+  uploaded — grew a server's heap by 420,255,432 bytes with 99 frames still
+  queued, and about 20 such connections exhaust a 4 GiB pod. The same flood of
+  40 SyncStep1 frames on a 1 MiB document (160 bytes uploaded) grows the heap
+  by 42,272,136 bytes with the peer still connected.
+
+  With the budget set, a frame that would take a peer past it is not queued:
+  the peer is closed on the frame cap's path (its connection is closed, its
+  read loop runs the disconnect, the writer drains, the room is evicted if it
+  is now empty), on every enqueue path — a room broadcast, the SyncStep2
+  answering a SyncStep1, awareness, a `Server.Apply`/`Inject` delivery — and
+  whatever `SlowPeerPolicy` is set, since a peer over its budget is holding
+  memory rather than lagging by one delta, and its backlog drains only if it
+  reads. The close is logged at Warn with `cause` set to the new
+  `CloseCauseWriteQueueBytes` constant, alongside `path`, `queuedBytes`,
+  `budgetBytes` and `frameBytes`, so an embedder's `slog` handler can count
+  those closes apart from frame-cap closes and write failures.
+
+  At the boundary, a peer with nothing queued takes the next frame whatever
+  its size, so one honest frame larger than the budget — a room whose full
+  state exceeds it — is never refused and no peer is closed for a frame it
+  could not have avoided; it is then over budget, so the frame after it closes
+  the peer. One peer therefore holds at most its budget plus one frame. The
+  bytes a peer is charged are credited back when its writer has written the
+  frame, and released when the peer is dropped.
+
+  Zero, the default, means no byte budget and leaves `PeerWriteQueueSize` the
+  only bound, which is the behaviour of every release before this one.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
