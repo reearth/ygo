@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Fixed
+
+- **`provider/websocket`: the server drops the input of a peer it closed for a
+  full write queue.** When a peer's write queue overflowed, on a direct send or
+  on a broadcast under `SlowPeerDisconnect`, the server closed the connection,
+  but the read loop still handled the messages already in its read buffer (up
+  to about 4 KiB). For a client that sent SyncStep1 and never read, the server
+  encoded the room's full state for each of those messages (up to about 400),
+  then refused it and logged a warning. The read loop now drops that input, as
+  it does after a queued close. Updates in it are not applied: the client
+  sends them again when it reconnects.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

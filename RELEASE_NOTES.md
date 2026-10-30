@@ -1,3 +1,17 @@
+## v1.54.1
+
+**Who is affected: a `provider/websocket` server with a peer that fills its
+write queue.**
+
+When a peer's write queue (`PeerWriteQueueSize`, 512 frames by default)
+overflowed, the server closed the connection, but the read loop still handled
+the messages already in its read buffer (up to about 4 KiB). Each buffered
+SyncStep1 made the server encode the room's full state, then refuse it and log
+a warning. The read loop
+now drops that input, as it already did after a queued close. A client that
+reconnects sends its updates again in the sync exchange. No API or wire format
+changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

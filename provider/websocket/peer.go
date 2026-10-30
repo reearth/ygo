@@ -39,7 +39,7 @@ type peer struct {
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
 	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
-	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
+	inputClosed       atomic.Bool   // a close is queued or sent, or the queue overflowed; the read loop drops input from then on
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -819,10 +819,12 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 					"room", other.roomName,
 					"queueSize", cap(other.writeCh))
 			} else {
-				// Disconnect the slow peer; the read loop runs handleDisconnect.
+				// Disconnect the slow peer; the read loop drops what it already
+				// sent and runs handleDisconnect.
 				p.server.log().Warn("peer write queue full; closing slow peer",
 					"room", other.roomName,
 					"queueSize", cap(other.writeCh))
+				other.inputClosed.Store(true)
 				_ = other.conn.Close()
 			}
 		}
@@ -847,10 +849,12 @@ func (p *peer) write(data []byte) {
 	default:
 		// Queue full during a direct send (e.g. handshake reply) — disconnect.
 		// Unlike a silent drop, closing the connection lets the CRDT
-		// pending-structs machinery recover via reconnect-and-resync.
+		// pending-structs machinery recover via reconnect-and-resync. The
+		// read loop drops what the peer already sent, so it is not answered.
 		p.server.log().Warn("peer write queue full during direct send; closing peer",
 			"room", p.roomName,
 			"queueSize", cap(p.writeCh))
+		p.inputClosed.Store(true)
 		_ = p.conn.Close()
 	}
 	p.wmu.Unlock()
