@@ -1,3 +1,22 @@
+## v1.55.1
+
+**Who is affected: anyone who applies V2 updates out of order gets a faster
+drain. No input is known that makes the panic below happen.**
+
+When an update let parked structs integrate and one of them panicked, that
+struct stayed in the pending queue. The structs not yet tried went back to the
+queue with no clock to wait for: in a V1 update, those whose dependencies were
+met, and in a V2 update, all of them. No drain tried them until another parked
+struct's clock advanced, and that drain panicked on the kept struct again. A
+struct could stay out of the document even after the panicking struct was sent
+again. Now the struct that panics is dropped, the other parked structs still
+integrate in the same update, and that update returns `ErrInvalidUpdate` as
+before.
+
+V2 updates now use the same drain as V1 updates, which retries each parked
+struct once per dependency. One client's 5,000 keystrokes applied newest first
+as V2 updates took 335 ms and now take 7.5 ms. No API or wire format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

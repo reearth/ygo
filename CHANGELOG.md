@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-10-31
+
+### Fixed
+
+- **`crdt`: a panic while parked structs integrate no longer strands the
+  others.** When an update let parked structs integrate and one of them
+  panicked, that struct stayed in the pending queue. The structs not yet
+  tried went back to the queue with no clock to wait for: in a V1 update,
+  those whose dependencies were met, and in a V2 update, all of them. No
+  drain tried them until another parked struct's clock advanced, and that
+  drain panicked on the kept struct again. A struct could stay out of the
+  document even after the panicking struct was sent again. Each parked struct
+  that panics is now dropped, the others still integrate, and the update
+  returns `ErrInvalidUpdate` as before. V2 updates now use the same drain as
+  V1 updates. No input is known that makes a parked struct panic.
+
+### Performance
+
+- **`crdt`: the doc-level drain of a V2 update retries each parked struct
+  once per dependency, as V1 does.** One client's 5,000 keystrokes applied
+  newest first: V2 from 335 ms and 361 MiB allocated to 7.5 ms and 10 MiB
+  (`BenchmarkPendingDrainNewestFirst`).
+
 ## [1.55.0] — 2026-10-31
 
 ### Added
