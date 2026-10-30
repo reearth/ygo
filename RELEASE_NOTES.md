@@ -24,14 +24,15 @@ path and whatever `SlowPeerPolicy` is set, because a peer over its budget
 drains only if it reads. The close is logged at Warn as
 `peer queued bytes over budget`.
 
-The frame that crosses the budget is queued whatever its size, and the
-handshake is not counted, so a peer can join a room whose state is larger than
-the budget and get an answer to its SyncStep1. A frame that arrives while more
-than the budget waits closes even a peer that reads, so set the budget above
-the largest room state the server holds.
+Set the budget above the largest room state the server holds. A frame that
+arrives while more than the budget waits closes even a peer that reads, and a
+peer that joins a room receives the room's state at least once. The handshake
+is not counted, and the frame that crosses the budget is queued whatever its
+size, so one peer holds at most the budget plus one frame, besides its
+handshake and the frame being written.
 
-Zero, the default, means no byte budget: nothing changes for a server that
-does not set it.
+Zero, the default, or a negative value means no byte budget: nothing changes
+for a server that does not set it.
 
 ## v1.54.0
 

@@ -8,22 +8,20 @@ import (
 
 func TestUnit_Peer_OverBudget(t *testing.T) {
 	tests := []struct {
-		name        string
-		budget      int64
-		handshaking bool
-		queued      int64
-		want        bool
+		name   string
+		budget int64
+		queued int64
+		want   bool
 	}{
 		{name: "below the budget", budget: 100, queued: 99, want: false},
 		{name: "at the budget", budget: 100, queued: 100, want: true},
 		{name: "past the budget", budget: 100, queued: 1_000, want: true},
-		{name: "during the handshake", budget: 100, handshaking: true, queued: 1_000, want: false},
 		{name: "budget 0 is off", budget: 0, queued: 1 << 40, want: false},
 		{name: "a negative budget is off", budget: -1, queued: 1 << 40, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &peer{writeBudget: tt.budget, handshaking: tt.handshaking, queuedBytes: tt.queued}
+			p := &peer{writeBudget: tt.budget, queuedBytes: tt.queued}
 			assert.Equal(t, tt.want, p.overBudgetLocked())
 		})
 	}
@@ -55,20 +53,21 @@ func TestUnit_Peer_Write_ChargesQueuedBytes(t *testing.T) {
 }
 
 func TestUnit_Peer_HandshakeIsNotCharged(t *testing.T) {
-	p := &peer{server: &Server{}, writeCh: make(chan []byte, 4), writeBudget: 4}
-	p.setHandshaking(true)
-	p.write([]byte{1, 2, 3, 4, 5})
-	p.write([]byte{6})
-	p.setHandshaking(false)
-	p.write([]byte{7, 8})
+	// A frame queued before the handshake is charged and leaves the queue
+	// first; the handshake is not charged even past the budget; the frame
+	// after it is charged.
+	p := &peer{server: &Server{}, writeCh: make(chan []byte, 8), writeBudget: 4}
+	p.write([]byte{1, 2, 3})
+	p.writeHandshake([]byte{4, 5, 6, 7, 8}, []byte{9})
+	p.write([]byte{10})
 
 	p.wmu.Lock()
 	defer p.wmu.Unlock()
-	assert.Equal(t, int64(2), p.queuedBytes, "only the frame after the handshake is charged")
-	for range 2 {
+	assert.Equal(t, int64(4), p.queuedBytes, "only the frames outside the handshake are charged")
+	assert.Len(t, p.writeCh, 4)
+	want := []int64{1, 1, 1, 0}
+	for i, w := range want {
 		p.creditLocked(len(<-p.writeCh))
+		assert.Equal(t, w, p.queuedBytes, "after frame %d leaves the queue", i+1)
 	}
-	assert.Equal(t, int64(2), p.queuedBytes, "the handshake frames leave the queue first, uncharged")
-	p.creditLocked(len(<-p.writeCh))
-	assert.Equal(t, int64(0), p.queuedBytes)
 }

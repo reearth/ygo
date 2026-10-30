@@ -1,13 +1,15 @@
 package websocket
 
 // enqueueLocked hands data to the peer's writer and charges it to the peer's
-// Server.PeerWriteQueueBytes. It reports true only when writeCh was full, so
-// the caller can run its own full-queue handling. When the frames waiting for
-// the peer already reach its budget, the frame is not queued and the peer is
-// closed, whatever the SlowPeerPolicy, because a peer over its budget drains
-// only if it reads. The caller holds wmu and has checked closed.
-func (p *peer) enqueueLocked(data []byte, path string) (full bool) {
-	if p.overBudgetLocked() {
+// Server.PeerWriteQueueBytes, unless it is a handshake frame. It reports true
+// only when writeCh was full, so the caller can run its own full-queue
+// handling; it reports false also when it refused the frame. It refuses a
+// frame, other than a handshake frame, when the frames waiting for the peer
+// already reach its budget, and then closes the peer whatever the
+// SlowPeerPolicy, because a peer over its budget drains only if it reads. The
+// caller holds wmu and has checked closed.
+func (p *peer) enqueueLocked(data []byte, path string, handshake bool) (full bool) {
+	if !handshake && p.overBudgetLocked() {
 		p.server.log().Warn("peer queued bytes over budget; closing peer",
 			"room", p.roomName,
 			"path", path,
@@ -20,12 +22,11 @@ func (p *peer) enqueueLocked(data []byte, path string) (full bool) {
 	}
 	select {
 	case p.writeCh <- data:
-		switch {
-		case p.writeBudget <= 0:
-		case p.handshaking:
-			p.unchargedFrames++
-		default:
-			p.queuedBytes += int64(len(data))
+		if p.writeBudget > 0 {
+			p.enqueued++
+			if !handshake {
+				p.queuedBytes += int64(len(data))
+			}
 		}
 		return false
 	default:
@@ -33,32 +34,35 @@ func (p *peer) enqueueLocked(data []byte, path string) (full bool) {
 	}
 }
 
-// overBudgetLocked reports whether the frames waiting for the peer reach its
-// budget. A frame is refused only then, so the frame that crosses the budget
-// is queued whatever its size. The caller holds wmu.
+// overBudgetLocked reports whether the charged frames waiting for the peer
+// reach its budget. A frame is refused only then, so the frame that crosses
+// the budget is queued whatever its size. The caller holds wmu.
 func (p *peer) overBudgetLocked() bool {
-	return p.writeBudget > 0 && !p.handshaking && p.queuedBytes >= p.writeBudget
+	return p.writeBudget > 0 && p.queuedBytes >= p.writeBudget
 }
 
-// creditLocked takes a frame runWriter has taken off writeCh out of the
-// count. writeCh is first in, first out, so the frames queued during the
-// handshake, which were never charged, leave it first. The caller holds wmu.
+// creditLocked takes the next frame runWriter took off writeCh out of the
+// count, unless it is a handshake frame. Every send on writeCh happens under
+// wmu, so frames leave it in the order enqueued numbered them. The caller
+// holds wmu.
 func (p *peer) creditLocked(n int) {
-	if p.unchargedFrames > 0 {
-		p.unchargedFrames--
-		return
+	seq := p.dequeued
+	p.dequeued++
+	if seq < p.handshakeFrom || seq >= p.handshakeTo {
+		p.queuedBytes -= int64(n)
 	}
-	p.queuedBytes -= int64(n)
 }
 
-// setHandshaking marks the frames queued while on is true as the handshake,
-// which is never refused or charged: a peer cannot ask for it again, and a
-// client may ask for the room's state before it reads it.
-func (p *peer) setHandshaking(on bool) {
-	if p.writeBudget <= 0 {
-		return
-	}
+// writeHandshake queues the frames a peer gets when it connects, with no
+// other frame between them. Server.PeerWriteQueueBytes neither refuses nor
+// charges them: a peer cannot ask for them again, and a client may ask for
+// the room's state before it reads them.
+func (p *peer) writeHandshake(frames ...[]byte) {
 	p.wmu.Lock()
-	p.handshaking = on
-	p.wmu.Unlock()
+	defer p.wmu.Unlock()
+	p.handshakeFrom = p.enqueued
+	for _, f := range frames {
+		p.writeLocked(f, true)
+	}
+	p.handshakeTo = p.enqueued
 }

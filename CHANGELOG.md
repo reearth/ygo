@@ -26,8 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The frame that crosses the budget is queued whatever its size, and the
   handshake is not counted, so one peer holds at most the budget plus one
-  frame, besides its handshake and the frame being written. Zero, the
-  default, means no byte budget.
+  frame, besides its handshake and the frame being written. A frame that
+  arrives while more than the budget waits closes even a peer that reads, so
+  set the budget above the largest room state. Zero, the default, or a
+  negative value means no byte budget.
 
 ## [1.54.0] — 2026-10-22
 

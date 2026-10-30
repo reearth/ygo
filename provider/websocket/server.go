@@ -2173,20 +2173,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// The handshake is not charged to PeerWriteQueueBytes (see setHandshaking).
-	p.setHandshaking(true)
+	// 1. Sync step-1 — request the peer's state vector.
+	step1 := syncFrame(ygsync.EncodeSyncStep1(rm.doc))
 
-	// 1. Send sync step-1 — request the peer's state vector.
-	p.sendSync(ygsync.EncodeSyncStep1(rm.doc))
-
-	// 2. Send sync step-2 — give the peer everything the server already has.
+	// 2. Sync step-2 — give the peer everything the server already has.
 	fullUpdate := crdt.EncodeStateAsUpdateV1(rm.doc, nil)
-	step2 := encodeSyncStep2Msg(fullUpdate)
-	p.sendSync(step2)
+	step2 := syncFrame(encodeSyncStep2Msg(fullUpdate))
 
-	// 3. Send the current awareness state of all active peers.
-	p.sendAwareness(rm.awareness.EncodeUpdate(nil))
-	p.setHandshaking(false)
+	// 3. The current awareness state of all active peers.
+	aw := awarenessFrame(rm.awareness.EncodeUpdate(nil))
+
+	// Queued together, outside PeerWriteQueueBytes (see writeHandshake).
+	p.writeHandshake(step1, step2, aw)
 
 	// Read loop — exits when the connection is closed (by peer, by context
 	// cancellation, or by Shutdown).

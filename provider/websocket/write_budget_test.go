@@ -1,6 +1,7 @@
 package websocket_test
 
 import (
+	"context"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
@@ -193,6 +194,39 @@ func TestInteg_PeerWriteQueueBytes_RoomLargerThanTheBudget(t *testing.T) {
 	assert.Equal(t, 3, peers, "no peer is closed")
 }
 
+func TestInteg_PeerWriteQueueBytes_FrameQueuedBeforeTheHandshake(t *testing.T) {
+	// OnFirstPeer runs after the peer joins the room and before its
+	// handshake, so an Apply there queues a charged frame ahead of the
+	// handshake. Once the peer has read everything, nothing is charged.
+	const (
+		room   = "before-handshake"
+		budget = int64(64 << 10)
+	)
+	srv, dialer := budgetServer(t, budget, ygws.SlowPeerDisconnect)
+	insert := func(text string) {
+		_ = srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := doc.GetText("t")
+			transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, text, nil) })
+		})
+	}
+	srv.OnFirstPeer = func(context.Context, string) { insert(strings.Repeat("a", 128<<10)) }
+
+	conn, _, err := dialer.Dial("ws://pipe/"+room, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	for range 4 { // the Apply update, then the handshake
+		readOne(t, conn, 5*time.Second)
+	}
+	require.Eventually(t, func() bool {
+		queued, peers := ygws.PeerQueuedBytes(srv, room)
+		return peers == 1 && queued == 0
+	}, 5*time.Second, 10*time.Millisecond, "a peer that read everything has nothing charged")
+
+	insert("b")
+	outerType, _ := readOne(t, conn, 5*time.Second)
+	assert.Equal(t, uint64(0), outerType, "the next update reaches the peer")
+}
+
 func TestInteg_PeerWriteQueueBytes_LargeBroadcastKeepsAReadingPeer(t *testing.T) {
 	// A broadcast larger than the budget, then small ones right behind it:
 	// the reading peer's writer takes the large frame off the queue before it
@@ -280,8 +314,11 @@ func TestInteg_PeerWriteQueueBytes_AccountingReturnsToZero(t *testing.T) {
 		return peers == 2 && queued == 0
 	}, 5*time.Second, 10*time.Millisecond, "a drained queue leaves nothing charged")
 
-	peak := step1Flood(t, srv, conn, room, 3)
-	require.Positive(t, peak, "the non-reading peer holds queued bytes")
+	step1Flood(t, srv, conn, room, 3)
+	require.Eventually(t, func() bool {
+		queued, _ := ygws.PeerQueuedBytes(srv, room)
+		return queued > 0
+	}, 5*time.Second, 10*time.Millisecond, "the non-reading peer holds queued bytes")
 	require.NoError(t, conn.Close())
 
 	require.Eventually(t, func() bool {
