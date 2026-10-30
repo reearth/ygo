@@ -1,14 +1,8 @@
 package websocket
 
-// enqueueLocked hands data to the peer's writer and charges it to the peer's
-// Server.PeerWriteQueueBytes, unless it is a handshake frame. It reports true
-// only when writeCh was full, so the caller can run its own full-queue
-// handling; it reports false also when it refused the frame. It refuses a
-// frame, other than a handshake frame, when the frames waiting for the peer
-// already reach its budget, and then closes the peer whatever the
-// SlowPeerPolicy, because a peer over its budget drains only if it reads.
-// The read loop drops the input the peer already sent, so it builds no more
-// answers for it. The caller holds wmu and has checked closed.
+// enqueueLocked queues data and charges it to the peer's byte budget, closing
+// a peer already over budget on a non-handshake frame because such a peer
+// drains only if it reads.
 func (p *peer) enqueueLocked(data []byte, path string, handshake bool) (full bool) {
 	if !handshake && p.overBudgetLocked() {
 		p.server.log().Warn("peer queued bytes over budget; closing peer",
@@ -37,17 +31,13 @@ func (p *peer) enqueueLocked(data []byte, path string, handshake bool) (full boo
 }
 
 // overBudgetLocked reports whether the charged frames waiting for the peer
-// reach its budget. A frame is refused only then, so the frame that crosses
-// the budget is queued whatever its size. The caller holds wmu.
+// reach its budget, so the frame that crosses it is still queued.
 func (p *peer) overBudgetLocked() bool {
 	return p.writeBudget > 0 && p.queuedBytes >= p.writeBudget
 }
 
-// creditLocked takes the next frame runWriter took off writeCh out of the
-// count, unless it is a handshake frame. Every data frame is sent on writeCh
-// under wmu, so frames leave it in the order enqueued numbered them. The nil
-// close sentinel is sent without wmu, but it is not numbered and runWriter
-// stops at it. The caller holds wmu.
+// creditLocked uncharges the next frame runWriter took off writeCh unless it
+// is a handshake frame, relying on wmu to keep frames in enqueue order.
 func (p *peer) creditLocked(n int) {
 	seq := p.dequeued
 	p.dequeued++
@@ -56,10 +46,8 @@ func (p *peer) creditLocked(n int) {
 	}
 }
 
-// writeHandshake queues the frames a peer gets when it connects, with no
-// other frame between them. Server.PeerWriteQueueBytes neither refuses nor
-// charges them: a peer cannot ask for them again, and a client may ask for
-// the room's state before it reads them.
+// writeHandshake queues a peer's connect frames back to back and uncharged,
+// because a peer cannot ask for them again.
 func (p *peer) writeHandshake(frames ...[]byte) {
 	p.wmu.Lock()
 	defer p.wmu.Unlock()

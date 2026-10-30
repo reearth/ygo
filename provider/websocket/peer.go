@@ -30,11 +30,8 @@ type peer struct {
 	cidMu      sync.Mutex
 	writeCh    chan []byte   // buffered queue drained by runWriter goroutine
 	writerDone chan struct{} // closed when runWriter exits
-	// Server.PeerWriteQueueBytes accounting, kept only when writeBudget > 0 and
-	// guarded by wmu (see write_budget.go). queuedBytes is the size of the
-	// charged frames waiting in writeCh. enqueued and dequeued number the
-	// frames in and out of writeCh, and the handshake's frames are numbered
-	// handshakeFrom up to handshakeTo.
+	// Byte-budget accounting under wmu, kept only when writeBudget > 0, with
+	// the handshake numbered handshakeFrom to handshakeTo so it stays uncharged.
 	queuedBytes   int64
 	enqueued      uint64
 	dequeued      uint64
@@ -865,8 +862,8 @@ func (p *peer) write(data []byte) {
 	p.wmu.Unlock()
 }
 
-// writeLocked is write with wmu held. Server.PeerWriteQueueBytes neither
-// refuses nor charges a handshake frame (see writeHandshake).
+// writeLocked is write with wmu held, leaving handshake frames outside the
+// byte budget.
 func (p *peer) writeLocked(data []byte, handshake bool) {
 	if p.closed {
 		return

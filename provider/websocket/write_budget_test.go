@@ -21,9 +21,8 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 )
 
-// budgetServer starts a server with PeerWriteQueueBytes set, reachable only
-// through pipe connections: a pipe has no kernel buffer, so a server-side
-// write blocks as soon as the peer stops reading.
+// budgetServer starts a budgeted server reachable only through pipes, which
+// have no kernel buffer, so a server write blocks once the peer stops reading.
 func budgetServer(t *testing.T, budget int64, policy ygws.SlowPeerPolicy) (*ygws.Server, *gws.Dialer) {
 	t.Helper()
 	srv := ygws.NewServer()
@@ -48,8 +47,8 @@ func dialPipe(t *testing.T, dialer *gws.Dialer, room string) *gws.Conn {
 	return conn
 }
 
-// drainingPeer dials room and reads it until the connection ends. The counter
-// it returns holds how many frames it has read.
+// drainingPeer dials room and reads it until the connection ends, counting
+// the frames it reads.
 func drainingPeer(t *testing.T, dialer *gws.Dialer, room string) *atomic.Int64 {
 	t.Helper()
 	conn := dialPipe(t, dialer, room)
@@ -71,9 +70,8 @@ func drainingPeer(t *testing.T, dialer *gws.Dialer, room string) *atomic.Int64 {
 	return &read
 }
 
-// largeRoom adds a reading peer to room, then connects conn and sends a
-// docBytes-long text insert, so every SyncStep1 in room is answered with at
-// least docBytes. The reading peer keeps the room open when conn is dropped.
+// largeRoom makes every SyncStep1 in room answer with at least docBytes,
+// keeping a reading peer so the room stays open when conn is dropped.
 func largeRoom(t *testing.T, dialer *gws.Dialer, room string, docBytes int) *gws.Conn {
 	t.Helper()
 	reads := drainingPeer(t, dialer, room)
@@ -84,9 +82,8 @@ func largeRoom(t *testing.T, dialer *gws.Dialer, room string, docBytes int) *gws
 	return conn
 }
 
-// askFullState sends a SyncStep1 with an empty state vector, which the server
-// answers with the room's full state. Unlike sendSync it returns the write
-// error, because the server closing the connection is what the tests expect.
+// askFullState asks for the room's full state and, unlike sendSync, returns
+// the write error because the tests expect the server to close conn.
 func askFullState(conn *gws.Conn) error {
 	enc := encoding.NewEncoder()
 	enc.WriteVarUint(0) // msgSync
@@ -94,9 +91,8 @@ func askFullState(conn *gws.Conn) error {
 	return conn.WriteMessage(gws.BinaryMessage, enc.Bytes())
 }
 
-// step1Flood sends up to limit SyncStep1 frames on conn and never reads. After
-// each, it polls room's queued bytes for up to 100 ms, and it returns the
-// highest total it saw. It stops when the server closes conn.
+// step1Flood sends SyncStep1 frames on conn without reading until the server
+// closes it, returning the highest queued-bytes total it polled for room.
 func step1Flood(t *testing.T, srv *ygws.Server, conn *gws.Conn, room string, limit int) int64 {
 	t.Helper()
 	var peak int64
@@ -143,8 +139,8 @@ func TestInteg_PeerWriteQueueBytes_ClosesPeerThatNeverReads(t *testing.T) {
 	peak := step1Flood(t, srv, conn, room, 40)
 	requireServerClosed(t, conn, "a peer past its budget must be closed")
 
-	// An empty queue takes one frame of any size, so the peak can pass the
-	// budget by one answer, not more.
+	// An empty queue takes one frame of any size, so the peak passes the
+	// budget by at most one answer.
 	const syncFraming = 64 // at most, around the full state in an answer
 	assert.Positive(t, peak)
 	assert.LessOrEqual(t, peak, budget+full+syncFraming)
@@ -155,8 +151,7 @@ func TestInteg_PeerWriteQueueBytes_ClosesPeerThatNeverReads(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the closed peer should leave the room")
 }
 
-// lockedBuffer is a bytes.Buffer that the server's logger and the test can
-// use at once.
+// lockedBuffer is a bytes.Buffer the server's logger and the test share.
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -175,9 +170,8 @@ func (b *lockedBuffer) String() string {
 }
 
 func TestInteg_PeerWriteQueueBytes_DropsInputAfterTheClose(t *testing.T) {
-	// Over TCP the server still reads the SyncStep1 frames in the socket
-	// buffer after the budget closes the connection. It answers none of them,
-	// so it refuses, and logs, only once.
+	// Over TCP the server still reads buffered SyncStep1 frames after the
+	// budget close, so it must refuse and log only once.
 	const (
 		room     = "drops-input"
 		docBytes = 256 << 10
@@ -224,9 +218,8 @@ func TestInteg_PeerWriteQueueBytes_ClosesOverBudgetUnderResyncPolicy(t *testing.
 }
 
 func TestInteg_PeerWriteQueueBytes_RoomLargerThanTheBudget(t *testing.T) {
-	// A new peer asks for the room's state before it reads the handshake, as
-	// y-websocket does on open, and gets both, though each full state is
-	// larger than the budget.
+	// A new peer asking for state before reading the handshake, as
+	// y-websocket does, gets both even though each exceeds the budget.
 	const (
 		room     = "oversized"
 		docBytes = 256 << 10
@@ -253,9 +246,8 @@ func TestInteg_PeerWriteQueueBytes_RoomLargerThanTheBudget(t *testing.T) {
 }
 
 func TestInteg_PeerWriteQueueBytes_FrameQueuedBeforeTheHandshake(t *testing.T) {
-	// OnFirstPeer runs after the peer joins the room and before its
-	// handshake, so an Apply there queues a charged frame ahead of the
-	// handshake. Once the peer has read everything, nothing is charged.
+	// An Apply in OnFirstPeer queues a charged frame ahead of the handshake,
+	// and it must be uncharged once the peer has read everything.
 	const (
 		room   = "before-handshake"
 		budget = int64(64 << 10)
@@ -286,10 +278,8 @@ func TestInteg_PeerWriteQueueBytes_FrameQueuedBeforeTheHandshake(t *testing.T) {
 }
 
 func TestInteg_PeerWriteQueueBytes_LargeBroadcastKeepsAReadingPeer(t *testing.T) {
-	// A broadcast larger than the budget, then small ones behind it. The
-	// reader is paused until its writer has taken the large frame off the
-	// queue (it is blocked writing it to the pipe), so the test shows that a
-	// frame being written is not counted, without depending on the scheduler.
+	// The reader pauses until its writer is blocked on the large frame, so the
+	// test shows a frame being written is uncounted without scheduler luck.
 	const (
 		room   = "large-broadcast"
 		small  = 20
@@ -301,8 +291,8 @@ func TestInteg_PeerWriteQueueBytes_LargeBroadcastKeepsAReadingPeer(t *testing.T)
 	sender := dialPipe(t, dialer, room)
 	doc := crdt.New(crdt.WithClientID(2))
 	sendUpdate(t, sender, textUpdate(doc, strings.Repeat("y", 256<<10)))
-	// The sender's messages are handled in order, so once this answer is
-	// back the large broadcast is queued for the reader.
+	// Messages are handled in order, so this answer means the large broadcast
+	// is queued for the reader.
 	require.NoError(t, askFullState(sender))
 	readOne(t, sender, 5*time.Second)
 	require.Eventually(t, func() bool {
@@ -322,8 +312,8 @@ func TestInteg_PeerWriteQueueBytes_LargeBroadcastKeepsAReadingPeer(t *testing.T)
 }
 
 func TestInteg_PeerWriteQueueBytes_ZeroKeepsTheFrameCapAlone(t *testing.T) {
-	// With the default 0, the same asks stay queued and the peer stays
-	// connected: all of them are delivered when it reads.
+	// With the default 0, the same asks stay queued and are all delivered
+	// when the peer reads.
 	const (
 		room     = "budget-off"
 		docBytes = 256 << 10

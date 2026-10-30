@@ -1093,24 +1093,10 @@ type Server struct {
 	// Zero (the default) uses 512, sized for typical sync workloads.
 	PeerWriteQueueSize int
 
-	// PeerWriteQueueBytes bounds the total size of the frames waiting in one
-	// peer's write queue. PeerWriteQueueSize bounds that queue in frames
-	// only, so one peer can make the server hold that count times the room's
-	// largest frame: for example, a peer that sends SyncStep1 again and again
-	// and never reads gets a full-state SyncStep2 queued each time.
-	//
-	// When the frames waiting for a peer reach this budget, the next frame
-	// is not queued and the peer is closed as for a full queue, on every
-	// enqueue path and whatever the SlowPeerPolicy. The frame that crosses
-	// the budget is queued whatever its size, and the handshake a peer gets
-	// when it connects is not counted. One peer therefore holds at most the
-	// budget plus one frame, besides its handshake and the frame being
-	// written. A frame that arrives while the budget or more waits closes
-	// even a peer that reads, so set the budget above the largest room state
-	// the server holds.
-	//
-	// Zero (the default) or a negative value means no byte budget. Like the
-	// other config fields, set it before serving.
+	// PeerWriteQueueBytes bounds the bytes queued for one peer beyond its
+	// handshake, closing the peer when reached, because PeerWriteQueueSize
+	// alone lets one peer pin many full-state frames; zero or negative
+	// disables it.
 	PeerWriteQueueBytes int64
 
 	// SlowPeerPolicy selects the reaction when a peer's broadcast write queue

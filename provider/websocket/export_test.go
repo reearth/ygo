@@ -77,10 +77,8 @@ func MemoryPersistenceBackoffState(m *MemoryPersistence, room string) (failures 
 	return l.failures, l.retryAt
 }
 
-// PeerQueuedBytes reports the bytes charged to room's peers together (the
-// frames queued for them and not yet written) and how many peers room holds,
-// or (0, 0) for a room the server does not hold. Bytes are charged only when
-// PeerWriteQueueBytes is set.
+// PeerQueuedBytes reports the bytes charged to room's peers and its peer
+// count, or (0, 0) for a room the server does not hold.
 func PeerQueuedBytes(s *Server, room string) (bytes int64, peers int) {
 	s.rmu.RLock()
 	rm, ok := s.rooms[room]
