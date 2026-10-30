@@ -476,10 +476,8 @@ func encodeBroadcastWire(update []byte) []byte {
 //
 // If peers are connected:
 //   - force=false: returns ErrRoomHasPeers without modifying state.
-//   - force=true:  closes each peer connection, waits for disconnect
-//     handlers to run, then deletes the room. A peer's messages that its read
-//     loop has not handled when its connection closes are dropped, not
-//     applied or saved.
+//   - force=true:  closes each peer connection, dropping input its read loop
+//     has not handled, waits for disconnect handlers, then deletes the room.
 //
 // CloseRoom is primarily intended for releasing rooms created by Apply
 // that never accumulated peer connections. In eager-evict mode

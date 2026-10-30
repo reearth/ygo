@@ -23,8 +23,7 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 )
 
-// lockedLog is a log destination that the server and the test can use at
-// once.
+// lockedLog is a log destination the server and the test can share safely.
 type lockedLog struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -43,11 +42,8 @@ func (l *lockedLog) String() string {
 }
 
 func TestInteg_WriteQueueFull_DropsBufferedInput(t *testing.T) {
-	// A client that sends SyncStep1 and never reads fills its write queue
-	// with full-state answers, and the server closes it. Over TCP the
-	// server's read buffer still holds SyncStep1 frames after the close. It
-	// must answer none of them, so it logs the full queue once. (A pipe
-	// connection holds no unread input, so this test uses TCP.)
+	// Over TCP, unlike a pipe, frames remain buffered after a full write queue
+	// closes the client, and the server must answer none of them.
 	const (
 		room     = "write-queue-full-drops-input"
 		docBytes = 256 << 10
@@ -62,8 +58,7 @@ func TestInteg_WriteQueueFull_DropsBufferedInput(t *testing.T) {
 		doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, strings.Repeat("x", docBytes), nil) })
 		return nil
 	}
-	// The client is the room's only peer, so the room is empty once its read
-	// loop has exited.
+	// The client is the room's only peer, so OnLastPeer marks its read loop's exit.
 	srv.OnLastPeer = func(context.Context, string) { close(left) }
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -89,9 +84,8 @@ func TestInteg_WriteQueueFull_DropsBufferedInput(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(logs.String(), "peer write queue full"))
 }
 
-// clientFrame encodes payload (under 64 KiB) as one masked binary WebSocket
-// frame from a client. The mask key is zero, so the payload goes out
-// unchanged.
+// clientFrame encodes payload (under 64 KiB) as one client binary frame with a
+// zero mask key, so the payload goes out unchanged.
 func clientFrame(payload []byte) []byte {
 	if len(payload) > 0xFFFF {
 		panic("clientFrame: payload must be under 64 KiB")
@@ -111,9 +105,8 @@ func clientFrame(payload []byte) []byte {
 	return b.Bytes()
 }
 
-// updateFrames returns n update messages from n different clients, in one
-// buffer the test writes with a single call, so the server's first read puts
-// all of them in its read buffer.
+// updateFrames returns n updates from n clients in one buffer, so the server's
+// first read buffers all of them.
 func updateFrames(n int) []byte {
 	var all bytes.Buffer
 	for i := range n {
@@ -129,10 +122,8 @@ func updateFrames(n int) []byte {
 	return all.Bytes()
 }
 
-// closeHarness serves srv with a cancellable request context and counts the
-// updates that reach the room. With block set, the first update waits until
-// the test calls releaseFirst, so the test can close the connection while the
-// rest of the updates wait in the server's read buffer.
+// closeHarness serves srv and counts room updates, optionally blocking the
+// first so the test can close the connection while the rest stay buffered.
 type closeHarness struct {
 	srv     *ygws.Server
 	ts      *httptest.Server
