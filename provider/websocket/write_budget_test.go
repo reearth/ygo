@@ -286,26 +286,37 @@ func TestInteg_PeerWriteQueueBytes_FrameQueuedBeforeTheHandshake(t *testing.T) {
 }
 
 func TestInteg_PeerWriteQueueBytes_LargeBroadcastKeepsAReadingPeer(t *testing.T) {
-	// A broadcast larger than the budget, then small ones right behind it:
-	// the reading peer's writer takes the large frame off the queue before it
-	// writes it, so the small ones fit.
+	// A broadcast larger than the budget, then small ones behind it. The
+	// reader is paused until its writer has taken the large frame off the
+	// queue (it is blocked writing it to the pipe), so the test shows that a
+	// frame being written is not counted, without depending on the scheduler.
 	const (
 		room   = "large-broadcast"
 		small  = 20
 		budget = int64(64 << 10)
 	)
 	srv, dialer := budgetServer(t, budget, ygws.SlowPeerDisconnect)
-	reads := drainingPeer(t, dialer, room)
+	reader := dialPipe(t, dialer, room)
 
 	sender := dialPipe(t, dialer, room)
 	doc := crdt.New(crdt.WithClientID(2))
 	sendUpdate(t, sender, textUpdate(doc, strings.Repeat("y", 256<<10)))
+	// The sender's messages are handled in order, so once this answer is
+	// back the large broadcast is queued for the reader.
+	require.NoError(t, askFullState(sender))
+	readOne(t, sender, 5*time.Second)
+	require.Eventually(t, func() bool {
+		queued, _ := ygws.PeerQueuedBytes(srv, room)
+		return queued == 0
+	}, 5*time.Second, time.Millisecond, "the reader's writer takes the large frame off the queue")
+
 	for range small {
 		sendUpdate(t, sender, textUpdate(doc, "z"))
 	}
-
-	require.Eventually(t, func() bool { return reads.Load() >= small+1 }, 5*time.Second, 10*time.Millisecond,
-		"the reading peer receives every broadcast")
+	for i := range small + 1 {
+		outerType, _ := readOne(t, reader, 5*time.Second)
+		require.Equal(t, uint64(0), outerType, "frame %d is a sync frame", i+1)
+	}
 	_, peers := ygws.PeerQueuedBytes(srv, room)
 	assert.Equal(t, 2, peers, "no peer is closed")
 }
