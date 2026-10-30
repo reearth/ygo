@@ -5,9 +5,8 @@ import (
 	"github.com/reearth/ygo/internal/anycodec"
 )
 
-// v2Frame reads a V2 update's struct section on its columns as a lenient
-// pendingScanner does: each struct's length, clock and dependencies, without
-// validation.
+// v2Frame reads a V2 update's structs on its columns as a lenient
+// pendingScanner does.
 type v2Frame struct {
 	d    *v2Decoder
 	keys int
@@ -182,15 +181,14 @@ func (f *v2Frame) fail() {
 	}
 }
 
-// scanPendingGroupsV2 is scanPendingGroupsV1 for a V2 update, on its columns
-// through a v2Frame.
+// scanPendingGroupsV2 is scanPendingGroupsV1 for a V2 update.
 func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int) (pendingPass, error) {
 	var result pendingPass
 	read := 0
 	f := v2Frame{d: d}
 	clients := f.uint()
-	// A failed read is ErrInvalidUpdate: the decoders' own errors are not
-	// returned, so nothing of the decoder copy escapes through them.
+	// A failed read is ErrInvalidUpdate, so nothing of the decoder copy escapes
+	// through its errors.
 	if f.err != nil || clients > maxV2Items {
 		return result, ErrInvalidUpdate
 	}

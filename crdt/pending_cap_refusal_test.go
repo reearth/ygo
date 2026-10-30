@@ -38,9 +38,8 @@ func observed(doc *Doc) *int {
 	return n
 }
 
-// requireUnchanged requires doc to encode as before did and its text to read as
-// text did, and its observers to have been handed nothing since updates was
-// zero.
+// requireUnchanged requires doc to match before and text, with no update
+// observed since updates was zero.
 func requireUnchanged(t *testing.T, doc *Doc, before []byte, text string, updates *int) {
 	t.Helper()
 	if after := EncodeStateAsUpdateV1(doc, nil); string(after) != string(before) {
@@ -54,10 +53,8 @@ func requireUnchanged(t *testing.T, doc *Doc, before []byte, text string, update
 	}
 }
 
-// parkingEdit is an update of client 2 that inserts text into "t" and sets n
-// keys on a map client 1 created, which the receiver never got, so every
-// entry parks waiting for its parent while the text integrates. author is the
-// state the receiver lacks.
+// parkingEdit is an update that inserts text and sets n keys on a map the
+// receiver lacks (author), so every entry parks.
 func parkingEdit(t *testing.T, n int) (update, author []byte) {
 	t.Helper()
 	creator := New(WithClientID(1))
@@ -83,10 +80,8 @@ func parkingEdit(t *testing.T, n int) (update, author []byte) {
 	return EncodeStateAsUpdateV1(editor, creator.StateVector()), author
 }
 
-// gappedUpdate is a receiver's state, held, and a V1 update that lacks
-// structs the receiver needs: it is encoded from a state vector that claims a
-// random clock per client, so some structs park and others resolve later in
-// the update, in another client's group.
+// gappedUpdate returns a receiver's state and a V1 update missing random
+// structs it needs, so some park and others resolve later in the update.
 func gappedUpdate(t *testing.T, rng *rand.Rand) (held, update []byte) {
 	t.Helper()
 	writers := []*Doc{New(WithClientID(1)), New(WithClientID(2)), New(WithClientID(3))}
@@ -153,9 +148,8 @@ func gappedUpdate(t *testing.T, rng *rand.Rand) (held, update []byte) {
 	return held, EncodeStateAsUpdateV1(sender, claimed)
 }
 
-// A document refuses an update that would park more items than the pending
-// cap has room for before it changes anything, and the same update applies
-// on a document with room for what it parks.
+// A document refuses, before changing anything, an update that would park past
+// the pending cap's room.
 func TestUnit_ApplyUpdate_RefusedParkedItemUpdateLeavesTheDocumentUnchanged(t *testing.T) {
 	const limit, parked = 2, 5
 	update, author := parkingEdit(t, parked)
@@ -192,10 +186,8 @@ func TestUnit_ApplyUpdate_RefusedParkedItemUpdateLeavesTheDocumentUnchanged(t *t
 	}
 }
 
-// The pending cap refuses exactly the updates that would park more items than
-// it has room for: with room for p the update applies, and with room for p-1
-// (p > 1, since a cap of 0 is the default) it is refused and leaves the
-// document unchanged.
+// The pending cap applies an update with room for the p items it parks and
+// refuses it, unchanged, with room for p-1.
 func TestUnit_ApplyUpdate_ParkedItemCapRefusesExactlyWhatWouldPassIt(t *testing.T) {
 	const rounds = 300
 	rng := rand.New(rand.NewPCG(338, 2526))
@@ -248,9 +240,8 @@ func TestUnit_ApplyUpdate_ParkedItemCapRefusesExactlyWhatWouldPassIt(t *testing.
 	t.Logf("%d of %d applies were refused a cap one short of the items they park", refused, 2*rounds)
 }
 
-// The lenient check refuses exactly what the validating check
-// (referencePendingBudgetCheck) refuses, at each room around what the update
-// parks.
+// The lenient check refuses exactly what referencePendingBudgetCheck refuses,
+// at each room around what the update parks.
 func TestUnit_PendingBudget_LenientCheckRefusesWhatTheValidatingCheckRefuses(t *testing.T) {
 	const rounds = 300
 	rng := rand.New(rand.NewPCG(340, 2527))
@@ -291,9 +282,8 @@ func TestUnit_PendingBudget_LenientCheckRefusesWhatTheValidatingCheckRefuses(t *
 				if room < 0 {
 					continue
 				}
-				// The check finds the superseded groups and the struct count
-				// itself, so its first pass may stop early; given the groups
-				// without the count, it stops early only in the last group.
+				// Without the struct count the first pass can stop early only
+				// in the last group.
 				for _, b := range []pendingBudget{
 					{initial: sv, update: data, remaining: room, v2: format.v2},
 					{initial: sv, update: data, remaining: room, v2: format.v2, superseded: superseded, groupsKnown: true},
@@ -313,7 +303,7 @@ func TestUnit_PendingBudget_LenientCheckRefusesWhatTheValidatingCheckRefuses(t *
 }
 
 // withStringPool is the V2 update with its string column's pool replaced by
-// pool, the column's lengths kept.
+// pool, the lengths kept.
 func withStringPool(t *testing.T, update []byte, pool func(string) string) []byte {
 	t.Helper()
 	dec := encoding.NewDecoder(update)
@@ -343,9 +333,8 @@ func withStringPool(t *testing.T, update []byte, pool func(string) string) []byt
 	return append(enc.Bytes(), dec.RemainingBytes()...)
 }
 
-// The check counts a V2 string's clocks as the apply decodes it, not as the
-// lengths column claims, so an update whose pool is shorter than its lengths
-// is refused before it changes anything.
+// The check counts a V2 string's clocks as the apply decodes them, so a pool
+// shorter than its lengths cannot slip past the cap.
 func TestUnit_PendingBudget_V2StringClocksFollowThePoolNotTheLengths(t *testing.T) {
 	const limit, parked = 2, 5
 	author := New(WithClientID(1))
@@ -386,9 +375,8 @@ func TestUnit_PendingBudget_V2StringClocksFollowThePoolNotTheLengths(t *testing.
 	}
 }
 
-// An update whose header does not read, or whose group framing does not read
-// in an update of several groups, fails before the apply changes anything, so
-// it tells no observer, as one the pending cap refuses does not.
+// An update whose header or group framing does not read fails before changing
+// anything, so it tells no observer.
 func TestUnit_ApplyUpdate_UnreadableHeaderOrGroupFramingTellsNoObserver(t *testing.T) {
 	emptyColumns := make([]byte, 10) // the V2 feature flag and nine empty columns
 	for _, tc := range []struct {
@@ -421,8 +409,8 @@ func TestUnit_ApplyUpdate_UnreadableHeaderOrGroupFramingTellsNoObserver(t *testi
 	}
 }
 
-// An update that fails after some of it integrated still commits that part,
-// and tells each observer once, so that persistence and the relay get it.
+// An update that fails after some of it integrated commits that part once, so
+// that persistence and the relay get it.
 func TestUnit_ApplyUpdate_PartlyAppliedUpdateTellsItsObservers(t *testing.T) {
 	editor := New(WithClientID(2))
 	text, m := editor.GetText("t"), editor.GetMap("m")

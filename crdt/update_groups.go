@@ -15,11 +15,8 @@ func (s groupSet) has(i uint64) bool {
 }
 
 // supersededGroups marks wire groups that a later group for the same client
-// replaces. Yjs keeps only the last group per client and never integrates
-// the earlier ones. Encoders sort clients, so a strictly monotonic header
-// sequence proves uniqueness without an index. v2 and rest are the update's
-// initial V2 decoder state (v2 nil for V1); both are copied, never advanced.
-// structs counts the update's structs, skips included.
+// replaces, since Yjs integrates only the last, and counts the update's
+// structs.
 func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set groupSet, structs int, err error) {
 	ordered, n, total, ok := scanGroupClients(update, v2, rest, nil)
 	if !ok {
@@ -55,10 +52,9 @@ func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set 
 	return set, int(total), nil
 }
 
-// scanGroupClients walks every group header and struct. It reports whether
-// the clients are strictly monotonic and how many structs the groups hold,
-// and calls visit, if set, per group. Returning ok rather than an error keeps
-// the decoder copies on the stack.
+// scanGroupClients walks every group header and struct, reporting whether the
+// clients are strictly monotonic and the struct count, and returns ok rather
+// than an error to keep the decoder copies on the stack.
 func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit func(uint64, ClientID)) (ordered bool, groups, structs uint64, ok bool) {
 	s := pendingScanner{frame: true}
 	if v2 == nil {

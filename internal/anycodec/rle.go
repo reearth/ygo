@@ -22,9 +22,8 @@ func NewRleByteDecoder(data []byte) RleByteDecoder {
 // Read returns the next decoded byte.
 func (d *RleByteDecoder) Read() (byte, error) { return ReadRleByte(&d.dec, &d.state, &d.count) }
 
-// ReadInRun returns the next byte when it repeats the current run, without
-// reading the stream, and false when the next byte needs Read. It is small
-// enough to inline, for a reader of many values.
+// ReadInRun returns the next byte when it repeats the current run, and false
+// when it needs Read, small enough to inline in a hot loop.
 func (d *RleByteDecoder) ReadInRun() (byte, bool) {
 	if d.count > 0 {
 		d.count--
@@ -36,9 +35,8 @@ func (d *RleByteDecoder) ReadInRun() (byte, bool) {
 	return 0, false
 }
 
-// ReadRun returns the next decoded byte and reads up to max-1 more copies of
-// it from the same run, returning how many bytes it read in all (at least
-// one, at most max). It is Read called that many times, in one step.
+// ReadRun returns the next byte and how many copies of it, from one to max, it
+// read from the same run in one step.
 func (d *RleByteDecoder) ReadRun(max int) (byte, int, error) {
 	b, err := d.Read()
 	if err != nil {
@@ -96,9 +94,8 @@ func NewUintOptRleDecoder(data []byte) UintOptRleDecoder {
 // Read returns the next decoded value.
 func (d *UintOptRleDecoder) Read() (uint64, error) { return ReadUintOptRle(&d.dec, &d.state, &d.count) }
 
-// ReadInRun returns the next value when it repeats the current run, without
-// reading the stream, and false when the next value needs Read. It is small
-// enough to inline, for a reader of many values.
+// ReadInRun returns the next value when it repeats the current run, and false
+// when it needs Read, small enough to inline in a hot loop.
 func (d *UintOptRleDecoder) ReadInRun() (uint64, bool) {
 	if d.count > 0 {
 		d.count--
@@ -151,8 +148,8 @@ func (d *IntDiffOptRleDecoder) Read() (int64, error) {
 }
 
 // ReadInRun returns the next value when it continues the current run of equal
-// differences, without reading the stream, and false when the next value
-// needs Read. It is small enough to inline, for a reader of many values.
+// differences, and false when it needs Read, small enough to inline in a hot
+// loop.
 func (d *IntDiffOptRleDecoder) ReadInRun() (int64, bool) {
 	if d.count > 0 {
 		d.count--
@@ -222,9 +219,8 @@ func (d *StringDecoder) Read() (string, error) {
 	return ReadStringChunk(d.str, &d.bytePos, l), nil
 }
 
-// ReadUnits steps over the next string without copying it and returns its
-// length in UTF-16 units as Read would decode it, which a short pool or a
-// split supplementary character makes differ from the lengths column.
+// ReadUnits steps over the next string and returns its UTF-16 length as Read
+// decodes it, which can differ from the lengths column.
 func (d *StringDecoder) ReadUnits() (uint64, error) {
 	l, err := d.lens.Read()
 	if err != nil {

@@ -259,9 +259,8 @@ func resolvePendingWaiters(txn *Transaction, pending []*Item) []*Item {
 	return remaining
 }
 
-// parkWithinUpdatePending charges only unresolved items to the persistent cap.
-// The apply already checked the update against the cap, so this check is a
-// last guard.
+// parkWithinUpdatePending charges only unresolved items to the persistent cap,
+// as a last guard behind the apply's check.
 func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 	for _, item := range pending {
 		if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {

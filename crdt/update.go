@@ -59,14 +59,9 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 	return applyErr
 }
 
-// ApplyUpdateV1Landed is ApplyUpdateV1 for a caller that must forward what
-// a failed apply left behind. ApplyUpdateV1 integrates an update item by item,
-// so one it rejects partway (a struct it cannot decode after others
-// integrated, say) can leave part of itself in doc. When the apply fails,
-// landed is a V1 update of exactly what this call integrated: the structs it
-// added to doc's store and the deletions it made, not structs still parked,
-// nor the rest of the document. landed is nil when the apply succeeds or when
-// nothing integrated.
+// ApplyUpdateV1Landed is ApplyUpdateV1 that, when the apply fails partway, also
+// returns landed, a V1 update of exactly what this call integrated (nil if
+// nothing), for a caller that must forward it.
 func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, err error) {
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
@@ -574,8 +569,8 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	var superseded groupSet
 	structs := 0
 	if numClients > 1 {
-		// Fail before integrating anything: a later malformed group must not
-		// leave earlier, superseded groups applied.
+		// A later malformed group must not leave earlier, superseded groups
+		// applied.
 		if superseded, structs, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
 			return wrapUpdateErr(err)
 		}

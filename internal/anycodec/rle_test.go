@@ -7,8 +7,8 @@ import (
 	"github.com/reearth/ygo/internal/anycodec"
 )
 
-// ReadUnits steps over each string as Read does and counts the UTF-16 units
-// Read returns, also when the lengths column disagrees with the pool.
+// ReadUnits counts the UTF-16 units Read returns, also when the lengths column
+// disagrees with the pool.
 func TestUnit_StringDecoder_ReadUnitsCountsWhatReadDecodes(t *testing.T) {
 	for _, tc := range []struct {
 		name string

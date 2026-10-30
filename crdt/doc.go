@@ -102,10 +102,9 @@ func WithCollectionID(id string) DocOption {
 const defaultMaxPendingItems = 100_000
 
 // WithMaxPendingItems caps the per-doc pending queue depth — items parked
-// waiting for out-of-order dependencies. An update whose items would park
-// past the cap causes ApplyUpdate to return ErrInvalidUpdate. The update is
-// refused before the apply changes anything: the document is as it was and
-// no observer is told. Zero or negative uses the default (100,000).
+// waiting for out-of-order dependencies, refusing with ErrInvalidUpdate, before
+// any change, an update that would park past it (zero or negative uses the
+// default, 100,000).
 //
 // This is a defence against a malicious peer crafting an update full of
 // far-future-clock items, which would otherwise grow the pending queue
@@ -457,8 +456,7 @@ func (d *Doc) GetText(name string) *YText {
 // The closure must be invoked OUTSIDE d.mu — observers may re-enter Doc
 // methods that acquire d.mu, which would deadlock under the lock.
 //
-// Returns nil only if there is nothing to fire (no observers of any kind), or
-// when the transaction refused its update (Transaction.refused).
+// Returns nil when there is nothing to fire: no observers, or a refused update.
 func buildPhase2(d *Doc, txn *Transaction) func() {
 	if txn.refused {
 		return nil

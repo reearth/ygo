@@ -39,17 +39,10 @@
 // Leave it false (the default) for native y-websocket clients.
 //
 // On a Hocuspocus-framed connection the server answers every SyncStep2 or
-// Update the client sends, under Sync (tag 0) or SyncReply (tag 4), with
-// exactly one SyncStatus (tag 8) frame, in the order the frames arrived, so
-// the provider's unsynced-changes count drops for every update the room
-// applied (1), and stays up for one it did not (0): 0 when the room did not
-// fully apply it (it overflows MaxPendingItems, which refuses it before it
-// changes the room, or it fails to decode partway, in which case the part
-// that did integrate still reaches the other peers); for a read-only
-// connection, 0 for an Update, and for a SyncStep2 1 when the room already
-// holds everything in it and 0 otherwise. A sync frame that does not decode
-// gets no SyncStatus: the server closes the connection with 1002 (protocol
-// error) and handles no later frame from it.
+// Update, in order, with one SyncStatus (tag 8) frame, 1 when the room fully
+// applied it and 0 otherwise, so the provider's unsynced-changes count stays
+// accurate, and closes the connection with 1002 on a sync frame that does not
+// decode.
 //
 // # Stability
 //

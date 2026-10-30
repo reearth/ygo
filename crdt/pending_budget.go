@@ -25,8 +25,8 @@ type pendingBudget struct {
 	v2Rest      encoding.Decoder
 	superseded  groupSet
 	groupsKnown bool
-	// structs, when not zero, bounds the update's structs so the first pass
-	// can stop early.
+	// structs, when not zero, bounds the update's structs so the first pass can
+	// stop early.
 	structs int
 }
 
@@ -72,8 +72,8 @@ func (b *pendingBudget) scanner() *pendingScanner {
 	return &pendingScanner{v2: &v2, rest: &rest, lenient: true}
 }
 
-// check is the exact preflight: it refuses the update when its structs would
-// leave more items parked than the room left.
+// check refuses the update when its structs would park more items than the room
+// left.
 func (b *pendingBudget) check() error {
 	if b.remaining < 0 {
 		return ErrInvalidUpdate
@@ -497,13 +497,8 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 	return result, s.err
 }
 
-// The scanner retains nothing. V1 reads the caller's buffer; V2 uses its
-// normal column decoder without building a key dictionary or decoding
-// Any/JSON values into object trees. A framing scanner only finds struct
-// boundaries: it skips text and JSON without validating or counting them, and
-// in V2 never reads the clock, string, key or type columns. A lenient scanner
-// reads each struct's length, clock and dependencies, as the pending budget
-// needs, and validates nothing, since the decoder still validates everything.
+// pendingScanner reads struct framing without retaining or validating anything,
+// since the decoder still validates everything.
 type pendingScanner struct {
 	rest    *encoding.Decoder
 	v2      *v2Decoder
@@ -819,8 +814,8 @@ func (s *pendingScanner) json() {
 	}
 }
 
-// stringLen is a lenient scanner's read of a string's length in UTF-16 units,
-// the clocks it takes, counted as the apply decodes it, without validation.
+// stringLen reads a string's length in UTF-16 units as the apply decodes it,
+// since that is the clocks it takes.
 func (s *pendingScanner) stringLen() uint64 {
 	if s.v2 != nil {
 		n, err := s.v2.stringDec.ReadUnits()
@@ -832,8 +827,7 @@ func (s *pendingScanner) stringLen() uint64 {
 	return utf16Units(raw)
 }
 
-// utf16Units counts the UTF-16 units of UTF-8 text on its bytes, without
-// validating it, eight ASCII bytes at a time.
+// utf16Units counts the UTF-16 units of UTF-8 text without validating it.
 func utf16Units(b []byte) uint64 {
 	n := len(b)
 	for len(b) >= 8 {

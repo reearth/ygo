@@ -7,9 +7,8 @@ import (
 	"github.com/reearth/ygo/internal/anycodec"
 )
 
-// v1Frame reads a V1 update's struct section on its bytes as a lenient
-// pendingScanner does, allocation-free so that the check costs little on a
-// large update. A failed read sets bad and stops every later read.
+// v1Frame reads a V1 update's structs as a lenient pendingScanner does, without
+// allocating, so the check stays cheap on a large update.
 type v1Frame struct {
 	buf []byte
 	p   int
@@ -145,9 +144,8 @@ func (f *v1Frame) content(tag byte) uint64 {
 	return 1
 }
 
-// frameJSON reads JSON content as decodeContent does: as JSON text, or, when
-// the first value starts with an Any tag, as the validating scanner reads it,
-// since only that decides where the values end.
+// frameJSON reads JSON content as decodeContent does, since only that decides
+// where the values end.
 func (f *v1Frame) frameJSON() uint64 {
 	start := f.p
 	n := f.uint()
@@ -172,10 +170,8 @@ func (f *v1Frame) frameJSON() uint64 {
 	return n
 }
 
-// scanPendingGroupsV1 is the pending budget's first pass over a V1 update. It
-// stops once the structs it has not read cannot change its answer
-// (pendingUnread), so that an update well within the room is not read to the
-// end.
+// scanPendingGroupsV1 is the pending budget's first pass over a V1 update,
+// stopping once the unread structs cannot change its answer.
 func scanPendingGroupsV1(update []byte, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int) (pendingPass, error) {
 	var result pendingPass
 	read := 0
@@ -252,8 +248,8 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 	return result, nil
 }
 
-// pendingUnread bounds the structs the first pass has not read, or is -1 when
-// it cannot. Each unread struct adds one pending at most.
+// pendingUnread bounds the structs the first pass has not read, each adding one
+// pending at most, or is -1 when it cannot.
 func pendingUnread(structs, read int, lastGroup bool, inGroup uint64) int {
 	if structs > 0 {
 		return structs - read

@@ -7,10 +7,8 @@ import (
 	"testing"
 )
 
-// The pending cap's check costs a keystroke no allocation, in V1 and V2, and
-// leaves the V2 decoder where the apply begins to read. The same check
-// refuses that keystroke where it would park past the cap, so what is
-// measured is the check that refuses.
+// The pending cap's check costs a keystroke no allocation in V1 and V2, and
+// leaves the V2 decoder where the apply begins to read.
 func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *testing.T) {
 	base := New(WithClientID(1))
 	text := base.GetText("t")
@@ -38,7 +36,7 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 		t.Fatalf("the V1 check allocated %v times", n)
 	}
 	// A room too small for the cheap bound takes the exact check, which
-	// allocates only the state vector it tracks.
+	// allocates only its state vector.
 	walked := v1
 	walked.remaining = len(keystroke)/2 - 1
 	if n := testing.AllocsPerRun(100, func() {
@@ -97,10 +95,8 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 	}
 }
 
-// v2StructCount counts the structs the full scan reads, and leaves the rest
-// cursor at the same delete set. The lenient readers read each struct with the
-// same length, skip and dependencies as the validating scanner, and end where
-// it ends.
+// The lenient readers read each struct as the validating scanner does and end
+// where it ends.
 func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testing.T) {
 	type read struct {
 		length  uint64
@@ -109,7 +105,7 @@ func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testi
 		numDeps int
 	}
 	// scan reads every struct of the update through next, after header reads
-	// the group count, a group's struct count and its client and clock.
+	// the group framing.
 	scan := func(header func() uint64, client func() ClientID, next func() read) (reads []read, want int) {
 		clients := header()
 		for range clients {
@@ -212,9 +208,8 @@ func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testi
 		count(t, update)
 	}
 
-	// V2 writes client groups from the highest client down, so client 2's
-	// group, with every kind of rest content, comes before client 1's, and the
-	// walk steps over all of it to find client 1's header.
+	// V2 writes the highest client first, so the walk steps over client 2's
+	// rest content to reach client 1's header.
 	doc := New(WithClientID(2))
 	text, arr, m := doc.GetText("t"), doc.GetArray("a"), doc.GetMap("m")
 	doc.Transact(func(txn *Transaction) {

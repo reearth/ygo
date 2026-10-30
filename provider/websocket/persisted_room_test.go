@@ -16,8 +16,8 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 )
 
-// storeLog is a PersistenceAdapter that loads no stored state and keeps every
-// update the room stores, in order.
+// storeLog is a PersistenceAdapter that loads nothing and keeps every update
+// the room stores, in order.
 type storeLog struct {
 	mu      sync.Mutex
 	updates [][]byte
@@ -38,8 +38,8 @@ func (a *storeLog) stored() [][]byte {
 	return append([][]byte(nil), a.updates...)
 }
 
-// persistingServer starts a Hocuspocus-framed server that stores each update
-// with its own StoreUpdate, with a pending cap of limit, and returns its store.
+// persistingServer starts a Hocuspocus-framed server with a pending cap of
+// limit and returns its store.
 func persistingServer(t *testing.T, limit int) (*ygws.Server, *httptest.Server, *storeLog) {
 	t.Helper()
 	adapter := &storeLog{}
@@ -52,10 +52,8 @@ func persistingServer(t *testing.T, limit int) (*ygws.Server, *httptest.Server, 
 	return srv, ts, adapter
 }
 
-// A persisting room refuses an update that would park more items than the
-// cap without changing anything: it stores, relays and observes nothing, and
-// tells the sender SyncStatus(0). Once the parked items' parent is in, the
-// same update applies and reaches the other peer.
+// A persisting room refuses an update that would park past the cap without
+// storing, relaying or observing it, and applies it once its parent is in.
 func TestInteg_PersistedRoom_RefusedUpdateLeavesTheRoomUnchanged(t *testing.T) {
 	const limit, parked = 2, 5
 	srv, ts, adapter := persistingServer(t, limit)

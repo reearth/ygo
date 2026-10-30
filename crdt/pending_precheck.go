@@ -1,13 +1,7 @@
 package crdt
 
-// checkBeforeApply refuses the update when its structs would park more items
-// than the pending cap has room for, before the apply integrates any of it,
-// so a refused update changes nothing. size is the update's length in bytes;
-// cheap bounds come first so that a small update is not read.
-//
-// A V2 budget must carry the apply's decoder (v2Start, v2Rest). The check
-// must run before the apply reads its rest cursor, which it uses and puts
-// back.
+// checkBeforeApply refuses an update that would park past the pending cap
+// before the apply integrates any of it, so a refused update changes nothing.
 func (b *pendingBudget) checkBeforeApply(size int) error {
 	if !b.mayParkPastRoom(size) {
 		return nil
@@ -26,8 +20,8 @@ func (b *pendingBudget) checkBeforeApply(size int) error {
 	return b.check()
 }
 
-// walkStructsV2 counts the V2 update's structs, skips included, to the end
-// of its struct section, and reports whether the section reads.
+// walkStructsV2 counts the V2 update's structs, skips included, and reports
+// whether the section reads.
 func (b *pendingBudget) walkStructsV2() (int, bool) {
 	v2 := *b.v2Start
 	n, ok := v2StructCount(&v2, true)
@@ -43,9 +37,8 @@ func (b *pendingBudget) firstPassV2(known StateVector, clients *pendingClientRan
 	return scanPendingGroupsV2(&v2, known, b.remaining, clients, b.superseded, b.structs)
 }
 
-// mayParkPastRoom is whether the update may park more items than the room
-// left, by a bound that costs nothing to read: a V1 struct takes at least 2
-// bytes, and a V2 update's group headers give its struct count.
+// mayParkPastRoom is whether the update may park more items than the room left,
+// by a bound that costs nothing to read.
 func (b *pendingBudget) mayParkPastRoom(size int) bool {
 	if !b.v2 && size/2 <= b.remaining {
 		return false
@@ -63,10 +56,8 @@ func (b *pendingBudget) mayParkPastRoom(size int) bool {
 	return !ok || n > b.remaining
 }
 
-// v2StructCount is the V2 update's struct count, skips included, read from
-// its group headers, and whether they read. To reach a later group's header
-// it steps over only the rest-cursor content of each struct kind; toEnd also
-// walks the last group, which leaves the rest cursor at the delete set.
+// v2StructCount is the V2 update's struct count from its group headers, and
+// whether they read.
 func v2StructCount(d *v2Decoder, toEnd bool) (int, bool) {
 	s := pendingScanner{v2: d, rest: d.restDec}
 	clients := s.uint()

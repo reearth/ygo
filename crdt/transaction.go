@@ -66,8 +66,8 @@ type Transaction struct {
 	formatCleanup      bool
 	typeObserved       bool
 	afterTypeObservers func()
-	// refused marks a remote apply that failed before it began to integrate,
-	// so the commit fires nothing.
+	// refused marks a remote apply that failed before integrating, so the
+	// commit fires nothing.
 	refused bool
 }
 

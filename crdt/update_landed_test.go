@@ -46,12 +46,8 @@ func TestUnit_ApplyUpdateV1Landed(t *testing.T) {
 		return room
 	}
 
-	// The editor inserts "abc" and overwrites w.a, which integrate (the
-	// overwrite deletes the writer's entry), then sets five entries on a map
-	// the room never received, which park in five of the six pending slots
-	// left. The update is cut short in its delete set, so the apply fails
-	// after its structs integrated or parked: its own deletion of a character
-	// travels in that delete set, which the apply never reaches.
+	// The editor's text and overwrite integrate and five map entries park
+	// before its cut-short delete set fails the apply.
 	editor := newTestDoc(7)
 	require.NoError(t, ApplyUpdateV1(editor, written, nil))
 	author := newTestDoc(1)
