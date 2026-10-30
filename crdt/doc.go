@@ -125,9 +125,14 @@ func WithMaxPendingItems(n int) DocOption {
 // took 20.8 s against a list of 20,000 unmerged items. An update whose scans
 // pass the bound is refused with ErrIntegrateScanBudget, and like every remote
 // update the bounded document refuses, it leaves the document as it was and
-// fires no observer. Such a document refuses a remote update carrying a
-// subdocument or a move. Zero or negative, the default, sets no bound. Local
-// transactions are never bounded: their inserts name both neighbours.
+// fires no observer. The drain of the pending queue an update's apply ends
+// with has an allowance of its own, the bound again; a drain that would pass
+// it is taken back and the queue parked again as it was, while the update
+// stands, and the queue is drained again once an apply brings a clock it waits
+// on further (apply_rollback.go). Such a document refuses a remote update
+// carrying a subdocument or a move. Zero or negative, the default, sets no
+// bound. Local transactions are never bounded: their inserts name both
+// neighbours.
 func WithMaxIntegrateScan(n int) DocOption {
 	return func(d *Doc) { d.maxIntegrateScan = n }
 }

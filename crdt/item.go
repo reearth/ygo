@@ -537,6 +537,10 @@ func nextDeleteItem(current, root *Item) *Item {
 // item.Content is mutated to hold [0, offset); the returned item holds [offset, end).
 // Both halves are registered in the store. The linked-list pointers are updated.
 func splitItem(txn *Transaction, item *Item, offset int) *Item {
+	// A drain taken back parks again the items it integrated, whole.
+	if j := txn.journal; j != nil && j.drained(item) {
+		j.keepParked(item)
+	}
 	rightContent := item.Content.Splice(offset) // mutates item.Content → [0, offset)
 	right := &Item{
 		ID:          ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset)},

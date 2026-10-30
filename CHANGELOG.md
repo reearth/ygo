@@ -43,7 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the document is left as it was and the transaction fires no observer:
   nothing of the update is persisted or relayed. A bounded document refuses a
   remote update carrying a subdocument or a move. Local transactions are never
-  bounded. No bound is set by default. Bounded or not, a transaction's
+  bounded. No bound is set by default. The drain of the pending queue that
+  ends an apply has an allowance of its own, the bound again; a drain that
+  would pass it is taken back and the queue is parked again as it was, every
+  peer's items kept, while the update that filled the gap stands. The clocks
+  the queue waits on are raised to the store's, so only an apply that brings
+  one of its clients further drains it again. Bounded or not, a transaction's
   conflict scans share one map of marks, made by the first scan that needs it
   and kept until the transaction commits: each mark records which scan, and
   which step of it, passed the item, so a new scan reuses the map without

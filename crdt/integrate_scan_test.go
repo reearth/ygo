@@ -416,8 +416,8 @@ func fillTheGap(last *Item) []byte {
 
 // Items an earlier update parked are not charged to the update that fills
 // their gap: their drain has an allowance of its own, and a drain that passes
-// it is taken back and the parked items dropped, while the filling update
-// applies.
+// it is taken back and the items parked again as they were, while the filling
+// update applies.
 func TestAnUpdateThatFillsAGapIsNotChargedWhatWasParkedBehindIt(t *testing.T) {
 	const l, n = 5_000, 500
 	doc := chainedList(t, l, WithMaxIntegrateScan(testScanBound))
@@ -440,10 +440,10 @@ func TestAnUpdateThatFillsAGapIsNotChargedWhatWasParkedBehindIt(t *testing.T) {
 	if err := ApplyUpdateV1(twin, fill, nil); err != nil {
 		t.Fatal(err)
 	}
-	if parked := doc.PendingStats().Items; parked != 0 {
-		t.Fatalf("%d items are still parked, want the parked queue dropped", parked)
+	if parked := doc.PendingStats().Items; parked != n {
+		t.Fatalf("%d items are parked, want the %d parked items parked again", parked, n)
 	}
-	if a, b := EncodeStateAsUpdateV1(doc, nil), EncodeStateAsUpdateV1(twin, nil); string(a) != string(b) {
+	if a, b := text.ToString(), twin.GetText("t").ToString(); a != b {
 		t.Fatal("the document holds more than the update that filled the gap")
 	}
 	if got := doc.StateVector().Clock(99); got != 1 {

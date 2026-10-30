@@ -1496,6 +1496,12 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 		return true
 	}
 
+	// From here the item is resolved, trimmed or integrated in place; a drain
+	// taken back parks it again as it was (drainParked).
+	if j := txn.journal; j != nil {
+		j.keepParked(item)
+	}
+
 	// GC-orphan path (no parent, deleted): store without integration, trimmed
 	// to the not-yet-integrated suffix exactly as the decode loops do.
 	//

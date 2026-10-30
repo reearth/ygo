@@ -22,8 +22,9 @@ import (
 // (drainPending), and charged to that update, an earlier sender could make
 // every later update that fills its gap be refused. So the drain is a phase of
 // its own: it has an allowance of its own (the scan count starts again), and a
-// drain that fails is taken back to where it began (applyPoint) and the parked
-// queue dropped, while the update that filled the gap stands.
+// drain that fails is taken back to where it began (applyPoint) and the queue
+// is parked again as the drain found it (drainParked), while the update that
+// filled the gap stands.
 //
 // What a rollback has to undo is what integrating and deleting change:
 //   - every struct added since the point it rolls back to, which is every
@@ -46,8 +47,9 @@ import (
 //     pending deletes rather than writing into them, but for the merge of a
 //     delete range it parks (parkDeletes), which writes into copies of the
 //     clients it names. The parked items themselves are not touched before
-//     the drain, the apply's last step, and a drain that fails drops the
-//     queue rather than restoring it, so their fields need no record.
+//     the drain, the apply's last step, so the whole apply's rollback needs
+//     no record of their fields; a drain taken back gives back what it
+//     changed of them (drainParked).
 //
 // Splits of items the document already held stay: a split leaves the same
 // content, and the transaction's commit merges each split back
@@ -72,6 +74,9 @@ type applyJournal struct {
 	// map key's previous value is recorded on.
 	drain *applyPoint
 	at    *applyPoint
+	// parkedAs is each parked item the drain changed in place, as the drain
+	// found it, for a drain taken back (keepParked).
+	parkedAs map[*Item]Item
 	// integrating is the item integrate has linked into its parent's list and
 	// not yet appended to the store, for a failure between the two.
 	integrating *Item
@@ -129,13 +134,21 @@ func beginRemoteApply(txn *Transaction, before StateVector) {
 		j.missing = s.pending.missing
 	}
 	j.pendingDs = s.pendingDs
-	if s.pendingMoves != nil {
-		j.pendingMoves = make(map[ClientID][]*Item, len(s.pendingMoves))
-		for c, moves := range s.pendingMoves {
-			j.pendingMoves[c] = append([]*Item(nil), moves...)
-		}
-	}
+	j.pendingMoves = clonePendingMoves(s.pendingMoves)
 	txn.journal = j
+}
+
+// clonePendingMoves copies the pending moves, each client's slice included:
+// resolvePendingMoves writes the moves that stay into the slice they were in.
+func clonePendingMoves(moves map[ClientID][]*Item) map[ClientID][]*Item {
+	if moves == nil {
+		return nil
+	}
+	out := make(map[ClientID][]*Item, len(moves))
+	for c, list := range moves {
+		out[c] = append([]*Item(nil), list...)
+	}
+	return out
 }
 
 // parkedMissing is the pending queue's missing map, for a write that parks an
@@ -187,8 +200,24 @@ func endRemoteApply(txn *Transaction, failed bool) {
 
 // drainParked runs drain, the apply's drain of the pending queue and pending
 // deletes. On a document with a scan bound it is a phase of its own, with an
-// allowance of its own; one that fails is taken back to where it began and the
-// parked queue is dropped, and the apply goes on as if nothing had been parked.
+// allowance of its own, the bound again. One that fails is taken back to where
+// it began, the pending queue, pending deletes and pending moves are put back
+// as it found them (the queue's clocks raised, parkAgain), and the apply goes
+// on as if the drain had not run.
+//
+// The queue is put back rather than dropped: a parked item is an edit whose
+// sender was told it was delivered and which the store's state vector does not
+// show, so a dropped one would come back only when its sender next connects,
+// and taking the drain back already keeps the drain's scans from refusing the
+// update. The drain writes into neither the queue it found nor that queue's
+// slice and map (drainPending replaces the queue), nor into the pending
+// deletes (retryParkedDeletes replaces them), so they are kept by reference;
+// it resolves pending moves in place, so those are copied. It does change the
+// parked items it integrates, and the take-back gives each back what it
+// changed: rollBackTo unlinks it and undoes the drain's deletion of it, a
+// parked item the drain integrated, trimmed or split gets back the fields the
+// drain found it with (keepParked), and parkAgain clears the neighbours and
+// the move the drain gave it.
 func drainParked(txn *Transaction, drain func()) {
 	j := txn.journal
 	if j == nil {
@@ -197,22 +226,87 @@ func drainParked(txn *Transaction, drain func()) {
 	}
 	s := txn.doc.store
 	point := pointNow(txn, s.StateVector())
-	// The drain replaces the pending deletes rather than writing into them, so
-	// they are kept as they are, by reference.
-	pendingDs := s.pendingDs
+	pending, pendingDs, pendingMoves := s.pending, s.pendingDs, clonePendingMoves(s.pendingMoves)
 	j.drain, j.at = &point, &point
 	txn.scanned = 0
 	defer func() {
 		r := recover()
 		j.at = &j.start
 		if r == nil {
+			j.parkedAs = nil
 			return
 		}
 		j.rollBackTo(txn, &point)
-		s.pending = nil
+		for item, as := range j.parkedAs {
+			*item = as
+		}
+		j.parkedAs = nil
+		s.pending = parkAgain(s, pending)
 		s.pendingDs = pendingDs
+		s.pendingMoves = pendingMoves
 	}()
 	drain()
+}
+
+// parkAgain is found, the pending queue as a drain found it, for after the
+// drain was taken back: the same items in the same order, without the
+// neighbours and move the drain gave them, waiting on each client found waits
+// on at the later of the clock found holds for it and the store's next clock.
+//
+// The clocks are raised so that a drain the bound could not hold is not run
+// again by every later apply. A drain tries the queue's items only while the
+// store's next clock for a client the queue waits on has passed the clock held
+// for it. Taken back, a drain leaves the store at the clocks it began at, which
+// have passed found's - the update that filled the gap passed them - so
+// found's clocks would let every later apply try the items again and pay again
+// for a drain that integrates nothing. Raised, the items are tried again only
+// by an apply that brings one of the queue's clients past the clock the store
+// held for it at the take-back, the rule every drain runs under. That apply's
+// drain has the bound as its allowance, and completes when the bound holds it,
+// or when the apply carries the parked items itself, as their sender does when
+// it connects again: the apply integrates them under its own allowance and the
+// drain skips each as already integrated (tryIntegrate).
+func parkAgain(s *StructStore, found *pendingUpdate) *pendingUpdate {
+	if found == nil {
+		return nil
+	}
+	for _, item := range found.items {
+		item.Left, item.Right, item.MovedBy = nil, nil, nil
+	}
+	missing := make(StateVector, len(found.missing))
+	for client, clock := range found.missing {
+		missing[client] = max(clock, s.NextClock(client))
+	}
+	return &pendingUpdate{items: found.items, missing: missing}
+}
+
+// keepParked records item, a parked item or a struct the running drain added,
+// as the drain found it, its content copied, before the drain changes it in
+// place, so a drain taken back can give it back (drainParked). It does nothing
+// outside a drain or for an item it recorded already. A drain changes a parked
+// item in two places: tryIntegrate, which resolves, trims and integrates it,
+// and a split of an item it integrated, which leaves the item's first part in
+// it (splitItem, drained).
+func (j *applyJournal) keepParked(item *Item) {
+	if j.drain == nil || j.at != j.drain {
+		return
+	}
+	if _, kept := j.parkedAs[item]; kept {
+		return
+	}
+	if j.parkedAs == nil {
+		j.parkedAs = make(map[*Item]Item)
+	}
+	as := *item
+	as.Content = item.Content.Copy()
+	j.parkedAs[item] = as
+}
+
+// drained is whether item is a struct the running drain added to the store: a
+// parked item it integrated, or a part split from one. A struct the store held
+// before the drain keeps a split the drain made (see the top of this file).
+func (j *applyJournal) drained(item *Item) bool {
+	return j.drain != nil && j.at == j.drain && item.ID.Clock >= j.drain.sv.Clock(item.ID.Client)
 }
 
 // tookMapKey records that a new item is about to replace the value of key in
