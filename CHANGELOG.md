@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`provider/websocket`: the part of a relay-injected update a node's room
   kept never reached that node's peers.** `Server.Inject` applies a cluster
-  relay's sync update item by item, so one that fails partway (a delete set
-  that does not decode, the pending cap refusing a deferred item) leaves part
+  relay's sync update item by item, so one that fails partway (a later
+  struct or its delete set does not decode) leaves part
   of itself in the room, which the room's update observers, persistence among
   them, are told of; Inject returned the error and rebroadcast nothing. It now
   rebroadcasts that part, and only that part (from `crdt.ApplyUpdateV1Landed`),

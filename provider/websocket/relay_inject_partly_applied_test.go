@@ -1,9 +1,9 @@
 package websocket_test
 
 import (
+	"bytes"
 	"context"
 	"net/http/httptest"
-	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,26 +40,20 @@ func truncatedEdit() (seed, edit []byte) {
 	return seed, whole[:len(whole)-1]
 }
 
-// overflowingEdit returns client 2's update that writes "hello" and sets n
-// keys on a map client 3 created, which a node that never got the map parks.
-func overflowingEdit(t *testing.T, n int) []byte {
+// invalidStringEdit returns client 2's update holding two structs, "hello"
+// and then "xyz" inserted before it, with the second's bytes replaced by
+// ones that are not UTF-8: the first struct integrates, then the second does
+// not decode. No check before the apply reads a struct's string, so the
+// apply alone refuses it, at that struct.
+func invalidStringEdit(t *testing.T) []byte {
 	t.Helper()
-	creator := crdt.New(crdt.WithClientID(3))
-	root := creator.GetMap("m")
-	creator.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
-	editor := crdt.New(crdt.WithClientID(2))
-	require.NoError(t, crdt.ApplyUpdateV1(editor, crdt.EncodeStateAsUpdateV1(creator, nil), nil))
-	v, _ := editor.GetMap("m").Get("nested")
-	nested, ok := v.(*crdt.YMap)
-	require.True(t, ok, "nested is %T", v)
-	text := editor.GetText("t")
-	editor.Transact(func(txn *crdt.Transaction) {
-		text.Insert(txn, 0, "hello", nil)
-		for i := range n {
-			nested.Set(txn, "k"+strconv.Itoa(i), i)
-		}
-	})
-	return crdt.EncodeStateAsUpdateV1(editor, creator.StateVector())
+	doc := crdt.New(crdt.WithClientID(2))
+	text := doc.GetText("t")
+	doc.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "hello", nil) })
+	doc.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "xyz", nil) })
+	update := crdt.EncodeStateAsUpdateV1(doc, nil)
+	require.Equal(t, 1, bytes.Count(update, []byte("xyz")))
+	return bytes.Replace(update, []byte("xyz"), []byte{0xff, 0xfe, 0xfd}, 1)
 }
 
 // A relay-injected update that fails after part of it integrated leaves that
@@ -73,15 +67,14 @@ func overflowingEdit(t *testing.T, n int) []byte {
 func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 	seed, truncated := truncatedEdit()
 	cases := []struct {
-		name       string
-		maxPending int
-		seed       []byte
-		update     []byte
-		roomText   string
-		relays     bool
+		name     string
+		seed     []byte
+		update   []byte
+		roomText string
+		relays   bool
 	}{
 		{name: "a delete set that does not decode", seed: seed, update: truncated, roomText: "hello!", relays: true},
-		{name: "the pending cap refusing a deferred item", maxPending: 3, update: overflowingEdit(t, 7), roomText: "hello", relays: true},
+		{name: "a later struct that does not decode", update: invalidStringEdit(t), roomText: "hello", relays: true},
 		{name: "nothing integrated", update: []byte{0x01, 0x05}, relays: false},
 	}
 	for _, tc := range cases {
@@ -89,7 +82,6 @@ func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 			relay := cluster.NewMemRelay()
 			defer func() { require.NoError(t, relay.Close()) }()
 			srv := ygws.NewServer()
-			srv.MaxPendingItems = tc.maxPending
 			require.NoError(t, srv.AttachRelay(relay))
 			ts := httptest.NewServer(srv)
 			defer ts.Close()
