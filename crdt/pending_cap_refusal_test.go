@@ -386,9 +386,9 @@ func TestUnit_PendingBudget_V2StringClocksFollowThePoolNotTheLengths(t *testing.
 	}
 }
 
-// An update whose header or a later group's framing does not read fails
-// before the apply changes anything, so it tells no observer, as one the
-// pending cap refuses does not.
+// An update whose header or group framing does not read fails before the
+// apply changes anything, so it tells no observer, as one the pending cap
+// refuses does not.
 func TestUnit_ApplyUpdate_UnreadableHeaderOrGroupFramingTellsNoObserver(t *testing.T) {
 	emptyColumns := make([]byte, 10) // the V2 feature flag and nine empty columns
 	for _, tc := range []struct {
