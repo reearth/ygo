@@ -783,7 +783,8 @@ func (s *Server) markIdleIfEmpty(r *room) {
 // here in a backward-compatible way.
 type ConnectionConfig struct {
 	// ReadOnly makes the peer receive broadcasts while its sync and awareness
-	// updates do not change the room, and its awareness update gets an empty response.
+	// updates neither change the room nor reach other peers, and its awareness
+	// update gets an empty response.
 	ReadOnly bool
 }
 
@@ -911,7 +912,9 @@ type Server struct {
 
 	// Authorize, if non-nil, takes precedence over AuthFunc and accepts or
 	// rejects the connection (false → 401) while returning its ConnectionConfig,
-	// such as whether it is read-only.
+	// such as whether it is read-only. A read-only peer still gets its SyncStep1
+	// answered and can query awareness, and read-only does not gate stateless
+	// signals.
 	Authorize func(r *http.Request) (ConnectionConfig, bool)
 
 	// AllowedOrigins is the list of origins permitted to open WebSocket

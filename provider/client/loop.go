@@ -941,7 +941,9 @@ func (s *session) handleFrame(frame []byte) error {
 			// Against ygo's own server, which encodes a disconnect removal at each
 			// clientID's current clock, a single Heartbeat's +1 bump already makes our
 			// re-announcement newer than that removal, so ApplyUpdate admits it in any
-			// arrival order.
+			// arrival order. The removal usually cannot reach this client, whose old
+			// connection is gone, but it goes to every room peer, so a client that
+			// reconnects under the same clientID before it is broadcast receives it.
 			//
 			// The SECOND call exists for every OTHER WebSocket server this
 			// package must interoperate with — Hocuspocus, y-websocket, or
