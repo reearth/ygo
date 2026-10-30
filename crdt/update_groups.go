@@ -19,8 +19,7 @@ func (s groupSet) has(i uint64) bool {
 // the earlier ones. Encoders sort clients, so a strictly monotonic header
 // sequence proves uniqueness without an index. v2 and rest are the update's
 // initial V2 decoder state (v2 nil for V1); both are copied, never advanced.
-// structs is how many structs the update holds, skips included, which the
-// scan reads on its way (a bound the pending budget uses).
+// structs counts the update's structs, skips included.
 func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set groupSet, structs int, err error) {
 	ordered, n, total, ok := scanGroupClients(update, v2, rest, nil)
 	if !ok {

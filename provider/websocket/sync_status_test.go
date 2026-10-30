@@ -265,8 +265,7 @@ func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
 // landed, not the room's parked structs or its delete set: a room with 40
 // parked entries and 100 deletions forwards the three characters that
 // integrated and nothing more, when the update fails in a delete set cut
-// short after them. The cap leaves the update far more room than it is long,
-// so no check before the apply reads it, and the apply fails partway.
+// short after them. The cap is large so that the apply, not a check, fails.
 func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing.T) {
 	_, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 200 })
 	editor := crdt.New(crdt.WithClientID(7))

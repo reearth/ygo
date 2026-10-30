@@ -7,13 +7,9 @@ import (
 	"github.com/reearth/ygo/internal/anycodec"
 )
 
-// v1Frame reads a V1 update's struct section on its bytes, a varint at a
-// time, as a lenient pendingScanner does (see pendingScanner): it reads each
-// struct's length, clock and dependencies, steps over strings, keys, names,
-// JSON text and Any values by their length or framing, and validates nothing
-// the decoder validates. A read past the end, or a struct it cannot frame,
-// sets bad and stops every later read. It allocates nothing, but for JSON
-// content whose first value starts with an Any tag (frameJSON).
+// v1Frame reads a V1 update's struct section on its bytes as a lenient
+// pendingScanner does, allocation-free so that the check costs little on a
+// large update. A failed read sets bad and stops every later read.
 type v1Frame struct {
 	buf []byte
 	p   int
@@ -149,11 +145,9 @@ func (f *v1Frame) content(tag byte) uint64 {
 	return 1
 }
 
-// frameJSON reads JSON content. decodeContent reads its values as JSON text,
-// one string each, unless the first starts with an Any tag (116–127), where
-// it tries JSON text for all values and falls back to legacy Any; only then
-// does the frame read them as the validating scanner does, since which of the
-// two it is decides where the values end.
+// frameJSON reads JSON content as decodeContent does: as JSON text, or, when
+// the first value starts with an Any tag, as the validating scanner reads it,
+// since only that decides where the values end.
 func (f *v1Frame) frameJSON() uint64 {
 	start := f.p
 	n := f.uint()
@@ -178,15 +172,10 @@ func (f *v1Frame) frameJSON() uint64 {
 	return n
 }
 
-// scanPendingGroupsV1 is the pending budget's first pass over a V1 update,
-// on its bytes through a v1Frame, which decides every update that does not
-// park more than the room left. It walks the groups in wire order, takes a
-// struct as ready when its clock follows what its client holds and its
-// dependencies lie below what their clients hold, and counts the others
-// pending; it records the clients' order in clientRange and leaves in known
-// what the ready structs reach, for the later passes. Superseded groups count
-// for nothing. It stops as soon as the rest of the update cannot change its
-// answer (pendingUnread).
+// scanPendingGroupsV1 is the pending budget's first pass over a V1 update. It
+// stops once the structs it has not read cannot change its answer
+// (pendingUnread), so that an update well within the room is not read to the
+// end.
 func scanPendingGroupsV1(update []byte, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int) (pendingPass, error) {
 	var result pendingPass
 	read := 0
@@ -264,12 +253,7 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 }
 
 // pendingUnread bounds the structs the first pass has not read, or is -1 when
-// it cannot: from the update's struct count when known (structs, not zero;
-// read is how many the pass has read), else, in the last group, its own count
-// left (inGroup). Each unread struct can add one to the pending count at
-// most, so once the pending count and this bound fit the room left, no later
-// struct can make the update not fit, and the pass can stop with a count
-// within the room.
+// it cannot. Each unread struct adds one pending at most.
 func pendingUnread(structs, read int, lastGroup bool, inGroup uint64) int {
 	if structs > 0 {
 		return structs - read

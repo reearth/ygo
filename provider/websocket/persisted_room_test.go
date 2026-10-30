@@ -40,11 +40,9 @@ func (a *storeLog) stored() [][]byte {
 	return append([][]byte(nil), a.updates...)
 }
 
-// dispatchServer starts a Hocuspocus-framed server that stores every update
-// the room commits with one StoreUpdate each (PersistCoalesceWindow < 0), with
-// a pending cap of limit, as a production deployment that persists through
-// NewServerWithPersistence configures it, and returns its store.
-func dispatchServer(t *testing.T, limit int) (*ygws.Server, *httptest.Server, *storeLog) {
+// persistingServer starts a Hocuspocus-framed server that stores each update
+// with its own StoreUpdate, with a pending cap of limit, and returns its store.
+func persistingServer(t *testing.T, limit int) (*ygws.Server, *httptest.Server, *storeLog) {
 	t.Helper()
 	adapter := &storeLog{}
 	srv := ygws.NewServerWithPersistence(adapter)
@@ -76,18 +74,13 @@ func relayedUpdates(t *testing.T, conn *gws.Conn, room string) [][]byte {
 	}
 }
 
-// A room under that configuration (dispatchServer) refuses an update that
-// would park more items than the cap without changing anything: the update
-// inserts "hello" and sets five keys on a map whose creator the room never
-// heard from, with a cap of two. The room's state and text are as they were,
-// its OnUpdate observers are handed nothing, nothing is stored, the other
-// peer gets no document update and the sender gets SyncStatus(0). Before, the
-// room kept and stored "hello" and fired OnUpdate, and relayed it to the other
-// peer, while the sender was told 0. Once the map's creator is in, the same
-// update parks nothing and applies, and reaches the other peer.
-func TestInteg_DispatchConfig_RefusedUpdateLeavesTheRoomUnchanged(t *testing.T) {
+// A persisting room refuses an update that would park more items than the
+// cap without changing anything: it stores, relays and observes nothing, and
+// tells the sender SyncStatus(0). Once the parked items' parent is in, the
+// same update applies and reaches the other peer.
+func TestInteg_PersistedRoom_RefusedUpdateLeavesTheRoomUnchanged(t *testing.T) {
 	const limit, parked = 2, 5
-	srv, ts, adapter := dispatchServer(t, limit)
+	srv, ts, adapter := persistingServer(t, limit)
 
 	creator := crdt.New(crdt.WithClientID(1))
 	root := creator.GetMap("m")
@@ -151,20 +144,11 @@ func TestInteg_DispatchConfig_RefusedUpdateLeavesTheRoomUnchanged(t *testing.T) 
 	assert.Zero(t, replay.PendingStats().Items, "the stored updates park nothing")
 }
 
-// A room under that configuration (dispatchServer) relays and stores exactly
-// what an update that fails partway committed (crdt.ApplyUpdateV1Landed). The
-// room holds 100 deletions and 40 parked entries. The editor's update inserts
-// "abc", which integrates, and sets five entries on a map the room never
-// received, which park well inside the cap; its delete set is cut short, so
-// the apply fails after them. The update is small enough that no check reads
-// it before the apply. The sender gets SyncStatus(0); the other peer gets one
-// document update carrying the three characters and nothing more (not the
-// parked entries, not the room's deletions), and ends with the room's text;
-// the room stores those three characters, once, with no parked entry and no
-// deletion it did not already hold (a stored update carries the room's whole
-// delete set, as every OnUpdate update does).
-func TestInteg_DispatchConfig_PartlyAppliedUpdateRelaysAndStoresWhatLanded(t *testing.T) {
-	srv, ts, adapter := dispatchServer(t, 200)
+// A persisting room relays and stores exactly what an update that fails
+// partway committed: an update that inserts "abc", parks five entries within
+// the cap and is cut short in its delete set relays and stores only "abc".
+func TestInteg_PersistedRoom_PartlyAppliedUpdateRelaysAndStoresWhatLanded(t *testing.T) {
+	srv, ts, adapter := persistingServer(t, 200)
 	editorDoc := crdt.New(crdt.WithClientID(7))
 	editor := hpDial(t, ts, "room", false, editorDoc)
 	watcherDoc := crdt.New(crdt.WithClientID(9))

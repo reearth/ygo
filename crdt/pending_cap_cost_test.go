@@ -6,10 +6,8 @@ import (
 	"testing"
 )
 
-// The pending cap's check before the apply costs a small update nothing: for a
-// keystroke, in V1 (a comparison of its length with the room left) and in V2
-// (a count of its structs from its group headers), it allocates nothing, and
-// it leaves the V2 decoder where the apply begins to read.
+// The pending cap's check costs a keystroke no allocation, in V1 and V2, and
+// leaves the V2 decoder where the apply begins to read.
 func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *testing.T) {
 	base := New(WithClientID(1))
 	text := base.GetText("t")
@@ -36,10 +34,8 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 	}); n != 0 {
 		t.Fatalf("the V1 check allocated %v times", n)
 	}
-	// A room too small for the cheap bound to pass, but not for the
-	// keystroke's one struct, takes the exact check, whose first pass walks
-	// the bytes (scanPendingGroupsV1) and allocates only the state vector it
-	// tracks.
+	// A room too small for the cheap bound takes the exact check, which
+	// allocates only the state vector it tracks.
 	walked := v1
 	walked.remaining = len(keystroke)/2 - 1
 	if n := testing.AllocsPerRun(100, func() {
@@ -79,17 +75,10 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 	}
 }
 
-// v2StructCount, the bound on a V2 update's structs read from its group
-// headers, is the number of structs the full scan of the update reads, skips
-// included, and read to the end of the struct section it leaves the scan at
-// the same delete set as the full scan. The pending budget's lenient readers
-// (pendingScanner with lenient set, and v1Frame on a V1 update's bytes) read
-// every struct as the validating scanner reads it: the same length, skip and
-// dependencies, and they end where it ends. This holds for updates of several
-// groups holding text, map values, nested arrays, deletes and skips
-// (gappedUpdate), and for every kind of content whose value is on the rest
-// cursor (binary, embeds, formats, Any values, subdocuments) in a group before
-// the last.
+// v2StructCount counts the structs the full scan reads, and leaves the rest
+// cursor at the same delete set. The lenient readers read each struct with the
+// same length, skip and dependencies as the validating scanner, and end where
+// it ends.
 func TestUnit_PendingBudget_V2StructCountIsTheScannedCount(t *testing.T) {
 	type read struct {
 		length  uint64

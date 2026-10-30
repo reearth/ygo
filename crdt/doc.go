@@ -458,8 +458,7 @@ func (d *Doc) GetText(name string) *YText {
 // methods that acquire d.mu, which would deadlock under the lock.
 //
 // Returns nil only if there is nothing to fire (no observers of any kind), or
-// when the transaction is a remote apply that refused its update before it
-// changed anything (Transaction.refused).
+// when the transaction refused its update (Transaction.refused).
 func buildPhase2(d *Doc, txn *Transaction) func() {
 	if txn.refused {
 		return nil

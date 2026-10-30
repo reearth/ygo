@@ -622,8 +622,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	budget := newPendingBudget(txn.doc, sv, update, true)
 	budget.v2Start = &initialV2
 	budget.v2Rest = *dec.restDec
-	// The group count is peeked on a copy of the rest cursor: the pending-cap
-	// check reads the update from where the apply begins.
+	// Peek on a copy, since the pending-cap check reads from the apply's start.
 	peek := budget.v2Rest
 	numClients, err := peek.ReadVarUint()
 	if err != nil {
@@ -646,7 +645,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 	budget.setSuperseded(superseded)
 	if err := budget.checkBeforeApply(len(update)); err != nil {
-		// Refused before anything changed: the commit tells no observer.
+		// Nothing changed, so the commit must tell no observer.
 		txn.refused = true
 		return err
 	}

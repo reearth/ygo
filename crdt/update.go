@@ -66,8 +66,7 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 // landed is a V1 update of exactly what this call integrated: the structs it
 // added to doc's store and the deletions it made, not structs still parked,
 // nor the rest of the document. landed is nil when the apply succeeds or when
-// nothing integrated, as for an update the pending cap refuses, which it
-// refuses before the apply changes anything.
+// nothing integrated.
 func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, err error) {
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
@@ -573,8 +572,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	structs := 0
 	if numClients > 1 {
 		// Fail before integrating anything: a later malformed group must not
-		// leave earlier, superseded groups applied. The scan also counts the
-		// update's structs, which bounds the pending-cap check's work.
+		// leave earlier, superseded groups applied.
 		if superseded, structs, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
 			return wrapUpdateErr(err)
 		}
@@ -583,7 +581,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	budget.setSuperseded(superseded)
 	budget.structs = structs
 	if err := budget.checkBeforeApply(len(update)); err != nil {
-		// Refused before anything changed: the commit tells no observer.
+		// Nothing changed, so the commit must tell no observer.
 		txn.refused = true
 		return err
 	}
@@ -625,11 +623,8 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 //	(e) collects items whose parent is unresolved-but-might-be-in-this-update
 //	    into the returned slice for the within-update retry pass.
 //
-// Groups that a later group for the same client supersedes (superseded, which
-// the apply found before it decoded anything) are decoded and dropped (yjs
-// parity). numClients is the count parsed from the header. The apply checked
-// the update against the pending cap before calling it
-// (pendingBudget.checkBeforeApply), so nothing it defers can pass the cap.
+// Groups that a later group for the same client supersedes are decoded and
+// dropped (yjs parity). numClients is the count parsed from the header.
 func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, superseded groupSet) ([]*Item, error) {
 	var pending []*Item
 
