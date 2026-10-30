@@ -43,6 +43,10 @@ type StructStore struct {
 type pendingUpdate struct {
 	items   []*Item     // parked items, in arrival order
 	missing StateVector // clientID -> store clock at park time for that client
+	// cover is the clocks items span, built when first asked for and kept
+	// by add (pending_cover.go). A writer that replaces or cuts back items
+	// builds a new pendingUpdate, or sets cover to nil.
+	cover *pendingCover
 }
 
 func newStructStore() *StructStore {

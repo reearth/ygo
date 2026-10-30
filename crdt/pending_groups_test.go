@@ -92,28 +92,30 @@ func TestUnit_PendingBudget_BoundsDiverseBytes(t *testing.T) {
 // must decode back to the struct the scan saw.
 func TestUnit_PendingSummary_RoundTrip(t *testing.T) {
 	type entry struct {
-		skip   bool
-		length uint64
-		deps   []ID
+		skip, gc bool
+		length   uint64
+		deps     []ID
 	}
 	top := ^uint64(0)
 	entries := []entry{
-		{false, 1, []ID{{Client: 1, Clock: 0}}},
-		{true, 1 << 40, nil},
-		{false, 0, nil},
-		{false, top >> 1, []ID{{Client: ClientID(top), Clock: top}, {Client: 127, Clock: 128}, {Client: 0, Clock: 1 << 35}}},
-		{false, 3, []ID{{Client: 9, Clock: 2}, {Client: 300, Clock: 0}}},
+		{false, false, 1, []ID{{Client: 1, Clock: 0}}},
+		{true, false, 1 << 40, nil},
+		{false, true, 0, nil},
+		{false, false, top >> 1, []ID{{Client: ClientID(top), Clock: top}, {Client: 127, Clock: 128}, {Client: 0, Clock: 1 << 35}}},
+		{false, true, 3, []ID{{Client: 9, Clock: 2}, {Client: 300, Clock: 0}}},
+		{false, false, 3, []ID{{Client: 9, Clock: 2}, {Client: 300, Clock: 0}, {Client: 1, Clock: 1}}},
 	}
 	sizing, fill := pendingCollector{}, pendingCollector{fill: true}
 	for _, e := range entries {
-		sizing.put(e.skip, e.length, e.deps)
-		fill.put(e.skip, e.length, e.deps)
+		sizing.put(e.skip, e.gc, e.length, e.deps)
+		fill.put(e.skip, e.gc, e.length, e.deps)
 	}
 	require.Len(t, fill.sum, sizing.size)
 	at := uint32(0)
 	for _, e := range entries {
-		skip, length, deps, n, next := pendingEntry(fill.sum, at)
+		skip, gc, length, deps, n, next := pendingEntry(fill.sum, at)
 		require.Equal(t, e.skip, skip)
+		require.Equal(t, e.gc, gc)
 		require.Equal(t, e.length, length)
 		require.Equal(t, len(e.deps), n)
 		for i := range e.deps {

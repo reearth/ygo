@@ -259,20 +259,42 @@ func resolvePendingWaiters(txn *Transaction, pending []*Item) []*Item {
 	return remaining
 }
 
-// parkWithinUpdatePending charges only unresolved items to the persistent cap.
+// parkWithinUpdatePending parks what the update could not integrate, minus
+// clocks the queue already holds, as Yjs merges its pending structs.
 func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
+	s := txn.doc.store
+	// The cover is built before the park adds to it, from the queue as it was.
+	held := s.pending != nil && len(s.pending.items) > 0
+	if held {
+		s.pending.coverOf()
+	}
+	var parked []*Item
+	defer func() {
+		if len(parked) > 0 {
+			s.pending.addCover(parked)
+		}
+	}()
 	for _, item := range pending {
-		if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
+		if held {
+			if item = unparked(s, item, s.NextClock(item.ID.Client)); item == nil {
+				continue
+			}
+		}
+		if s.pending != nil && len(s.pending.items) >= txn.doc.maxPendingItemsLimit() {
 			return wrapUpdateErr(ErrInvalidUpdate)
 		}
-		if txn.doc.store.pending == nil {
-			txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
+		if s.pending == nil {
+			s.pending = &pendingUpdate{missing: make(StateVector)}
 		}
-		txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
-		if client, parkedAt, future := itemFutureDep(item, txn.doc.store); future {
-			mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
+		s.pending.items = append(s.pending.items, item)
+		if held {
+			// Only a queue that held structs has a cover to keep.
+			parked = append(parked, item)
+		}
+		if client, parkedAt, future := itemFutureDep(item, s); future {
+			mergePendingMissing(s.pending.missing, client, parkedAt)
 		} else {
-			mergePendingMissing(txn.doc.store.pending.missing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
+			mergePendingMissing(s.pending.missing, item.ID.Client, s.NextClock(item.ID.Client))
 		}
 	}
 	return nil
