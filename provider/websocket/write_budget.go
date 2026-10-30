@@ -6,8 +6,9 @@ package websocket
 // handling; it reports false also when it refused the frame. It refuses a
 // frame, other than a handshake frame, when the frames waiting for the peer
 // already reach its budget, and then closes the peer whatever the
-// SlowPeerPolicy, because a peer over its budget drains only if it reads. The
-// caller holds wmu and has checked closed.
+// SlowPeerPolicy, because a peer over its budget drains only if it reads.
+// The read loop drops the input the peer already sent, so it builds no more
+// answers for it. The caller holds wmu and has checked closed.
 func (p *peer) enqueueLocked(data []byte, path string, handshake bool) (full bool) {
 	if !handshake && p.overBudgetLocked() {
 		p.server.log().Warn("peer queued bytes over budget; closing peer",
@@ -17,6 +18,7 @@ func (p *peer) enqueueLocked(data []byte, path string, handshake bool) (full boo
 			"budgetBytes", p.writeBudget,
 			"frameBytes", len(data),
 			"queueSize", cap(p.writeCh))
+		p.inputClosed.Store(true)
 		_ = p.conn.Close()
 		return false
 	}
@@ -42,9 +44,10 @@ func (p *peer) overBudgetLocked() bool {
 }
 
 // creditLocked takes the next frame runWriter took off writeCh out of the
-// count, unless it is a handshake frame. Every send on writeCh happens under
-// wmu, so frames leave it in the order enqueued numbered them. The caller
-// holds wmu.
+// count, unless it is a handshake frame. Every data frame is sent on writeCh
+// under wmu, so frames leave it in the order enqueued numbered them. The nil
+// close sentinel is sent without wmu, but it is not numbered and runWriter
+// stops at it. The caller holds wmu.
 func (p *peer) creditLocked(n int) {
 	seq := p.dequeued
 	p.dequeued++

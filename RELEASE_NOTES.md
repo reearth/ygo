@@ -25,7 +25,7 @@ drains only if it reads. The close is logged at Warn as
 `peer queued bytes over budget`.
 
 Set the budget above the largest room state the server holds. A frame that
-arrives while more than the budget waits closes even a peer that reads, and a
+arrives while the budget or more waits closes even a peer that reads, and a
 peer that joins a room receives the room's state at least once. The handshake
 is not counted, and the frame that crosses the budget is queued whatever its
 size, so one peer holds at most the budget plus one frame, besides its

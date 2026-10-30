@@ -50,7 +50,7 @@ type peer struct {
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
 	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
-	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
+	inputClosed       atomic.Bool   // a close is queued or sent, or the byte budget closed the peer; the read loop drops input from then on
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -976,19 +976,12 @@ func (p *peer) maybeResync() bool {
 
 	// Build resync frames without holding wmu: crdt.Doc and Awareness are
 	// internally synchronised (mirrors the initial-sync path).
-	step2 := encodeSyncStep2Msg(crdt.EncodeStateAsUpdateV1(p.room.doc, nil))
-	syncFrame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
-		enc.WriteVarUint(msgSync)
-		enc.WriteRaw(step2)
-	})
-	awFrame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
-		enc.WriteVarUint(msgAwareness)
-		enc.WriteVarBytes(p.room.awareness.EncodeUpdate(nil))
-	})
+	step2 := syncFrame(encodeSyncStep2Msg(crdt.EncodeStateAsUpdateV1(p.room.doc, nil)))
+	aw := awarenessFrame(p.room.awareness.EncodeUpdate(nil))
 
 	// Send the frames via the same wmu-free write path as normal broadcasts, so a
 	// slow peer cannot stall broadcast() during the resync either.
-	for _, frame := range [][]byte{syncFrame, awFrame} {
+	for _, frame := range [][]byte{step2, aw} {
 		if !p.writeToConn(frame) {
 			return false
 		}

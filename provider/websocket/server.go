@@ -1105,7 +1105,7 @@ type Server struct {
 	// the budget is queued whatever its size, and the handshake a peer gets
 	// when it connects is not counted. One peer therefore holds at most the
 	// budget plus one frame, besides its handshake and the frame being
-	// written. A frame that arrives while more than the budget waits closes
+	// written. A frame that arrives while the budget or more waits closes
 	// even a peer that reads, so set the budget above the largest room state
 	// the server holds.
 	//
