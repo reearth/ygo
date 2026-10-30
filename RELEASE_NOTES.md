@@ -10,8 +10,11 @@ hook as an empty `YArray`: the state a server sends to a late joiner, the
 client that loaded that state got an empty array without the hook's entries.
 ygo now keeps the hook and its name and writes them back byte for byte as Yjs
 does. `ToJSON`, `Entries`, `ToSlice` and observer values, which gave `null`
-for a hook, now give its entries as an object, as Yjs `toJSON` does. State
-that an older ygo already stored keeps the hook as an empty `YArray`.
+for a hook, now give its entries as an object, as Yjs `toJSON` does.
+`YXmlFragment.Children()` now includes a hook, so its indexes match `Len()`,
+and `ToXML` renders the hook as `[object Object]`, as Yjs `toString` does.
+`YMap.Get` and `YArray.Get` return a hook as a `*YMap`. State that an older
+ygo already stored keeps the hook as an empty `YArray`.
 
 An update with a type ref above 6 (no Yjs type has one) was accepted and
 written back as a `YArray`. Yjs refuses such an update, and ygo now refuses it

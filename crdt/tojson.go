@@ -28,15 +28,7 @@ func nestedJSONEntryForContent(ct *ContentType) nestedJSONEntry {
 	if ct == nil || ct.Type == nil || ct.Type.owner == nil {
 		return nestedJSONEntry{}
 	}
-	return nestedJSONEntry{owner: jsonOwner(ct.Type.owner)}
-}
-
-// jsonOwner returns the owner the JSON walkers render; a YXmlHook renders as its map, as in Yjs.
-func jsonOwner(owner any) any {
-	if h, ok := owner.(*yxmlHook); ok {
-		return &h.YMap
-	}
-	return owner
+	return nestedJSONEntry{owner: readOwner(ct.Type.owner)}
 }
 
 // nestedJSONEntryForValue reads a staged entry of a detached container, which
@@ -280,7 +272,7 @@ func toJSONValue(ct *ContentType) any {
 	if ct == nil || ct.Type == nil || ct.Type.owner == nil {
 		return nil
 	}
-	return nestedJSONValue(jsonOwner(ct.Type.owner))
+	return nestedJSONValue(readOwner(ct.Type.owner))
 }
 
 // jsonWriter is ToJSON's scratch space, pooled so repeated calls reuse its

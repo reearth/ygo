@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`crdt`: a `Y.XmlHook` reads as its entries.** `ToJSON`, `Entries`,
   `ToSlice` and observer values gave `null` for a hook; they now give its
   entries as an object, as Yjs `toJSON` does.
+- **`crdt`: a `Y.XmlHook` is a child node and a map, as in Yjs.**
+  `YXmlFragment.Children()` skipped a hook that `Len()` counts, so indexes from
+  `Children()` did not match `Len()`; it now includes the hook, and `ToXML`
+  renders it as `[object Object]`, as Yjs `toString` does. The hook child has
+  the methods of `YMap`. `YMap.Get` and `YArray.Get` return a hook as a
+  `*YMap`.
 - **`crdt`: an update with a type ref above 6 is refused.** Yjs has no shared
   type for such a ref and refuses the update; ygo accepted it as a placeholder
   and wrote it back as a `YArray`. Every function that decodes an update now
