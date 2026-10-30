@@ -618,7 +618,6 @@ taken in that window — a compaction, or a sync reply to a new peer — lost th
 for good. Snapshots now include them, byte for byte as yjs does. Thanks to
 @sjawhar for the report and reproduction.
 
->>>>>>> conflict 1 of 1 ends
 ## v1.50.0
 
 **Who is affected: nobody, unless you choose to be.** This release adds a

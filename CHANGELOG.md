@@ -595,7 +595,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pendingStructs`/`pendingDs`, and match its output byte for byte. `OnUpdate`
   payloads are unchanged. Reported with a reproduction by @sjawhar on #257.
 
->>>>>>> conflict 1 of 1 ends
 ## [1.50.0] — 2026-09-10
 
 ### Added
