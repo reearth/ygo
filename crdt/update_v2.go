@@ -645,7 +645,6 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 	budget.setSuperseded(superseded)
 	if err := budget.checkBeforeApply(len(update)); err != nil {
-		// Nothing changed, so the commit must tell no observer.
 		txn.refused = true
 		return err
 	}

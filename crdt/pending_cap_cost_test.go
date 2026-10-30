@@ -79,7 +79,7 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 // cursor at the same delete set. The lenient readers read each struct with the
 // same length, skip and dependencies as the validating scanner, and end where
 // it ends.
-func TestUnit_PendingBudget_V2StructCountIsTheScannedCount(t *testing.T) {
+func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testing.T) {
 	type read struct {
 		length  uint64
 		skip    bool

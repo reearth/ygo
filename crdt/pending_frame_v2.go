@@ -23,17 +23,7 @@ func (f *v2Frame) uint() uint64 {
 	return v
 }
 
-func (f *v2Frame) client() ClientID {
-	if v, ok := f.d.clientDec.ReadInRun(); ok {
-		return ClientID(v)
-	}
-	if f.err != nil {
-		return 0
-	}
-	v, err := f.d.clientDec.Read()
-	f.err = err
-	return ClientID(v)
-}
+func (f *v2Frame) client() ClientID { return ClientID(uintInRun(&f.d.clientDec, f)) }
 
 func clockInRun(d *anycodec.IntDiffOptRleDecoder, f *v2Frame) uint64 {
 	if v, ok := d.ReadInRun(); ok {
@@ -201,10 +191,7 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 	clients := f.uint()
 	// A failed read is ErrInvalidUpdate: the decoders' own errors are not
 	// returned, so nothing of the decoder copy escapes through them.
-	if f.err != nil {
-		return result, ErrInvalidUpdate
-	}
-	if clients > maxV2Items {
+	if f.err != nil || clients > maxV2Items {
 		return result, ErrInvalidUpdate
 	}
 	var total uint64

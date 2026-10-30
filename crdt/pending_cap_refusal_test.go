@@ -298,8 +298,8 @@ func TestUnit_PendingBudget_LenientCheckRefusesWhatTheValidatingCheckRefuses(t *
 					{initial: sv, update: data, remaining: room, v2: format.v2},
 					{initial: sv, update: data, remaining: room, v2: format.v2, superseded: superseded, groupsKnown: true},
 				} {
-					want := referencePendingBudgetCheck(b, room)
-					got := b.check(room)
+					want := referencePendingBudgetCheck(b)
+					got := b.check()
 					if (got == nil) != (want == nil) {
 						t.Fatalf("round %d %s room %d groups known %v (the update parks %d): the check returned %v, the validating check %v",
 							round, format.name, room, b.groupsKnown, p, got, want)

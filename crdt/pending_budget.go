@@ -21,7 +21,6 @@ type pendingBudget struct {
 	update      []byte
 	remaining   int
 	v2          bool
-	checked     bool
 	v2Start     *v2Decoder
 	v2Rest      encoding.Decoder
 	superseded  groupSet
@@ -82,7 +81,7 @@ func (b *pendingBudget) checkBeforeApply(size int) error {
 		}
 		b.structs = n
 	}
-	return b.check(b.remaining)
+	return b.check()
 }
 
 // walkStructsV2 counts the V2 update's structs, skips included, to the end
@@ -211,10 +210,9 @@ func v2StructCount(d *v2Decoder, toEnd bool) (int, bool) {
 	return int(total), true
 }
 
-func (b *pendingBudget) check(count int) error {
-	if b.checked || count < b.remaining {
-		return nil
-	}
+// check is the exact preflight: it refuses the update when its structs would
+// leave more items parked than the room left.
+func (b *pendingBudget) check() error {
 	if b.remaining < 0 {
 		return ErrInvalidUpdate
 	}
@@ -232,9 +230,7 @@ func (b *pendingBudget) check(count int) error {
 			return wrapUpdateErr(err)
 		}
 		b.setSuperseded(superseded)
-		if b.structs == 0 {
-			b.structs = structs
-		}
+		b.structs = structs
 	}
 	known := make(StateVector, len(b.initial))
 	for client, clock := range b.initial {
@@ -271,7 +267,6 @@ func (b *pendingBudget) check(count int) error {
 			return wrapUpdateErr(err)
 		}
 		if result.pending <= b.remaining {
-			b.checked = true
 			return nil
 		}
 		if !result.progressed {
@@ -315,7 +310,6 @@ func (b *pendingBudget) check(count int) error {
 			}
 		}
 	}
-	b.checked = true
 	return nil
 }
 
