@@ -177,9 +177,8 @@ func pendingBlocker(item *Item, store *StructStore) (ClientID, uint64, bool) {
 // integratePending integrates pending items in dependency order. A rejected
 // item waits on its blocking client and is retried once that client's clock
 // passes the dependency, so each item is retried at most once per dependency.
-// Integrated items are marked in done. With a non-nil dropped, an item whose
-// integration panics is marked done too, and the last such panic is kept in
-// dropped as an error.
+// Integrated items are marked in done. With a non-nil dropped, a panicking item
+// is marked done so it is not retried, and the last such panic is kept in dropped.
 func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *error) {
 	store := txn.doc.store
 	var waiters map[ClientID][]pendingWaiter
