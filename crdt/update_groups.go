@@ -19,23 +19,25 @@ func (s groupSet) has(i uint64) bool {
 // the earlier ones. Encoders sort clients, so a strictly monotonic header
 // sequence proves uniqueness without an index. v2 and rest are the update's
 // initial V2 decoder state (v2 nil for V1); both are copied, never advanced.
-func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (groupSet, error) {
-	ordered, n, ok := scanGroupClients(update, v2, rest, nil)
+// structs is how many structs the update holds, skips included, which the
+// scan reads on its way (a bound the pending budget uses).
+func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set groupSet, structs int, err error) {
+	ordered, n, total, ok := scanGroupClients(update, v2, rest, nil)
 	if !ok {
-		return nil, ErrInvalidUpdate
+		return nil, 0, ErrInvalidUpdate
 	}
 	if ordered {
-		return nil, nil
+		return nil, int(total), nil
 	}
 	type entry struct {
 		client ClientID
 		index  uint32
 	}
 	entries := make([]entry, 0, n)
-	if _, _, ok := scanGroupClients(update, v2, rest, func(i uint64, client ClientID) {
+	if _, _, _, ok := scanGroupClients(update, v2, rest, func(i uint64, client ClientID) {
 		entries = append(entries, entry{client, uint32(i)})
 	}); !ok {
-		return nil, ErrInvalidUpdate
+		return nil, 0, ErrInvalidUpdate
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].client != entries[j].client {
@@ -43,7 +45,6 @@ func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (grou
 		}
 		return entries[i].index < entries[j].index
 	})
-	var set groupSet
 	for i := 0; i+1 < len(entries); i++ {
 		if entries[i].client == entries[i+1].client {
 			if set == nil {
@@ -52,13 +53,14 @@ func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (grou
 			set[entries[i].index/64] |= 1 << (entries[i].index % 64)
 		}
 	}
-	return set, nil
+	return set, int(total), nil
 }
 
 // scanGroupClients walks every group header and struct. It reports whether
-// the clients are strictly monotonic and calls visit, if set, per group.
-// Returning ok rather than an error keeps the decoder copies on the stack.
-func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit func(uint64, ClientID)) (ordered bool, groups uint64, ok bool) {
+// the clients are strictly monotonic and how many structs the groups hold,
+// and calls visit, if set, per group. Returning ok rather than an error keeps
+// the decoder copies on the stack.
+func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit func(uint64, ClientID)) (ordered bool, groups, structs uint64, ok bool) {
 	s := pendingScanner{frame: true}
 	if v2 == nil {
 		rest = *encoding.NewDecoder(update)
@@ -71,7 +73,7 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 	}
 	n := s.uint()
 	if n > maxV2Items {
-		return false, 0, false
+		return false, 0, 0, false
 	}
 	ordered = true
 	var previous ClientID
@@ -81,7 +83,7 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 		items := s.uint()
 		total += items
 		if total > maxV2Items {
-			return false, 0, false
+			return false, 0, 0, false
 		}
 		client := s.client()
 		s.uint()
@@ -103,5 +105,5 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 			s.item()
 		}
 	}
-	return ordered, n, s.err == nil
+	return ordered, n, total, s.err == nil
 }

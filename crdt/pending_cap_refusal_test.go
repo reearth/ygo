@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+
+	"github.com/reearth/ygo/encoding"
 )
 
 // applyIn applies the V1 update to doc as V1, or converted to V2.
@@ -255,4 +257,72 @@ func TestUnit_ApplyUpdate_ParkedItemCapRefusesExactlyWhatWouldPassIt(t *testing.
 		t.Fatalf("only %d of %d applies were refused a cap one short of the items they park", refused, 2*rounds)
 	}
 	t.Logf("%d of %d applies were refused a cap one short of the items they park", refused, 2*rounds)
+}
+
+// The pending budget's check, which reads the update through lenient readers
+// (a V1 update's bytes in its first pass, scanPendingGroupsV1), refuses
+// exactly the updates the validating fixed point (referencePendingBudgetCheck,
+// which reads through the validating scanner) refuses. For random updates
+// with gaps and cross-client dependencies (gappedUpdate), in V1 and V2, the
+// two agree at every room from none to every struct, the room one short of
+// what the update parks and the room for it among them.
+func TestUnit_PendingBudget_LenientCheckRefusesWhatTheValidatingCheckRefuses(t *testing.T) {
+	const rounds = 300
+	rng := rand.New(rand.NewPCG(340, 2527))
+	compared := 0
+	for round := range rounds {
+		held, update := gappedUpdate(t, rng)
+		for _, format := range applyFormats {
+			doc := New(WithMaxPendingItems(math.MaxInt))
+			if err := ApplyUpdateV1(doc, held, nil); err != nil {
+				t.Fatal(err)
+			}
+			sv := doc.StateVector()
+			if err := applyIn(t, doc, format.v2, update); err != nil {
+				t.Fatal(err)
+			}
+			p := doc.PendingStats().Items
+			data := update
+			if format.v2 {
+				var err error
+				if data, err = UpdateV1ToV2(update); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var v2 *v2Decoder
+			var rest encoding.Decoder
+			if format.v2 {
+				d, err := newV2Decoder(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				v2, rest = d, *d.restDec
+			}
+			superseded, _, err := supersededGroups(data, v2, rest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, room := range []int{0, 1, p - 1, p, p + 1, len(data)} {
+				if room < 0 {
+					continue
+				}
+				// The check finds the superseded groups and the struct count
+				// itself, so its first pass may stop early; given the groups
+				// without the count, it stops early only in the last group.
+				for _, b := range []pendingBudget{
+					{initial: sv, update: data, remaining: room, v2: format.v2},
+					{initial: sv, update: data, remaining: room, v2: format.v2, superseded: superseded, groupsKnown: true},
+				} {
+					want := referencePendingBudgetCheck(b, room)
+					got := b.check(room)
+					if (got == nil) != (want == nil) {
+						t.Fatalf("round %d %s room %d groups known %v (the update parks %d): the check returned %v, the validating check %v",
+							round, format.name, room, b.groupsKnown, p, got, want)
+					}
+					compared++
+				}
+			}
+		}
+	}
+	t.Logf("%d checks agreed", compared)
 }

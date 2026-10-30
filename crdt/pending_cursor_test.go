@@ -357,7 +357,14 @@ func TestUnit_PendingBudget_SupersededKeepsClientOrder(t *testing.T) {
 		require.NoError(t, b.check(0))
 		require.True(t, b.superseded.has(1), "V%d", version)
 		var r pendingClientRange
-		_, err := scanPendingGroups(newPendingScanner(update, version == 2), StateVector{}, 0, &r, b.superseded)
+		var err error
+		if version == 2 {
+			d, derr := newV2Decoder(update)
+			require.NoError(t, derr)
+			_, err = scanPendingGroupsV2(d, StateVector{}, 0, &r, b.superseded, 0)
+		} else {
+			_, err = scanPendingGroupsV1(update, StateVector{}, 0, &r, b.superseded, 0)
+		}
 		require.NoError(t, err)
 		require.True(t, r.ordered, "V%d", version)
 		require.Equal(t, [2]ClientID{2, 9}, [2]ClientID{r.min, r.max})

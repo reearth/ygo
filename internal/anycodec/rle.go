@@ -22,6 +22,20 @@ func NewRleByteDecoder(data []byte) RleByteDecoder {
 // Read returns the next decoded byte.
 func (d *RleByteDecoder) Read() (byte, error) { return ReadRleByte(&d.dec, &d.state, &d.count) }
 
+// ReadInRun returns the next byte when it repeats the current run, without
+// reading the stream, and false when the next byte needs Read. It is small
+// enough to inline, for a reader of many values.
+func (d *RleByteDecoder) ReadInRun() (byte, bool) {
+	if d.count > 0 {
+		d.count--
+		return d.state, true
+	}
+	if d.count < 0 {
+		return d.state, true
+	}
+	return 0, false
+}
+
 // ReadRun returns the next decoded byte and reads up to max-1 more copies of
 // it from the same run, returning how many bytes it read in all (at least
 // one, at most max). It is Read called that many times, in one step.
@@ -82,6 +96,17 @@ func NewUintOptRleDecoder(data []byte) UintOptRleDecoder {
 // Read returns the next decoded value.
 func (d *UintOptRleDecoder) Read() (uint64, error) { return ReadUintOptRle(&d.dec, &d.state, &d.count) }
 
+// ReadInRun returns the next value when it repeats the current run, without
+// reading the stream, and false when the next value needs Read. It is small
+// enough to inline, for a reader of many values.
+func (d *UintOptRleDecoder) ReadInRun() (uint64, bool) {
+	if d.count > 0 {
+		d.count--
+		return d.state, true
+	}
+	return 0, false
+}
+
 // ReadUintOptRle shares the wire traversal with the public decoder facade.
 func ReadUintOptRle(dec *Decoder, state *uint64, count *int) (uint64, error) {
 	if *count == 0 {
@@ -123,6 +148,18 @@ func NewIntDiffOptRleDecoder(data []byte) IntDiffOptRleDecoder {
 // Read returns the next decoded value.
 func (d *IntDiffOptRleDecoder) Read() (int64, error) {
 	return ReadIntDiffOptRle(&d.dec, &d.state, &d.diff, &d.count)
+}
+
+// ReadInRun returns the next value when it continues the current run of equal
+// differences, without reading the stream, and false when the next value
+// needs Read. It is small enough to inline, for a reader of many values.
+func (d *IntDiffOptRleDecoder) ReadInRun() (int64, bool) {
+	if d.count > 0 {
+		d.count--
+		d.state += d.diff
+		return d.state, true
+	}
+	return 0, false
 }
 
 // ReadIntDiffOptRle shares the wire traversal with the public decoder facade.
@@ -184,6 +221,16 @@ func (d *StringDecoder) Read() (string, error) {
 	}
 	return ReadStringChunk(d.str, &d.bytePos, l), nil
 }
+
+// ReadLen returns the next string's length in UTF-16 units, the unit the pool
+// is encoded in, without reading the string. The pool cursor stays behind, so
+// a decoder that has called ReadLen must not call Read again.
+func (d *StringDecoder) ReadLen() (uint64, error) { return d.lens.Read() }
+
+// ReadLenInRun is ReadLen for a length that repeats the current run of the
+// lengths column, without reading it, and false when the length needs
+// ReadLen. It is small enough to inline, for a reader of many lengths.
+func (d *StringDecoder) ReadLenInRun() (uint64, bool) { return d.lens.ReadInRun() }
 
 // ReadStringChunk advances a pool cursor by UTF-16 units without copying data.
 func ReadStringChunk(str string, bytePos *int, units uint64) string {

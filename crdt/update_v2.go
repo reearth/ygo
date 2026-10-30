@@ -640,7 +640,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	if numClients > 1 {
 		// Fail before integrating anything: a later malformed group must not
 		// leave earlier, superseded groups applied.
-		if superseded, err = supersededGroups(update, &initialV2, budget.v2Rest); err != nil {
+		if superseded, budget.structs, err = supersededGroups(update, &initialV2, budget.v2Rest); err != nil {
 			return wrapUpdateErr(err)
 		}
 	}

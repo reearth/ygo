@@ -26,6 +26,9 @@ type pendingBudget struct {
 	v2Rest      encoding.Decoder
 	superseded  groupSet
 	groupsKnown bool
+	// structs bounds the update's structs when not zero (walkStructsV2), so
+	// the check's first pass can stop once the rest cannot change its answer.
+	structs int
 }
 
 func newPendingBudget(doc *Doc, initial StateVector, update []byte, v2 bool) pendingBudget {
@@ -42,16 +45,20 @@ func (b *pendingBudget) setSuperseded(s groupSet) {
 	b.superseded, b.groupsKnown = s, true
 }
 
+// scanner is a lenient scanner of the update (pendingScanner): the budget
+// reads lengths, clocks and dependencies, and leaves validation to the apply.
 func (b *pendingBudget) scanner() *pendingScanner {
 	if b.v2Start == nil {
-		return newPendingScanner(b.update, b.v2)
+		s := newPendingScanner(b.update, b.v2)
+		s.lenient = true
+		return s
 	}
 	// Column cursors copy by value; the immutable columns and string pool are
 	// shared with the real decoder. Only the raw rest cursor needs rebinding.
 	v2 := *b.v2Start
 	rest := b.v2Rest
 	v2.restDec = &rest
-	return &pendingScanner{v2: &v2, rest: &rest}
+	return &pendingScanner{v2: &v2, rest: &rest, lenient: true}
 }
 
 // checkBeforeApply refuses the update, before the apply integrates any of it,
@@ -59,12 +66,18 @@ func (b *pendingBudget) scanner() *pendingScanner {
 // room for. size is the update's length in bytes. It costs what the update
 // can do. A bound that costs nothing to read comes first (mayParkPastRoom):
 // an update that cannot pass the room left, as every keystroke on a document
-// below the cap cannot, is not read. Otherwise one walk of its struct section
-// (walkStructs) counts its structs, reading no string or value. Only a count
-// past the room left runs the exact preflight (check), which decides the
-// refusal. An update whose struct section the walk cannot read is refused:
-// the apply would fail inside that section, after the structs before the
-// failure had integrated.
+// below the cap cannot, is not read. A V2 update whose struct count is not
+// known yet (the apply counts the structs of an update of several groups as
+// it looks for superseded groups) is counted by one walk of its group headers
+// to the end of its struct section (walkStructsV2). Only an update these
+// bounds do not clear runs the exact preflight (check), which decides the
+// refusal. It reads the update through lenient readers: its first pass, which
+// decides every update that does not park more than the room left, reads the
+// bytes of a V1 update (scanPendingGroupsV1) and the columns of a V2 one
+// (scanPendingGroupsV2), and stops once the structs it has not read cannot
+// change its answer. An update whose struct section the walk cannot read is
+// refused: the apply would fail inside that section, after the structs before
+// the failure had integrated.
 //
 // For V2 it must run before the apply reads from its decoder: it reads the
 // apply's own rest cursor and puts it back where the apply began.
@@ -72,28 +85,26 @@ func (b *pendingBudget) checkBeforeApply(size int) error {
 	if !b.mayParkPastRoom(size) {
 		return nil
 	}
-	n, ok := b.walkStructs()
-	if !ok {
-		return ErrInvalidUpdate
-	}
-	if n <= b.remaining {
-		return nil
+	if b.v2 && b.structs == 0 {
+		n, ok := b.walkStructsV2()
+		if !ok {
+			return ErrInvalidUpdate
+		}
+		if n <= b.remaining {
+			return nil
+		}
+		b.structs = n
 	}
 	return b.check(b.remaining)
 }
 
-// walkStructs is how many structs the update's struct section holds, skips
-// included (a bound on what it can park), read by one walk to the section's
-// end, and whether the walk read the section: frameV1Structs on a V1
-// update's bytes, v2StructCount to the end on a V2 one. It allocates nothing
-// but for JSON content: the V2 walk reads a copy of the update's own column
-// cursors, on the stack, and the apply's own rest cursor, which has read
-// nothing yet and is put back where it began.
-func (b *pendingBudget) walkStructs() (int, bool) {
-	if !b.v2 {
-		n, _, err := frameV1Structs(b.update)
-		return n, err == nil
-	}
+// walkStructsV2 is how many structs the V2 update's struct section holds,
+// skips included (a bound on what it can park), read by v2StructCount to the
+// section's end, and whether it read the section. It allocates nothing: it
+// reads a copy of the update's own column cursors, on the stack, and the
+// apply's own rest cursor, which has read nothing yet and is put back where it
+// began.
+func (b *pendingBudget) walkStructsV2() (int, bool) {
 	if b.v2Start == nil {
 		d, err := newV2Decoder(b.update)
 		if err != nil {
@@ -107,16 +118,39 @@ func (b *pendingBudget) walkStructs() (int, bool) {
 	return n, ok
 }
 
+// firstPassV2 is the check's first pass over a V2 update (scanPendingGroupsV2),
+// on a copy of the update's column cursors and rest cursor.
+func (b *pendingBudget) firstPassV2(known StateVector, clients *pendingClientRange) (pendingPass, error) {
+	if b.v2Start == nil {
+		d, err := newV2Decoder(b.update)
+		if err != nil {
+			return pendingPass{}, err
+		}
+		return scanPendingGroupsV2(d, known, b.remaining, clients, b.superseded, b.structs)
+	}
+	v2 := *b.v2Start
+	rest := b.v2Rest
+	v2.restDec = &rest
+	return scanPendingGroupsV2(&v2, known, b.remaining, clients, b.superseded, b.structs)
+}
+
 // mayParkPastRoom is whether the update's structs may leave more items parked
 // than the pending cap has room for, by a bound that costs nothing to read:
-// a V1 struct takes two bytes of the update at least, so a V1 update of at
-// most twice the room cannot; a V2 update, whose columns can hold many structs
-// in a few bytes, cannot when its group headers hold no more structs than the
-// room (v2StructCount, which for an update of one group, as a keystroke is,
-// reads two numbers). size is the update's length in bytes.
+// the update's struct count when the apply has it (structs); else a V1 struct
+// takes two bytes of the update at least, so a V1 update of at most twice the
+// room cannot; and a V2 update, whose columns can hold many structs in a few
+// bytes, cannot when its group headers hold no more structs than the room
+// (v2StructCount, which for an update of one group, as a keystroke is, reads
+// two numbers). size is the update's length in bytes.
 func (b *pendingBudget) mayParkPastRoom(size int) bool {
+	if !b.v2 && size/2 <= b.remaining {
+		return false
+	}
+	if b.structs > 0 {
+		return b.structs > b.remaining
+	}
 	if !b.v2 {
-		return size/2 > b.remaining
+		return true
 	}
 	if b.v2Start == nil {
 		return true
@@ -129,144 +163,6 @@ func (b *pendingBudget) mayParkPastRoom(size int) bool {
 	n, ok := v2StructCount(&v2, false)
 	*v2.restDec = b.v2Rest
 	return !ok || n > b.remaining
-}
-
-// frameV1Structs steps over the struct section at the start of buf, a V1
-// update, as decodeItem and decodeContent read it, without decoding its
-// strings or values, and is how many structs it holds and where it ends. It
-// works on the bytes directly, a varint at a time. JSON content keeps the
-// pending scanner's reading, since whether its values are JSON or legacy Any
-// decides where they end.
-func frameV1Structs(buf []byte) (structs, end int, err error) {
-	p := 0
-	bad := false
-	next := func() uint64 {
-		v, n := binary.Uvarint(buf[p:])
-		if n <= 0 {
-			bad = true
-			return 0
-		}
-		p += n
-		return v
-	}
-	skipBytes := func() {
-		l := next()
-		if bad || l > uint64(len(buf)-p) {
-			bad = true
-			return
-		}
-		p += int(l)
-	}
-	skipAny := func() {
-		n, err := anycodec.Skip(buf[p:])
-		if err != nil {
-			bad = true
-			return
-		}
-		p += n
-	}
-	clients := next()
-	if bad || clients > maxV2Items {
-		return 0, 0, ErrInvalidUpdate
-	}
-	var total uint64
-	for range clients {
-		n := next()
-		total += n
-		if bad || total > maxV2Items {
-			return 0, 0, ErrInvalidUpdate
-		}
-		next() // client
-		next() // clock
-		for range n {
-			if bad || p >= len(buf) {
-				return 0, 0, ErrInvalidUpdate
-			}
-			info := buf[p]
-			p++
-			tag := info & 0x1f
-			if tag == 0 || tag == 10 {
-				next()
-				continue
-			}
-			if info&flagHasOrigin != 0 {
-				next()
-				next()
-			}
-			if info&flagHasRightOrigin != 0 {
-				next()
-				next()
-			}
-			if info&(flagHasOrigin|flagHasRightOrigin) == 0 {
-				if bad || p >= len(buf) {
-					return 0, 0, ErrInvalidUpdate
-				}
-				named := buf[p] == 1
-				p++
-				if named {
-					skipBytes()
-				} else {
-					next()
-					next()
-				}
-				if info&flagHasParentSub != 0 {
-					skipBytes()
-				}
-			}
-			if bad {
-				return 0, 0, ErrInvalidUpdate
-			}
-			switch tag {
-			case wireDeleted:
-				next()
-			case wireJSON:
-				d := encoding.NewDecoder(buf[p:])
-				js := pendingScanner{rest: d}
-				js.content(tag)
-				if js.err != nil {
-					return 0, 0, js.err
-				}
-				p = len(buf) - d.Remaining()
-			case wireBinary, wireString, wireEmbed:
-				skipBytes()
-			case wireFormat:
-				skipBytes()
-				skipBytes()
-			case wireType:
-				if p >= len(buf) {
-					return 0, 0, ErrInvalidUpdate
-				}
-				ref := buf[p]
-				p++
-				if ref == 3 || ref == 5 {
-					skipBytes()
-				}
-			case wireAny:
-				values := next()
-				if bad || values > uint64(len(buf)-p) {
-					return 0, 0, ErrInvalidUpdate
-				}
-				for range values {
-					if skipAny(); bad {
-						break
-					}
-				}
-			case wireDoc:
-				skipBytes()
-				skipAny()
-			case wireMove:
-				next()
-				next()
-				next()
-			default:
-				return 0, 0, ErrInvalidUpdate
-			}
-		}
-	}
-	if bad {
-		return 0, 0, ErrInvalidUpdate
-	}
-	return int(total), p, nil
 }
 
 // v2StructCount is how many structs the V2 update d decodes holds, skips
@@ -367,11 +263,14 @@ func (b *pendingBudget) check(count int) error {
 			}
 			v2, rest = dec, *dec.restDec
 		}
-		superseded, err := supersededGroups(b.update, v2, rest)
+		superseded, structs, err := supersededGroups(b.update, v2, rest)
 		if err != nil {
 			return wrapUpdateErr(err)
 		}
 		b.setSuperseded(superseded)
+		if b.structs == 0 {
+			b.structs = structs
+		}
 	}
 	known := make(StateVector, len(b.initial))
 	for client, clock := range b.initial {
@@ -386,7 +285,11 @@ func (b *pendingBudget) check(count int) error {
 		var result pendingPass
 		var err error
 		if pass == 0 {
-			result, err = scanPendingGroups(b.scanner(), known, b.remaining, &clients, b.superseded)
+			if b.v2 {
+				result, err = b.firstPassV2(known, &clients)
+			} else {
+				result, err = scanPendingGroupsV1(b.update, known, b.remaining, &clients, b.superseded, b.structs)
+			}
 		} else {
 			var clientRange *pendingClientRange
 			if clients.ordered {
@@ -596,17 +499,19 @@ func (w pendingWireSummary) containsDependencies() bool {
 func (b *pendingBudget) wireContainsDependencies(known StateVector) bool {
 	if b.v2Start == nil {
 		if b.v2 {
-			return pendingWireContainsDependencies(newPendingScanner(b.update, true), known)
+			s := newPendingScanner(b.update, true)
+			s.lenient = true
+			return pendingWireContainsDependencies(s, known)
 		}
 		rest := encoding.NewDecoder(b.update)
-		s := pendingScanner{rest: rest}
+		s := pendingScanner{rest: rest, lenient: true}
 		return pendingWireContainsDependencies(&s, known)
 	}
 	v2, rest := *b.v2Start, b.v2Rest
 	// The census uses only V2 column methods. Raw fields go through s.rest;
 	// no full V2 decoder rest cursor is needed or retained here.
 	v2.restDec = nil
-	s := pendingScanner{v2: &v2, rest: &rest}
+	s := pendingScanner{v2: &v2, rest: &rest, lenient: true}
 	return pendingWireContainsDependencies(&s, known)
 }
 
@@ -702,62 +607,6 @@ type pendingBoundedPass struct {
 	permanent int
 }
 
-func scanPendingGroups(s *pendingScanner, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet) (pendingPass, error) {
-	var result pendingPass
-	clients := s.uint()
-	if clients > maxV2Items {
-		return result, ErrInvalidUpdate
-	}
-	var total uint64
-	first := true
-	for i := uint64(0); i < clients && s.err == nil; i++ {
-		n := s.uint()
-		total += n
-		if total > maxV2Items {
-			return result, ErrInvalidUpdate
-		}
-		client, clock := s.client(), s.uint()
-		drop := superseded.has(i)
-		if clientRange != nil && !drop {
-			clientRange.add(client, first)
-			first = false
-		}
-		knownClock := known.Clock(client)
-		for j := uint64(0); j < n && s.err == nil; j++ {
-			length, skip, deps, numDeps := s.item()
-			end := clock + length
-			if end < clock {
-				return result, ErrInvalidUpdate
-			}
-			if !drop && !skip && end > knownClock {
-				ready := clock <= knownClock
-				if ready {
-					for _, dep := range deps[:numDeps] {
-						if dep.Clock >= known.Clock(dep.Client) {
-							ready = false
-							break
-						}
-					}
-				}
-				if ready {
-					known[client] = end
-					knownClock = end
-					result.progressed = true
-				} else {
-					result.pending++
-					if clients == 1 && result.pending > remaining {
-						// No other group can fill this group's first blocked head. All
-						// following uncovered non-Skip structs remain permanently pending.
-						return result, ErrInvalidUpdate
-					}
-				}
-			}
-			clock = end
-		}
-	}
-	return result, s.err
-}
-
 func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining int, collect *pendingCollector, bounds []pendingWireBound, clientRange *pendingClientRange, superseded groupSet) (pendingBoundedPass, error) {
 	var result pendingBoundedPass
 	clients := s.uint()
@@ -842,14 +691,22 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 // normal column decoder without building a key dictionary or decoding
 // Any/JSON values into object trees. A framing scanner only finds struct
 // boundaries: it skips text and JSON without validating or counting them, and
-// in V2 never reads the clock, string, key or type columns. The decoder still
-// validates everything.
+// in V2 never reads the clock, string, key or type columns. A lenient scanner,
+// the pending budget's (pendingBudget.scanner), reads every struct's length,
+// clock and dependencies, as the budget needs them, and validates nothing the
+// decoder validates: it counts a string's length in UTF-16 units on its raw
+// bytes (V1) or reads it from the string column's lengths (V2, without
+// reading the string), steps over keys, names and JSON text by their length,
+// and over Any values by their framing. On a well-formed update it reads what
+// the validating scanner reads; on a malformed one the apply fails at the
+// malformed struct, as the decoder validates everything.
 type pendingScanner struct {
-	rest  *encoding.Decoder
-	v2    *v2Decoder
-	keys  int
-	err   error
-	frame bool
+	rest    *encoding.Decoder
+	v2      *v2Decoder
+	keys    int
+	err     error
+	frame   bool
+	lenient bool
 }
 
 func newPendingScanner(update []byte, v2 bool) *pendingScanner {
@@ -943,9 +800,11 @@ func (s *pendingScanner) text() uint64 {
 	if s.err != nil {
 		return 0
 	}
-	if s.frame {
+	if s.frame || s.lenient {
 		if s.v2 == nil {
 			_, s.err = s.rest.ReadVarBytes()
+		} else if s.lenient {
+			_, s.err = s.v2.stringDec.ReadLen()
 		}
 		return 0
 	}
@@ -1055,6 +914,13 @@ func (s *pendingScanner) content(tag byte) uint64 {
 			// V2 JSON values live in the string column, which framing never reads.
 			return n
 		}
+		if tag == wireJSON && s.v2 == nil && s.lenient && (n == 0 || !isAnyTag(s.rest.RemainingBytes()[0])) {
+			// decodeContent reads such values as JSON text, one string each.
+			for i := uint64(0); i < n && s.err == nil; i++ {
+				s.text()
+			}
+			return n
+		}
 		if tag == wireJSON && s.v2 == nil {
 			// Match decodeContent's whole-item JSON-first legacy fallback,
 			// without constructing the values or their nested object trees.
@@ -1085,6 +951,9 @@ func (s *pendingScanner) content(tag byte) uint64 {
 	case wireBinary:
 		s.bytes()
 	case wireString:
+		if s.lenient {
+			return s.stringLen()
+		}
 		return s.text()
 	case wireEmbed:
 		if s.v2 == nil {
@@ -1131,7 +1000,7 @@ func (s *pendingScanner) json() {
 	if s.err != nil {
 		return
 	}
-	if s.frame {
+	if s.frame || s.lenient {
 		s.text()
 		return
 	}
@@ -1144,6 +1013,50 @@ func (s *pendingScanner) json() {
 	if s.err == nil {
 		s.err = validatePendingJSON([]byte(value))
 	}
+}
+
+// stringLen is a lenient scanner's read of a string's length in UTF-16 units,
+// the clocks it takes: from the string column's lengths in V2, without the
+// string, and in V1 from the string's bytes, which it counts but does not
+// validate (utf16Units).
+func (s *pendingScanner) stringLen() uint64 {
+	if s.v2 != nil {
+		n, err := s.v2.stringDec.ReadLen()
+		s.err = err
+		return n
+	}
+	raw, err := s.rest.ReadVarBytes()
+	s.err = err
+	return utf16Units(raw)
+}
+
+// utf16Units is how many UTF-16 units the UTF-8 text b decodes to, counted on
+// its bytes: one per byte that starts a character, and one more per byte that
+// starts a four-byte one. It equals the count of a decode when b is valid
+// UTF-8, and checks nothing. ASCII, which most text is, is passed eight bytes
+// at a time.
+func utf16Units(b []byte) uint64 {
+	n := len(b)
+	for len(b) >= 8 {
+		if binary.LittleEndian.Uint64(b)&0x8080808080808080 != 0 {
+			for _, c := range b[:8] {
+				if c&0xc0 == 0x80 {
+					n--
+				} else if c >= 0xf0 {
+					n++
+				}
+			}
+		}
+		b = b[8:]
+	}
+	for _, c := range b {
+		if c&0xc0 == 0x80 {
+			n--
+		} else if c >= 0xf0 {
+			n++
+		}
+	}
+	return uint64(n)
 }
 
 // skipJSONVals validates V1 JSON text without allocating decoded values.

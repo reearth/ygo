@@ -4,8 +4,6 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"testing"
-
-	"github.com/reearth/ygo/encoding"
 )
 
 // The pending cap's check before the apply costs a small update nothing: for a
@@ -39,19 +37,21 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 		t.Fatalf("the V1 check allocated %v times", n)
 	}
 	// A room too small for the cheap bound to pass, but not for the
-	// keystroke's one struct, takes the walk of its struct section
-	// (frameV1Structs), which allocates nothing either.
+	// keystroke's one struct, takes the exact check, whose first pass walks
+	// the bytes (scanPendingGroupsV1) and allocates only the state vector it
+	// tracks.
 	walked := v1
 	walked.remaining = len(keystroke)/2 - 1
 	if n := testing.AllocsPerRun(100, func() {
 		if !walked.mayParkPastRoom(len(keystroke)) {
-			t.Fatal("the cheap bound passed; the walk was not taken")
+			t.Fatal("the cheap bound passed; the check was not taken")
 		}
-		if err := walked.checkBeforeApply(len(keystroke)); err != nil {
+		fresh := walked
+		if err := fresh.checkBeforeApply(len(keystroke)); err != nil {
 			t.Fatal(err)
 		}
-	}); n != 0 {
-		t.Fatalf("the V1 walk allocated %v times", n)
+	}); n > 2 {
+		t.Fatalf("the V1 check allocated %v times", n)
 	}
 
 	dec, err := newV2Decoder(keystrokeV2)
@@ -81,93 +81,117 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 
 // v2StructCount, the bound on a V2 update's structs read from its group
 // headers, is the number of structs the full scan of the update reads, skips
-// included, and so is frameStructs, the walk of a V1 or V2 struct section,
-// which also leaves the scan at the same delete set as the full scan. This
-// holds for updates of several groups holding text, map values, nested
-// arrays, deletes and skips (gappedUpdate), and for every kind of content
-// whose value is on the rest cursor (binary, embeds, formats, Any values,
-// subdocuments) in a group before the last.
+// included, and read to the end of the struct section it leaves the scan at
+// the same delete set as the full scan. The pending budget's lenient readers
+// (pendingScanner with lenient set, and v1Frame on a V1 update's bytes) read
+// every struct as the validating scanner reads it: the same length, skip and
+// dependencies, and they end where it ends. This holds for updates of several
+// groups holding text, map values, nested arrays, deletes and skips
+// (gappedUpdate), and for every kind of content whose value is on the rest
+// cursor (binary, embeds, formats, Any values, subdocuments) in a group before
+// the last.
 func TestUnit_PendingBudget_V2StructCountIsTheScannedCount(t *testing.T) {
+	type read struct {
+		length  uint64
+		skip    bool
+		deps    [3]ID
+		numDeps int
+	}
+	// scan reads every struct of the update through next, after header reads
+	// the group count, a group's struct count and its client and clock.
+	scan := func(header func() uint64, client func() ClientID, next func() read) (reads []read, want int) {
+		clients := header()
+		for range clients {
+			n := header()
+			want += int(n)
+			client()
+			header()
+			for range n {
+				reads = append(reads, next())
+			}
+		}
+		return reads, want
+	}
 	count := func(t *testing.T, v1 []byte) {
 		t.Helper()
 		v2, err := UpdateV1ToV2(v1)
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := newPendingScanner(v2, true)
-		want := 0
-		clients := s.uint()
-		for range clients {
-			n := s.uint()
-			want += int(n)
-			s.client()
-			s.uint()
-			for range n {
-				s.item()
-			}
-		}
-		if s.err != nil {
-			t.Fatal(s.err)
-		}
-		d, err := newV2Decoder(v2)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got, ok := v2StructCount(d, false); !ok || got != want {
-			t.Fatalf("v2StructCount = %d, %v; the scan reads %d structs", got, ok, want)
-		}
-		// The walk to the end of the struct section, V1 (frameV1Structs) and
-		// V2 (v2StructCount to the end), counts the same structs and stands
-		// where the full scan stands: at the delete set, which reads the same
-		// from both.
 		for _, isV2 := range []bool{false, true} {
 			update := v1
 			if isV2 {
 				update = v2
 			}
 			full := newPendingScanner(update, isV2)
-			for range full.uint() {
-				n := full.uint()
-				full.client()
-				full.uint()
-				for range n {
-					full.item()
-				}
-			}
+			wantReads, want := scan(full.uint, full.client, func() read {
+				l, s, d, n := full.item()
+				return read{l, s, d, n}
+			})
 			if full.err != nil {
 				t.Fatal(full.err)
 			}
-			var got int
-			var walked, scanned DeleteSet
-			var errWalked, errScanned error
-			if isV2 {
-				d, err := newV2Decoder(update)
-				if err != nil {
-					t.Fatal(err)
-				}
-				var ok bool
-				if got, ok = v2StructCount(d, true); !ok {
-					t.Fatal("v2StructCount to the end did not read the structs")
-				}
-				walked, errWalked = decodeDeleteSetV2(d)
-				scanned, errScanned = decodeDeleteSetV2(full.v2)
-			} else {
-				n, end, err := frameV1Structs(update)
-				if err != nil {
-					t.Fatal(err)
-				}
-				got = n
-				walked, errWalked = decodeDeleteSet(encoding.NewDecoder(update[end:]))
-				scanned, errScanned = decodeDeleteSet(full.rest)
+			lenient := newPendingScanner(update, isV2)
+			lenient.lenient = true
+			gotReads, _ := scan(lenient.uint, lenient.client, func() read {
+				l, s, d, n := lenient.item()
+				return read{l, s, d, n}
+			})
+			if lenient.err != nil || !reflect.DeepEqual(gotReads, wantReads) {
+				t.Fatalf("V2 %v: the lenient scanner read %v (err %v); the scanner reads %v", isV2, gotReads, lenient.err, wantReads)
 			}
-			if got != want {
-				t.Fatalf("the walk (V2 %v) counts %d structs; the scan reads %d", isV2, got, want)
+			if !isV2 {
+				if got, want := lenient.rest.Remaining(), full.rest.Remaining(); got != want {
+					t.Fatalf("the lenient scanner ends %d bytes before the end, the scanner %d", got, want)
+				}
+				f := v1Frame{buf: update}
+				frameReads, _ := scan(f.uint, func() ClientID { return ClientID(f.uint()) }, func() read {
+					l, s, d, n := f.item()
+					return read{l, s, d, n}
+				})
+				if f.bad || !reflect.DeepEqual(frameReads, wantReads) {
+					t.Fatalf("the V1 frame read %v (bad %v); the scanner reads %v", frameReads, f.bad, wantReads)
+				}
+				if got, want := len(update)-f.p, full.rest.Remaining(); got != want {
+					t.Fatalf("the V1 frame ends %d bytes before the end, the scanner %d", got, want)
+				}
+				continue
 			}
+			d, err := newV2Decoder(update)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := v2Frame{d: d}
+			frameReads, _ := scan(f.uint, f.client, func() read {
+				l, s, deps, n := f.item()
+				return read{l, s, deps, n}
+			})
+			if f.err != nil || !reflect.DeepEqual(frameReads, wantReads) {
+				t.Fatalf("the V2 frame read %v (err %v); the scanner reads %v", frameReads, f.err, wantReads)
+			}
+			if got, want := d.restDec.Remaining(), full.rest.Remaining(); got != want {
+				t.Fatalf("the V2 frame ends %d bytes before the end, the scanner %d", got, want)
+			}
+			if d, err = newV2Decoder(update); err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := v2StructCount(d, false); !ok || got != want {
+				t.Fatalf("v2StructCount = %d, %v; the scan reads %d structs", got, ok, want)
+			}
+			d, err = newV2Decoder(update)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := v2StructCount(d, true); !ok || got != want {
+				t.Fatalf("v2StructCount to the end = %d, %v; the scan reads %d structs", got, ok, want)
+			}
+			walked, errWalked := decodeDeleteSetV2(d)
+			scanned, errScanned := decodeDeleteSetV2(full.v2)
 			if errWalked != nil || errScanned != nil {
-				t.Fatalf("V2 %v: the delete set does not read: %v, %v", isV2, errWalked, errScanned)
+				t.Fatalf("the delete set does not read: %v, %v", errWalked, errScanned)
 			}
 			if !reflect.DeepEqual(walked.clients, scanned.clients) {
-				t.Fatalf("the delete set read after the walk (V2 %v) is %v, after the full scan %v", isV2, walked.clients, scanned.clients)
+				t.Fatalf("the delete set read after the walk is %v, after the full scan %v", walked.clients, scanned.clients)
 			}
 		}
 	}

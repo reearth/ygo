@@ -570,15 +570,18 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		return ErrInvalidUpdate
 	}
 	var superseded groupSet
+	structs := 0
 	if numClients > 1 {
 		// Fail before integrating anything: a later malformed group must not
-		// leave earlier, superseded groups applied.
-		if superseded, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
+		// leave earlier, superseded groups applied. The scan also counts the
+		// update's structs, which bounds the pending-cap check's work.
+		if superseded, structs, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
 			return wrapUpdateErr(err)
 		}
 	}
 	budget := newPendingBudget(txn.doc, sv, update, false)
 	budget.setSuperseded(superseded)
+	budget.structs = structs
 	if err := budget.checkBeforeApply(len(update)); err != nil {
 		// Refused before anything changed: the commit tells no observer.
 		txn.refused = true
