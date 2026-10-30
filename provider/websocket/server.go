@@ -2206,7 +2206,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if p.inputClosed.Load() {
-			// A close is queued or sent: nothing more from this peer lands.
+			// A close is queued or sent, or the byte budget closed the peer:
+			// nothing more from this peer lands.
 			// continue, not break: the deferred teardown would drop the
 			// queued close frame or race the one being sent.
 			continue

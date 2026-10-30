@@ -1,9 +1,12 @@
 package websocket_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -150,6 +153,61 @@ func TestInteg_PeerWriteQueueBytes_ClosesPeerThatNeverReads(t *testing.T) {
 		_, peers := ygws.PeerQueuedBytes(srv, room)
 		return peers == 1
 	}, 5*time.Second, 10*time.Millisecond, "the closed peer should leave the room")
+}
+
+// lockedBuffer is a bytes.Buffer that the server's logger and the test can
+// use at once.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestInteg_PeerWriteQueueBytes_DropsInputAfterTheClose(t *testing.T) {
+	// Over TCP the server still reads the SyncStep1 frames in the socket
+	// buffer after the budget closes the connection. It answers none of them,
+	// so it refuses, and logs, only once.
+	const (
+		room     = "drops-input"
+		docBytes = 256 << 10
+		budget   = int64(1 << 20)
+	)
+	var logs lockedBuffer
+	srv := ygws.NewServer()
+	srv.PeerWriteQueueBytes = budget
+	srv.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	writer := dial(t, ts, room)
+	drainHandshake(t, writer, crdt.New())
+	sendUpdate(t, writer, textUpdate(crdt.New(crdt.WithClientID(1)), strings.Repeat("x", docBytes)))
+	require.Eventually(t, func() bool {
+		return len(crdt.EncodeStateAsUpdateV1(srv.GetDoc(room), nil)) > docBytes
+	}, 5*time.Second, 10*time.Millisecond, "the room should hold the update")
+
+	conn := dial(t, ts, room)
+	for range 5000 {
+		if askFullState(conn) != nil {
+			break
+		}
+	}
+	require.Eventually(t, func() bool {
+		_, peers := ygws.PeerQueuedBytes(srv, room)
+		return peers == 1
+	}, 10*time.Second, 10*time.Millisecond, "the flooding peer should be closed")
+	assert.Equal(t, 1, strings.Count(logs.String(), "peer queued bytes over budget"))
 }
 
 func TestInteg_PeerWriteQueueBytes_ClosesOverBudgetUnderResyncPolicy(t *testing.T) {
