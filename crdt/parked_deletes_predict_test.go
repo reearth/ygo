@@ -162,7 +162,7 @@ func TestUnit_ApplyUpdate_TheParkedDeletesCheckedAreWhatTheApplyParks(t *testing
 				if err != nil {
 					t.Fatalf("round %d %s: %v", round, format.name, err)
 				}
-				counted := parkedDeleteRangesAfter(stillParked(receiver.store.pendingDs, sv, clocks), parkedPartsOf(ds, clocks))
+				counted := parkedDeleteRangesAfter(receiver.store.pendingDs, receiver.store.pendingDsRanges, sv, clocks, parkedPartsOf(ds, clocks))
 				if format.v2 {
 					err = ApplyUpdateV2(receiver, update, nil)
 				} else {
@@ -175,6 +175,10 @@ func TestUnit_ApplyUpdate_TheParkedDeletesCheckedAreWhatTheApplyParks(t *testing
 				if got > counted || (full && counted != 0) {
 					t.Fatalf("round %d %s (full %v): %d delete ranges are parked, the check counted %d",
 						round, format.name, full, got, counted)
+				}
+				if kept := receiver.store.pendingDsRanges; kept != got {
+					t.Fatalf("round %d %s (full %v): the store keeps a count of %d parked ranges, it holds %d",
+						round, format.name, full, kept, got)
 				}
 			}
 		}

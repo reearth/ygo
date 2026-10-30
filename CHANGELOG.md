@@ -7,16 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.55.0] — 2026-10-29
 
+### Added
+
+- **`crdt`: `Doc.SetMaxPendingItems`** sets the pending cap on a document
+  already made, so stored state, which can carry more parked items or ranges
+  than the cap, can be loaded with the cap lifted. `provider/websocket` now
+  loads each room's stored state that way and sets `MaxPendingItems` before
+  the `OnLoadDocument` hook and any peer's update. A document over its cap is
+  refused only growth of what it has parked, so it still applies an update
+  whose items resolve within it.
+
 ### Fixed
 
 - **`crdt`: a remote apply no longer pays for every parked delete range.**
   Every remote apply retried every parked delete range, re-sorting and copying
   each range of a client the store does not hold, so one keystroke allocated
-  about 1.6 MB with 100,000 ranges parked. A client's parked ranges are now
-  retried only once the store's next clock for it has passed the lowest of
-  them, since until then none of them can apply: an apply that brings nothing
-  for a client costs nothing for its parked ranges, and a parked range still
-  applies, part by part, as the structs it names arrive.
+  about 9 MB with 100,000 ranges parked. A client's parked ranges are now
+  retried only once the client gains structs past the lowest of them, so an
+  apply costs nothing for the parked ranges of clients it brings nothing for.
 
 ### Changed
 
@@ -25,25 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grow them without limit with delete sets naming clocks of a client nobody
   holds, taxing every later apply in the room and surviving into every
   snapshot. `WithMaxPendingItems` (and `Server.MaxPendingItems`) now also caps
-  them, counted separately from parked items with the same default of 100,000:
-  an update whose delete set would grow the parked ranges past the cap returns
-  `ErrInvalidUpdate` before it changes anything, so the document is left as it
-  was: no struct of it is integrated, no delete applied, nothing stored and no
-  observer told. The count is what the update would leave parked: ranges its
-  own structs resolve make room, ranges a peer sends again or that join parked
-  ones add nothing, and an update that adds no range is never refused. An
-  update too short to carry more ranges than the cap has room for, such as a
-  keystroke, is not read again for the check.
-- **`crdt`: `Doc.SetMaxPendingItems`, and `provider/websocket` loads a room's
-  stored state with the pending cap lifted.** A stored state carries what was
-  parked when it was written, which can be more than the cap, so a document
-  capped before such a state arrives refuses it, and the room never loads. The
-  server now makes each room's document with the cap lifted and sets
-  `MaxPendingItems` with `SetMaxPendingItems` once the stored state is in,
-  before the `OnLoadDocument` hook and before any peer's update. A document
-  over the cap, whether from a loaded state or a lowered cap, is refused only
-  growth of what it has parked, items and delete ranges alike, so it still
-  applies an update whose items resolve within it.
+  them, counted separately from parked items with the same default of 100,000.
+  An update whose delete set would leave more parked ranges than the cap
+  returns `ErrInvalidUpdate` before it changes anything: nothing of it is
+  applied, stored or sent to observers. Ranges the update's own structs
+  resolve make room, and ranges a peer sends again or that join parked ones
+  add nothing. The count does not credit ranges that items the update unblocks
+  would resolve, so near the cap it can refuse such an update.
 
 ## [1.54.0] — 2026-10-22
 

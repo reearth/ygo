@@ -69,22 +69,10 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 		dec.restDec = nil
 		s.v2, s.rest = &dec, &rest
 	}
-	n := s.uint()
-	if n > maxV2Items {
-		return false, 0, false
-	}
 	ordered = true
 	var previous ClientID
 	direction := 0
-	var total uint64
-	for i := uint64(0); i < n && s.err == nil; i++ {
-		items := s.uint()
-		total += items
-		if total > maxV2Items {
-			return false, 0, false
-		}
-		client := s.client()
-		s.uint()
+	groups, ok = s.frameGroups(func(i uint64, client ClientID) {
 		if visit != nil {
 			visit(i, client)
 		}
@@ -99,9 +87,32 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 			direction = d
 		}
 		previous = client
+	})
+	return ordered, groups, ok
+}
+
+// frameGroups steps a framing scanner over every group header and struct, so
+// that it stands at the delete set, calling visit, if set, per group.
+func (s *pendingScanner) frameGroups(visit func(uint64, ClientID)) (groups uint64, ok bool) {
+	n := s.uint()
+	if n > maxV2Items {
+		return 0, false
+	}
+	var total uint64
+	for i := uint64(0); i < n && s.err == nil; i++ {
+		items := s.uint()
+		total += items
+		if total > maxV2Items {
+			return 0, false
+		}
+		client := s.client()
+		s.uint()
+		if visit != nil {
+			visit(i, client)
+		}
 		for j := uint64(0); j < items && s.err == nil; j++ {
 			s.item()
 		}
 	}
-	return ordered, n, s.err == nil
+	return n, s.err == nil
 }

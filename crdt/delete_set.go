@@ -2,13 +2,9 @@ package crdt
 
 import (
 	"cmp"
-	"encoding/binary"
 	"math"
 	"slices"
 	"sort"
-
-	"github.com/reearth/ygo/encoding"
-	"github.com/reearth/ygo/internal/anycodec"
 )
 
 // DeleteRange is a contiguous range of deleted clocks for a single client.
@@ -142,37 +138,33 @@ func (ds *DeleteSet) orderedClients() []ClientID {
 
 // retryPendingDs reapplies the store's parked deletions in the order Yjs
 // re-reads its encoded pending delete set: clients descending, ranges sorted.
-// It skips a client whose next clock has not passed its lowest parked range,
-// since none of that client's ranges can apply yet.
+// Only a client that gained structs since the last retry, and whose next clock
+// passed its lowest parked range, can have a range to apply, so an apply costs
+// nothing for the others.
 func retryPendingDs(txn *Transaction) {
 	store := txn.doc.store
 	var ready DeleteSet
-	for client, ranges := range store.pendingDs.clients {
-		if len(ranges) > 0 && store.NextClock(client) > ranges[0].Clock {
+	for client := range store.pendingDsMoved {
+		if ranges := store.pendingDs.clients[client]; len(ranges) > 0 && store.NextClock(client) > ranges[0].Clock {
 			if ready.clients == nil {
 				ready = newDeleteSet()
 			}
 			ready.clients[client] = ranges
+			ready.order = append(ready.order, client)
+			delete(store.pendingDs.clients, client)
+			store.pendingDsRanges -= len(ranges)
 		}
 	}
+	clear(store.pendingDsMoved)
 	if ready.clients == nil {
 		return
 	}
-	kept := store.pendingDs
-	store.pendingDs = newDeleteSet()
-	ready.order = make([]ClientID, 0, len(ready.clients))
-	for c := range ready.clients {
-		ready.order = append(ready.order, c)
-		ready.sortAndCompact(c)
-	}
 	slices.SortFunc(ready.order, func(a, b ClientID) int { return cmp.Compare(b, a) })
 	still := ready.applyToPartial(txn)
-	for client, ranges := range kept.clients {
-		if _, retried := ready.clients[client]; !retried && len(ranges) > 0 {
-			still.clients[client] = ranges
-		}
+	for client, ranges := range still.clients {
+		store.pendingDs.clients[client] = ranges
+		store.pendingDsRanges += len(ranges)
 	}
-	store.pendingDs = still
 }
 
 // applyToPartial applies delete-set entries whose target items are
@@ -278,16 +270,13 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	limit := doc.maxPendingItemsLimit()
 	pending := doc.store.pendingDs
-	before := 0
-	for _, ranges := range pending.clients {
-		before += len(ranges)
-	}
+	before := doc.store.pendingDsRanges
 	room := max(limit-before, 0)
 	if len(b.update)/2 <= room {
 		return nil
 	}
 	s := b.scanner()
-	if _, err := frameStructs(s); err != nil {
+	if err := frameStructs(s); err != nil {
 		return wrapUpdateErr(err)
 	}
 	if n, err := parkingRangesBound(s, b.initial); err != nil {
@@ -299,48 +288,21 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	if n := parkingRanges(ds, b.initial); n <= room {
-		return nil
-	}
 	clocks, err := structClocksOf(b)
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	after := parkedDeleteRangesAfter(stillParked(pending, b.initial, clocks), parkedPartsOf(ds, clocks))
+	after := parkedDeleteRangesAfter(pending, before, b.initial, clocks, parkedPartsOf(ds, clocks))
 	if after <= limit || after <= before {
 		return nil
 	}
 	return ErrInvalidUpdate
 }
 
-// stillParked is what the retry after the update's structs leaves of pending:
-// the ranges of each client whose clock the structs moved, cut at its clock in
-// clocks.
-func stillParked(pending DeleteSet, initial, clocks StateVector) DeleteSet {
-	still := DeleteSet{clients: make(map[ClientID][]DeleteRange, len(pending.clients))}
-	for client, ranges := range pending.clients {
-		next := clocks.Clock(client)
-		if next == initial.Clock(client) {
-			still.clients[client] = ranges
-			continue
-		}
-		var kept []DeleteRange
-		for _, r := range ranges {
-			if part, parks := parkedPart(r, next); parks {
-				kept = append(kept, part)
-			}
-		}
-		if len(kept) > 0 {
-			still.clients[client] = kept
-		}
-	}
-	return still
-}
-
 // deleteSetOf is the delete set of the update s scans, a V1 one or a V2 one,
 // read past its structs without keeping anything of them.
 func deleteSetOf(s *pendingScanner, v2 bool) (DeleteSet, error) {
-	if _, err := frameStructs(s); err != nil {
+	if err := frameStructs(s); err != nil {
 		return DeleteSet{}, err
 	}
 	if v2 {
@@ -349,174 +311,28 @@ func deleteSetOf(s *pendingScanner, v2 bool) (DeleteSet, error) {
 	return decodeDeleteSet(s.rest)
 }
 
-// frameStructs reads the update s scans past its struct section, so that s
-// stands at its delete set, and is how many structs the section holds, skips
-// included. It reads only what it takes to find each struct's end, and checks
-// nothing more: a V2 update's group headers and the rest content of its
-// structs (v2StructCount), and of a V1 update each struct's info, origins,
-// parent and content, with strings and values stepped over by their length,
-// unread (frameV1Structs).
-func frameStructs(s *pendingScanner) (int, error) {
+// frameStructs steps s over the update's struct section, as the framing
+// scanner does for the group scan, so that s stands at its delete set.
+func frameStructs(s *pendingScanner) error {
 	if s.err != nil {
-		return 0, s.err
+		return s.err
 	}
-	if s.v2 != nil {
-		n, ok := v2StructCount(s.v2, true)
-		if !ok {
-			return 0, ErrInvalidUpdate
-		}
-		return n, nil
+	frame := s.frame
+	s.frame = true
+	_, ok := s.frameGroups(nil)
+	s.frame = frame
+	if s.err != nil {
+		return s.err
 	}
-	buf := s.rest.RemainingBytes()
-	n, end, err := frameV1Structs(buf)
-	if err != nil {
-		return 0, err
+	if !ok {
+		return ErrInvalidUpdate
 	}
-	*s.rest = *encoding.NewDecoder(buf[end:])
-	return n, nil
-}
-
-// frameV1Structs steps over the struct section at the start of buf, a V1
-// update, as decodeItem and decodeContent read it, without decoding its
-// strings or values, and is how many structs it holds and where it ends. It
-// works on the bytes directly, a varint at a time. JSON content keeps the
-// pending scanner's reading, since whether its values are JSON or legacy Any
-// decides where they end.
-func frameV1Structs(buf []byte) (structs, end int, err error) {
-	p := 0
-	bad := false
-	next := func() uint64 {
-		v, n := binary.Uvarint(buf[p:])
-		if n <= 0 {
-			bad = true
-			return 0
-		}
-		p += n
-		return v
-	}
-	skipBytes := func() {
-		l := next()
-		if bad || l > uint64(len(buf)-p) {
-			bad = true
-			return
-		}
-		p += int(l)
-	}
-	skipAny := func() {
-		n, err := anycodec.Skip(buf[p:])
-		if err != nil {
-			bad = true
-			return
-		}
-		p += n
-	}
-	clients := next()
-	if bad || clients > maxV2Items {
-		return 0, 0, ErrInvalidUpdate
-	}
-	var total uint64
-	for range clients {
-		n := next()
-		total += n
-		if bad || total > maxV2Items {
-			return 0, 0, ErrInvalidUpdate
-		}
-		next() // client
-		next() // clock
-		for range n {
-			if bad || p >= len(buf) {
-				return 0, 0, ErrInvalidUpdate
-			}
-			info := buf[p]
-			p++
-			tag := info & 0x1f
-			if tag == 0 || tag == 10 {
-				next()
-				continue
-			}
-			if info&flagHasOrigin != 0 {
-				next()
-				next()
-			}
-			if info&flagHasRightOrigin != 0 {
-				next()
-				next()
-			}
-			if info&(flagHasOrigin|flagHasRightOrigin) == 0 {
-				if bad || p >= len(buf) {
-					return 0, 0, ErrInvalidUpdate
-				}
-				named := buf[p] == 1
-				p++
-				if named {
-					skipBytes()
-				} else {
-					next()
-					next()
-				}
-				if info&flagHasParentSub != 0 {
-					skipBytes()
-				}
-			}
-			if bad {
-				return 0, 0, ErrInvalidUpdate
-			}
-			switch tag {
-			case wireDeleted:
-				next()
-			case wireJSON:
-				d := encoding.NewDecoder(buf[p:])
-				js := pendingScanner{rest: d}
-				js.content(tag)
-				if js.err != nil {
-					return 0, 0, js.err
-				}
-				p = len(buf) - d.Remaining()
-			case wireBinary, wireString, wireEmbed:
-				skipBytes()
-			case wireFormat:
-				skipBytes()
-				skipBytes()
-			case wireType:
-				if p >= len(buf) {
-					return 0, 0, ErrInvalidUpdate
-				}
-				ref := buf[p]
-				p++
-				if ref == 3 || ref == 5 {
-					skipBytes()
-				}
-			case wireAny:
-				values := next()
-				if bad || values > uint64(len(buf)-p) {
-					return 0, 0, ErrInvalidUpdate
-				}
-				for range values {
-					if skipAny(); bad {
-						break
-					}
-				}
-			case wireDoc:
-				skipBytes()
-				skipAny()
-			case wireMove:
-				next()
-				next()
-				next()
-			default:
-				return 0, 0, ErrInvalidUpdate
-			}
-		}
-	}
-	if bad {
-		return 0, 0, ErrInvalidUpdate
-	}
-	return int(total), p, nil
+	return nil
 }
 
 // parkingRangesBound reads the delete set s stands at, keeping nothing of it,
 // and is how many of its ranges would park some part on a store whose state
-// vector is sv: a bound on what the update parks (parkingRanges), since its
+// vector is sv: a bound on what the update parks (parkedPartsOf), since its
 // structs only move the store's clocks past sv and the decoder's merge of
 // ranges only joins them. It allocates nothing.
 func parkingRangesBound(s *pendingScanner, sv StateVector) (int, error) {
@@ -596,30 +412,11 @@ func structClocksOf(b *pendingBudget) (StateVector, error) {
 func parkedPartsOf(ds DeleteSet, clocks StateVector) DeleteSet {
 	parked := newDeleteSet()
 	for client, ranges := range ds.clients {
-		next := clocks.Clock(client)
-		for _, r := range ranges {
-			if part, parks := parkedPart(r, next); parks {
-				parked.clients[client] = append(parked.clients[client], part)
-			}
+		if parts := cutParked(ranges, clocks.Clock(client)); len(parts) > 0 {
+			parked.clients[client] = parts
 		}
 	}
 	return parked
-}
-
-// parkingRanges is how many ranges of ds would park some part on a store whose
-// state vector is sv. The update's structs can only move the store's clocks
-// past sv, so no more of them park once they are in.
-func parkingRanges(ds DeleteSet, sv StateVector) int {
-	n := 0
-	for client, ranges := range ds.clients {
-		next := sv.Clock(client)
-		for _, r := range ranges {
-			if _, parks := parkedPart(r, next); parks {
-				n++
-			}
-		}
-	}
-	return n
 }
 
 // parkedPart is the part of r that applyToPartial parks on a store holding r's
@@ -638,21 +435,41 @@ func parkedPart(r DeleteRange, next uint64) (DeleteRange, bool) {
 	return DeleteRange{Clock: start, Len: end - start}, true
 }
 
-// parkedDeleteRangesAfter is how many delete ranges pending would hold once ds
-// is merged into it: Merge sorts each client's ranges and joins those that
-// overlap or touch, so ranges ds names again, or that fill the gap between two
-// parked ranges, add nothing or take ranges away.
-func parkedDeleteRangesAfter(pending, ds DeleteSet) int {
-	n := 0
-	for client, ranges := range pending.clients {
-		if _, merged := ds.clients[client]; !merged {
-			n += len(ranges)
+// parkedDeleteRangesAfter is how many delete ranges pending, which holds before
+// of them, holds after an update that moves the store's clocks from initial to
+// clocks and parks parked: the retry cuts a moved client's ranges at its new
+// clock, and Merge joins ranges that overlap or touch. It reads only the
+// clients the update moves or parks ranges for.
+func parkedDeleteRangesAfter(pending DeleteSet, before int, initial, clocks StateVector, parked DeleteSet) int {
+	after := before
+	count := func(client ClientID) {
+		have := pending.clients[client]
+		if next := clocks.Clock(client); next != initial.Clock(client) {
+			have = cutParked(have, next)
+		}
+		after += mergedRangeCount(have, parked.clients[client]) - len(pending.clients[client])
+	}
+	for client := range parked.clients {
+		count(client)
+	}
+	for client, clock := range clocks {
+		if _, counted := parked.clients[client]; !counted && clock != initial.Clock(client) && len(pending.clients[client]) > 0 {
+			count(client)
 		}
 	}
-	for client, add := range ds.clients {
-		n += mergedRangeCount(pending.clients[client], add)
+	return after
+}
+
+// cutParked is what the retry leaves of a client's parked ranges once the
+// store holds the client up to next.
+func cutParked(ranges []DeleteRange, next uint64) []DeleteRange {
+	var kept []DeleteRange
+	for _, r := range ranges {
+		if part, parks := parkedPart(r, next); parks {
+			kept = append(kept, part)
+		}
 	}
-	return n
+	return kept
 }
 
 // mergedRangeCount is how many ranges sortAndCompact leaves of have and add

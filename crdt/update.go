@@ -559,8 +559,8 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 
 	// Snapshot state vector before applying anything (used for skip/offset logic).
 	sv := txn.doc.store.StateVector()
-	check := newPendingBudget(txn.doc, sv, update, false)
-	if err := checkParkedDeletes(txn.doc, &check); err != nil {
+	budget := newPendingBudget(txn.doc, sv, update, false)
+	if err := checkParkedDeletes(txn.doc, &budget); err != nil {
 		// Refused before anything changed: the commit tells no observer.
 		txn.refused = true
 		return err
@@ -577,7 +577,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	// 1. Decode all items, parking any with future-clock deps or same-client gaps.
 	//    Returns the within-update pending list (items whose parent might resolve
 	//    later in this same update).
-	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, update)
+	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, &budget)
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
@@ -592,7 +592,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		return wrapUpdateErr(err)
 	}
 	if unresolvableDs := ds.applyToPartial(txn); len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
+		txn.doc.store.parkDeletes(unresolvableDs)
 	}
 
 	drainPending(txn)
@@ -611,20 +611,23 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 //	    into the returned slice for the within-update retry pass.
 //
 // Groups that a later group for the same client supersedes are decoded and
-// dropped (yjs parity). numClients is the count parsed from the header.
-func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, update []byte) ([]*Item, error) {
+// dropped (yjs parity). numClients is the count parsed from the header, and
+// budget is the apply's pending budget, which checkParkedDeletes may already
+// have found the superseded groups for.
+func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, budget *pendingBudget) ([]*Item, error) {
 	var pending []*Item
-	budget := newPendingBudget(txn.doc, sv, update, false)
-	var superseded groupSet
-	if numClients > 1 {
+	if numClients > 1 && !budget.groupsKnown {
 		// Fail before integrating anything: a later malformed group must not
 		// leave earlier, superseded groups applied.
-		var err error
-		if superseded, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
+		superseded, err := supersededGroups(budget.update, nil, encoding.Decoder{})
+		if err != nil {
 			return nil, err
 		}
+		budget.setSuperseded(superseded)
+	} else if !budget.groupsKnown {
+		budget.setSuperseded(nil)
 	}
-	budget.setSuperseded(superseded)
+	superseded := budget.superseded
 
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {

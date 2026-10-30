@@ -27,11 +27,8 @@ type pendingBudget struct {
 	groupsKnown bool
 }
 
-// newPendingBudget starts the budget with what the pending cap leaves for
-// doc's parked items, and no less than none: a document can hold more parked
-// items than its cap when it loaded a stored state with the cap lifted
-// (SetMaxPendingItems), and such a document still applies an update whose
-// items resolve within it. Only growth of the parked items is refused.
+// newPendingBudget floors the budget at zero, so a document loaded over its
+// cap is refused only growth of its parked items.
 func newPendingBudget(doc *Doc, initial StateVector, update []byte, v2 bool) pendingBudget {
 	remaining := doc.maxPendingItemsLimit()
 	if doc.store.pending != nil {
@@ -56,88 +53,6 @@ func (b *pendingBudget) scanner() *pendingScanner {
 	rest := b.v2Rest
 	v2.restDec = &rest
 	return &pendingScanner{v2: &v2, rest: &rest}
-}
-
-// v2StructCount is how many structs the V2 update d decodes holds, skips
-// included, read from its group headers on the rest cursor, and whether it
-// read them. It is a bound on what the update can park, not a count of it.
-// The first group's header follows the update's group count, so an update of
-// one group, as a keystroke is, costs two numbers unless toEnd asks for the
-// rest cursor to be left at the delete set. A later group's header follows the
-// rest content of the groups before it, so for every group but the last (and
-// for the last too under toEnd) the info column is read run by run (ReadRun),
-// and only the rest content a struct's kind carries is stepped over: a skip's
-// length, binary bytes, an embed's, format's or subdocument's value, the
-// values of an Any (whose number is on the length column, which GC, Deleted
-// and JSON lengths share and which is read only up to an Any) and a move's
-// three numbers. Origins, parents, keys and strings are on other columns and
-// are not read.
-func v2StructCount(d *v2Decoder, toEnd bool) (int, bool) {
-	s := pendingScanner{v2: d, rest: d.restDec}
-	clients := s.uint()
-	if s.err != nil || clients > maxV2Items {
-		return 0, false
-	}
-	var total uint64
-	lens := 0 // length-column entries passed and not yet read
-	for i := range clients {
-		structs := s.uint()
-		total += structs
-		if s.err != nil || total > maxV2Items {
-			return 0, false
-		}
-		if i == clients-1 && !toEnd {
-			break
-		}
-		s.uint() // the group's first clock; its client is on the client column
-		for left := int(structs); left > 0; {
-			info, k, err := d.infoDec.ReadRun(left)
-			if err != nil {
-				return 0, false
-			}
-			left -= k
-			switch info & 0x1f {
-			case 0, wireDeleted, wireJSON:
-				lens += k
-			case wireString, wireType:
-			case wireAny:
-				for range k {
-					for ; lens > 0; lens-- {
-						s.length()
-					}
-					values := s.length()
-					if values > maxV2Items {
-						return 0, false
-					}
-					for range values {
-						s.any()
-					}
-				}
-			case 10:
-				for range k {
-					s.uint()
-				}
-			case wireBinary:
-				for range k {
-					s.bytes()
-				}
-			case wireEmbed, wireFormat, wireDoc:
-				for range k {
-					s.any()
-				}
-			case wireMove:
-				for range 3 * k {
-					s.uint()
-				}
-			default:
-				return 0, false
-			}
-			if s.err != nil {
-				return 0, false
-			}
-		}
-	}
-	return int(total), true
 }
 
 func (b *pendingBudget) check(count int) error {

@@ -107,31 +107,21 @@ const defaultMaxPendingItems = 100_000
 // parked waiting for the structs they delete (PendingStats.DeleteRanges).
 // Once the cap is reached, further items that would be parked cause
 // ApplyUpdate to return ErrInvalidUpdate, and so does an update whose delete
-// set would grow the parked ranges past the cap; ranges an update names again,
-// or that join parked ones, count once, and an update that adds no range is
-// never refused. An update refused for its delete ranges is refused before
-// the apply changes anything: the document is as it was and no observer is
-// told. Zero or negative uses the default (100,000). To load stored state,
-// which can hold more than the cap, see SetMaxPendingItems.
+// set would leave more parked ranges than the cap, refused before it changes
+// anything. The count is conservative: it credits ranges the update's own
+// structs resolve, but not those that items it unblocks would resolve. Zero or
+// negative uses the default (100,000). To load stored state, which can hold
+// more than the cap, see SetMaxPendingItems.
 //
-// This is a defence against a malicious peer crafting an update full of
-// far-future-clock items, which would otherwise grow the pending queue
-// without bound, or a run of updates whose delete sets name clocks
-// of a client nobody holds, which would otherwise grow the pending deletes
-// without bound. An honest peer deletes only what it holds and sends a struct
-// before or with any delete of it, so its deletes park only while its updates
-// arrive out of order, and only until the structs they name do.
+// This is a defence against a malicious peer growing the pending queue or the
+// parked delete ranges without bound.
 func WithMaxPendingItems(n int) DocOption {
 	return func(d *Doc) { d.maxPendingItems = n }
 }
 
 // SetMaxPendingItems sets the cap of WithMaxPendingItems on a document already
-// made, for an owner that loads stored state first and caps what arrives after
-// it. A stored state carries what was parked when it was written
-// (EncodeStateAsUpdateV1 includes it), which can be more than the cap, so a
-// document capped before such a state arrives refuses it. Load it with the cap
-// lifted (WithMaxPendingItems(math.MaxInt)), then set the cap here. It takes
-// the document lock.
+// made, so an owner can load stored state, which can hold more than the cap,
+// with the cap lifted and cap what arrives after it.
 func (d *Doc) SetMaxPendingItems(n int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -609,8 +599,9 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 // exposed to fn via Transaction.Ctx().
 //
 // fn's returned error is captured as the named return value retErr.
-// Observers fire regardless of whether fn returned an error; the error
-// is propagated to the caller only after the observers have fired.
+// Observers fire regardless of whether fn returned an error, unless a remote
+// apply refused its update before changing anything (Transaction.refused);
+// the error is propagated to the caller only after the observers have fired.
 //
 // See docs/superpowers/specs/2026-04-21-transact-panic-safety-design.md
 // for the full rationale on the defer/recover structure.

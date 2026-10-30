@@ -834,7 +834,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		return wrapUpdateErr(err)
 	}
 	if unresolvableDs := ds.applyToPartial(txn); len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
+		txn.doc.store.parkDeletes(unresolvableDs)
 	}
 
 	// pendingDs may be drainable even if pending items aren't — integrated

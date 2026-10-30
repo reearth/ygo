@@ -67,59 +67,81 @@ func textState(client ClientID, s string) []byte {
 	return EncodeStateAsUpdateV1(doc, nil)
 }
 
-// A keystroke must not pay for parked delete ranges of a client it brings
-// nothing for.
+// A keystroke must not pay for parked delete ranges of clients it brings
+// nothing for, whether they belong to one client or to many.
 func TestUnit_ApplyUpdate_AKeystrokeCostsNothingForParkedDeleteRanges(t *testing.T) {
-	const n = 100_000
+	const n, keystrokes = 100_000, 100
 	state := textState(7, strings.Repeat("a", 8))
-	keystroke := typedKeystroke(t, state)
-	var allocated [2]uint64
-	for i, parked := range [][]byte{nil, parkedDeletes(98, n)} {
+	typed := typedKeystrokes(t, state, keystrokes)
+	manyClients := make(map[ClientID][]DeleteRange, n)
+	for i := range n {
+		manyClients[ClientID(1000+i)] = []DeleteRange{{Clock: 0, Len: 1}}
+	}
+	shapes := []struct {
+		name   string
+		parked []byte
+	}{
+		{"nothing parked", nil},
+		{"one client", parkedDeletes(98, n)},
+		{"many clients", deleteSetUpdate(manyClients)},
+	}
+	var allocated [3]uint64
+	var took [3]time.Duration
+	for i, shape := range shapes {
 		doc := New()
 		if err := ApplyUpdateV1(doc, state, nil); err != nil {
 			t.Fatal(err)
 		}
-		if parked != nil {
-			if err := ApplyUpdateV1(doc, parked, nil); err != nil {
+		want := 0
+		if shape.parked != nil {
+			want = n
+			if err := ApplyUpdateV1(doc, shape.parked, nil); err != nil {
 				t.Fatal(err)
 			}
-		}
-		if got, want := doc.PendingStats().DeleteRanges, i*n; got != want {
-			t.Fatalf("%d delete ranges are parked, want %d", got, want)
 		}
 		runtime.GC()
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
 		start := time.Now()
-		if err := ApplyUpdateV1(doc, keystroke, nil); err != nil {
-			t.Fatal(err)
+		for _, keystroke := range typed {
+			if err := ApplyUpdateV1(doc, keystroke, nil); err != nil {
+				t.Fatal(err)
+			}
 		}
-		took := time.Since(start)
+		took[i] = time.Since(start) / keystrokes
 		runtime.ReadMemStats(&after)
-		allocated[i] = after.TotalAlloc - before.TotalAlloc
-		if got, want := doc.PendingStats().DeleteRanges, i*n; got != want {
-			t.Fatalf("after the keystroke %d delete ranges are parked, want %d", got, want)
+		allocated[i] = (after.TotalAlloc - before.TotalAlloc) / keystrokes
+		if got := doc.PendingStats().DeleteRanges; got != want {
+			t.Fatalf("%s: after the keystrokes %d delete ranges are parked, want %d", shape.name, got, want)
 		}
-		t.Logf("%d delete ranges parked: allocated %d bytes in %s", i*n, allocated[i], took)
+		t.Logf("%s: a keystroke allocated %d bytes in %s", shape.name, allocated[i], took[i])
 	}
-	if without, with := allocated[0], allocated[1]; with > without+64<<10 {
-		t.Fatalf("with %d delete ranges parked the keystroke allocated %d bytes, %d with none, want within %d of it",
-			n, with, without, 64<<10)
+	for i := 1; i < len(shapes); i++ {
+		if allocated[i] > allocated[0]+1<<10 {
+			t.Errorf("%s: a keystroke allocated %d bytes, %d with nothing parked", shapes[i].name, allocated[i], allocated[0])
+		}
+		if limit := 10*took[0] + 200*time.Microsecond; took[i] > limit {
+			t.Errorf("%s: a keystroke took %s, %s with nothing parked, want at most %s", shapes[i].name, took[i], took[0], limit)
+		}
 	}
 }
 
-// typedKeystroke is the update of one character a peer of state types into its
-// text.
-func typedKeystroke(t *testing.T, state []byte) []byte {
+// typedKeystrokes are the updates of n characters a peer of state types into
+// its text, one at a time.
+func typedKeystrokes(t *testing.T, state []byte, n int) [][]byte {
 	t.Helper()
 	peer := New(WithClientID(11))
 	if err := ApplyUpdateV1(peer, state, nil); err != nil {
 		t.Fatal(err)
 	}
-	sv := peer.StateVector()
 	txt := peer.GetText("t")
-	peer.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "k", nil) })
-	return EncodeStateAsUpdateV1(peer, sv)
+	updates := make([][]byte, n)
+	for i := range n {
+		sv := peer.StateVector()
+		peer.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "k", nil) })
+		updates[i] = EncodeStateAsUpdateV1(peer, sv)
+	}
+	return updates
 }
 
 // Parked delete ranges are capped as parked items are (WithMaxPendingItems):
@@ -299,6 +321,52 @@ func TestUnit_SetMaxPendingItems_AStoredStateOverTheCapLoadsWhenTheCapIsSetAfter
 	}
 	if err := ApplyUpdateV1(doc, parkedDeletes(97, 1), nil); !errors.Is(err, ErrInvalidUpdate) {
 		t.Fatalf("an update adding a range past the cap was applied with err %v, want ErrInvalidUpdate", err)
+	}
+}
+
+// A document holding more parked items than its cap must still apply an
+// update whose items wait only on each other within it.
+func TestUnit_SetMaxPendingItems_ADocumentOverTheItemCapAppliesAnUpdateThatResolvesWithin(t *testing.T) {
+	const limit, parked = 10, 19
+	gapped := New(WithClientID(50))
+	gappedText := gapped.GetText("t")
+	gapped.Transact(func(txn *Transaction) { gappedText.Insert(txn, 0, "a", nil) })
+	sv := gapped.StateVector()
+	for range parked {
+		gapped.Transact(func(txn *Transaction) { gappedText.Insert(txn, 0, "b", nil) })
+	}
+	afterGap := EncodeStateAsUpdateV1(gapped, sv)
+
+	// Client 70's item has client 61's as its right origin, and client 70's
+	// group comes first in the update.
+	first := New(WithClientID(61))
+	firstText := first.GetText("u")
+	first.Transact(func(txn *Transaction) { firstText.Insert(txn, 0, "x", nil) })
+	second := New(WithClientID(70))
+	if err := ApplyUpdateV1(second, EncodeStateAsUpdateV1(first, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	secondText := second.GetText("u")
+	second.Transact(func(txn *Transaction) { secondText.Insert(txn, 0, "y", nil) })
+	within := EncodeStateAsUpdateV1(second, nil)
+
+	for _, format := range applyFormats {
+		t.Run(format.name, func(t *testing.T) {
+			doc := New(WithMaxPendingItems(math.MaxInt))
+			if err := applyIn(t, doc, format.v2, afterGap); err != nil {
+				t.Fatal(err)
+			}
+			doc.SetMaxPendingItems(limit)
+			if got := doc.PendingStats().Items; got != parked {
+				t.Fatalf("%d items are parked, want %d", got, parked)
+			}
+			if err := applyIn(t, doc, format.v2, within); err != nil {
+				t.Fatalf("an update whose items resolve within it was refused: %v", err)
+			}
+			if got := doc.GetText("u").ToString(); got != "yx" {
+				t.Fatalf("the text is %q, want %q", got, "yx")
+			}
+		})
 	}
 }
 

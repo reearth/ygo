@@ -20,6 +20,12 @@ type StructStore struct {
 	// pendingDs holds delete-set entries targeting items not yet integrated.
 	// Accumulated across updates and retried whenever pending drains.
 	pendingDs DeleteSet
+	// pendingDsRanges is how many ranges pendingDs holds, kept current so an
+	// apply need not count them.
+	pendingDsRanges int
+	// pendingDsMoved holds the clients of pendingDs that Append gave a struct
+	// since the last retry, the only ones whose parked ranges can apply.
+	pendingDsMoved map[ClientID]struct{}
 
 	// pendingMoves holds ContentMove items whose target item was not yet
 	// integrated when the move itself integrated (e.g. a fresh peer applying a
@@ -55,6 +61,23 @@ func newStructStore() *StructStore {
 // Append adds item to the store. Items must be appended in Clock order per client.
 func (s *StructStore) Append(item *Item) {
 	s.clients[item.ID.Client] = append(s.clients[item.ID.Client], item)
+	if _, parked := s.pendingDs.clients[item.ID.Client]; parked {
+		if s.pendingDsMoved == nil {
+			s.pendingDsMoved = make(map[ClientID]struct{})
+		}
+		s.pendingDsMoved[item.ID.Client] = struct{}{}
+	}
+}
+
+// parkDeletes merges ds into pendingDs.
+func (s *StructStore) parkDeletes(ds DeleteSet) {
+	for client := range ds.clients {
+		s.pendingDsRanges -= len(s.pendingDs.clients[client])
+	}
+	s.pendingDs.Merge(ds)
+	for client := range ds.clients {
+		s.pendingDsRanges += len(s.pendingDs.clients[client])
+	}
 }
 
 // Find returns the Item that contains the given ID, or nil if not found.

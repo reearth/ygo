@@ -10,22 +10,20 @@ them. Two things about those parked deletes cost every server:
 - **Every remote apply retried all of them.** The retry re-sorted and copied
   every parked range of a client the store still lacks, on every apply, so a
   document holding many parked ranges paid for them on every keystroke in the
-  room: about 1.6 MB allocated for one keystroke with 100,000 parked. A
-  client's parked ranges are now retried only once the store's next clock for
-  it has passed the lowest of them, since none of them can apply before that.
-  An apply that brings nothing for a client now costs nothing for its parked
-  ranges, and a parked range still applies, part by part, as its structs
-  arrive.
+  room: about 9 MB allocated for one keystroke with 100,000 parked. A
+  client's parked ranges are now retried only once the client gains structs
+  past the lowest of them, so an apply costs nothing for the parked ranges of
+  clients it brings nothing for, however many clients hold them.
 - **Nothing capped them.** A peer could send delete sets naming clocks of a
-  client nobody holds and grow the parked ranges without limit — they also
+  client nobody holds and grow the parked ranges without limit. They also
   persist into every snapshot. `WithMaxPendingItems` (and
   `Server.MaxPendingItems`) now caps the parked delete ranges as it caps parked
   items, separately, with the same default of 100,000. An update whose delete
-  set would grow them past the cap is refused with `ErrInvalidUpdate` before
-  it changes anything: the document keeps none of it, and no observer, store
-  or peer is told of it. An update that adds no range is never refused, so a
-  peer re-sending its parked deletes, as its sync does after a reconnect, is
-  not turned away.
+  set would leave more parked ranges than the cap is refused with
+  `ErrInvalidUpdate` before it changes anything: the document keeps none of
+  it, and no observer, store or peer is told of it. Ranges the update's own
+  structs resolve make room, and a peer re-sending its parked deletes, as its
+  sync does after a reconnect, adds nothing.
 
 `Doc.SetMaxPendingItems` is new, for an owner that loads trusted stored state
 before it caps what arrives after it: a stored state can carry more parked

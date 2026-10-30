@@ -82,12 +82,8 @@ func walkedUpdate(t *testing.T, rng *rand.Rand) (update []byte, held StateVector
 	return update, held
 }
 
-// The walk of a struct section (frameStructs, and v2StructCount for a V2
-// update's headers) counts the structs the full scan of the update reads,
-// skips included, and leaves the scan where the full scan leaves it: the
-// delete set read after the walk is the one read after the full scan. The
-// ranges parkingRangesBound counts from there are at least those of the
-// decoded delete set that would park. V1 and V2.
+// The framing walk must leave the scan at the delete set the full scan reads,
+// and parkingRangesBound must count no fewer ranges than park.
 func TestUnit_FrameStructs_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
 	rng := rand.New(rand.NewPCG(334, 340))
 	skips := 0
@@ -117,10 +113,8 @@ func TestUnit_FrameStructs_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
 				return ds
 			}
 			full := newPendingScanner(update, format.v2)
-			want := 0
 			for range full.uint() {
 				n := full.uint()
-				want += int(n)
 				full.client()
 				full.uint()
 				for range n {
@@ -135,32 +129,26 @@ func TestUnit_FrameStructs_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
 			wantDS := readDS(full)
 
 			walk := newPendingScanner(update, format.v2)
-			got, err := frameStructs(walk)
-			if err != nil || got != want {
-				t.Fatalf("round %d %s: frameStructs = %d, %v; the full scan reads %d structs", round, format.name, got, err, want)
+			if err := frameStructs(walk); err != nil {
+				t.Fatalf("round %d %s: frameStructs: %v", round, format.name, err)
 			}
 			if gotDS := readDS(walk); !reflect.DeepEqual(gotDS, wantDS) {
 				t.Fatalf("round %d %s: after the walk the delete set is %v, after the full scan %v", round, format.name, gotDS, wantDS)
 			}
-			if format.v2 {
-				d, err := newV2Decoder(update)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got, ok := v2StructCount(d, false); !ok || got != want {
-					t.Fatalf("round %d: v2StructCount = %d, %v; the full scan reads %d structs", round, got, ok, want)
-				}
-			}
 
 			bounded := newPendingScanner(update, format.v2)
-			if _, err := frameStructs(bounded); err != nil {
+			if err := frameStructs(bounded); err != nil {
 				t.Fatal(err)
 			}
 			bound, err := parkingRangesBound(bounded, held)
 			if err != nil {
 				t.Fatalf("round %d %s: parkingRangesBound: %v", round, format.name, err)
 			}
-			if exact := parkingRanges(wantDS, held); bound < exact {
+			exact := 0
+			for _, parts := range parkedPartsOf(wantDS, held).clients {
+				exact += len(parts)
+			}
+			if bound < exact {
 				t.Fatalf("round %d %s: parkingRangesBound = %d, below the %d ranges that park", round, format.name, bound, exact)
 			}
 		}

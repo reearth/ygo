@@ -1801,11 +1801,7 @@ func (s *Server) releaseInflight(rm *room) {
 // leak that administrative CloseRoom cannot even clear (#182 follow-up).
 func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 	loadErr := s.loadRoomDoc(r, name)
-	// The stored state loaded with the pending cap lifted: it carries what was
-	// parked when it was written, which can be more than MaxPendingItems, and a
-	// room whose state is refused never loads. Peers' updates, the
-	// OnLoadDocument hook's and every later apply are capped: nothing else
-	// touches r.doc before ready closes.
+	// Cap only after the stored state is in, since it can hold more than the cap.
 	r.doc.SetMaxPendingItems(s.MaxPendingItems)
 	// #60 — fire OnLoadDocument AFTER persistence bootstrap but BEFORE the
 	// persistence worker starts, so a hook returning an error fails room creation
