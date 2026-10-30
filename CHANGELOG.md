@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.0] — 2026-10-26
+
+### Fixed
+
+- **`crdt`: a bounded document's remote apply no longer copies what earlier
+  updates parked.** To restore them when it refuses an update, the apply of a
+  document with a scan bound (`WithMaxIntegrateScan`) copied the pending queue's
+  items, the clocks it waits on and the pending deletes as it began, and the
+  drain copied the pending deletes again, so every remote apply cost time and
+  memory in proportion to what sat parked: one keystroke allocated 2,806,176
+  bytes on a bounded document holding 349,517 parked structs (2,880 unbounded)
+  and 25,171,104 bytes on one holding 524,280 parked delete ranges (8,391,872
+  unbounded). The apply now keeps them by reference: it only appends to the
+  parked items past the length it keeps, copies the map of clocks the queue
+  waits on at its first write to it, and merges a delete range it parks into
+  copies of the clients that range names, so a refused update still leaves the
+  parked items, the clocks they wait on and the pending deletes exactly as they
+  were. With 100,000 parked items a keystroke now allocates 3,176 bytes on a
+  bounded document against 1,608 unbounded (806,264 before), and with 100,000
+  parked delete ranges 1,609,192 against 1,607,624 (4,821,112 before).
+
+### Added
+
+- **`crdt`: `WithMaxIntegrateScan`, `Doc.SetMaxIntegrateScan` and
+  `ErrIntegrateScanBudget`: a document can bound the conflict scans of a remote
+  update, and then applies every remote update whole or not at all.** YATA
+  places an item by scanning right from its left origin past every item whose
+  own origin lies in what the scan has passed, so an item naming an early left
+  origin and no right origin scans to the end of a list, and an update of n of
+  them scans n times the list: 2,000 such items (about 12 KB) into a list of
+  20,000 unmerged items took 20.8 s and allocated 2,365,640,192 bytes. With a
+  bound, the scans of one remote update together pass at most that many items;
+  past it, `ApplyUpdateV1` and `ApplyUpdateV2` return `ErrIntegrateScanBudget`
+  (which wraps `ErrInvalidUpdate`). A bounded document takes out what such an
+  update, or any remote update whose apply fails, integrated before it failed,
+  so the document is left as it was and the transaction fires no observer:
+  nothing of the update is persisted or relayed. A bounded document refuses a
+  remote update carrying a subdocument or a move. Local transactions are never
+  bounded. No bound is set by default. The drain of the pending queue that
+  ends an apply has an allowance of its own, the bound again; a drain that
+  would pass it is taken back and the queue is parked again as it was, every
+  peer's items kept, while the update that filled the gap stands. The clocks
+  the queue waits on are raised to the store's, so only an apply that brings
+  one of its clients further drains it again. Bounded or not, a transaction's
+  conflict scans share one map of marks, made by the first scan that needs it
+  and kept until the transaction commits: each mark records which scan, and
+  which step of it, passed the item, so a new scan reuses the map without
+  clearing it.
+
+### Fixed
+
+- **`crdt`: merging split runs back at commit is linear in the run.** An update
+  that splits one run n times and leaves each half where it merges back at
+  commit made each merge append the half to the run's whole text and search and
+  shift the client's store slice: 20,000 halves of a 40,000-character run
+  allocated 440,968,992 bytes in one apply, 11,384,168 bytes with this change.
+  The halves merge in clock order, each run's text is joined once, and the
+  merged halves leave their store slices in one pass per client.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

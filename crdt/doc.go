@@ -113,6 +113,39 @@ func WithMaxPendingItems(n int) DocOption {
 	return func(d *Doc) { d.maxPendingItems = n }
 }
 
+// WithMaxIntegrateScan bounds the items the conflict scans of one remote
+// update (ApplyUpdate and its V1 and V2 forms) may pass, all of its items
+// together, and makes the document apply a remote update whole or not at all
+// (apply_rollback.go). Integrating an item scans the items between its left
+// origin and its right origin (Item.integrate). An item an editor sends scans
+// only what other peers inserted concurrently at the same place, so a remote
+// update's scans pass a handful of items; an item that names a left origin
+// early in a list and no right origin scans to the list's end instead, and an
+// update of n such items scans n times the list - 2,000 of them, about 12 KB,
+// took 20.8 s against a list of 20,000 unmerged items. An update whose scans
+// pass the bound is refused with ErrIntegrateScanBudget, and like every remote
+// update the bounded document refuses, it leaves the document as it was and
+// fires no observer. The drain of the pending queue an update's apply ends
+// with has an allowance of its own, the bound again; a drain that would pass
+// it is taken back and the queue parked again as it was, while the update
+// stands, and the queue is drained again once an apply brings a clock it waits
+// on further (apply_rollback.go). Such a document refuses a remote update
+// carrying a subdocument or a move. Zero or negative, the default, sets no
+// bound. Local transactions are never bounded: their inserts name both
+// neighbours.
+func WithMaxIntegrateScan(n int) DocOption {
+	return func(d *Doc) { d.maxIntegrateScan = n }
+}
+
+// SetMaxIntegrateScan sets the bound of WithMaxIntegrateScan on a document
+// already made, for an owner that loads trusted state first and bounds what
+// arrives after it. It takes the document lock.
+func (d *Doc) SetMaxIntegrateScan(n int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.maxIntegrateScan = n
+}
+
 // updateSub pairs a unique subscription ID with its callback so that
 // unsubscribe closures can find and remove the right entry even when
 // callbacks are removed out-of-order.
@@ -154,6 +187,9 @@ type Doc struct {
 	subdocs         map[string]*Doc
 	onSubdocs       []subdocsSub
 	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
+	// maxIntegrateScan is the scan bound of WithMaxIntegrateScan; zero or
+	// negative for none.
+	maxIntegrateScan int
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -242,6 +278,12 @@ func (d *Doc) Load() {
 		}
 		txn.addSubdocLoaded(d)
 	})
+}
+
+// integrateScanLimit is the bound of WithMaxIntegrateScan, or 0 for none.
+// Its caller holds d.mu.
+func (d *Doc) integrateScanLimit() int {
+	return max(d.maxIntegrateScan, 0)
 }
 
 // maxPendingItemsLimit returns the effective cap on the pending queue depth.
@@ -458,6 +500,11 @@ func (d *Doc) GetText(name string) *YText {
 //
 // Returns nil only if there is nothing to fire (no observers of any kind).
 func buildPhase2(d *Doc, txn *Transaction) func() {
+	// A remote apply rolled back left the document as it was: there is no
+	// update to encode and nothing for any observer (apply_rollback.go).
+	if txn.rolledBack {
+		return nil
+	}
 	// Encode the incremental update and snapshot observer slices while still
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
@@ -684,6 +731,9 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 	}()
 
 	retErr = fn(txn)
+	// The scans' marks are the transaction's alone; an observer that keeps the
+	// *Transaction must not keep them.
+	txn.scanMarks = nil
 
 	rearbitrateMoves(txn)
 	txn.afterState = d.store.StateVector()

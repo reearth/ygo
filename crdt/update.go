@@ -36,6 +36,18 @@ const (
 // ErrInvalidUpdate is returned when a binary update cannot be decoded.
 var ErrInvalidUpdate = errors.New("crdt: invalid update")
 
+// ErrIntegrateScanBudget is returned by ApplyUpdate for a remote update whose
+// conflict scans pass more items than the document's bound
+// (WithMaxIntegrateScan). It wraps ErrInvalidUpdate. Like every remote update
+// a document with a bound refuses, it leaves the document as it was
+// (apply_rollback.go).
+var ErrIntegrateScanBudget = fmt.Errorf("%w: its conflict scans pass more items than the document allows", ErrInvalidUpdate)
+
+// integrateScanBudgetExceeded is the panic Item.integrate raises when a remote
+// update's scans pass the bound, before it links the item; applyV1Txn and
+// applyV2Txn recover it as ErrIntegrateScanBudget.
+type integrateScanBudgetExceeded struct{}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 // EncodeStateAsUpdateV1 encodes the part of doc newer than sv as a V1 binary
@@ -551,14 +563,16 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	// a split; without recovery the server would crash instead of returning an error.
 	defer func() {
 		if r := recover(); r != nil {
-			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+			retErr = recoveredApplyErr(r)
 		}
+		endRemoteApply(txn, retErr != nil)
 	}()
 
 	dec := encoding.NewDecoder(update)
 
 	// Snapshot state vector before applying anything (used for skip/offset logic).
 	sv := txn.doc.store.StateVector()
+	beginRemoteApply(txn, sv)
 
 	numClients, err := dec.ReadVarUint()
 	if err != nil {
@@ -587,10 +601,10 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 	unresolvableDs := ds.applyToPartial(txn)
 	if len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
+		parkDeletes(txn, unresolvableDs)
 	}
 
-	drainPending(txn)
+	drainParked(txn, func() { drainPending(txn) })
 
 	return nil
 }
@@ -995,6 +1009,9 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseOnBoundedDoc(doc, content); err != nil {
+		return nil, err
+	}
 
 	item := &Item{
 		ID:          ID{Client: client, Clock: clock},
@@ -1300,6 +1317,16 @@ func clientsSorted[T any](m map[ClientID]T) []ClientID {
 	return out
 }
 
+// recoveredApplyErr is the error an apply returns for a panic it recovered
+// while integrating: ErrIntegrateScanBudget for the scan bound's own panic,
+// otherwise ErrInvalidUpdate naming the panic.
+func recoveredApplyErr(r any) error {
+	if _, ok := r.(integrateScanBudgetExceeded); ok {
+		return ErrIntegrateScanBudget
+	}
+	return fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+}
+
 func wrapUpdateErr(err error) error {
 	if err == nil {
 		return nil
@@ -1467,6 +1494,12 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	// Fully covered ranges need no further integration.
 	if item.ID.Clock+uint64(item.Content.Len()) <= existingEnd {
 		return true
+	}
+
+	// From here the item is resolved, trimmed or integrated in place; a drain
+	// taken back parks it again as it was (drainParked).
+	if j := txn.journal; j != nil {
+		j.keepParked(item)
 	}
 
 	// GC-orphan path (no parent, deleted): store without integration, trimmed
