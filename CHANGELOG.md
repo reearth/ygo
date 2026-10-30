@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection stayed open. A peer that kept sending stayed in its room, did not
   trigger `OnLastPeer`, and its replies queued with no writer until the write
   queue overflowed. The writer now closes the connection, and the read loop
-  removes the peer.
+  removes the peer without handling the frames left in its read buffer.
 
 ## [1.54.0] — 2026-10-22
 

@@ -39,7 +39,7 @@ type peer struct {
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
 	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
-	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
+	inputClosed       atomic.Bool   // set before the server closes, or starts to close, the connection; the read loop drops input from then on
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -901,6 +901,8 @@ func (p *peer) runWriter() {
 //
 // A failed write closes the connection, because gorilla's read side keeps
 // working after a write timeout and the peer would stay in its room otherwise.
+// It also sets inputClosed, so the read loop drops the frames still in its
+// read buffer instead of answering a peer that no writer serves.
 func (p *peer) writeToConn(data []byte) bool {
 	p.wmu.Lock()
 	closed := p.closed
@@ -916,11 +918,13 @@ func (p *peer) writeToConn(data []byte) bool {
 	}
 	if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 		p.server.log().Debug("set write deadline failed; closing", "room", p.roomName, "err", err)
+		p.inputClosed.Store(true)
 		_ = p.conn.Close()
 		return false
 	}
 	if err := p.conn.WriteMessage(gws.BinaryMessage, data); err != nil {
 		p.server.log().Warn("write to peer failed; closing", "room", p.roomName, "err", err)
+		p.inputClosed.Store(true)
 		_ = p.conn.Close()
 		return false
 	}
