@@ -3,41 +3,34 @@
 **Who is affected: anyone running a `provider/websocket` server reachable by
 clients it does not control.**
 
-A peer's write queue was bounded in frames (`PeerWriteQueueSize`, 512 by
-default) and not in bytes, so what one connection could make the server hold
-was 512 times the largest frame its room produces. Every SyncStep1 a peer
-sends is answered with the room's full state on that peer's own queue, and a
-peer that never reads keeps the answers queued: on a 4 MiB document, 100
-SyncStep1 frames — 400 bytes uploaded — grew a server's heap by 420,255,432
-bytes with 99 frames still queued, and about 20 such connections exhaust a
-4 GiB pod. The connection stayed open throughout.
+A peer's write queue is bounded in frames (`PeerWriteQueueSize`, 512 by
+default), not in bytes, so one connection can make the server hold 512 times
+the largest frame its room produces. Every SyncStep1 a peer sends is answered
+with the room's full state on that peer's own queue, and a peer that never
+reads keeps the answers queued: on a 4 MiB document, 100 SyncStep1 frames
+(400 bytes uploaded) grew a server's heap by 420,255,432 bytes, and the
+connection stayed open.
 
 The new `Server.PeerWriteQueueBytes` bounds those bytes:
 
 ```go
-srv := &ygws.Server{PeerWriteQueueBytes: 8 << 20} // 8 MiB queued per peer
+srv := ygws.NewServer()
+srv.PeerWriteQueueBytes = 8 << 20 // 8 MiB queued per peer
 ```
 
-A frame that would take a peer past the budget is not queued. The peer is
-closed the way the frame cap closes one — its connection is closed, its read
-loop runs the disconnect, the writer drains, the room is evicted if it is now
-empty, and the peer's queued bytes are released — on every enqueue path (a
-room broadcast, the SyncStep2 answering a SyncStep1, awareness, a `Apply` or
-`Inject` delivery), and whatever `SlowPeerPolicy` is set: a peer over its
-budget is holding memory rather than lagging by one delta, and its backlog
-drains only if it reads. The close is logged at Warn with `cause` set to the
-new `CloseCauseWriteQueueBytes`, with `path`, `queuedBytes`, `budgetBytes` and
-`frameBytes` beside it, so a handler can count these closes apart from
-frame-cap closes and write failures.
+A frame that would take a peer past the budget is not queued, and the peer is
+closed as for a full queue. This holds on every enqueue path and whatever
+`SlowPeerPolicy` is set, because a peer over its budget drains only if it
+reads. The close is logged at Warn with `cause` set to the new
+`CloseCauseWriteQueueBytes`.
 
-At the boundary, a peer with nothing queued takes the next frame whatever its
-size: a room whose full state is larger than the budget still answers a
-SyncStep1, and no peer is closed for a frame it could not have avoided. That
-peer is then over budget, so the frame after it closes the connection, which
-bounds what one peer holds at the budget plus one frame.
+A peer with nothing queued takes the next frame whatever its size, so a room
+whose full state is larger than the budget still answers a SyncStep1. The
+frame after that one closes the peer, so one peer holds at most the budget
+plus one frame.
 
-Zero, the default, means no byte budget and leaves `PeerWriteQueueSize` the
-only bound: behaviour is unchanged for anyone who does not set it.
+Zero, the default, means no byte budget: nothing changes for a server that
+does not set it.
 
 ## v1.54.0
 

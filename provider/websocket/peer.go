@@ -30,14 +30,11 @@ type peer struct {
 	cidMu      sync.Mutex
 	writeCh    chan []byte   // buffered queue drained by runWriter goroutine
 	writerDone chan struct{} // closed when runWriter exits
-	// queuedBytes is the total size of the frames handed to writeCh and not
-	// yet written to the connection, including the frame runWriter is writing
-	// (it is still in memory, and still this peer's). Guarded by wmu, like
-	// every enqueue decision it feeds.
+	// queuedBytes is the size of the frames handed to writeCh and not yet
+	// written, the one runWriter is writing included. Kept only when
+	// writeBudget > 0, so the default path takes no extra lock. Guarded by wmu.
 	queuedBytes int64
-	// writeBudget is Server.PeerWriteQueueBytes as it stood when the peer
-	// connected: the ceiling queuedBytes may not pass. 0 disables the ceiling,
-	// leaving writeCh's frame count the only bound.
+	// writeBudget is Server.PeerWriteQueueBytes when the peer connected.
 	writeBudget int64
 	// needsResync is set (under wmu) when a broadcast is dropped because writeCh
 	// was full under SlowPeerResync. runWriter clears it and sends a full-state
@@ -518,17 +515,6 @@ func (p *peer) handleDisconnect() {
 		// channel and exit cleanly.
 		<-p.writerDone
 
-		// Credit back every byte still charged to this peer. The writer has
-		// exited, so nothing debits or credits queuedBytes from here on, and
-		// the frames left in writeCh are never written: writeToConn returns
-		// false on the first one it sees once closed is set, and the channel
-		// itself becomes garbage with the peer. Without this a dropped peer
-		// would leave its last reading above zero for anything watching the
-		// accounting.
-		p.wmu.Lock()
-		p.queuedBytes = 0
-		p.wmu.Unlock()
-
 		rm := p.room
 
 		// Acquire both locks (server map first, then room) to atomically remove
@@ -806,8 +792,8 @@ func (p *peer) broadcastAwarenessFromRoom(awMsg []byte) {
 // a reconnect-and-resync flow which the CRDT's pending-structs
 // machinery handles cleanly.
 //
-// A target that is within its frame count but past Server.PeerWriteQueueBytes
-// is closed by closeOverBudget instead, on every policy: see there.
+// A target past Server.PeerWriteQueueBytes is closed by closeOverBudget before
+// the frame cap is checked, whatever the SlowPeerPolicy.
 func (p *peer) broadcast(data []byte, excludeSelf bool) {
 	p.room.mu.Lock()
 	targets := make([]*peer, 0, len(p.room.peers))
@@ -835,7 +821,9 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 		}
 		select {
 		case other.writeCh <- data:
-			other.queuedBytes += int64(len(data))
+			if other.writeBudget > 0 {
+				other.queuedBytes += int64(len(data))
+			}
 		default:
 			// Queue full.
 			if p.server.SlowPeerPolicy == SlowPeerResync {
@@ -858,17 +846,9 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 	}
 }
 
-// withinBudget reports whether a frame of n bytes may be queued for this peer:
-// its budget is off, it has nothing outstanding, or the frame fits under the
-// budget. The caller holds wmu, so the answer still holds at the enqueue that
-// follows it.
-//
-// The empty-queue case is the boundary rule: a peer with nothing queued takes
-// the frame whatever its size, so one honest frame larger than the budget — a
-// room whose full state exceeds it, answering a SyncStep1 — is never refused,
-// and no peer is closed for a frame it could not have avoided. The peer is
-// then over budget, so the next frame for it is refused and it is closed,
-// which bounds what one peer holds at budget + one frame.
+// withinBudget reports whether a frame of n bytes may be queued for this peer.
+// An empty queue takes any frame (see Server.PeerWriteQueueBytes). The caller
+// holds wmu.
 func (p *peer) withinBudget(n int) bool {
 	if p.writeBudget <= 0 || p.queuedBytes == 0 {
 		return true
@@ -876,25 +856,10 @@ func (p *peer) withinBudget(n int) bool {
 	return p.queuedBytes+int64(n) <= p.writeBudget
 }
 
-// closeOverBudget closes a peer whose next frame would take its queued bytes
-// past Server.PeerWriteQueueBytes. It takes the frame-cap close path —
-// conn.Close(), so the read loop returns and runs handleDisconnect, which
-// drains the writer, releases the peer's queued bytes and evicts an emptied
-// room — and the frame is not queued, so nothing it would have held is
-// retained. The caller holds wmu.
-//
-// Unlike the frame cap in broadcast, this does not consult SlowPeerPolicy.
-// SlowPeerResync's bargain is that dropping one stale delta buys a full-state
-// resync once the backlog drains; a peer over its byte budget is not a peer
-// that is behind by one delta but one holding more memory than the server
-// allows it, and its backlog only drains if it reads, which is exactly what it
-// is not doing. The budget is a ceiling on the bytes one peer can make the
-// server hold, so it closes on every policy.
-//
-// The log line carries the cause and the numbers behind it (cause, path,
-// queuedBytes, budgetBytes, frameBytes), so an embedder's slog handler can
-// tell a peer closed for its byte budget from one closed for the frame cap,
-// and from a write failure.
+// closeOverBudget closes the peer on the frame cap's path without queuing the
+// frame: the read loop then runs handleDisconnect. Unlike the frame cap it
+// ignores SlowPeerPolicy, because a peer over its budget drains only if it
+// reads. The caller holds wmu.
 func (p *peer) closeOverBudget(frameBytes int, path string) {
 	p.server.log().Warn("peer queued bytes over budget; closing peer",
 		"room", p.roomName,
@@ -928,7 +893,9 @@ func (p *peer) write(data []byte) {
 	}
 	select {
 	case p.writeCh <- data:
-		p.queuedBytes += int64(len(data))
+		if p.writeBudget > 0 {
+			p.queuedBytes += int64(len(data))
+		}
 	default:
 		// Queue full during a direct send (e.g. handshake reply) — disconnect.
 		// Unlike a silent drop, closing the connection lets the CRDT
@@ -960,13 +927,12 @@ func (p *peer) runWriter() {
 			return
 		}
 		written := p.writeToConn(data)
-		// Credit the frame back: it is no longer queued, and on the failure
-		// path the write is over too. The peer's enqueue paths can take
-		// another frame of this size again. A failed write ends this
-		// goroutine, and handleDisconnect releases whatever is still charged.
-		p.wmu.Lock()
-		p.queuedBytes -= int64(len(data))
-		p.wmu.Unlock()
+		if p.writeBudget > 0 {
+			// Credit the frame whether or not the write succeeded.
+			p.wmu.Lock()
+			p.queuedBytes -= int64(len(data))
+			p.wmu.Unlock()
+		}
 		if !written {
 			return
 		}

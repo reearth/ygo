@@ -211,10 +211,8 @@ const maxAwarenessClientsPerPeer = 10_000
 // ring), reducing how often the slow-peer path is hit at all.
 const defaultPeerWriteQueueSize = 512
 
-// CloseCauseWriteQueueBytes is the "cause" attribute of the log entry a peer
-// closed for Server.PeerWriteQueueBytes produces, so an embedder's slog
-// handler can count those closes apart from the frame-cap and write-failure
-// ones (see peer.closeOverBudget).
+// CloseCauseWriteQueueBytes is the "cause" attribute of the Warn entry logged
+// when a peer is closed for Server.PeerWriteQueueBytes.
 const CloseCauseWriteQueueBytes = "write queue byte budget"
 
 // PersistenceAdapter is implemented by storage backends that want to persist
@@ -1100,35 +1098,22 @@ type Server struct {
 	PeerWriteQueueSize int
 
 	// PeerWriteQueueBytes bounds the total size of the frames queued for one
-	// peer and not yet written to it, the frame its writer is writing
-	// included. PeerWriteQueueSize bounds that queue in frames only, so what
-	// one peer can make the server hold is that count times the largest frame
-	// the room produces: a peer that opens a connection, sends SyncStep1
-	// repeatedly and never reads is answered a full-state SyncStep2 each
-	// time, and on a 4 MiB document 100 such frames (400 bytes uploaded) grew
-	// a server's heap by 420 MB with 99 frames still queued. A few dozen such
-	// connections exhaust a 4 GiB pod.
+	// peer and not yet written to it. PeerWriteQueueSize bounds that queue in
+	// frames only, so one peer can make the server hold that count times the
+	// room's largest frame: for example, a peer that sends SyncStep1 again
+	// and again and never reads gets a full-state SyncStep2 queued each time.
 	//
-	// A frame that would take a peer past this budget is not queued: the peer
-	// is closed on the frame cap's path (the connection is closed, the read
-	// loop runs the peer's disconnect, the writer drains and the peer's
-	// queued bytes are released), on every enqueue path — a room broadcast,
-	// the SyncStep2 answering a SyncStep1, awareness — and whatever
-	// SlowPeerPolicy is set, since a peer over its budget is holding memory
-	// rather than lagging by a delta. The close is logged at Warn with
-	// "cause" set to CloseCauseWriteQueueBytes.
+	// A frame that would take a peer past this budget is not queued, and the
+	// peer is closed as for a full queue, on every enqueue path and whatever
+	// the SlowPeerPolicy. The close is logged at Warn with "cause" set to
+	// CloseCauseWriteQueueBytes.
 	//
 	// A peer with nothing queued takes the next frame whatever its size, so a
-	// single frame larger than the budget is never refused and a peer is
-	// never closed for a frame it could not have avoided; it is then over
-	// budget, so the frame after it closes the peer. One peer therefore holds
-	// at most this budget plus one frame.
+	// frame larger than the budget is still delivered. The frame after it
+	// closes the peer, so one peer holds at most this budget plus one frame.
 	//
-	// Zero (the default) means no byte budget, leaving PeerWriteQueueSize the
-	// only bound, which is the behaviour of every release before this one.
-	// Like the other config fields, set it before serving; it is read when a
-	// peer connects and must not be mutated while the server is handling
-	// connections.
+	// Zero (the default) means no byte budget. Like the other config fields,
+	// set it before serving.
 	PeerWriteQueueBytes int64
 
 	// SlowPeerPolicy selects the reaction when a peer's broadcast write queue
