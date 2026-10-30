@@ -938,29 +938,11 @@ func (s *session) handleFrame(frame []byte) error {
 			// TWO Heartbeat calls, not one, and this is not a defensive
 			// round number — it is sized for servers OTHER than our own.
 			//
-			// As of #226, ygo's own provider/websocket no longer bumps a
-			// disconnect-synthesised removal's clock (see
-			// encodeAwarenessRemoval, peer.go): it now encodes the removal
-			// at each clientID's CURRENT clock, exactly as the room's
-			// shared Awareness sees it at the moment handleDisconnect
-			// runs — unbumped. Against our own server, a SINGLE Heartbeat
-			// here already clears that removal unconditionally: Heartbeat's
-			// own +1 (from our pre-disconnect clock — under the ORDINARY
-			// interleaving this client's OWN local clock is untouched by a
-			// removal broadcast, because the disconnecting connection is
-			// already torn down by the time handleDisconnect's broadcast
-			// fires, so there is no live socket of ours left to receive it
-			// on. That is not a universal rule, though (#228: an earlier
-			// version of this comment stated it as one): that broadcast's
-			// excludeSelf is false — see peer.go's
-			// broadcastAwarenessFromRoom — so a peer that has already
-			// RECONNECTED under the SAME clientID before the broadcast
-			// fires, a genuine race rather than the ordinary case, IS a
-			// live recipient of its own removal notice) makes our
-			// re-announcement strictly NEWER than any removal our
-			// server could have synthesised from that same base, so
-			// Awareness.ApplyUpdate's ordinary newer-clock path — not the
-			// equal-clock one — admits it every time, regardless of
+			// Against ygo's own server, which encodes a disconnect removal at each
+			// clientID's current clock and sends it to every room peer (so a client
+			// that reconnects under the same clientID before the broadcast receives
+			// its own removal), a single Heartbeat's +1 bump already makes our
+			// re-announcement newer than that removal, so ApplyUpdate admits it in any
 			// arrival order.
 			//
 			// The SECOND call exists for every OTHER WebSocket server this

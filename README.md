@@ -559,7 +559,7 @@ server.AuthFunc = func(r *http.Request) bool {
 }
 ```
 
-For **read-only connections** (v1.30.0, #59), use `Server.Authorize` instead — it both accepts/rejects and reports per-connection config. A read-only peer receives document and awareness broadcasts but its inbound writes (sync step-2/update and awareness) are dropped server-side; it can still request state (SyncStep1) and query awareness. When set, `Authorize` takes precedence over `AuthFunc`:
+For **read-only connections** (v1.30.0, #59), use `Server.Authorize` instead — it both accepts/rejects and reports per-connection config. A read-only peer receives document and awareness broadcasts. Its sync updates and awareness update do not change the room or reach other peers, and its awareness update gets an empty response; it can still request state (SyncStep1) and query awareness. When set, `Authorize` takes precedence over `AuthFunc`:
 
 ```go
 server.Authorize = func(r *http.Request) (ygws.ConnectionConfig, bool) {

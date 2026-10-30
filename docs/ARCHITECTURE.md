@@ -207,7 +207,7 @@ Depends on `awareness/` and `crdt/`. Defines the `Relay`/`Sink` abstraction that
 
 ### `provider/websocket/`
 
-`net/http`-compatible handler. One `Doc` per named room. On connect: exchanges `SyncStep1/2` and awareness state. On message: applies update and broadcasts to all other peers in the room.
+`net/http`-compatible handler. One `Doc` per named room. On connect: exchanges `SyncStep1/2` and awareness state. On message: applies a read-write peer's document updates and broadcasts them to the other peers; a read-only peer's `SyncStep2` and `Update` input is neither applied nor forwarded. Awareness updates from read-write peers are applied and broadcast to every peer, including the sender; a read-only peer gets an empty awareness response without changing shared awareness or retaining its input.
 
 **Persistence** is pluggable via the `PersistenceAdapter` interface:
 ```go

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-29
+
+### Fixed
+
+- **`provider/websocket`: awareness keeps its sender connected.** A read-write
+  peer's valid update reaches every peer in its room. A read-only peer gets an
+  empty awareness response without changing shared awareness or retaining its
+  input. A lone idle editor or viewer on `@hocuspocus/provider` or the
+  `y-websocket` client now receives a message after its 15-second awareness
+  renewal and does not reconnect after its 30-second no-message timeout.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

@@ -286,31 +286,29 @@ func TestInteg_IncrementalUpdate_BroadcastToPeer(t *testing.T) {
 	assert.Equal(t, "incremental", docB.GetText("t").ToString())
 }
 
-func TestInteg_AwarenessBroadcast_PeerReceivesState(t *testing.T) {
+func TestInteg_AwarenessBroadcast_SenderReceivesState(t *testing.T) {
 	ts := httptest.NewServer(ygws.NewServer())
 	defer ts.Close()
 
-	// Both peers connect and drain their handshakes.
 	connA := dial(t, ts, "awroom")
 	connB := dial(t, ts, "awroom")
 	drainHandshake(t, connA, crdt.New())
 	drainHandshake(t, connB, crdt.New())
 
-	// A sends an awareness update with clientID=42.
 	aw := awareness.New(42)
 	aw.SetLocalState(map[string]any{"cursor": float64(5)})
 	sendAwareness(t, connA, aw.EncodeUpdate(nil))
 
-	// B should receive the awareness broadcast.
-	outerType, awPayload := readOne(t, connB, 2*time.Second)
-	assert.Equal(t, uint64(1), outerType)
+	for _, conn := range []*gws.Conn{connA, connB} {
+		outerType, awPayload := readOne(t, conn, 2*time.Second)
+		assert.Equal(t, uint64(1), outerType)
 
-	// Parse and verify.
-	awDec := awareness.New(99)
-	require.NoError(t, awDec.ApplyUpdate(awPayload, nil))
-	states := awDec.GetStates()
-	require.Contains(t, states, uint64(42))
-	assert.InEpsilon(t, float64(5), states[42].State["cursor"], 1e-9)
+		received := awareness.New(99)
+		require.NoError(t, received.ApplyUpdate(awPayload, nil))
+		state, found := received.GetStates()[42]
+		require.True(t, found)
+		assert.InEpsilon(t, float64(5), state.State["cursor"], 1e-9)
+	}
 }
 
 func TestInteg_QueryAwareness_ReturnsCurrentState(t *testing.T) {
