@@ -72,18 +72,49 @@ func invalidStringEdit(t *testing.T) []byte {
 	return bytes.Replace(update, []byte("xyz"), []byte{0xff, 0xfe, 0xfd}, 1)
 }
 
+// invalidMapOverwriteEdit returns a seed setting m["k"] and an update whose overwrite of "k", which deletes the seed's value, integrates before a later non-UTF-8 value fails.
+func invalidMapOverwriteEdit(t *testing.T) (seed, edit []byte) {
+	t.Helper()
+	source := crdt.New(crdt.WithClientID(1))
+	sourceMap := source.GetMap("m")
+	source.Transact(func(txn *crdt.Transaction) { sourceMap.Set(txn, "k", "old") })
+	seed = crdt.EncodeStateAsUpdateV1(source, nil)
+
+	editor := crdt.New(crdt.WithClientID(2))
+	require.NoError(t, crdt.ApplyUpdateV1(editor, seed, nil))
+	sv := editor.StateVector()
+	editorMap := editor.GetMap("m")
+	editor.Transact(func(txn *crdt.Transaction) { editorMap.Set(txn, "k", "new") })
+	editor.Transact(func(txn *crdt.Transaction) { editorMap.Set(txn, "bad", "xyz") })
+	whole := crdt.EncodeStateAsUpdateV1(editor, sv)
+	require.Equal(t, 1, bytes.Count(whole, []byte("xyz")))
+	return seed, bytes.Replace(whole, []byte("xyz"), []byte{0xff, 0xfe, 0xfd}, 1)
+}
+
+// mapValue returns doc's m[key], or nil when it is unset.
+func mapValue(doc *crdt.Doc, key string) any {
+	v, _ := doc.GetMap("m").Get(key)
+	return v
+}
+
 // A relay-injected update that partly integrates before failing must reach local peers as exactly its landed part, and as nothing when nothing new landed.
 func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 	seed, truncated := truncatedEdit()
+	mapSeed, mapOverwrite := invalidMapOverwriteEdit(t)
+	textSeeded := func(d *crdt.Doc) bool { return d.GetText("t").ToString() == "hello" }
 	cases := []struct {
 		name     string
 		seed     []byte
+		seeded   func(*crdt.Doc) bool
 		update   []byte
 		roomText string
+		roomK    any
 		relays   bool
 	}{
-		{name: "a delete set that does not decode", seed: seed, update: truncated, roomText: "hello!", relays: true},
+		{name: "a delete set that does not decode", seed: seed, seeded: textSeeded, update: truncated, roomText: "hello!", relays: true},
 		{name: "a later struct that does not decode", update: invalidStringEdit(t), roomText: "hello", relays: true},
+		{name: "a map overwrite before a struct that does not decode", seed: mapSeed, update: mapOverwrite,
+			seeded: func(d *crdt.Doc) bool { return mapValue(d, "k") == "old" }, roomK: "new", relays: true},
 		{name: "nothing integrated", update: []byte{0x01, 0x05}, relays: false},
 	}
 	for _, tc := range cases {
@@ -101,8 +132,7 @@ func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 			ctx := context.Background()
 			if tc.seed != nil {
 				require.NoError(t, srv.Inject(ctx, cluster.Inbound{Room: "room", Kind: cluster.KindSync, Data: tc.seed}))
-				readUntil(t, conn, peerDoc, 2*time.Second,
-					func() bool { return peerDoc.GetText("t").ToString() == "hello" }, "the peer gets the seed")
+				readUntil(t, conn, peerDoc, 2*time.Second, func() bool { return tc.seeded(peerDoc) }, "the peer gets the seed")
 			}
 			room := srv.GetDoc("room")
 			require.NotNil(t, room)
@@ -118,6 +148,7 @@ func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 			}
 			injectFails()
 			require.Equal(t, tc.roomText, room.GetText("t").ToString())
+			require.Equal(t, tc.roomK, mapValue(room, "k"))
 
 			if tc.relays {
 				require.Equal(t, int32(1), observed.Load(), "the room's update observers are told of the part that landed")
