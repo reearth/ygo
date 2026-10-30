@@ -2,8 +2,10 @@ package crdt
 
 import (
 	"errors"
+	"maps"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"strconv"
 	"testing"
 )
@@ -141,7 +143,9 @@ func gappedUpdate(t *testing.T, rng *rand.Rand) (held, update []byte) {
 	}
 	has, all := receiver.StateVector(), sender.StateVector()
 	claimed := make(StateVector, len(all))
-	for client, clock := range all {
+	// In client order, so that a seed draws the same clocks on every run.
+	for _, client := range slices.Sorted(maps.Keys(all)) {
+		clock := all[client]
 		claimed[client] = has.Clock(client)
 		if clock > has.Clock(client) {
 			claimed[client] += uint64(rng.Int64N(int64(clock - has.Clock(client) + 1)))
