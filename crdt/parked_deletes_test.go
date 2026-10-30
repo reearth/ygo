@@ -13,8 +13,8 @@ import (
 	"github.com/reearth/ygo/encoding"
 )
 
-// deleteSetUpdate is a V1 update of no structs whose delete set names, for each
-// client, its ranges.
+// deleteSetUpdate is a struct-free V1 update deleting the given ranges per
+// client.
 func deleteSetUpdate(sets map[ClientID][]DeleteRange) []byte {
 	enc := encoding.NewEncoder()
 	enc.WriteVarUint(0) // clients
@@ -30,9 +30,8 @@ func deleteSetUpdate(sets map[ClientID][]DeleteRange) []byte {
 	return append([]byte(nil), enc.Bytes()...)
 }
 
-// parkedDeletes is a V1 update whose delete set names n one-clock ranges of
-// client, every other clock from 0, which a document that never heard from
-// client parks, every range.
+// parkedDeletes is a struct-free V1 update of n one-clock ranges of client,
+// every other clock from 0.
 func parkedDeletes(client ClientID, n int) []byte {
 	ranges := make([]DeleteRange, n)
 	for i := range n {
@@ -58,8 +57,8 @@ var applyFormats = []struct {
 	v2   bool
 }{{"V1", false}, {"V2", true}}
 
-// textState is the full V1 state of a document whose text "t" holds s, written
-// by client.
+// textState is the V1 state of a document whose text "t" holds s, written by
+// client.
 func textState(client ClientID, s string) []byte {
 	doc := New(WithClientID(client))
 	txt := doc.GetText("t")
@@ -68,7 +67,7 @@ func textState(client ClientID, s string) []byte {
 }
 
 // A keystroke must not pay for parked delete ranges of clients it brings
-// nothing for, whether they belong to one client or to many.
+// nothing for.
 func TestUnit_ApplyUpdate_AKeystrokeCostsNothingForParkedDeleteRanges(t *testing.T) {
 	const n, keystrokes = 100_000, 100
 	state := textState(7, strings.Repeat("a", 8))
@@ -126,8 +125,8 @@ func TestUnit_ApplyUpdate_AKeystrokeCostsNothingForParkedDeleteRanges(t *testing
 	}
 }
 
-// typedKeystrokes are the updates of n characters a peer of state types into
-// its text, one at a time.
+// typedKeystrokes are the updates of n characters typed one at a time by a peer
+// of state.
 func typedKeystrokes(t *testing.T, state []byte, n int) [][]byte {
 	t.Helper()
 	peer := New(WithClientID(11))
@@ -144,10 +143,8 @@ func typedKeystrokes(t *testing.T, state []byte, n int) [][]byte {
 	return updates
 }
 
-// Parked delete ranges are capped as parked items are (WithMaxPendingItems):
-// an update whose delete set would grow the parked ranges past the cap is
-// refused with ErrInvalidUpdate before it changes anything. An update that
-// adds no range is never refused.
+// An update that would grow the parked ranges past WithMaxPendingItems must be
+// refused, and one adding no range never is.
 func TestUnit_ApplyUpdate_ParkedDeleteRangesAreCapped(t *testing.T) {
 	const limit = 10
 	for _, format := range applyFormats {
@@ -176,8 +173,8 @@ func TestUnit_ApplyUpdate_ParkedDeleteRangesAreCapped(t *testing.T) {
 			if after := EncodeStateAsUpdateV1(doc, nil); string(after) != string(before) {
 				t.Fatal("the refused update changed the document's state")
 			}
-			// Clocks 1, 3, ..., 2*limit-3 fill every gap between the parked
-			// ranges, which join into one.
+			// Clocks 1, 3, ..., 2*limit-3 fill the gaps so the parked ranges
+			// join into one.
 			gaps := make([]DeleteRange, 0, limit-1)
 			for i := range limit - 1 {
 				gaps = append(gaps, DeleteRange{Clock: uint64(2*i + 1), Len: 1})
@@ -192,8 +189,7 @@ func TestUnit_ApplyUpdate_ParkedDeleteRangesAreCapped(t *testing.T) {
 	}
 }
 
-// Parked ranges that an update's own structs resolve do not count against the
-// cap the update's new ranges are checked by.
+// Parked ranges an update's own structs resolve must not count against its cap.
 func TestUnit_ApplyUpdate_ParkedRangesTheUpdateResolvesMakeRoom(t *testing.T) {
 	const limit = 10
 	// Client 98's structs at clocks 0-3 resolve the parked ranges at 0 and 2.
@@ -234,9 +230,8 @@ func TestUnit_ApplyUpdate_ParkedRangesTheUpdateResolvesMakeRoom(t *testing.T) {
 	}
 }
 
-// A parked delete range applies once the structs it names arrive, also after an
-// apply that brings nothing for its client, and the document converges with a
-// peer that saw every update in order.
+// A parked delete range must apply once its structs arrive, so the document
+// converges with an in-order peer.
 func TestUnit_ApplyUpdate_AParkedDeleteRangeAppliesOnceItsStructsArrive(t *testing.T) {
 	writer := New(WithClientID(98))
 	written := writer.GetText("t")
@@ -294,10 +289,8 @@ func TestUnit_ApplyUpdate_AParkedDeleteRangeAppliesOnceItsStructsArrive(t *testi
 	}
 }
 
-// A stored state holding more parked delete ranges than the cap loads into a
-// document whose cap is set once the state is in (SetMaxPendingItems); a
-// document capped first refuses it. After the load, an update that adds a
-// range is refused and one that adds none applies.
+// Stored state over the cap must load when SetMaxPendingItems caps only
+// afterwards, with later updates capped.
 func TestUnit_SetMaxPendingItems_AStoredStateOverTheCapLoadsWhenTheCapIsSetAfterIt(t *testing.T) {
 	const limit = 10
 	stored := New(WithClientID(1), WithMaxPendingItems(math.MaxInt))
@@ -324,8 +317,8 @@ func TestUnit_SetMaxPendingItems_AStoredStateOverTheCapLoadsWhenTheCapIsSetAfter
 	}
 }
 
-// A document holding more parked items than its cap must still apply an
-// update whose items wait only on each other within it.
+// A document over its parked-item cap must still apply an update whose items
+// depend only on each other.
 func TestUnit_SetMaxPendingItems_ADocumentOverTheItemCapAppliesAnUpdateThatResolvesWithin(t *testing.T) {
 	const limit, parked = 10, 19
 	gapped := New(WithClientID(50))
@@ -337,8 +330,8 @@ func TestUnit_SetMaxPendingItems_ADocumentOverTheItemCapAppliesAnUpdateThatResol
 	}
 	afterGap := EncodeStateAsUpdateV1(gapped, sv)
 
-	// Client 70's item has client 61's as its right origin, and client 70's
-	// group comes first in the update.
+	// Client 70's item, whose group comes first, has client 61's as its right
+	// origin.
 	first := New(WithClientID(61))
 	firstText := first.GetText("u")
 	first.Transact(func(txn *Transaction) { firstText.Insert(txn, 0, "x", nil) })
@@ -370,8 +363,7 @@ func TestUnit_SetMaxPendingItems_ADocumentOverTheItemCapAppliesAnUpdateThatResol
 	}
 }
 
-// deleteRangesUpdate is a V1 update of no structs whose delete set names the
-// ranges of one client.
+// deleteRangesUpdate is a struct-free V1 update deleting ranges of one client.
 func deleteRangesUpdate(client ClientID, ranges ...DeleteRange) []byte {
 	return deleteSetUpdate(map[ClientID][]DeleteRange{client: ranges})
 }
@@ -383,8 +375,8 @@ func observed(doc *Doc) *int {
 	return n
 }
 
-// requireUnchanged fails unless doc's state is before, its text "t" is text
-// and its OnUpdate observers were handed no update.
+// requireUnchanged fails unless doc's state, text "t" and OnUpdate observers
+// are untouched.
 func requireUnchanged(t *testing.T, doc *Doc, before []byte, text string, updates *int) {
 	t.Helper()
 	if after := EncodeStateAsUpdateV1(doc, nil); string(after) != string(before) {
@@ -460,12 +452,8 @@ func decodeDS(t *testing.T, update []byte) DeleteSet {
 	return ds
 }
 
-// An update that carries more delete ranges than the cap, each deleting a
-// struct the update itself brings, parks none of them and applies: the check
-// reads the clocks the update's structs leave, not the store's as the apply
-// begins. The structs of one client sit behind those of another in the
-// update (they are inserted between them), so some integrate only once a
-// later client group is in.
+// An update deleting more of its own structs than the cap must apply, since the
+// check uses the clocks its structs leave.
 func TestUnit_ApplyUpdate_DeletingMoreThanTheCapOfItsOwnStructsApplies(t *testing.T) {
 	const limit = 10
 	first, second := New(WithClientID(1)), New(WithClientID(2))
@@ -502,8 +490,8 @@ func TestUnit_ApplyUpdate_DeletingMoreThanTheCapOfItsOwnStructsApplies(t *testin
 	}
 }
 
-// A malformed update of several groups must be refused with the error text
-// it has on main, so the parked-delete check adds no layer of wrapping.
+// A malformed multi-group update must keep its error text, so the parked-delete
+// check adds no wrapping.
 func TestUnit_ApplyUpdate_AMalformedMultiGroupUpdateKeepsItsErrorText(t *testing.T) {
 	want := wrapUpdateErr(ErrInvalidUpdate).Error()
 	merged, err := MergeUpdatesV1(textState(5, "abc"), textState(6, "def"))

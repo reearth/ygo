@@ -31,11 +31,8 @@ type Server struct {
 	mu   sync.RWMutex
 	docs map[string]*crdt.Doc
 
-	// MaxPendingItems caps the per-document pending-items queue depth. The
-	// queue holds items whose dependencies have not yet arrived, waiting for
-	// out-of-order delivery to resolve. It caps, separately, the delete ranges
-	// parked waiting for the structs they delete. Zero or negative uses the
-	// crdt default (100,000). See crdt.WithMaxPendingItems.
+	// MaxPendingItems caps each document's parked items and, separately, parked
+	// delete ranges (crdt.WithMaxPendingItems).
 	MaxPendingItems int
 
 	// AuthFunc, if non-nil, is called on every request before any document is

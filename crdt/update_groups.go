@@ -91,8 +91,8 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 	return ordered, groups, ok
 }
 
-// frameGroups steps a framing scanner over every group header and struct, so
-// that it stands at the delete set, calling visit, if set, per group.
+// frameGroups steps a framing scanner to the delete set, calling visit, if set,
+// per group.
 func (s *pendingScanner) frameGroups(visit func(uint64, ClientID)) (groups uint64, ok bool) {
 	n := s.uint()
 	if n > maxV2Items {

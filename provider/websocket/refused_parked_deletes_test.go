@@ -17,8 +17,8 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 )
 
-// recordingAdapter is a PersistenceAdapter that loads no stored state and
-// keeps every update the room stores, in order.
+// recordingAdapter is a PersistenceAdapter that loads nothing and records every
+// stored update in order.
 type recordingAdapter struct {
 	mu      sync.Mutex
 	updates [][]byte
@@ -39,8 +39,8 @@ func (a *recordingAdapter) stored() [][]byte {
 	return append([][]byte(nil), a.updates...)
 }
 
-// missingDeleteRanges is a V1 update of no structs whose delete set names n
-// one-clock ranges of client, every other clock from 0.
+// missingDeleteRanges is a struct-free V1 update of n one-clock ranges of
+// client, every other clock from 0.
 func missingDeleteRanges(client crdt.ClientID, n int) []byte {
 	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
 		enc.WriteVarUint(0) // clients
@@ -54,8 +54,8 @@ func missingDeleteRanges(client crdt.ClientID, n int) []byte {
 	})
 }
 
-// documentUpdates sends a Ping on conn and reads frames until its Pong,
-// counting the document updates (Sync frames) on the way.
+// documentUpdates counts the Sync frames on conn before the Pong to a Ping it
+// sends.
 func documentUpdates(t *testing.T, conn *gws.Conn, room string) int {
 	t.Helper()
 	hpSend(t, conn, room, tagPing, nil)
@@ -72,8 +72,8 @@ func documentUpdates(t *testing.T, conn *gws.Conn, room string) int {
 	}
 }
 
-// A refused over-cap update must leave the room unchanged: nothing applied,
-// stored or sent to the other peer, and SyncStatus(0) to the sender.
+// A refused over-cap update must leave the room unchanged and answer the sender
+// with SyncStatus(0).
 func TestInteg_RefusedParkedDeleteUpdateLeavesTheRoomUnchanged(t *testing.T) {
 	const limit = 10
 	adapter := &recordingAdapter{}

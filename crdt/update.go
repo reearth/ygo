@@ -610,10 +610,8 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 //	(e) collects items whose parent is unresolved-but-might-be-in-this-update
 //	    into the returned slice for the within-update retry pass.
 //
-// Groups that a later group for the same client supersedes are decoded and
-// dropped (yjs parity). numClients is the count parsed from the header, and
-// budget is the apply's pending budget, which checkParkedDeletes may already
-// have found the superseded groups for.
+// Groups a later group for the same client supersedes are decoded and dropped
+// (yjs parity), using the superseded groups budget may already know.
 func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, budget *pendingBudget) ([]*Item, error) {
 	var pending []*Item
 	if numClients > 1 {

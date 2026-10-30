@@ -136,9 +136,8 @@ func (ds *DeleteSet) orderedClients() []ClientID {
 	return append(out, rest...)
 }
 
-// retryPendingDs reapplies the store's parked deletions that can apply
-// (takeReadyDeletes) in the order Yjs re-reads its encoded pending delete set:
-// clients descending, ranges sorted.
+// retryPendingDs reapplies the parked deletions that can now apply, in the
+// order Yjs re-reads its pending delete set.
 func retryPendingDs(txn *Transaction) {
 	store := txn.doc.store
 	ready := store.takeReadyDeletes()
@@ -243,12 +242,8 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 	return unresolvable
 }
 
-// checkParkedDeletes refuses, before the apply changes anything, an update
-// whose delete set would leave more parked ranges than WithMaxPendingItems
-// allows, so a refused update leaves the document as it was. A range takes at
-// least two bytes, so a short update is accepted on its length alone, and a
-// longer one is first bounded by one walk (frameStructs, parkingRangesBound)
-// before the exact count.
+// checkParkedDeletes refuses, before anything changes, an update whose delete
+// set would grow the parked ranges past WithMaxPendingItems.
 func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	limit := doc.maxPendingItemsLimit()
 	pending := doc.store.pendingDs
@@ -281,8 +276,8 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	return ErrInvalidUpdate
 }
 
-// deleteSetOf is the delete set of the update s scans, a V1 one or a V2 one,
-// read past its structs without keeping anything of them.
+// deleteSetOf reads the delete set of the V1 or V2 update s scans, skipping its
+// structs.
 func deleteSetOf(s *pendingScanner, v2 bool) (DeleteSet, error) {
 	if err := frameStructs(s); err != nil {
 		return DeleteSet{}, err
@@ -293,8 +288,8 @@ func deleteSetOf(s *pendingScanner, v2 bool) (DeleteSet, error) {
 	return decodeDeleteSet(s.rest)
 }
 
-// frameStructs steps s over the update's struct section, as the framing
-// scanner does for the group scan, so that s stands at its delete set.
+// frameStructs steps s over the update's structs so that s stands at its delete
+// set.
 func frameStructs(s *pendingScanner) error {
 	if s.err != nil {
 		return s.err
@@ -312,11 +307,9 @@ func frameStructs(s *pendingScanner) error {
 	return nil
 }
 
-// parkingRangesBound reads the delete set s stands at, keeping nothing of it,
-// and is how many of its ranges would park some part on a store whose state
-// vector is sv: a bound on what the update parks (parkedPartsOf), since its
-// structs only move the store's clocks past sv and the decoder's merge of
-// ranges only joins them. It allocates nothing.
+// parkingRangesBound counts, without allocating, the ranges of the delete set s
+// stands at that would park on a store at sv, an upper bound on what the update
+// parks.
 func parkingRangesBound(s *pendingScanner, sv StateVector) (int, error) {
 	clients := s.uint()
 	if s.err != nil {
@@ -361,9 +354,8 @@ func parkingRangesBound(s *pendingScanner, sv StateVector) (int, error) {
 	return n, nil
 }
 
-// structClocksOf is the store's state vector once the structs of b's update
-// are in, resolved as the pending budget resolves them; items an earlier
-// update parked are left out, so the count it feeds can only be high.
+// structClocksOf is the store's state vector once b's update structs are in,
+// leaving out earlier parked items so the count it feeds can only be high.
 func structClocksOf(b *pendingBudget) (StateVector, error) {
 	if err := b.knowSuperseded(); err != nil {
 		return nil, err
@@ -389,8 +381,7 @@ func structClocksOf(b *pendingBudget) (StateVector, error) {
 	return known, nil
 }
 
-// parkedPartsOf is what applyToPartial parks of ds on a store whose state
-// vector is clocks.
+// parkedPartsOf is what applyToPartial parks of ds on a store at clocks.
 func parkedPartsOf(ds DeleteSet, clocks StateVector) DeleteSet {
 	parked := newDeleteSet()
 	for client, ranges := range ds.clients {
@@ -401,8 +392,8 @@ func parkedPartsOf(ds DeleteSet, clocks StateVector) DeleteSet {
 	return parked
 }
 
-// parkedPart is the part of r that applyToPartial parks on a store holding r's
-// client up to next, and whether any of it parks.
+// parkedPart is the part of r that applyToPartial parks when r's client is held
+// up to next.
 func parkedPart(r DeleteRange, next uint64) (DeleteRange, bool) {
 	end := r.Clock + r.Len
 	switch {
@@ -417,11 +408,9 @@ func parkedPart(r DeleteRange, next uint64) (DeleteRange, bool) {
 	return DeleteRange{Clock: start, Len: end - start}, true
 }
 
-// parkedDeleteRangesAfter is how many delete ranges pending, which holds before
-// of them, holds after an update that moves the store's clocks from initial to
-// clocks and parks parked: the retry cuts a moved client's ranges at its new
-// clock, and Merge joins ranges that overlap or touch. It recounts only the
-// parked ranges of clients the update moves or parks ranges for.
+// parkedDeleteRangesAfter is how many ranges pending holds after an update
+// moves the clocks from initial to clocks and parks parked, recounting only the
+// clients it touches.
 func parkedDeleteRangesAfter(pending DeleteSet, before int, initial, clocks StateVector, parked DeleteSet) int {
 	after := before
 	count := func(client ClientID) {
@@ -442,8 +431,8 @@ func parkedDeleteRangesAfter(pending DeleteSet, before int, initial, clocks Stat
 	return after
 }
 
-// cutParked is what the retry leaves of a client's parked ranges once the
-// store holds the client up to next.
+// cutParked is what the retry leaves of a client's parked ranges once the store
+// holds it up to next.
 func cutParked(ranges []DeleteRange, next uint64) []DeleteRange {
 	var kept []DeleteRange
 	for _, r := range ranges {
@@ -454,9 +443,8 @@ func cutParked(ranges []DeleteRange, next uint64) []DeleteRange {
 	return kept
 }
 
-// mergedRangeCount is how many ranges sortAndCompact leaves of have and add
-// together. Both are sorted here, on copies, so the count costs what they hold
-// and changes neither.
+// mergedRangeCount is how many ranges sortAndCompact leaves of have and add,
+// computed on copies so neither changes.
 func mergedRangeCount(have, add []DeleteRange) int {
 	byClock := func(a, b DeleteRange) int { return cmp.Compare(a.Clock, b.Clock) }
 	have, add = slices.Clone(have), slices.Clone(add)

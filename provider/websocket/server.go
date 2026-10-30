@@ -1209,11 +1209,8 @@ type Server struct {
 	// crdt.MergeUpdatesV1). Tests inject a failing merge to exercise fallback.
 	mergeFn func(...[]byte) ([]byte, error)
 
-	// MaxPendingItems caps the per-document pending-items queue depth. The
-	// queue holds items whose dependencies have not yet arrived, waiting for
-	// out-of-order delivery to resolve. It caps, separately, the delete ranges
-	// parked waiting for the structs they delete. Zero or negative uses the
-	// crdt default (100,000). See crdt.WithMaxPendingItems.
+	// MaxPendingItems caps each document's parked items and, separately, parked
+	// delete ranges (crdt.WithMaxPendingItems).
 	MaxPendingItems int
 
 	// HandshakeTimeout caps how long a peer may stay connected without sending
@@ -1734,8 +1731,7 @@ func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	if s.MaxRooms > 0 && len(s.rooms) >= s.MaxRooms {
 		return nil, false, ErrTooManyRooms
 	}
-	// The room's document loads its stored state with the pending cap lifted,
-	// and loadRoom sets MaxPendingItems once the state is in (see there).
+	// The pending cap stays lifted until loadRoom has loaded the stored state.
 	docOpts := []crdt.DocOption{crdt.WithMaxPendingItems(math.MaxInt)}
 	aw := awareness.New(0)
 	if s.MaxAwarenessBytesPerRoom > 0 {

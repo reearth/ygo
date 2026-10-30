@@ -10,15 +10,15 @@ import (
 	"github.com/reearth/ygo/encoding"
 )
 
-// storedStateAdapter is a PersistenceAdapter whose LoadDoc returns one stored
-// state for every room and whose StoreUpdate keeps nothing.
+// storedStateAdapter is a PersistenceAdapter that loads one stored state for
+// every room and keeps nothing.
 type storedStateAdapter struct{ state []byte }
 
 func (a storedStateAdapter) LoadDoc(string) ([]byte, error)   { return a.state, nil }
 func (a storedStateAdapter) StoreUpdate(string, []byte) error { return nil }
 
-// parkedDeletesV1 is a V1 update of no structs whose delete set names n
-// one-clock ranges of client, every other clock from 0.
+// parkedDeletesV1 is a struct-free V1 update of n one-clock ranges of client,
+// every other clock from 0.
 func parkedDeletesV1(client crdt.ClientID, n int) []byte {
 	enc := encoding.NewEncoder()
 	enc.WriteVarUint(0) // clients
@@ -32,11 +32,8 @@ func parkedDeletesV1(client crdt.ClientID, n int) []byte {
 	return append([]byte(nil), enc.Bytes()...)
 }
 
-// A room whose stored state holds more parked delete ranges than
-// MaxPendingItems loads all the same: the state was written by the room, and
-// refusing it would leave a room that never loads. What arrives after the load
-// is capped: an honest update applies, and one that parks a further range is
-// refused.
+// A room must load stored state over MaxPendingItems, since refusing it would
+// leave the room unloadable, and cap what arrives after.
 func TestUnit_LoadRoom_StoredStateOverThePendingCapLoads(t *testing.T) {
 	const limit = 10
 	stored := crdt.New(crdt.WithClientID(1), crdt.WithMaxPendingItems(math.MaxInt))

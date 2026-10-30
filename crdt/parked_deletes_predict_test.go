@@ -8,18 +8,8 @@ import (
 	"testing"
 )
 
-// What checkParkedDeletes counts before the apply changes anything
-// (parkedPartsOf of the update's delete set at structClocksOf) is what the
-// apply then parks. Three writers edit a text, a map and
-// an array nested in it, syncing at random; a receiver holds a state one
-// writer had, and is sent the whole document encoded from a state vector that
-// claims, for each client, a random clock between what the receiver holds and
-// what the document holds. The update then lacks structs the receiver needs:
-// structs after a gap, items whose origin, right origin or parent lies in it,
-// and the delete ranges of what they hold park, while structs whose
-// dependencies come later in the update, in another client's group,
-// integrate. With the cap lifted, the ranges the apply parks are those
-// checkParkedDeletes named, in V1 and in V2.
+// The ranges checkParkedDeletes predicts must be exactly those the apply parks,
+// for random gapped V1 and V2 updates.
 func TestUnit_ApplyUpdate_TheParkedDeletesCheckedAreWhatTheApplyParks(t *testing.T) {
 	const rounds = 1000
 	rng := rand.New(rand.NewPCG(334, 2526))
@@ -133,9 +123,8 @@ func TestUnit_ApplyUpdate_TheParkedDeletesCheckedAreWhatTheApplyParks(t *testing
 			if len(want.clients) > 0 {
 				parkedSome++
 			}
-			// A second update, now that ranges are parked, never leaves more of
-			// them than the check counts, and the rest of the document leaves
-			// none.
+			// With ranges already parked, the check must still never
+			// undercount.
 			for _, full := range []bool{false, true} {
 				claimed := receiver.StateVector()
 				if !full {

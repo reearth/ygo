@@ -139,8 +139,8 @@ func (b *pendingBudget) check(count int) error {
 	return nil
 }
 
-// knowSuperseded finds the groups the decoder drops, when the apply has not
-// recorded them yet; its error is unwrapped, for the caller to wrap.
+// knowSuperseded records the groups the decoder drops, returning an unwrapped
+// error for the caller to wrap.
 func (b *pendingBudget) knowSuperseded() error {
 	if b.groupsKnown {
 		return nil

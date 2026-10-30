@@ -20,11 +20,10 @@ type StructStore struct {
 	// pendingDs holds delete-set entries targeting items not yet integrated.
 	// Accumulated across updates and retried whenever pending drains.
 	pendingDs DeleteSet
-	// pendingDsRanges is how many ranges pendingDs holds, kept current so an
-	// apply need not count them.
+	// pendingDsRanges counts pendingDs's ranges so an apply need not.
 	pendingDsRanges int
-	// pendingDsMoved holds the clients of pendingDs that Append gave a struct
-	// since the last retry, the only ones whose parked ranges can apply.
+	// pendingDsMoved holds the parked clients given a struct since the last
+	// retry, the only ones whose ranges can apply.
 	pendingDsMoved map[ClientID]struct{}
 
 	// pendingMoves holds ContentMove items whose target item was not yet
@@ -80,9 +79,8 @@ func (s *StructStore) parkDeletes(ds DeleteSet) {
 	}
 }
 
-// takeReadyDeletes removes from pendingDs, and returns, the ranges of each
-// client that gained structs since the last call and whose next clock passed
-// its lowest parked range, since only those can apply.
+// takeReadyDeletes removes and returns the parked ranges of clients whose new
+// structs reach their lowest range, the only ones that can apply.
 func (s *StructStore) takeReadyDeletes() DeleteSet {
 	var ready DeleteSet
 	for client := range s.pendingDsMoved {

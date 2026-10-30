@@ -8,12 +8,8 @@ import (
 	"testing"
 )
 
-// walkedUpdate is a V1 update of a document three writers edit at random, with
-// text, formats, embeds, map values of every kind, subdocuments and nested
-// arrays, and deletes, and a state vector a receiver could hold. The update
-// is encoded from a random clock per client, so its structs start mid-run; one
-// update in three is the merge of two updates with a gap between them, so it
-// holds skips.
+// walkedUpdate is a random V1 update of every content kind, starting mid-run
+// and sometimes holding skips, with a receiver's state vector.
 func walkedUpdate(t *testing.T, rng *rand.Rand) (update []byte, held StateVector) {
 	t.Helper()
 	writers := []*Doc{New(WithClientID(1)), New(WithClientID(2)), New(WithClientID(3))}
@@ -65,8 +61,7 @@ func walkedUpdate(t *testing.T, rng *rand.Rand) (update []byte, held StateVector
 	}
 	update = EncodeStateAsUpdateV1(sender, held)
 	if rng.IntN(3) == 0 {
-		// Two updates of one writer with a gap between them merge into one
-		// that holds a skip over the gap.
+		// Merging two updates of one writer around a gap yields a skip.
 		w := writers[rng.IntN(len(writers))]
 		text := w.GetText("t")
 		// update ends where w stood; "gap" is left out of the merge.
@@ -82,8 +77,8 @@ func walkedUpdate(t *testing.T, rng *rand.Rand) (update []byte, held StateVector
 	return update, held
 }
 
-// The framing walk must leave the scan at the delete set the full scan reads,
-// and parkingRangesBound must count no fewer ranges than park.
+// The framing walk must reach the delete set the full scan reads, and
+// parkingRangesBound must never undercount.
 func TestUnit_FrameStructs_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
 	rng := rand.New(rand.NewPCG(334, 340))
 	skips := 0
