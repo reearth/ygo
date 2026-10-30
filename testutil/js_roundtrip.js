@@ -27,7 +27,7 @@ if (!mode || !dir) {
 
 // ── Scenarios ────────────────────────────────────────────────────────────────
 // Each: { name, build(doc), checks: [{root, kind}] } where kind ∈
-// 'map' | 'array' | 'text' | 'xml'.
+// 'map' | 'array' | 'text' | 'xml' | 'map_hooks' | 'xml_hooks'.
 const scenarios = [
   {
     name: 'nested_map_in_map',
@@ -142,7 +142,32 @@ const scenarios = [
       { root: 'a', kind: 'array' },
     ],
   },
+  {
+    name: 'xml_hook',
+    build: (d) => {
+      const h = new Y.XmlHook('h')
+      d.getMap('m').set('hk', h)
+      h.set('a', 1)
+      d.getXmlFragment('x').insert(0, [new Y.XmlHook('widget'), new Y.XmlElement('div')])
+    },
+    checks: [
+      { root: 'm', kind: 'map_hooks' },
+      { root: 'x', kind: 'xml_hooks' },
+    ],
+  },
 ]
+
+// describe renders v like toJSON, but keeps each XmlHook's name.
+function describe(v) {
+  if (v instanceof Y.XmlElement) return { tag: v.nodeName, children: v.toArray().map(describe) }
+  if (v instanceof Y.XmlFragment) return v.toArray().map(describe)
+  if (v instanceof Y.Map) {
+    const entries = {}
+    v.forEach((value, key) => { entries[key] = describe(value) })
+    return v instanceof Y.XmlHook ? { hook: v.hookName, entries } : entries
+  }
+  return v instanceof Y.AbstractType ? v.toJSON() : v
+}
 
 function extract(doc, check) {
   switch (check.kind) {
@@ -154,6 +179,10 @@ function extract(doc, check) {
       return JSON.stringify(doc.getText(check.root).toDelta())
     case 'xml':
       return doc.getXmlFragment(check.root).toString()
+    case 'map_hooks':
+      return JSON.stringify(describe(doc.getMap(check.root)))
+    case 'xml_hooks':
+      return JSON.stringify(describe(doc.getXmlFragment(check.root)))
     default:
       throw new Error(`unknown kind ${check.kind}`)
   }

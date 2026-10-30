@@ -1,3 +1,22 @@
+## v1.55.1
+
+**Who is affected: documents that hold a Yjs `Y.XmlHook`, and anyone who
+applies updates from peers they do not fully trust.**
+
+ygo decoded a Yjs `Y.XmlHook` (type ref 5) to an untyped placeholder and
+dropped its hook name. Every update ygo encoded from the document wrote the
+hook as an empty `YArray`: the state a server sends to a late joiner, the
+`OnUpdate` output it stores, `MergeUpdates` and `DiffUpdate` results. A Yjs
+client that loaded that state got an empty array without the hook's entries.
+ygo now keeps the hook and its name and writes them back byte for byte as Yjs
+does.
+
+An update with a type ref above 6 (no Yjs type has one) was accepted and
+written back as a `YArray`. Yjs refuses such an update, and ygo now refuses it
+too: `ApplyUpdateV1`/`V2` and the other functions that decode updates return
+an error wrapping `ErrInvalidUpdate`. An update with several client groups is
+refused before any group is applied. No API changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

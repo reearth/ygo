@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-10-31
+
+### Fixed
+
+- **`crdt`: a Yjs `Y.XmlHook` keeps its type and hook name.** ygo decoded a
+  hook (type ref 5) to an untyped placeholder and dropped its name, so every
+  update it encoded from the document (`EncodeStateAsUpdateV1`/`V2`, the
+  `OnUpdate` output, `MergeUpdates`, `DiffUpdate`, `UpdateV1ToV2`/`V2ToV1`, an
+  undone delete) wrote the hook as an empty `YArray` (type ref 0). A Yjs peer
+  that loaded such state got an empty array where the hook was, without its
+  entries. ygo now keeps the hook and writes it back as Yjs does.
+- **`crdt`: an update with a type ref above 6 is refused.** Yjs has no shared
+  type for such a ref and refuses the update; ygo accepted it as a placeholder
+  and wrote it back as a `YArray`. Every function that decodes an update now
+  returns an error wrapping `ErrInvalidUpdate` for it. An update with several
+  client groups is refused before any group is applied; as for any update ygo
+  refuses, structs of the same group before the bad one stay applied.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

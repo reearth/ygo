@@ -87,10 +87,7 @@ func TestConformance_Content_SubDoc(t *testing.T) {
 	}
 }
 
-// YXmlHook (typeRef 5): a Yjs fragment with a hook followed by a <div>. ygo
-// has no YXmlHook type, but the V1 decoder must consume the hook's name string
-// so the rest of the update stays aligned — otherwise the trailing <div>
-// struct is misread ("parent item not found"). V2 already degrades gracefully.
+// A Yjs YXmlHook before a <div>: the V1 decoder must consume the hook name or the <div> struct is misread.
 func TestConformance_Content_XmlHook_NoDesync(t *testing.T) {
 	const v1 = "0102828adaef04000701016605066d79686f6f6b87828adaef0400030364697600"
 	doc := crdt.New()

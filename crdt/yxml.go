@@ -713,6 +713,20 @@ func NewYXmlText() *YXmlText {
 	return t
 }
 
+// yxmlHook is a Yjs Y.XmlHook, a map with a hook name, kept so that it
+// encodes back as Yjs wrote it.
+type yxmlHook struct {
+	YMap
+	hookName string
+}
+
+func newYXmlHook(hookName string) *yxmlHook {
+	h := &yxmlHook{hookName: hookName}
+	h.itemMap = make(map[string]*Item)
+	h.owner = h
+	return h
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 // leftChildAt is like abstractType.leftNeighbourAt but skips attribute items
