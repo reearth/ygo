@@ -15,13 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OnUpdate` output, `MergeUpdates`, `DiffUpdate`, `UpdateV1ToV2`/`V2ToV1`, an
   undone delete) wrote the hook as an empty `YArray` (type ref 0). A Yjs peer
   that loaded such state got an empty array where the hook was, without its
-  entries. ygo now keeps the hook and writes it back as Yjs does.
+  entries. ygo now keeps the hook and writes it back as Yjs does. State that
+  an older ygo already stored keeps the hook as a `YArray`.
+- **`crdt`: a `Y.XmlHook` reads as its entries.** `ToJSON`, `Entries`,
+  `ToSlice` and observer values gave `null` for a hook; they now give its
+  entries as an object, as Yjs `toJSON` does.
 - **`crdt`: an update with a type ref above 6 is refused.** Yjs has no shared
   type for such a ref and refuses the update; ygo accepted it as a placeholder
   and wrote it back as a `YArray`. Every function that decodes an update now
   returns an error wrapping `ErrInvalidUpdate` for it. An update with several
-  client groups is refused before any group is applied; as for any update ygo
-  refuses, structs of the same group before the bad one stay applied.
+  client groups is refused before any group is applied. In an update with one
+  client group, the structs before the bad one stay applied, as for any other
+  malformed struct; `ApplyUpdateV1Landed` returns them.
 
 ## [1.55.0] — 2026-10-31
 
