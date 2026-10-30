@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-29
+
+### Fixed
+
+- **`provider/websocket`: a failed write closes the peer's connection.** When
+  a write to a peer failed (for example, its 10-second write deadline expired
+  because the peer stopped reading), the peer's writer stopped but the
+  connection stayed open. A peer that kept sending stayed in its room, did not
+  trigger `OnLastPeer`, and its replies queued with no writer until the write
+  queue overflowed. The writer now closes the connection, and the read loop
+  removes the peer.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
