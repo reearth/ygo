@@ -87,14 +87,14 @@ func (s *StructStore) Find(id ID) *Item {
 // getItemCleanEnd returns the item ending at exactly (client, clock).
 // If the item at that position spans past clock it is split so the returned
 // item ends exactly at clock. Used when a new item's origin falls inside an
-// existing multi-character item.
+// existing multi-character item. A GC struct is returned whole, as in Yjs.
 func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock uint64) *Item {
 	item := s.Find(ID{Client: client, Clock: clock})
 	if item == nil {
 		return nil
 	}
 	end := item.ID.Clock + uint64(item.Content.Len()) - 1
-	if end == clock {
+	if end == clock || item.isGCOrphan() {
 		return item
 	}
 	// Guard against malformed updates where clock < item.ID.Clock: the
@@ -116,7 +116,8 @@ func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock u
 // Item.integrate needs the right boundary to be a clean item start so the
 // loop terminates at the correct position.
 //
-// Mirrors Yjs JS's `getItemCleanStart` and yrs's `get_item_clean_start`.
+// Mirrors Yjs JS's `getItemCleanStart` and yrs's `get_item_clean_start`, and
+// returns a GC struct whole, as Yjs does.
 // Returns nil if no item contains the given clock (e.g. the target hasn't
 // been integrated yet — the caller is responsible for parking via the
 // pending queue in that case).
@@ -125,7 +126,7 @@ func (s *StructStore) getItemCleanStart(txn *Transaction, id ID) *Item {
 	if item == nil {
 		return nil
 	}
-	if item.ID.Clock == id.Clock {
+	if item.ID.Clock == id.Clock || item.isGCOrphan() {
 		return item
 	}
 	// Guard against malformed updates where id.Clock < item.ID.Clock: Find

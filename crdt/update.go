@@ -1508,9 +1508,13 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 				return false
 			}
 			if ori := store.Find(*item.OriginRight); ori != nil {
-				item.Parent = ori.Parent
-				if item.ParentSub == nil {
-					item.ParentSub = ori.ParentSub
+				// An item whose origin is a GC struct keeps no parent, so it
+				// becomes a GC struct below, as in Yjs.
+				if item.Origin == nil {
+					item.Parent = ori.Parent
+					if item.ParentSub == nil {
+						item.ParentSub = ori.ParentSub
+					}
 				}
 			} else if item.OriginRight.Clock >= store.NextClock(item.OriginRight.Client) {
 				return false

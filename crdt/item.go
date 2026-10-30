@@ -74,7 +74,8 @@ func strPtr(s string) *string { return &s }
 
 // integrate inserts this item into its parent's linked list using the YATA
 // conflict-resolution algorithm. After integrate returns, Left and Right
-// reflect the item's final position.
+// reflect the item's final position. An item whose right origin is a GC struct
+// is stored as an unlinked GC struct instead.
 //
 // offset skips an already integrated prefix when the item's range partially
 // overlaps the store, either during decoding or when retrying a parked item.
@@ -101,7 +102,14 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// `if (this.rightOrigin !== null) this.right = getItemCleanStart(...)`
 	// at the top of Item.integrate.
 	if item.Right == nil && item.OriginRight != nil {
-		item.Right = txn.doc.store.getItemCleanStart(txn, *item.OriginRight)
+		right := txn.doc.store.getItemCleanStart(txn, *item.OriginRight)
+		// Yjs stores an item whose right origin is a GC struct as a GC struct.
+		if right != nil && right.isGCOrphan() {
+			item.markGCOrphan()
+			txn.doc.store.Append(item)
+			return
+		}
+		item.Right = right
 	}
 
 	// Determine the starting scan position: immediately right of the left origin.
@@ -641,11 +649,12 @@ func rearbitrateMoves(txn *Transaction) {
 // targetLen clock units starting at targetID.Clock. When the item is part of
 // a larger multi-value ContentAny (common when a delta update arrives without
 // the local splits a sender performed during Move()), splitItem is called to
-// carve out the exact boundary. Returns nil when no item contains targetID.
+// carve out the exact boundary. Returns nil when no item contains targetID;
+// returns a GC struct whole.
 func resolveMovedItem(txn *Transaction, targetID *ID, targetLen int) *Item {
 	si := txn.doc.store.Find(*targetID)
-	if si == nil {
-		return nil
+	if si == nil || si.isGCOrphan() {
+		return si
 	}
 	// Trim leading prefix: ensure si starts exactly at targetID.Clock.
 	if si.ID.Clock < targetID.Clock {
