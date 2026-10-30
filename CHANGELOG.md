@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drains after every failure once it has begun to integrate, in V1 and V2, and
   the commit's update holds what the drain integrated. V2 applies now drain
   through the same code as V1, so a V2 drain that panics parks the rest of the
-  queue again with the clocks it waits on, where before those items could stay
+  queue again with the clocks it waits on, where previously those items could stay
   parked for good.
 
 ## [1.54.0] — 2026-10-22
