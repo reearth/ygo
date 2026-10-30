@@ -470,7 +470,7 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 	if d.wantsUpdateBytes() {
 		updateBytes = encodeV1Locked(d, txn.beforeState)
 		if len(d.updateLogs) > 0 {
-			d.appendUpdateLogs(updateBytes, txn.Origin)
+			d.appendUpdateLogs(updateBytes, parkedUpdate(d, txn), txn.Origin)
 		}
 	}
 

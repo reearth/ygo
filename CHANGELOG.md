@@ -18,12 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   observer that drains it finds its own transaction's update after every
   update committed before it. The first commit after the log opens also
   records the document's whole state just before it, parked structs included
-  (the log's base), so a reader that applies the base and then each update
-  holds the document as it stood after each commit. A remote update's format
-  cleanup is a commit of its own and is logged like one. `Drain`, `Pending`,
-  `Reset` (start again from a fresh base) and `Close` complete it. Without an
-  open log nothing changes: a commit encodes its update only for OnUpdate
-  observers, as before.
+  (the log's base). Each logged update is the very slice its `OnUpdate`
+  observers get, and, in `LoggedUpdate.Parked`, what the commit parked:
+  structs and deletions that wait for something the document lacks, which
+  `OnUpdate` leaves out as Yjs does. A reader that applies the base and then
+  each update's `Update` and `Parked` holds the document as it stood after
+  each commit, what it holds parked included. A remote update's format cleanup is a commit of its own
+  and is logged like one. `Drain`, `Pending`, `Reset` (start again from a
+  fresh base) and `Close` complete it. Without an open log nothing changes: a
+  commit encodes its update only for OnUpdate observers, as before.
 
 ## [1.54.0] — 2026-10-22
 

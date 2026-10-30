@@ -24,6 +24,9 @@ func replay(t *testing.T, base []byte, updates []LoggedUpdate) *Doc {
 	require.NoError(t, ApplyUpdateV1(replica, base, nil))
 	for _, u := range updates {
 		require.NoError(t, ApplyUpdateV1(replica, u.Update, nil))
+		if u.Parked != nil {
+			require.NoError(t, ApplyUpdateV1(replica, u.Parked, nil))
+		}
 	}
 	return replica
 }

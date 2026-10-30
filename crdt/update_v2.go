@@ -415,19 +415,7 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 		originRight = item.OriginRight
 	}
 
-	// If the origin item is a GC placeholder (no Parent), the receiver can't
-	// infer this item's parent from it. Clear the origin so explicit parent
-	// info is encoded instead.
-	if origin != nil {
-		if oi := store.Find(*origin); oi != nil && oi.isGCOrphan() {
-			origin = nil
-		}
-	}
-	if originRight != nil {
-		if ori := store.Find(*originRight); ori != nil && ori.isGCOrphan() {
-			originRight = nil
-		}
-	}
+	origin, originRight = dropGCOrigins(item, origin, originRight, store)
 
 	contentTag := contentTagOf(item.Content)
 	info := contentTag
@@ -831,6 +819,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	unresolvableDs := ds.applyToPartial(txn)
 	if len(unresolvableDs.clients) > 0 {
 		txn.doc.store.pendingDs.Merge(unresolvableDs)
+		txn.noteParkedDeletes(unresolvableDs)
 	}
 
 	// pendingDs may be drainable even if pending items aren't — integrated

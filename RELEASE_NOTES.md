@@ -13,17 +13,22 @@ copy of the document cannot tell, from `OnUpdate` alone, which update came
 first, or whether a later observer has already caught its copy up.
 
 **What it gives.** An `UpdateLog` receives each committed transaction's update
-(the same bytes its `OnUpdate` observers are handed) and origin while the
-document lock is still held. An observer that calls `Drain` therefore finds
-its own transaction's update, after every update committed before it,
-whatever order the observers run in. The first transaction to commit after
-the log opens also records the document's whole state just before it, parked
-structs included, as a V1 update; applying that base and then each logged
-update, in order, reproduces the document as it stood after each commit. The
-format cleanup a remote update can trigger is a commit of its own and is
-logged like one. `Pending` counts what no `Drain` has taken, `Reset` hands
-that over and starts again from a fresh base (for a reader whose copy failed
-to apply an update), and `Close` stops logging.
+and origin while the document lock is still held. An observer that calls
+`Drain` therefore finds its own transaction's update, after every update
+committed before it, whatever order the observers run in. `Update` is the
+very slice its `OnUpdate` observers are handed. `Parked` is a V1 update of
+what the transaction parked, nil when it parked nothing: structs and
+deletions that wait for something the document lacks, which `OnUpdate` leaves
+out, as Yjs does. The first transaction to commit after the log opens also
+records the document's whole state just before it, parked structs and
+deletions included, as a V1 update. Applying that base and then each logged
+update's `Update` and `Parked`, in order, reproduces the document as it stood after each
+commit, what it holds parked included: a copy rebuilt from a stored log
+integrates a parked struct once the struct's missing predecessor arrives, as
+the document does. The format cleanup a remote update can trigger is a commit
+of its own and is logged like one. `Pending` counts what no `Drain` has
+taken, `Reset` hands that over and starts again from a fresh base (for a
+reader whose copy failed to apply an update), and `Close` stops logging.
 
 A log keeps everything until it is drained, so drain it (from an `OnUpdate`
 observer, typically) or close it.

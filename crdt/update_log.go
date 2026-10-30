@@ -1,11 +1,23 @@
 package crdt
 
-import "sync"
+import (
+	"cmp"
+	"slices"
+	"sync"
+)
 
-// LoggedUpdate is one committed transaction's update: the same V1 bytes the
-// transaction's OnUpdate observers are handed, and its origin.
+// LoggedUpdate is one committed transaction's update, what it parked, and its
+// origin.
+//
+// Update is the V1 update the transaction's OnUpdate observers are handed,
+// the very slice. Like Yjs's update event, it leaves out structs and
+// deletions the transaction parked because they wait for something the
+// document lacks. Parked is a V1 update of those, nil when the transaction
+// parked nothing. A reader that keeps a copy of the document applies Update
+// and then Parked; one that only follows what integrated reads Update alone.
 type LoggedUpdate struct {
 	Update []byte
+	Parked []byte
 	Origin any
 }
 
@@ -45,15 +57,17 @@ type UpdateLog struct {
 // before it, whatever order the observers of concurrent transactions run in.
 // A transaction is logged exactly when OnUpdate observers would be called for
 // it, empty and panicking transactions included, with the very bytes those
-// observers receive.
+// observers receive, and what it parked beside them (LoggedUpdate).
 //
 // The first transaction to commit after the log opens also records d's
 // whole state as of just before that transaction: a V1 update, what
-// EncodeStateAsUpdateV1(d, nil) would return at that moment. It is captured
-// under d's lock before the transaction's fn runs, so a reader that applies
-// that base and then each logged update in order holds d as it stood after
-// each commit in turn. A document that never commits after the log opens
-// records no base.
+// EncodeStateAsUpdateV1(d, nil) would return at that moment, parked structs
+// and deletions included. It is captured under d's lock before the
+// transaction's fn runs, so a reader that applies that base and then each
+// logged update's Update and Parked in order holds d as it stood after each
+// commit in turn, including what d holds parked: a replica rebuilt from the
+// log integrates a parked struct when its missing predecessor arrives, as d
+// does. A document that never commits after the log opens records no base.
 //
 // Like the observer registration methods, OpenUpdateLog takes d's lock and
 // must not be called from inside a Transact callback.
@@ -155,18 +169,50 @@ func (d *Doc) wantsUpdateBytes() bool {
 	return len(d.onUpdate) > 0 || len(d.updateLogs) > 0
 }
 
+// parkedUpdate is a V1 update of what txn parked and still holds parked at
+// its commit, or nil when it parked nothing: the structs and deletions
+// encodeV1Locked leaves out, so that a log's base plus its updates holds what
+// a logged apply parked, and a replica rebuilt from the log integrates it
+// once the missing predecessor arrives. The structs come from one update, so
+// each client's are disjoint; they are encoded whole (no state vector), as
+// the base's are, so a reader parks each exactly as d did. The caller holds
+// d.mu.
+func parkedUpdate(d *Doc, txn *Transaction) []byte {
+	if len(txn.parkedItems) == 0 && len(txn.parkedDeletes.clients) == 0 {
+		return nil
+	}
+	s := d.store
+	perClient := make(map[ClientID][]*Item)
+	for _, it := range txn.parkedItems {
+		if it.ID.Clock+uint64(it.Content.Len()) > s.NextClock(it.ID.Client) {
+			perClient[it.ID.Client] = append(perClient[it.ID.Client], it)
+		}
+	}
+	for _, items := range perClient {
+		slices.SortFunc(items, func(a, b *Item) int { return cmp.Compare(a.ID.Clock, b.ID.Clock) })
+	}
+	if len(perClient) == 0 && len(txn.parkedDeletes.clients) == 0 {
+		return nil
+	}
+	ds := txn.parkedDeletes
+	if ds.clients == nil {
+		ds = newDeleteSet()
+	}
+	return encodeStructStoreV1(perClient, ds, nil, s)
+}
+
 // appendUpdateLogs appends a committed transaction's update to every open
 // update log and forgets the closed ones. buildPhase2 calls it under d.mu, so
 // the logs receive updates in commit order. A log still waiting for its base
 // here (only when encoding the base panicked) takes no update: its base,
 // recorded by the next commit, already holds this one.
-func (d *Doc) appendUpdateLogs(update []byte, origin any) {
+func (d *Doc) appendUpdateLogs(update, parked []byte, origin any) {
 	open := d.updateLogs[:0]
 	for _, l := range d.updateLogs {
 		l.mu.Lock()
 		if !l.closed {
 			if !l.wantBase {
-				l.updates = append(l.updates, LoggedUpdate{Update: update, Origin: origin})
+				l.updates = append(l.updates, LoggedUpdate{Update: update, Parked: parked, Origin: origin})
 			}
 			open = append(open, l)
 		}
