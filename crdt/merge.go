@@ -80,15 +80,16 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 }
 
 // sliceItemFront mutates item to drop its first `offset` logical units, so it
-// starts `offset` clocks later. Used to dedup overlapping struct ranges when
-// merging. Content.Splice(offset) mutates the receiver to hold [0,offset) and
-// returns the suffix; we keep the suffix.
+// starts `offset` clocks later, as Yjs sliceStruct does. Used to dedup
+// overlapping struct ranges when merging, and for a re-sent pending struct
+// (unparked). Content.Splice(offset) mutates the receiver to hold [0,offset)
+// and returns the suffix; we keep the suffix.
 func sliceItemFront(item *Item, offset int) {
-	// An origin-less, parent-less struct (a GC placeholder) must stay so it
-	// re-encodes as a GC struct rather than a normal item; only set Origin for a
-	// real item (one that already has an origin or a resolved parent). Skip
-	// structs never reach here — they're filtered out during decode.
-	hadAnchor := item.Origin != nil || item.Parent != nil
+	// A GC placeholder (no origins, no parent) must stay so it re-encodes as
+	// a GC struct rather than a normal item; any other item continues the
+	// clock before it, as in Yjs. Skip structs never reach here: they are
+	// filtered out during decode.
+	hadAnchor := !item.isGCOrphan()
 	suffix := item.Content.Splice(offset)
 	item.ID.Clock += uint64(offset)
 	if hadAnchor {

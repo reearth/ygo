@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Fixed
+
+- **`crdt`: a struct sent again while it waits in the pending queue is parked
+  once.** A struct that waits for a missing predecessor parked again each time
+  it arrived again: a client that reconnects sends again what the room did not
+  acknowledge, and a stored state carries the structs parked when it was
+  saved. The queue grew by the whole resend each time (5, 10, 15 items for one
+  5-struct tail sent three times), and once it reached `WithMaxPendingItems`
+  the document refused the client's updates, the resend included. What an
+  update leaves to park now merges with the queue, as Yjs merges it with its
+  pending structs: a struct whose clocks the queue holds parks no second time,
+  one whose first or last clocks the queue holds parks only the rest, and the
+  pending cap does not count a held struct.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

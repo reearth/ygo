@@ -1,3 +1,25 @@
+## v1.54.1
+
+**Who is affected: servers whose peers reconnect while edits from another
+peer are missing, and documents loaded from a stored state that holds parked
+structs.**
+
+A struct that waits for a missing predecessor sits in the pending queue. When
+the same struct arrived again, ygo parked it again: a client that reconnects
+sends again what the room did not acknowledge, its waiting tail included, and
+a stored state carries the structs parked when it was saved. The queue grew by
+the whole resend each time, and once it reached the pending cap
+(`WithMaxPendingItems`, a server's `MaxPendingItems`) the room refused the
+client's updates, the resend included. Yjs holds each pending clock once.
+
+What an update leaves to park now merges with the queue, as Yjs merges it
+with its pending structs: a struct whose clocks the queue already holds parks
+no second time, one whose first or last clocks the queue holds parks only the
+rest, and the pending cap does not count a held struct. A struct that arrives
+again in a form that waits for less, a GC struct for a parked item, still
+parks and integrates as soon as it can, as in Yjs. An update that would park
+a new struct past the cap is still refused. No API or wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

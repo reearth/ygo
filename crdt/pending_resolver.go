@@ -260,19 +260,45 @@ func resolvePendingWaiters(txn *Transaction, pending []*Item) []*Item {
 }
 
 // parkWithinUpdatePending charges only unresolved items to the persistent cap.
+// What the update could not integrate merges with the queue, as Yjs merges
+// the structs an update leaves with its pending update: clocks the queue
+// already holds park no second time (unparked).
+//
+// An update holds one group per client (supersededGroups), so the structs it
+// parks never overlap each other: each is checked against the queue as the
+// update found it, and the queue's cover takes all of them in one merge.
 func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
+	s := txn.doc.store
+	// Only a queue that held structs before this park can hold one of
+	// pending; its cover is built now, before the park adds to it.
+	held := s.pending != nil && len(s.pending.items) > 0
+	if held {
+		s.pending.coverOf()
+	}
+	var parked []*Item
+	defer func() {
+		if len(parked) > 0 {
+			s.pending.addCover(parked)
+		}
+	}()
 	for _, item := range pending {
-		if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
+		if held {
+			if item = unparked(s, item, s.NextClock(item.ID.Client)); item == nil {
+				continue
+			}
+		}
+		if s.pending != nil && len(s.pending.items) >= txn.doc.maxPendingItemsLimit() {
 			return wrapUpdateErr(ErrInvalidUpdate)
 		}
-		if txn.doc.store.pending == nil {
-			txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
+		if s.pending == nil {
+			s.pending = &pendingUpdate{missing: make(StateVector)}
 		}
-		txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
-		if client, parkedAt, future := itemFutureDep(item, txn.doc.store); future {
-			mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
+		s.pending.items = append(s.pending.items, item)
+		parked = append(parked, item)
+		if client, parkedAt, future := itemFutureDep(item, s); future {
+			mergePendingMissing(s.pending.missing, client, parkedAt)
 		} else {
-			mergePendingMissing(txn.doc.store.pending.missing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
+			mergePendingMissing(s.pending.missing, item.ID.Client, s.NextClock(item.ID.Client))
 		}
 	}
 	return nil
