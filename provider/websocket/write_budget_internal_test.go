@@ -6,48 +6,53 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestPeer_WithinBudget_Boundary(t *testing.T) {
+func TestUnit_Peer_WithinBudget(t *testing.T) {
 	tests := []struct {
 		name   string
 		budget int64
+		armed  bool
 		queued int64
 		frame  int
 		want   bool
 	}{
 		{
+			name:   "the handshake is taken whatever its size",
+			budget: 100, armed: false, queued: 1_000, frame: 1_000, want: true,
+		},
+		{
 			name:   "a frame larger than the budget is taken on an empty queue",
-			budget: 100, queued: 0, frame: 1_000, want: true,
+			budget: 100, armed: true, queued: 0, frame: 1_000, want: true,
 		},
 		{
 			name:   "the frame after an over-budget one is refused",
-			budget: 100, queued: 1_000, frame: 1, want: false,
+			budget: 100, armed: true, queued: 1_000, frame: 1, want: false,
 		},
 		{
 			name:   "a frame that reaches the budget exactly is taken",
-			budget: 100, queued: 40, frame: 60, want: true,
+			budget: 100, armed: true, queued: 40, frame: 60, want: true,
 		},
 		{
 			name:   "one byte past the budget is refused",
-			budget: 100, queued: 40, frame: 61, want: false,
+			budget: 100, armed: true, queued: 40, frame: 61, want: false,
 		},
 		{
 			name:   "budget 0 refuses nothing",
-			budget: 0, queued: 1 << 40, frame: 1 << 20, want: true,
+			budget: 0, armed: true, queued: 1 << 40, frame: 1 << 20, want: true,
 		},
 		{
 			name:   "a negative budget is off, like 0",
-			budget: -1, queued: 1 << 40, frame: 1 << 20, want: true,
+			budget: -1, armed: true, queued: 1 << 40, frame: 1 << 20, want: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &peer{writeBudget: tt.budget, queuedBytes: tt.queued}
+			p := &peer{writeBudget: tt.budget, budgetArmed: tt.armed, queuedBytes: tt.queued}
 			assert.Equal(t, tt.want, p.withinBudget(tt.frame))
 		})
 	}
 }
 
-func TestPeer_Write_ChargesQueuedBytes(t *testing.T) {
+func TestUnit_Peer_Write_ChargesQueuedBytes(t *testing.T) {
 	queued := func(p *peer) int64 {
 		p.wmu.Lock()
 		defer p.wmu.Unlock()

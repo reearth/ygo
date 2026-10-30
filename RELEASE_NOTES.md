@@ -7,9 +7,9 @@ A peer's write queue is bounded in frames (`PeerWriteQueueSize`, 512 by
 default), not in bytes, so one connection can make the server hold 512 times
 the largest frame its room produces. Every SyncStep1 a peer sends is answered
 with the room's full state on that peer's own queue, and a peer that never
-reads keeps the answers queued: on a 4 MiB document, 100 SyncStep1 frames
-(400 bytes uploaded) grew a server's heap by 420,255,432 bytes, and the
-connection stayed open.
+reads keeps the answers queued: on a 4 MiB document, 100 SyncStep1 messages
+of 4 bytes each grew a server's heap by about 420 MB, and the connection
+stayed open.
 
 The new `Server.PeerWriteQueueBytes` bounds those bytes:
 
@@ -24,10 +24,9 @@ closed as for a full queue. This holds on every enqueue path and whatever
 reads. The close is logged at Warn with `cause` set to the new
 `CloseCauseWriteQueueBytes`.
 
-A peer with nothing queued takes the next frame whatever its size, so a room
-whose full state is larger than the budget still answers a SyncStep1. The
-frame after that one closes the peer, so one peer holds at most the budget
-plus one frame.
+The handshake is never refused, and a peer with nothing queued takes the next
+frame whatever its size, so a room whose state is larger than the budget can
+still be joined and still answers a SyncStep1.
 
 Zero, the default, means no byte budget: nothing changes for a server that
 does not set it.

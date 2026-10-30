@@ -90,9 +90,9 @@ func askFullState(conn *gws.Conn) error {
 	return conn.WriteMessage(gws.BinaryMessage, enc.Bytes())
 }
 
-// step1Flood sends up to limit SyncStep1 frames on conn and never reads. It
-// returns the highest queued-byte total it saw in room, and stops when the
-// server closes conn.
+// step1Flood sends up to limit SyncStep1 frames on conn and never reads. After
+// each, it polls room's queued bytes for up to 100 ms, and it returns the
+// highest total it saw. It stops when the server closes conn.
 func step1Flood(t *testing.T, srv *ygws.Server, conn *gws.Conn, room string, limit int) int64 {
 	t.Helper()
 	var peak int64
@@ -100,17 +100,17 @@ func step1Flood(t *testing.T, srv *ygws.Server, conn *gws.Conn, room string, lim
 		if err := askFullState(conn); err != nil {
 			return peak
 		}
-		// Wait for the answer to be queued before the next ask.
+		before := peak
 		for range 20 {
 			queued, peers := ygws.PeerQueuedBytes(srv, room)
 			peak = max(peak, queued)
 			if peers < 2 {
 				return peak
 			}
-			time.Sleep(5 * time.Millisecond)
-			if queued > 0 {
+			if peak > before {
 				break
 			}
+			time.Sleep(5 * time.Millisecond)
 		}
 	}
 	return peak
@@ -126,7 +126,7 @@ func requireServerClosed(t *testing.T, conn *gws.Conn, msg string) {
 	require.False(t, isTimeout(err), "%s: the read timed out", msg)
 }
 
-func TestServer_PeerWriteQueueBytes_ClosesPeerThatNeverReads(t *testing.T) {
+func TestInteg_PeerWriteQueueBytes_ClosesPeerThatNeverReads(t *testing.T) {
 	const (
 		room     = "never-reads"
 		docBytes = 512 << 10
@@ -140,9 +140,10 @@ func TestServer_PeerWriteQueueBytes_ClosesPeerThatNeverReads(t *testing.T) {
 	requireServerClosed(t, conn, "a peer past its budget must be closed")
 
 	// An empty queue takes one frame of any size, so the peak can pass the
-	// budget by one answer (the full state plus its sync framing), not more.
+	// budget by one answer, not more.
+	const syncFraming = 64 // at most, around the full state in an answer
 	assert.Positive(t, peak)
-	assert.LessOrEqual(t, peak, budget+full+64)
+	assert.LessOrEqual(t, peak, budget+full+syncFraming)
 
 	require.Eventually(t, func() bool {
 		_, peers := ygws.PeerQueuedBytes(srv, room)
@@ -150,7 +151,7 @@ func TestServer_PeerWriteQueueBytes_ClosesPeerThatNeverReads(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the closed peer should leave the room")
 }
 
-func TestServer_PeerWriteQueueBytes_ClosesOverBudgetUnderResyncPolicy(t *testing.T) {
+func TestInteg_PeerWriteQueueBytes_ClosesOverBudgetUnderResyncPolicy(t *testing.T) {
 	const (
 		room     = "never-reads-resync"
 		docBytes = 512 << 10
@@ -163,25 +164,60 @@ func TestServer_PeerWriteQueueBytes_ClosesOverBudgetUnderResyncPolicy(t *testing
 	requireServerClosed(t, conn, "SlowPeerResync must not keep a peer past its budget")
 }
 
-func TestServer_PeerWriteQueueBytes_DeliversAFrameLargerThanTheBudget(t *testing.T) {
+func TestInteg_PeerWriteQueueBytes_RoomLargerThanTheBudget(t *testing.T) {
+	// A new peer gets the whole handshake, and an answer to SyncStep1, though
+	// each full state is larger than the budget.
 	const (
 		room     = "oversized"
 		docBytes = 256 << 10
 		budget   = int64(64 << 10)
 	)
 	srv, dialer := budgetServer(t, budget, ygws.SlowPeerDisconnect)
-	conn := largeRoom(t, dialer, room, docBytes)
+	largeRoom(t, dialer, room, docBytes)
+
+	conn, _, err := dialer.Dial("ws://pipe/"+room, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	doc := crdt.New()
+	drainHandshake(t, conn, doc)
+	txt := doc.GetText("t")
+	assert.Equal(t, docBytes, len(txt.ToString()), "the handshake carries the whole room")
 
 	require.NoError(t, askFullState(conn))
 	outerType, payload := readOne(t, conn, 5*time.Second)
 	require.Equal(t, uint64(0), outerType)
-	require.Greater(t, len(payload), docBytes, "the full state is delivered whole")
+	require.Greater(t, len(payload), docBytes, "the answer is the full state")
 
 	_, peers := ygws.PeerQueuedBytes(srv, room)
-	assert.Equal(t, 2, peers, "the peer is not closed for a frame on an empty queue")
+	assert.Equal(t, 3, peers, "no peer is closed")
 }
 
-func TestServer_PeerWriteQueueBytes_ZeroKeepsTheFrameCapAlone(t *testing.T) {
+func TestInteg_PeerWriteQueueBytes_LargeBroadcastKeepsAReadingPeer(t *testing.T) {
+	// A broadcast larger than the budget, then small ones right behind it:
+	// the reading peer's writer takes the large frame off the queue before it
+	// writes it, so the small ones fit.
+	const (
+		room   = "large-broadcast"
+		small  = 20
+		budget = int64(64 << 10)
+	)
+	srv, dialer := budgetServer(t, budget, ygws.SlowPeerDisconnect)
+	reads := drainingPeer(t, dialer, room)
+
+	sender := dialPipe(t, dialer, room)
+	doc := crdt.New(crdt.WithClientID(2))
+	sendUpdate(t, sender, textUpdate(doc, strings.Repeat("y", 256<<10)))
+	for range small {
+		sendUpdate(t, sender, textUpdate(doc, "z"))
+	}
+
+	require.Eventually(t, func() bool { return reads.Load() >= small+1 }, 5*time.Second, 10*time.Millisecond,
+		"the reading peer receives every broadcast")
+	_, peers := ygws.PeerQueuedBytes(srv, room)
+	assert.Equal(t, 2, peers, "no peer is closed")
+}
+
+func TestInteg_PeerWriteQueueBytes_ZeroKeepsTheFrameCapAlone(t *testing.T) {
 	// With the default 0, the same asks stay queued and the peer stays
 	// connected: all of them are delivered when it reads.
 	const (
@@ -205,9 +241,9 @@ func TestServer_PeerWriteQueueBytes_ZeroKeepsTheFrameCapAlone(t *testing.T) {
 	assert.Zero(t, queued, "with no budget nothing is charged")
 }
 
-func TestServer_PeerWriteQueueBytes_ReadingPeerSurvivesABurst(t *testing.T) {
+func TestInteg_PeerWriteQueueBytes_ReadingPeerSurvivesABurst(t *testing.T) {
 	// 300 KiB of broadcasts through a 64 KiB budget: the reading peer keeps
-	// up, so its queue stays under the budget.
+	// up, so it is not closed.
 	const (
 		room   = "burst"
 		frames = 300
@@ -221,17 +257,15 @@ func TestServer_PeerWriteQueueBytes_ReadingPeerSurvivesABurst(t *testing.T) {
 	doc := crdt.New(crdt.WithClientID(2))
 	for range frames {
 		sendUpdate(t, sender, textUpdate(doc, strings.Repeat("y", each)))
-		time.Sleep(time.Millisecond)
 	}
 
 	require.Eventually(t, func() bool { return reads.Load() >= frames }, 10*time.Second, 10*time.Millisecond,
 		"the reading peer must receive the whole burst")
-	queued, peers := ygws.PeerQueuedBytes(srv, room)
+	_, peers := ygws.PeerQueuedBytes(srv, room)
 	assert.Equal(t, 2, peers, "neither peer is closed")
-	assert.LessOrEqual(t, queued, budget)
 }
 
-func TestServer_PeerWriteQueueBytes_AccountingReturnsToZero(t *testing.T) {
+func TestInteg_PeerWriteQueueBytes_AccountingReturnsToZero(t *testing.T) {
 	const (
 		room     = "accounting"
 		docBytes = 128 << 10

@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounds that queue in frames only, so one connection can make the server hold
   512 times the largest frame its room produces. A peer that sends SyncStep1
   and never reads is answered the room's full state each time: on a 4 MiB
-  document, 100 such frames (400 bytes uploaded) grew a server's heap by
-  420,255,432 bytes, and the connection stayed open.
+  document, 100 such messages of 4 bytes each grew a server's heap by about
+  420 MB, and the connection stayed open.
 
   With the budget set, a frame that would take a peer past it is not queued,
   and the peer is closed as for a full queue. This holds on every enqueue
@@ -24,9 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a peer over its budget drains only if it reads. The close is logged at Warn
   with `cause` set to the new `CloseCauseWriteQueueBytes`.
 
-  A peer with nothing queued takes the next frame whatever its size, so a
-  frame larger than the budget is still delivered, and one peer holds at most
-  its budget plus one frame. Zero, the default, means no byte budget.
+  The handshake is never refused, and a peer with nothing queued takes the
+  next frame whatever its size, so a room whose state is larger than the
+  budget can still be joined. Zero, the default, means no byte budget.
 
 ## [1.54.0] — 2026-10-22
 

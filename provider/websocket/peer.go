@@ -30,10 +30,11 @@ type peer struct {
 	cidMu      sync.Mutex
 	writeCh    chan []byte   // buffered queue drained by runWriter goroutine
 	writerDone chan struct{} // closed when runWriter exits
-	// queuedBytes is the size of the frames handed to writeCh and not yet
-	// written, the one runWriter is writing included. Kept only when
-	// writeBudget > 0, so the default path takes no extra lock. Guarded by wmu.
+	// queuedBytes is the size of the frames waiting in writeCh, kept only when
+	// writeBudget > 0. budgetArmed is false until the handshake is queued,
+	// which the budget never refuses. Both are guarded by wmu.
 	queuedBytes int64
+	budgetArmed bool
 	// writeBudget is Server.PeerWriteQueueBytes when the peer connected.
 	writeBudget int64
 	// needsResync is set (under wmu) when a broadcast is dropped because writeCh
@@ -792,8 +793,8 @@ func (p *peer) broadcastAwarenessFromRoom(awMsg []byte) {
 // a reconnect-and-resync flow which the CRDT's pending-structs
 // machinery handles cleanly.
 //
-// A target past Server.PeerWriteQueueBytes is closed by closeOverBudget before
-// the frame cap is checked, whatever the SlowPeerPolicy.
+// A target past Server.PeerWriteQueueBytes is closed before the frame cap is
+// checked (see enqueueLocked).
 func (p *peer) broadcast(data []byte, excludeSelf bool) {
 	p.room.mu.Lock()
 	targets := make([]*peer, 0, len(p.room.peers))
@@ -814,17 +815,7 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 			other.wmu.Unlock()
 			continue
 		}
-		if !other.withinBudget(len(data)) {
-			other.closeOverBudget(len(data), "broadcast")
-			other.wmu.Unlock()
-			continue
-		}
-		select {
-		case other.writeCh <- data:
-			if other.writeBudget > 0 {
-				other.queuedBytes += int64(len(data))
-			}
-		default:
+		if full := other.enqueueLocked(data, "broadcast"); full {
 			// Queue full.
 			if p.server.SlowPeerPolicy == SlowPeerResync {
 				// Drop this stale delta and flag an in-place resync; runWriter
@@ -846,57 +837,20 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 	}
 }
 
-// withinBudget reports whether a frame of n bytes may be queued for this peer.
-// An empty queue takes any frame (see Server.PeerWriteQueueBytes). The caller
-// holds wmu.
-func (p *peer) withinBudget(n int) bool {
-	if p.writeBudget <= 0 || p.queuedBytes == 0 {
-		return true
-	}
-	return p.queuedBytes+int64(n) <= p.writeBudget
-}
-
-// closeOverBudget closes the peer on the frame cap's path without queuing the
-// frame: the read loop then runs handleDisconnect. Unlike the frame cap it
-// ignores SlowPeerPolicy, because a peer over its budget drains only if it
-// reads. The caller holds wmu.
-func (p *peer) closeOverBudget(frameBytes int, path string) {
-	p.server.log().Warn("peer queued bytes over budget; closing peer",
-		"room", p.roomName,
-		"cause", CloseCauseWriteQueueBytes,
-		"path", path,
-		"queuedBytes", p.queuedBytes,
-		"budgetBytes", p.writeBudget,
-		"frameBytes", frameBytes,
-		"queueSize", cap(p.writeCh))
-	_ = p.conn.Close()
-}
-
 // write enqueues a raw binary message for delivery to this peer via the
 // per-peer writer goroutine. H2: skips the write if the peer has already
 // been marked closed. If the queue is full the peer is disconnected:
 // a dropped handshake reply (sendSync / sendAwareness) leaves the remote
 // peer hung waiting for a response it will never receive. Closing the
 // connection forces a reconnect-and-resync, matching the broadcast contract.
-// A frame that would take the peer past Server.PeerWriteQueueBytes closes it
-// the same way: see closeOverBudget.
+// A frame over Server.PeerWriteQueueBytes closes it too (see enqueueLocked).
 func (p *peer) write(data []byte) {
 	p.wmu.Lock()
 	if p.closed {
 		p.wmu.Unlock()
 		return
 	}
-	if !p.withinBudget(len(data)) {
-		p.closeOverBudget(len(data), "direct send")
-		p.wmu.Unlock()
-		return
-	}
-	select {
-	case p.writeCh <- data:
-		if p.writeBudget > 0 {
-			p.queuedBytes += int64(len(data))
-		}
-	default:
+	if full := p.enqueueLocked(data, "direct send"); full {
 		// Queue full during a direct send (e.g. handshake reply) — disconnect.
 		// Unlike a silent drop, closing the connection lets the CRDT
 		// pending-structs machinery recover via reconnect-and-resync.
@@ -926,14 +880,13 @@ func (p *peer) runWriter() {
 			p.sendCloseFrame()
 			return
 		}
-		written := p.writeToConn(data)
 		if p.writeBudget > 0 {
-			// Credit the frame whether or not the write succeeded.
+			// The frame has left the queue, whatever the write does.
 			p.wmu.Lock()
 			p.queuedBytes -= int64(len(data))
 			p.wmu.Unlock()
 		}
-		if !written {
+		if !p.writeToConn(data) {
 			return
 		}
 

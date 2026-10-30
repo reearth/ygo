@@ -1097,23 +1097,24 @@ type Server struct {
 	// Zero (the default) uses 512, sized for typical sync workloads.
 	PeerWriteQueueSize int
 
-	// PeerWriteQueueBytes bounds the total size of the frames queued for one
-	// peer and not yet written to it. PeerWriteQueueSize bounds that queue in
-	// frames only, so one peer can make the server hold that count times the
-	// room's largest frame: for example, a peer that sends SyncStep1 again
-	// and again and never reads gets a full-state SyncStep2 queued each time.
+	// PeerWriteQueueBytes bounds the total size of the frames waiting in one
+	// peer's write queue. PeerWriteQueueSize bounds that queue in frames
+	// only, so one peer can make the server hold that count times the room's
+	// largest frame: for example, a peer that sends SyncStep1 again and again
+	// and never reads gets a full-state SyncStep2 queued each time.
 	//
 	// A frame that would take a peer past this budget is not queued, and the
 	// peer is closed as for a full queue, on every enqueue path and whatever
 	// the SlowPeerPolicy. The close is logged at Warn with "cause" set to
 	// CloseCauseWriteQueueBytes.
 	//
-	// A peer with nothing queued takes the next frame whatever its size, so a
-	// frame larger than the budget is still delivered. The frame after it
-	// closes the peer, so one peer holds at most this budget plus one frame.
+	// The handshake a peer gets when it connects is never refused, and a
+	// peer with nothing waiting takes the next frame whatever its size, so a
+	// room whose state is larger than the budget can still be joined and
+	// synced.
 	//
-	// Zero (the default) means no byte budget. Like the other config fields,
-	// set it before serving.
+	// Zero (the default) or a negative value means no byte budget. Like the
+	// other config fields, set it before serving.
 	PeerWriteQueueBytes int64
 
 	// SlowPeerPolicy selects the reaction when a peer's broadcast write queue
@@ -2186,6 +2187,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Send the current awareness state of all active peers.
 	p.sendAwareness(rm.awareness.EncodeUpdate(nil))
+	p.armBudget()
 
 	// Read loop — exits when the connection is closed (by peer, by context
 	// cancellation, or by Shutdown).
