@@ -771,9 +771,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		defer s.markIdleIfEmpty(rm)
 		landed, err := crdt.ApplyUpdateV1Landed(rm.doc, in.Data, s.relaySentinel)
 		if err != nil {
-			// A partly applied update leaves landed in the room (and tells its
-			// observers, persistence included); relay that part to local peers
-			// as applyToRoom does for a peer's update, then report the error.
+			// The room and its observers already hold landed, so local peers need it too.
 			if landed != nil {
 				if berr := s.broadcastUpdate(ctx, in.Room, landed, false); berr != nil {
 					return errors.Join(err, berr)

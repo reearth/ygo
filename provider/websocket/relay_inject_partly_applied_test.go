@@ -57,13 +57,11 @@ func invalidStringEdit(t *testing.T) []byte {
 }
 
 // A relay-injected update that fails after part of it integrated leaves that
-// part in this node's room and tells the room's update observers, persistence
-// among them. The node's locally connected peers get exactly that part too,
-// as a peer's partly applied update reaches the room's other peers (#291).
-// Before this, Inject returned the error and relayed nothing, so the peer
-// held less than the room. An update that integrates nothing, or one whose
-// landed part a redelivery already brought, relays nothing: the next frame
-// the peer reads is a later, whole update's.
+// part in this node's room and tells the room's update observers, so the
+// node's locally connected peers must get exactly that part too. An update
+// that integrates nothing, or one whose landed part a redelivery already
+// brought, relays nothing: the next frame the peer reads is a later, whole
+// update's.
 func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 	seed, truncated := truncatedEdit()
 	cases := []struct {
