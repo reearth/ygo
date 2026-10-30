@@ -1,3 +1,20 @@
+## v1.55.1
+
+**Who is affected: servers that receive GC structs, which Yjs peers send for
+the content of a deleted nested type.**
+
+Yjs stores an item as a GC struct when the struct to its left or to its right
+is a GC struct. ygo did so only when both were. With one live neighbour, ygo
+put the item in that neighbour's type: at the wrong position, or stored but
+not linked. Two Yjs clients reach this when one inserts into a nested type
+that the other deletes; there ygo kept the insert as a deleted item where Yjs
+keeps a GC struct. A GC struct next to live content, which no Yjs client
+sends, made the document and a replica loaded from its encoded state show
+different text with the same state vector.
+
+Such an item now waits until both neighbours are present, as in Yjs, and is
+then stored as a GC struct. No API or wire format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

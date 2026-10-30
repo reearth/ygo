@@ -697,6 +697,8 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 					item.Content = item.Content.Splice(offset)
 				}
 				txn.doc.store.Append(item)
+				// A deferred move whose target is in this GC struct stops waiting.
+				txn.doc.store.resolvePendingMoves(txn, item.ID.Client)
 				existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
 				clock = itemEnd
 				continue
@@ -1481,6 +1483,7 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	// here, so the offset is never negative.
 	if item.Parent == nil && item.Deleted {
 		appendTrimmed(store, item, existingEnd)
+		store.resolvePendingMoves(txn, item.ID.Client)
 		return true
 	}
 
@@ -1508,9 +1511,13 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 				return false
 			}
 			if ori := store.Find(*item.OriginRight); ori != nil {
-				item.Parent = ori.Parent
-				if item.ParentSub == nil {
-					item.ParentSub = ori.ParentSub
+				// An item whose origin is a GC struct keeps no parent, so it
+				// becomes a GC struct below, as in Yjs.
+				if item.Origin == nil {
+					item.Parent = ori.Parent
+					if item.ParentSub == nil {
+						item.ParentSub = ori.ParentSub
+					}
 				}
 			} else if item.OriginRight.Clock >= store.NextClock(item.OriginRight.Client) {
 				return false
@@ -1540,6 +1547,7 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 			// struct Yjs integrates it as.
 			item.markGCOrphan()
 			appendTrimmed(store, item, existingEnd)
+			store.resolvePendingMoves(txn, item.ID.Client)
 			return true
 		}
 	}

@@ -777,6 +777,8 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 					item.Content = item.Content.Splice(offset)
 				}
 				txn.doc.store.Append(item)
+				// A deferred move whose target is in this GC struct stops waiting.
+				txn.doc.store.resolvePendingMoves(txn, item.ID.Client)
 				existingEnd = itemEnd
 				clock = itemEnd
 				continue
