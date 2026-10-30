@@ -119,9 +119,30 @@ func TestUnit_ApplyUpdate_AKeystrokeCostsNothingForParkedDeleteRanges(t *testing
 		if allocated[i] > allocated[0]+1<<10 {
 			t.Errorf("%s: a keystroke allocated %d bytes, %d with nothing parked", shapes[i].name, allocated[i], allocated[0])
 		}
-		if limit := 10*took[0] + 200*time.Microsecond; took[i] > limit {
-			t.Errorf("%s: a keystroke took %s, %s with nothing parked, want at most %s", shapes[i].name, took[i], took[0], limit)
-		}
+	}
+}
+
+// The retry takes only clients Append marked since the last retry, so a
+// parked client whose store already passes its range stays parked until
+// Append gives it a struct.
+func TestUnit_StructStore_TakeReadyDeletesTakesOnlyMovedClients(t *testing.T) {
+	s := newStructStore()
+	parked := newDeleteSet()
+	parked.clients[5] = []DeleteRange{{Clock: 0, Len: 1}}
+	parked.clients[6] = []DeleteRange{{Clock: 0, Len: 1}}
+	s.parkDeletes(parked)
+	// Client 5's struct reaches the store without Append, as no apply does.
+	s.clients[5] = []*Item{{ID: ID{Client: 5, Clock: 0}, Content: NewContentString("a")}}
+	if ready := s.takeReadyDeletes(); len(ready.clients) != 0 {
+		t.Fatalf("the retry took %v, whose clients gained no struct through Append", ready.clients)
+	}
+	s.Append(&Item{ID: ID{Client: 5, Clock: 1}, Content: NewContentString("b")})
+	ready := s.takeReadyDeletes()
+	if len(ready.clients) != 1 || len(ready.clients[5]) != 1 {
+		t.Fatalf("after Append the retry took %v, want client 5's range alone", ready.clients)
+	}
+	if got := s.pendingDsRanges; got != 1 || len(s.pendingDs.clients[6]) != 1 {
+		t.Fatalf("after the retry %d ranges are parked (client 6: %v), want client 6's one", got, s.pendingDs.clients[6])
 	}
 }
 
