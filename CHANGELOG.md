@@ -12,9 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`provider/websocket`: awareness keeps its sender connected.** A read-write
   peer's valid update reaches every peer in its room. A read-only peer gets an
   empty awareness response without changing shared awareness or retaining its
-  input. This matches Hocuspocus liveness: a lone `@hocuspocus/provider` editor
-  or viewer receives its 15-second renewal and does not reconnect after its
-  30-second no-message timeout.
+  input. A lone idle editor or viewer on `@hocuspocus/provider` or the
+  `y-websocket` client now receives a message after its 15-second awareness
+  renewal and does not reconnect after its 30-second no-message timeout.
 
 ## [1.54.0] — 2026-10-22
 

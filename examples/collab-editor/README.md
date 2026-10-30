@@ -136,8 +136,8 @@ peer maintains a local state object:
 ```
 
 When any field changes, a read-write peer sends an awareness update. The server
-applies it to the room's awareness state and relays the valid update to every
-connected peer, including its sender. When a tab closes, the WebSocket
+applies it to the room's awareness state and, when the update is valid, relays
+it to every connected peer, including its sender. When a tab closes, the WebSocket
 disconnects and the peer's state is removed from the awareness map.
 
 The WebSocket server does not interpret application-specific awareness fields.
