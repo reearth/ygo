@@ -1,3 +1,20 @@
+## v1.54.1
+
+**Who is affected: a `provider/websocket` server with a peer that stops
+reading but keeps sending.**
+
+Each write to a peer has a 10-second deadline. When a write failed, the peer's
+writer stopped, but nothing closed the connection. The read side still worked,
+so the peer stayed in its room: `OnLastPeer` did not fire, `CloseRoom` without
+force refused the room, and each reply to the peer went into its write queue
+with no writer. Unless the peer itself disconnected, it left only when that
+queue (512 frames by default) overflowed.
+
+ygo now closes the connection when a write or its deadline setup fails. The
+read loop then drops the frames left in its read buffer and removes the peer,
+as for any other disconnect. No API or wire
+format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

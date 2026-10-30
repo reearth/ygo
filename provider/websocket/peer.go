@@ -39,7 +39,7 @@ type peer struct {
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
 	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
-	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
+	inputClosed       atomic.Bool   // set before the server closes, or starts to close, the connection; the read loop drops input from then on
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -856,10 +856,8 @@ func (p *peer) write(data []byte) {
 	p.wmu.Unlock()
 }
 
-// runWriter is the dedicated per-peer broadcast writer. It drains writeCh
-// and serialises writes to the connection. Exits when writeCh is closed
-// (during teardown) or when a write fails (the connection is then dead;
-// the read loop will tear down the peer).
+// runWriter is the dedicated per-peer broadcast writer, serialising writeCh
+// to the connection until writeCh closes or a write fails.
 //
 // This pattern mirrors Rust yrs-warp's per-peer sink task. It replaces
 // the previous "spawn one goroutine per peer per broadcast" model, which
@@ -898,6 +896,9 @@ func (p *peer) runWriter() {
 // through writeCh), and gorilla/websocket permits conn.Close() — used by the
 // disconnect path and teardown — to run concurrently with a write. Returns false
 // when the writer goroutine should exit.
+//
+// A failed write closes the connection and sets inputClosed, because gorilla's
+// read side outlives a write timeout and would keep the peer in its room.
 func (p *peer) writeToConn(data []byte) bool {
 	p.wmu.Lock()
 	closed := p.closed
@@ -912,11 +913,15 @@ func (p *peer) writeToConn(data []byte) bool {
 		})
 	}
 	if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-		p.server.log().Debug("set write deadline failed", "err", err)
+		p.server.log().Debug("set write deadline failed; closing", "room", p.roomName, "err", err)
+		p.inputClosed.Store(true)
+		_ = p.conn.Close()
 		return false
 	}
 	if err := p.conn.WriteMessage(gws.BinaryMessage, data); err != nil {
 		p.server.log().Warn("write to peer failed; closing", "room", p.roomName, "err", err)
+		p.inputClosed.Store(true)
+		_ = p.conn.Close()
 		return false
 	}
 	return true
