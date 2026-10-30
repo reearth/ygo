@@ -26,8 +26,8 @@ type pendingBudget struct {
 	v2Rest      encoding.Decoder
 	superseded  groupSet
 	groupsKnown bool
-	// structs bounds the update's structs when not zero (walkStructsV2), so
-	// the check's first pass can stop once the rest cannot change its answer.
+	// structs, when not zero, bounds the update's structs so the first pass
+	// can stop early.
 	structs int
 }
 
@@ -45,8 +45,7 @@ func (b *pendingBudget) setSuperseded(s groupSet) {
 	b.superseded, b.groupsKnown = s, true
 }
 
-// scanner is a lenient scanner of the update (pendingScanner): the budget
-// reads lengths, clocks and dependencies, and leaves validation to the apply.
+// scanner is a lenient scanner of the update, since the apply validates it.
 func (b *pendingBudget) scanner() *pendingScanner {
 	if b.v2Start == nil {
 		s := newPendingScanner(b.update, b.v2)
@@ -61,26 +60,13 @@ func (b *pendingBudget) scanner() *pendingScanner {
 	return &pendingScanner{v2: &v2, rest: &rest, lenient: true}
 }
 
-// checkBeforeApply refuses the update, before the apply integrates any of it,
-// when its structs would leave more items parked than the pending cap has
-// room for. size is the update's length in bytes. It costs what the update
-// can do. A bound that costs nothing to read comes first (mayParkPastRoom):
-// an update that cannot pass the room left, as every keystroke on a document
-// below the cap cannot, is not read. A V2 update whose struct count is not
-// known yet (the apply counts the structs of an update of several groups as
-// it looks for superseded groups) is counted by one walk of its group headers
-// to the end of its struct section (walkStructsV2). Only an update these
-// bounds do not clear runs the exact preflight (check), which decides the
-// refusal. It reads the update through lenient readers: its first pass, which
-// decides every update that does not park more than the room left, reads the
-// bytes of a V1 update (scanPendingGroupsV1) and the columns of a V2 one
-// (scanPendingGroupsV2), and stops once the structs it has not read cannot
-// change its answer. An update whose struct section the walk cannot read is
-// refused: the apply would fail inside that section, after the structs before
-// the failure had integrated.
+// checkBeforeApply refuses the update when its structs would park more items
+// than the pending cap has room for, before the apply integrates any of it,
+// so a refused update changes nothing. size is the update's length in bytes;
+// cheap bounds come first so that a small update is not read.
 //
-// For V2 it must run before the apply reads from its decoder: it reads the
-// apply's own rest cursor and puts it back where the apply began.
+// For V2 it must run before the apply reads its rest cursor, which it uses
+// and puts back.
 func (b *pendingBudget) checkBeforeApply(size int) error {
 	if !b.mayParkPastRoom(size) {
 		return nil
@@ -88,6 +74,7 @@ func (b *pendingBudget) checkBeforeApply(size int) error {
 	if b.v2 && b.structs == 0 {
 		n, ok := b.walkStructsV2()
 		if !ok {
+			// The apply would fail in this section after earlier structs integrated.
 			return ErrInvalidUpdate
 		}
 		if n <= b.remaining {
@@ -98,12 +85,8 @@ func (b *pendingBudget) checkBeforeApply(size int) error {
 	return b.check(b.remaining)
 }
 
-// walkStructsV2 is how many structs the V2 update's struct section holds,
-// skips included (a bound on what it can park), read by v2StructCount to the
-// section's end, and whether it read the section. It allocates nothing: it
-// reads a copy of the update's own column cursors, on the stack, and the
-// apply's own rest cursor, which has read nothing yet and is put back where it
-// began.
+// walkStructsV2 counts the V2 update's structs, skips included, to the end
+// of its struct section, and reports whether the section reads.
 func (b *pendingBudget) walkStructsV2() (int, bool) {
 	if b.v2Start == nil {
 		d, err := newV2Decoder(b.update)
@@ -118,8 +101,7 @@ func (b *pendingBudget) walkStructsV2() (int, bool) {
 	return n, ok
 }
 
-// firstPassV2 is the check's first pass over a V2 update (scanPendingGroupsV2),
-// on a copy of the update's column cursors and rest cursor.
+// firstPassV2 runs scanPendingGroupsV2 on copies of the update's cursors.
 func (b *pendingBudget) firstPassV2(known StateVector, clients *pendingClientRange) (pendingPass, error) {
 	if b.v2Start == nil {
 		d, err := newV2Decoder(b.update)
@@ -134,14 +116,9 @@ func (b *pendingBudget) firstPassV2(known StateVector, clients *pendingClientRan
 	return scanPendingGroupsV2(&v2, known, b.remaining, clients, b.superseded, b.structs)
 }
 
-// mayParkPastRoom is whether the update's structs may leave more items parked
-// than the pending cap has room for, by a bound that costs nothing to read:
-// the update's struct count when the apply has it (structs); else a V1 struct
-// takes two bytes of the update at least, so a V1 update of at most twice the
-// room cannot; and a V2 update, whose columns can hold many structs in a few
-// bytes, cannot when its group headers hold no more structs than the room
-// (v2StructCount, which for an update of one group, as a keystroke is, reads
-// two numbers). size is the update's length in bytes.
+// mayParkPastRoom is whether the update may park more items than the room
+// left, by a bound that costs nothing to read: a V1 struct takes at least 2
+// bytes, and a V2 update's group headers give its struct count.
 func (b *pendingBudget) mayParkPastRoom(size int) bool {
 	if !b.v2 && size/2 <= b.remaining {
 		return false
@@ -155,30 +132,17 @@ func (b *pendingBudget) mayParkPastRoom(size int) bool {
 	if b.v2Start == nil {
 		return true
 	}
-	// The count reads a copy of the update's own column cursors, on the
-	// stack, and the apply's own rest cursor, which has read nothing yet and
-	// is put back where it began, so it allocates nothing. Headers that do not
-	// read leave the question to the exact check, which returns the error.
+	// On stack copies of the cursors, so that it allocates nothing.
 	v2 := *b.v2Start
 	n, ok := v2StructCount(&v2, false)
 	*v2.restDec = b.v2Rest
 	return !ok || n > b.remaining
 }
 
-// v2StructCount is how many structs the V2 update d decodes holds, skips
-// included, read from its group headers on the rest cursor, and whether it
-// read them. It is a bound on what the update can park, not a count of it.
-// The first group's header follows the update's group count, so an update of
-// one group, as a keystroke is, costs two numbers unless toEnd asks for the
-// rest cursor to be left at the delete set. A later group's header follows the
-// rest content of the groups before it, so for every group but the last (and
-// for the last too under toEnd) the info column is read run by run (ReadRun),
-// and only the rest content a struct's kind carries is stepped over: a skip's
-// length, binary bytes, an embed's, format's or subdocument's value, the
-// values of an Any (whose number is on the length column, which GC, Deleted
-// and JSON lengths share and which is read only up to an Any) and a move's
-// three numbers. Origins, parents, keys and strings are on other columns and
-// are not read.
+// v2StructCount is the V2 update's struct count, skips included, read from
+// its group headers, and whether they read. To reach a later group's header
+// it steps over only the rest-cursor content of each struct kind; toEnd also
+// walks the last group, which leaves the rest cursor at the delete set.
 func v2StructCount(d *v2Decoder, toEnd bool) (int, bool) {
 	s := pendingScanner{v2: d, rest: d.restDec}
 	clients := s.uint()
@@ -691,15 +655,9 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 // normal column decoder without building a key dictionary or decoding
 // Any/JSON values into object trees. A framing scanner only finds struct
 // boundaries: it skips text and JSON without validating or counting them, and
-// in V2 never reads the clock, string, key or type columns. A lenient scanner,
-// the pending budget's (pendingBudget.scanner), reads every struct's length,
-// clock and dependencies, as the budget needs them, and validates nothing the
-// decoder validates: it counts a string's length in UTF-16 units on its raw
-// bytes (V1) or reads it from the string column's lengths (V2, without
-// reading the string), steps over keys, names and JSON text by their length,
-// and over Any values by their framing. On a well-formed update it reads what
-// the validating scanner reads; on a malformed one the apply fails at the
-// malformed struct, as the decoder validates everything.
+// in V2 never reads the clock, string, key or type columns. A lenient scanner
+// reads each struct's length, clock and dependencies, as the pending budget
+// needs, and validates nothing, since the decoder still validates everything.
 type pendingScanner struct {
 	rest    *encoding.Decoder
 	v2      *v2Decoder
@@ -804,7 +762,7 @@ func (s *pendingScanner) text() uint64 {
 		if s.v2 == nil {
 			_, s.err = s.rest.ReadVarBytes()
 		} else if s.lenient {
-			_, s.err = s.v2.stringDec.ReadLen()
+			_, s.err = s.v2.stringDec.ReadUnits()
 		}
 		return 0
 	}
@@ -1016,12 +974,10 @@ func (s *pendingScanner) json() {
 }
 
 // stringLen is a lenient scanner's read of a string's length in UTF-16 units,
-// the clocks it takes: from the string column's lengths in V2, without the
-// string, and in V1 from the string's bytes, which it counts but does not
-// validate (utf16Units).
+// the clocks it takes, counted as the apply decodes it, without validation.
 func (s *pendingScanner) stringLen() uint64 {
 	if s.v2 != nil {
-		n, err := s.v2.stringDec.ReadLen()
+		n, err := s.v2.stringDec.ReadUnits()
 		s.err = err
 		return n
 	}
@@ -1030,11 +986,8 @@ func (s *pendingScanner) stringLen() uint64 {
 	return utf16Units(raw)
 }
 
-// utf16Units is how many UTF-16 units the UTF-8 text b decodes to, counted on
-// its bytes: one per byte that starts a character, and one more per byte that
-// starts a four-byte one. It equals the count of a decode when b is valid
-// UTF-8, and checks nothing. ASCII, which most text is, is passed eight bytes
-// at a time.
+// utf16Units counts the UTF-16 units of UTF-8 text on its bytes, without
+// validating it, eight ASCII bytes at a time.
 func utf16Units(b []byte) uint64 {
 	n := len(b)
 	for len(b) >= 8 {

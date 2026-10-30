@@ -6,12 +6,8 @@ import (
 )
 
 // v2Frame reads a V2 update's struct section on its columns as a lenient
-// pendingScanner does (see pendingScanner): each struct's length, clock and
-// dependencies, with strings, keys and names read for their length only,
-// from the string column's lengths, and Any values stepped over by their
-// framing; it validates nothing the decoder validates. A value that repeats
-// its column's current run is taken without a call into the column's
-// decoder. The first failed read sets err and stops every later read.
+// pendingScanner does: each struct's length, clock and dependencies, without
+// validation.
 type v2Frame struct {
 	d    *v2Decoder
 	keys int
@@ -75,15 +71,12 @@ func byteInRun(d *anycodec.RleByteDecoder, f *v2Frame) byte {
 	return v
 }
 
-// text steps over a string of the string column, reading its length only.
+// text steps over a string of the string column and returns its length.
 func (f *v2Frame) text() uint64 {
-	if v, ok := f.d.stringDec.ReadLenInRun(); ok {
-		return v
-	}
 	if f.err != nil {
 		return 0
 	}
-	v, err := f.d.stringDec.ReadLen()
+	v, err := f.d.stringDec.ReadUnits()
 	f.err = err
 	return v
 }

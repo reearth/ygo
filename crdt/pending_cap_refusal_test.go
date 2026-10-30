@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/reearth/ygo/encoding"
@@ -82,14 +83,10 @@ func parkingEdit(t *testing.T, n int) (update, author []byte) {
 	return EncodeStateAsUpdateV1(editor, creator.StateVector()), author
 }
 
-// gappedUpdate is a receiver's state, held, and an update, both V1, that lacks
-// structs the receiver needs. Three writers edit a text, a map and an array
-// nested in it, syncing at random; held is a state one writer had, and update
-// is the whole document encoded from a state vector that claims, for each
-// client, a random clock between what held holds and what the document holds.
-// Structs after a gap, and items whose origin, right origin or parent lies in
-// it, park, while structs whose dependencies come later in the update, in
-// another client's group, integrate.
+// gappedUpdate is a receiver's state, held, and a V1 update that lacks
+// structs the receiver needs: it is encoded from a state vector that claims a
+// random clock per client, so some structs park and others resolve later in
+// the update, in another client's group.
 func gappedUpdate(t *testing.T, rng *rand.Rand) (held, update []byte) {
 	t.Helper()
 	writers := []*Doc{New(WithClientID(1)), New(WithClientID(2)), New(WithClientID(3))}
@@ -157,13 +154,8 @@ func gappedUpdate(t *testing.T, rng *rand.Rand) (held, update []byte) {
 }
 
 // A document refuses an update that would park more items than the pending
-// cap (WithMaxPendingItems) has room for before it changes anything: an
-// update that inserts text and parks five map entries under a parent the
-// document lacks leaves a document capped at two as it was, with nothing
-// parked and no observer told. Before, the refusal came after the text had
-// integrated: the document kept the text, fired OnUpdate, and returned
-// ErrInvalidUpdate. The same edit applies on a document whose cap has room
-// for what it parks, and its entries integrate once their parent arrives.
+// cap has room for before it changes anything, and the same update applies
+// on a document with room for what it parks.
 func TestUnit_ApplyUpdate_RefusedParkedItemUpdateLeavesTheDocumentUnchanged(t *testing.T) {
 	const limit, parked = 2, 5
 	update, author := parkingEdit(t, parked)
@@ -201,13 +193,9 @@ func TestUnit_ApplyUpdate_RefusedParkedItemUpdateLeavesTheDocumentUnchanged(t *t
 }
 
 // The pending cap refuses exactly the updates that would park more items than
-// it has room for, before they change anything. For random updates with gaps
-// and cross-client dependencies (gappedUpdate), an update that parks p items
-// applies on a document whose cap leaves room for p (and for the delete
-// ranges it parks, should the cap count them), and is refused on one whose
-// cap leaves room for p-1, which it leaves unchanged. The second is tried
-// where the update parks fewer than p delete ranges, so only its items can
-// pass the cap, and p is more than one, since a cap of zero is the default.
+// it has room for: with room for p the update applies, and with room for p-1
+// (p > 1, since a cap of 0 is the default) it is refused and leaves the
+// document unchanged.
 func TestUnit_ApplyUpdate_ParkedItemCapRefusesExactlyWhatWouldPassIt(t *testing.T) {
 	const rounds = 300
 	rng := rand.New(rand.NewPCG(338, 2526))
@@ -230,6 +218,7 @@ func TestUnit_ApplyUpdate_ParkedItemCapRefusesExactlyWhatWouldPassIt(t *testing.
 			if p == 0 {
 				continue
 			}
+			// A cap that also counts parked delete ranges must have room for them too.
 			fits := load(max(p, d))
 			if err := applyIn(t, fits, format.v2, update); err != nil {
 				t.Fatalf("round %d %s: an update parking %d items and %d delete ranges was refused with room for %d: %v",
@@ -259,13 +248,9 @@ func TestUnit_ApplyUpdate_ParkedItemCapRefusesExactlyWhatWouldPassIt(t *testing.
 	t.Logf("%d of %d applies were refused a cap one short of the items they park", refused, 2*rounds)
 }
 
-// The pending budget's check, which reads the update through lenient readers
-// (a V1 update's bytes in its first pass, scanPendingGroupsV1), refuses
-// exactly the updates the validating fixed point (referencePendingBudgetCheck,
-// which reads through the validating scanner) refuses. For random updates
-// with gaps and cross-client dependencies (gappedUpdate), in V1 and V2, the
-// two agree at every room from none to every struct, the room one short of
-// what the update parks and the room for it among them.
+// The lenient check refuses exactly what the validating check
+// (referencePendingBudgetCheck) refuses, at each room around what the update
+// parks.
 func TestUnit_PendingBudget_LenientCheckRefusesWhatTheValidatingCheckRefuses(t *testing.T) {
 	const rounds = 300
 	rng := rand.New(rand.NewPCG(340, 2527))
@@ -325,4 +310,78 @@ func TestUnit_PendingBudget_LenientCheckRefusesWhatTheValidatingCheckRefuses(t *
 		}
 	}
 	t.Logf("%d checks agreed", compared)
+}
+
+// withStringPool is the V2 update with its string column's pool replaced by
+// pool, the column's lengths kept.
+func withStringPool(t *testing.T, update []byte, pool func(string) string) []byte {
+	t.Helper()
+	dec := encoding.NewDecoder(update)
+	enc := encoding.NewEncoder()
+	flag, err := dec.ReadVarUint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc.WriteVarUint(flag)
+	for column := range 9 {
+		b, err := dec.ReadVarBytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if column == 5 { // the string column: the pool, then its lengths
+			old := encoding.NewDecoder(b)
+			s, err := old.ReadVarString()
+			if err != nil {
+				t.Fatal(err)
+			}
+			col := encoding.NewEncoder()
+			col.WriteVarString(pool(s))
+			b = append(col.Bytes(), old.RemainingBytes()...)
+		}
+		enc.WriteVarBytes(b)
+	}
+	return append(enc.Bytes(), dec.RemainingBytes()...)
+}
+
+// The check counts a V2 string's clocks as the apply decodes it, not as the
+// lengths column claims, so an update whose pool is shorter than its lengths
+// is refused before it changes anything.
+func TestUnit_PendingBudget_V2StringClocksFollowThePoolNotTheLengths(t *testing.T) {
+	const limit, parked = 2, 5
+	author := New(WithClientID(1))
+	authorText := author.GetText("t")
+	author.Transact(func(txn *Transaction) { authorText.Insert(txn, 0, "abcdefghij", nil) })
+	editor := New(WithClientID(2))
+	if err := ApplyUpdateV1(editor, EncodeStateAsUpdateV1(author, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	editorText := editor.GetText("t")
+	for range parked {
+		editor.Transact(func(txn *Transaction) { editorText.Insert(txn, 10, "x", nil) })
+	}
+	update := withStringPool(t, EncodeStateAsUpdateV2(editor, nil), func(s string) string {
+		if !strings.HasSuffix(s, "abcdefghij") {
+			t.Fatalf("the pool %q does not end with the author's text", s)
+		}
+		return strings.TrimSuffix(s, "cdefghij")
+	})
+
+	doc := New(WithMaxPendingItems(limit))
+	before, text := EncodeStateAsUpdateV1(doc, nil), doc.GetText("t").ToString()
+	updates := observed(doc)
+	if err := ApplyUpdateV2(doc, update, nil); !errors.Is(err, ErrInvalidUpdate) {
+		t.Fatalf("the update was applied with err %v, want ErrInvalidUpdate", err)
+	}
+	requireUnchanged(t, doc, before, text, updates)
+
+	roomy := New(WithMaxPendingItems(parked))
+	if err := ApplyUpdateV2(roomy, update, nil); err != nil {
+		t.Fatalf("with room for its %d items the update was refused: %v", parked, err)
+	}
+	if got := roomy.GetText("t").ToString(); got != "ab" {
+		t.Fatalf("the text is %q, want %q", got, "ab")
+	}
+	if got := roomy.PendingStats().Items; got != parked {
+		t.Fatalf("%d items are parked, want %d", got, parked)
+	}
 }

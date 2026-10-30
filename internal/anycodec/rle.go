@@ -222,15 +222,33 @@ func (d *StringDecoder) Read() (string, error) {
 	return ReadStringChunk(d.str, &d.bytePos, l), nil
 }
 
-// ReadLen returns the next string's length in UTF-16 units, the unit the pool
-// is encoded in, without reading the string. The pool cursor stays behind, so
-// a decoder that has called ReadLen must not call Read again.
-func (d *StringDecoder) ReadLen() (uint64, error) { return d.lens.Read() }
-
-// ReadLenInRun is ReadLen for a length that repeats the current run of the
-// lengths column, without reading it, and false when the length needs
-// ReadLen. It is small enough to inline, for a reader of many lengths.
-func (d *StringDecoder) ReadLenInRun() (uint64, bool) { return d.lens.ReadInRun() }
+// ReadUnits steps over the next string without copying it and returns its
+// length in UTF-16 units as Read would decode it, which a short pool or a
+// split supplementary character makes differ from the lengths column.
+func (d *StringDecoder) ReadUnits() (uint64, error) {
+	l, err := d.lens.Read()
+	if err != nil {
+		return 0, err
+	}
+	// The same walk as AdvanceUTF16, with ASCII taken a byte at a time.
+	units, pos, counted := int(l), d.bytePos, 0
+	for counted < units && pos < len(d.str) {
+		if d.str[pos] < utf8.RuneSelf {
+			pos++
+			counted++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(d.str[pos:])
+		if r >= 0x10000 {
+			counted += 2
+		} else {
+			counted++
+		}
+		pos += size
+	}
+	d.bytePos = pos
+	return uint64(counted), nil
+}
 
 // ReadStringChunk advances a pool cursor by UTF-16 units without copying data.
 func ReadStringChunk(str string, bytePos *int, units uint64) string {
