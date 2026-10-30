@@ -90,7 +90,7 @@
 | **GC struct decoding (tag 0)** | ✅ | ✅ Fixed in v1.0.2 | ✅ | ygo pre-1.0.2 rejected tag-0 structs |
 | **Skip struct decoding (tag 10)** | ✅ | ✅ Fixed in v1.0.2 | ✅ | ygo pre-1.0.2 rejected tag-10 structs |
 | **Cross-client parent resolution** | ✅ | ✅ Fixed in v1.0.2–v1.0.3 | ✅ | Pending retry loop for items referencing later-decoded client groups |
-| **GC'd origin handling** | ✅ | ✅ Fixed in v1.0.3 | ✅ | Orphaned items encoded as GC structs; multi-client resolved via store scan |
+| **GC'd origin handling** | ✅ | ✅ Fixed in v1.0.3 and v1.54.1 | ✅ | An item whose origin or right origin is a GC struct is stored as a GC struct once both neighbours are present, as in Yjs; origins that name a GC struct are encoded unchanged |
 | **Out-of-order delta convergence** | ✅ `Store.pending` | ✅ `StructStore.pending` (inline retry, v1.2.0) | ✅ `pendingStructs` | parity — items with unresolved Origin/OriginRight are parked and retried on each subsequent apply; pendingDs mirrors JS pendingDs |
 
 ### 4.4 Undo / Redo

@@ -97,7 +97,7 @@ func encodeTxnV1Locked(txn *Transaction) []byte {
 	if len(perClient) == 0 && len(ds.clients) == 0 {
 		return nil
 	}
-	return encodeStructStoreV1(perClient, ds, txn.beforeState, store)
+	return encodeStructStoreV1(perClient, ds, txn.beforeState)
 }
 
 // EncodeStateAsUpdateV2 encodes the document state using the Yjs V2
@@ -115,7 +115,7 @@ func EncodeStateAsUpdateV2(doc *Doc, sv StateVector) []byte {
 // once the filler arrives. Kept out of encodeV1Locked so OnUpdate payloads
 // stay transaction-only, as in Yjs.
 func withParked(doc *Doc, sv StateVector, state []byte,
-	encode func(map[ClientID][]*Item, DeleteSet, StateVector, *StructStore) []byte,
+	encode func(map[ClientID][]*Item, DeleteSet, StateVector) []byte,
 	merge func(...[]byte) ([]byte, error)) []byte {
 	s := doc.store
 	if s.pending == nil && len(s.pendingDs.clients) == 0 {
@@ -125,11 +125,11 @@ func withParked(doc *Doc, sv StateVector, state []byte,
 	if s.pending != nil {
 		// One update per item: parked items may overlap, and merge dedups.
 		for _, it := range s.pending.items {
-			updates = append(updates, encode(map[ClientID][]*Item{it.ID.Client: {it}}, newDeleteSet(), sv, s))
+			updates = append(updates, encode(map[ClientID][]*Item{it.ID.Client: {it}}, newDeleteSet(), sv))
 		}
 	}
 	if len(s.pendingDs.clients) > 0 {
-		updates = append(updates, encode(nil, s.pendingDs, sv, s))
+		updates = append(updates, encode(nil, s.pendingDs, sv))
 	}
 	merged, err := merge(updates...)
 	if err != nil {
@@ -156,21 +156,21 @@ func ApplyUpdateV2(doc *Doc, update []byte, origin any) error {
 // update converts intact (integrating into a scratch doc parked such updates
 // and emitted an empty one; yjs convertUpdateFormatV1ToV2 parity).
 func UpdateV1ToV2(v1 []byte) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore([][]byte{v1}, decodeStructsV1)
+	perClient, ds, err := buildMergeStore([][]byte{v1}, decodeStructsV1)
 	if err != nil {
 		return nil, err
 	}
-	return encodeStructStoreV2(perClient, ds, StateVector{}, store), nil
+	return encodeStructStoreV2(perClient, ds, StateVector{}), nil
 }
 
 // UpdateV2ToV1 converts a real Yjs V2 update to V1 format, at the struct level
 // (see UpdateV1ToV2).
 func UpdateV2ToV1(v2 []byte) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore([][]byte{v2}, decodeStructsV2)
+	perClient, ds, err := buildMergeStore([][]byte{v2}, decodeStructsV2)
 	if err != nil {
 		return nil, err
 	}
-	return encodeStructStoreV1(perClient, ds, StateVector{}, store), nil
+	return encodeStructStoreV1(perClient, ds, StateVector{}), nil
 }
 
 // MergeUpdatesV1 and DiffUpdateV1 live in merge.go — they operate at the struct
@@ -256,27 +256,22 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 				if i == 0 && g.startClock > item.ID.Clock {
 					offset = int(g.startClock - item.ID.Clock)
 				}
-				encodeItem(enc, item, offset, doc.store)
+				encodeItem(enc, item, offset)
 			}
 		}
 		encodeDeleteSet(enc, deleteSet)
 	})
 }
 
-// isGCOrphan reports whether item carries no positional anchors at all — the
-// shape of a garbage-collected/deleted placeholder decoded from the wire GC
-// format, whose parent a receiver cannot infer. An item with a non-nil Origin,
-// OriginRight, or parentID is NOT an orphan even if its Parent is momentarily
-// unresolved (e.g. its anchor lives outside a merge input set): its origin must
-// be preserved on the wire so the receiver can resolve the parent once it has
-// the dependency. Stripping such an origin detaches the item (#149-class merge
-// corruption).
+// isGCOrphan reports whether item is a GC struct: no parent, origins or parent
+// ID. An item whose parent is only unresolved keeps an origin or parent ID.
 func (item *Item) isGCOrphan() bool {
 	return item.Parent == nil && item.Origin == nil && item.OriginRight == nil && item.parentID == nil
 }
 
-// markGCOrphan turns an item whose parent cannot be resolved into the GC struct
-// Yjs integrates it as: deleted, length-only content, and no parent or origins.
+// markGCOrphan turns item into the GC struct Yjs integrates it as when its
+// parent cannot be resolved or a neighbour is a GC struct: deleted,
+// length-only content, and no parent or origins.
 // It then encodes as a GC struct, and nothing can resolve a parent through it,
 // so children that arrive later are orphaned too instead of integrating into a
 // detached type.
@@ -290,7 +285,7 @@ func (item *Item) markGCOrphan() {
 	item.OriginRight = nil
 }
 
-func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStore) {
+func encodeItem(enc *encoding.Encoder, item *Item, offset int) {
 	// Orphaned items (no parent) came from GC wire format where the parent
 	// type name is lost. Encode them as GC structs so receivers get valid
 	// clock accounting instead of corrupt data.
@@ -354,21 +349,6 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 		originRight = item.OriginRight
 	}
 
-	// If the origin item is a GC placeholder (no Parent), the receiver can't
-	// infer this item's parent from it. Clear the origin so that explicit
-	// parent info is encoded instead, allowing the receiver to resolve the
-	// parent directly from the named root type or container item ID.
-	if origin != nil {
-		if oi := store.Find(*origin); oi != nil && oi.isGCOrphan() {
-			origin = nil
-		}
-	}
-	if originRight != nil {
-		if ori := store.Find(*originRight); ori != nil && ori.isGCOrphan() {
-			originRight = nil
-		}
-	}
-
 	info := tag
 	if origin != nil {
 		info |= flagHasOrigin
@@ -408,20 +388,13 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 			// integrated (its container is in a later client group), so Parent
 			// is still nil while parentID holds the container's ID. Re-emit the
 			// explicit parent-by-ID so the receiver can defer and resolve it too.
-			// Without this the struct-level MergeUpdatesV1/DiffUpdateV1 encode
-			// path falls through to the root-named-type branch below and writes
-			// an empty name, detaching the child (silent data loss). (#140)
 			enc.WriteUint8(0)
 			enc.WriteVarUint(uint64(item.parentID.Client))
 			enc.WriteVarUint(item.parentID.Clock)
 		} else {
-			// Root named type.
+			// Root named type; an item with no parent is a GC struct, written above.
 			enc.WriteUint8(1)
-			name := ""
-			if item.Parent != nil {
-				name = item.Parent.name
-			}
-			enc.WriteVarString(name)
+			enc.WriteVarString(item.Parent.name)
 		}
 
 		if item.ParentSub != nil {
@@ -1439,10 +1412,10 @@ func appendTrimmed(store *StructStore, item *Item, existingEnd uint64) {
 	store.Append(item)
 }
 
-// tryIntegrate attempts to integrate item into the doc store. Returns
-// true on success (item is now integrated into the linked list, or
-// stored as an orphan when its parent is truly unresolvable). Returns
-// false if blocked on a future-clock dependency — the caller should
+// tryIntegrate attempts to integrate item into the doc store. Returns true on
+// success (item is now integrated into the linked list, or stored as a GC
+// struct when its parent is truly unresolvable or a neighbour is a GC struct).
+// Returns false if blocked on a future-clock dependency — the caller should
 // leave it in the pending queue.
 //
 // Used by the inline retry loop to drain pending items that may now
