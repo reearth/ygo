@@ -147,6 +147,51 @@ func TestHocuspocusFraming_AwarenessEchoesToSender(t *testing.T) {
 	}
 }
 
+// TestHocuspocusFraming_ReadOnlyAwarenessReplyIsFixed checks that a read-only
+// peer's awareness update, however large, is answered with the same three
+// bytes after the docName prefix: an awareness message naming no client. The
+// reply never carries the peer's own payload.
+func TestHocuspocusFraming_ReadOnlyAwarenessReplyIsFixed(t *testing.T) {
+	srv := NewServer()
+	srv.HocuspocusFraming = true
+	srv.Authorize = func(*http.Request) (ConnectionConfig, bool) {
+		return ConnectionConfig{ReadOnly: true}, true
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	room := "doc-room"
+	c := dialRoomInternal(t, ts, room)
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for range 3 {
+		_, _, err := c.ReadMessage()
+		require.NoError(t, err)
+	}
+	_ = c.SetReadDeadline(time.Time{})
+
+	want := []byte{byte(msgAwareness), 1, 0}
+	for i, size := range []int{8, 64 << 10, 900 << 10} {
+		sender := awareness.New(uint64(42 + i))
+		sender.SetLocalState(map[string]any{"blob": strings.Repeat("x", size)})
+		require.NoError(t, c.WriteMessage(gws.BinaryMessage, encoding.EncodeBytes(func(enc *encoding.Encoder) {
+			enc.WriteVarString(room)
+			enc.WriteVarUint(msgAwareness)
+			enc.WriteVarBytes(sender.EncodeUpdate(nil))
+		})), "state of %d bytes", size)
+
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := c.ReadMessage()
+		require.NoError(t, err, "state of %d bytes", size)
+		_ = c.SetReadDeadline(time.Time{})
+		dec := encoding.NewDecoder(data)
+		name, err := dec.ReadVarString()
+		require.NoError(t, err)
+		require.Equal(t, room, name)
+		require.Equal(t, want, dec.RemainingBytes(), "state of %d bytes", size)
+	}
+}
+
 // TestInbandAuth_Authenticated_ReadWrite verifies the success path of the
 // Hocuspocus in-band Auth (tag 2) sub-protocol: a Server.OnTokenAuth hook that
 // accepts the token results in an Authenticated (sub-type 2) reply carrying
