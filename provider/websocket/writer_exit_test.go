@@ -42,10 +42,9 @@ func TestInteg_WriterExit_TimedOutWriteTearsDownPeer(t *testing.T) {
 	defer conn.Close()
 	start := time.Now()
 
-	// The client never reads, and net.Pipe has no buffer, so the server's first
-	// write times out. Its SyncStep1 frames keep the read side busy at a rate far
-	// below the default write queue size (512), so a queue overflow cannot be
-	// what tears the peer down.
+	// The client never reads an unbuffered net.Pipe, so the server's first write
+	// times out while slow SyncStep1 frames keep the read side busy without
+	// overflowing the write queue.
 	step1 := encoding.EncodeBytes(func(enc *encoding.Encoder) {
 		enc.WriteVarUint(0) // outer msgSync
 		enc.WriteRaw(ygsync.EncodeSyncStep1(crdt.New()))

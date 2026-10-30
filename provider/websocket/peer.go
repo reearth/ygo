@@ -856,10 +856,8 @@ func (p *peer) write(data []byte) {
 	p.wmu.Unlock()
 }
 
-// runWriter is the dedicated per-peer broadcast writer. It drains writeCh
-// and serialises writes to the connection. Exits when writeCh is closed
-// (during teardown) or when a write fails (writeToConn then closes the
-// connection, so the read loop tears down the peer).
+// runWriter is the dedicated per-peer broadcast writer, serialising writeCh
+// to the connection until writeCh closes or a write fails.
 //
 // This pattern mirrors Rust yrs-warp's per-peer sink task. It replaces
 // the previous "spawn one goroutine per peer per broadcast" model, which
@@ -899,10 +897,8 @@ func (p *peer) runWriter() {
 // disconnect path and teardown — to run concurrently with a write. Returns false
 // when the writer goroutine should exit.
 //
-// A failed write closes the connection, because gorilla's read side keeps
-// working after a write timeout and the peer would stay in its room otherwise.
-// It also sets inputClosed, so the read loop drops the frames still in its
-// read buffer instead of answering a peer that no writer serves.
+// A failed write closes the connection and sets inputClosed, because gorilla's
+// read side outlives a write timeout and would keep the peer in its room.
 func (p *peer) writeToConn(data []byte) bool {
 	p.wmu.Lock()
 	closed := p.closed
