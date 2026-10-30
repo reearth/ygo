@@ -501,3 +501,33 @@ func TestUnit_ApplyUpdate_DeletingMoreThanTheCapOfItsOwnStructsApplies(t *testin
 		})
 	}
 }
+
+// A malformed update of several groups must be refused with the error text
+// it has on main, so the parked-delete check adds no layer of wrapping.
+func TestUnit_ApplyUpdate_AMalformedMultiGroupUpdateKeepsItsErrorText(t *testing.T) {
+	want := wrapUpdateErr(ErrInvalidUpdate).Error()
+	merged, err := MergeUpdatesV1(textState(5, "abc"), textState(6, "def"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, format := range applyFormats {
+		t.Run(format.name, func(t *testing.T) {
+			update := merged
+			if format.v2 {
+				if update, err = UpdateV1ToV2(merged); err != nil {
+					t.Fatal(err)
+				}
+			}
+			truncated := update[:len(update)-4]
+			var got error
+			if format.v2 {
+				got = ApplyUpdateV2(New(), truncated, nil)
+			} else {
+				got = ApplyUpdateV1(New(), truncated, nil)
+			}
+			if !errors.Is(got, ErrInvalidUpdate) || got.Error() != want {
+				t.Fatalf("the truncated update was applied with err %v, want %q", got, want)
+			}
+		})
+	}
+}

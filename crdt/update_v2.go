@@ -639,15 +639,16 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 
 	var pending []*Item
-	var superseded groupSet
 	if numClients > 1 {
 		// Fail before integrating anything: a later malformed group must not
 		// leave earlier, superseded groups applied.
-		if superseded, err = supersededGroups(update, &initialV2, budget.v2Rest); err != nil {
+		if err := budget.knowSuperseded(); err != nil {
 			return wrapUpdateErr(err)
 		}
+	} else if !budget.groupsKnown {
+		budget.setSuperseded(nil)
 	}
-	budget.setSuperseded(superseded)
+	superseded := budget.superseded
 
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {

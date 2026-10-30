@@ -58,7 +58,7 @@ func (b *pendingBudget) check(count int) error {
 		return nil
 	}
 	if err := b.knowSuperseded(); err != nil {
-		return err
+		return wrapUpdateErr(err)
 	}
 	known := make(StateVector, len(b.initial))
 	for client, clock := range b.initial {
@@ -140,7 +140,7 @@ func (b *pendingBudget) check(count int) error {
 }
 
 // knowSuperseded finds the groups the decoder drops, when the apply has not
-// recorded them yet.
+// recorded them yet; its error is unwrapped, for the caller to wrap.
 func (b *pendingBudget) knowSuperseded() error {
 	if b.groupsKnown {
 		return nil
@@ -149,13 +149,13 @@ func (b *pendingBudget) knowSuperseded() error {
 	if b.v2 && v2 == nil {
 		dec, err := newV2Decoder(b.update)
 		if err != nil {
-			return wrapUpdateErr(err)
+			return err
 		}
 		v2, rest = dec, *dec.restDec
 	}
 	superseded, err := supersededGroups(b.update, v2, rest)
 	if err != nil {
-		return wrapUpdateErr(err)
+		return err
 	}
 	b.setSuperseded(superseded)
 	return nil
