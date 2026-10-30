@@ -82,7 +82,9 @@ func TestUnit_ApplyUpdate_TheParkedDeletesCheckedAreWhatTheApplyParks(t *testing
 			}
 			has, all := receiver.StateVector(), sender.StateVector()
 			claimed := make(StateVector, len(all))
-			for client, clock := range all {
+			// In client order, so the draws, and the update, are the same each run.
+			for _, client := range slices.Sorted(maps.Keys(all)) {
+				clock := all[client]
 				claimed[client] = has.Clock(client)
 				if clock > has.Clock(client) {
 					claimed[client] += uint64(rng.Int64N(int64(clock - has.Clock(client) + 1)))

@@ -2,9 +2,13 @@ package crdt
 
 import (
 	"cmp"
+	"encoding/binary"
 	"math"
 	"slices"
 	"sort"
+
+	"github.com/reearth/ygo/encoding"
+	"github.com/reearth/ygo/internal/anycodec"
 )
 
 // DeleteRange is a contiguous range of deleted clocks for a single client.
@@ -305,10 +309,12 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 // It costs what the update can do. Each range of a delete set takes two bytes
 // of the update at least, its clock and its length, so an update too short to
 // carry more ranges than the cap has room for costs a comparison: a keystroke
-// on a document below the cap is never read twice. A longer one is read past
-// its structs for its delete set, and only when more of its ranges reach past
-// the store than the cap has room for are the clocks its structs leave
-// resolved (structClocksOf).
+// on a document below the cap is never read twice. A longer one is walked
+// once past its struct section (frameStructs), and the ranges of its delete
+// set that could park are counted as they are read, keeping nothing
+// (parkingRangesBound). Only when that bound passes the room left does the
+// exact check run: the delete set decoded (deleteSetOf) and the clocks its
+// structs leave resolved (structClocksOf).
 func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	limit := doc.maxPendingItemsLimit()
 	pending := doc.store.pendingDs
@@ -318,6 +324,15 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	}
 	room := max(limit-before, 0)
 	if len(b.update)/2 <= room {
+		return nil
+	}
+	s := b.scanner()
+	if _, err := frameStructs(s); err != nil {
+		return wrapUpdateErr(err)
+	}
+	if n, err := parkingRangesBound(s, b.initial); err != nil {
+		return wrapUpdateErr(err)
+	} else if n <= room {
 		return nil
 	}
 	ds, err := deleteSetOf(b.scanner(), b.v2)
@@ -341,33 +356,227 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 // deleteSetOf is the delete set of the update s scans, a V1 one or a V2 one,
 // read past its structs without keeping anything of them.
 func deleteSetOf(s *pendingScanner, v2 bool) (DeleteSet, error) {
-	if s.err != nil {
-		return DeleteSet{}, s.err
-	}
-	clients := s.uint()
-	if clients > maxV2Items {
-		return DeleteSet{}, ErrInvalidUpdate
-	}
-	var total uint64
-	for i := uint64(0); i < clients && s.err == nil; i++ {
-		n := s.uint()
-		total += n
-		if total > maxV2Items {
-			return DeleteSet{}, ErrInvalidUpdate
-		}
-		s.client()
-		s.uint()
-		for j := uint64(0); j < n && s.err == nil; j++ {
-			s.item()
-		}
-	}
-	if s.err != nil {
-		return DeleteSet{}, s.err
+	if _, err := frameStructs(s); err != nil {
+		return DeleteSet{}, err
 	}
 	if v2 {
 		return decodeDeleteSetV2(s.v2)
 	}
 	return decodeDeleteSet(s.rest)
+}
+
+// frameStructs reads the update s scans past its struct section, so that s
+// stands at its delete set, and is how many structs the section holds, skips
+// included. It reads only what it takes to find each struct's end, and checks
+// nothing more: a V2 update's group headers and the rest content of its
+// structs (v2StructCount), and of a V1 update each struct's info, origins,
+// parent and content, with strings and values stepped over by their length,
+// unread (frameV1Structs).
+func frameStructs(s *pendingScanner) (int, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	if s.v2 != nil {
+		n, ok := v2StructCount(s.v2, true)
+		if !ok {
+			return 0, ErrInvalidUpdate
+		}
+		return n, nil
+	}
+	buf := s.rest.RemainingBytes()
+	n, end, err := frameV1Structs(buf)
+	if err != nil {
+		return 0, err
+	}
+	*s.rest = *encoding.NewDecoder(buf[end:])
+	return n, nil
+}
+
+// frameV1Structs steps over the struct section at the start of buf, a V1
+// update, as decodeItem and decodeContent read it, without decoding its
+// strings or values, and is how many structs it holds and where it ends. It
+// works on the bytes directly, a varint at a time. JSON content keeps the
+// pending scanner's reading, since whether its values are JSON or legacy Any
+// decides where they end.
+func frameV1Structs(buf []byte) (structs, end int, err error) {
+	p := 0
+	bad := false
+	next := func() uint64 {
+		v, n := binary.Uvarint(buf[p:])
+		if n <= 0 {
+			bad = true
+			return 0
+		}
+		p += n
+		return v
+	}
+	skipBytes := func() {
+		l := next()
+		if bad || l > uint64(len(buf)-p) {
+			bad = true
+			return
+		}
+		p += int(l)
+	}
+	skipAny := func() {
+		n, err := anycodec.Skip(buf[p:])
+		if err != nil {
+			bad = true
+			return
+		}
+		p += n
+	}
+	clients := next()
+	if bad || clients > maxV2Items {
+		return 0, 0, ErrInvalidUpdate
+	}
+	var total uint64
+	for range clients {
+		n := next()
+		total += n
+		if bad || total > maxV2Items {
+			return 0, 0, ErrInvalidUpdate
+		}
+		next() // client
+		next() // clock
+		for range n {
+			if bad || p >= len(buf) {
+				return 0, 0, ErrInvalidUpdate
+			}
+			info := buf[p]
+			p++
+			tag := info & 0x1f
+			if tag == 0 || tag == 10 {
+				next()
+				continue
+			}
+			if info&flagHasOrigin != 0 {
+				next()
+				next()
+			}
+			if info&flagHasRightOrigin != 0 {
+				next()
+				next()
+			}
+			if info&(flagHasOrigin|flagHasRightOrigin) == 0 {
+				if bad || p >= len(buf) {
+					return 0, 0, ErrInvalidUpdate
+				}
+				named := buf[p] == 1
+				p++
+				if named {
+					skipBytes()
+				} else {
+					next()
+					next()
+				}
+				if info&flagHasParentSub != 0 {
+					skipBytes()
+				}
+			}
+			if bad {
+				return 0, 0, ErrInvalidUpdate
+			}
+			switch tag {
+			case wireDeleted:
+				next()
+			case wireJSON:
+				d := encoding.NewDecoder(buf[p:])
+				js := pendingScanner{rest: d}
+				js.content(tag)
+				if js.err != nil {
+					return 0, 0, js.err
+				}
+				p = len(buf) - d.Remaining()
+			case wireBinary, wireString, wireEmbed:
+				skipBytes()
+			case wireFormat:
+				skipBytes()
+				skipBytes()
+			case wireType:
+				if p >= len(buf) {
+					return 0, 0, ErrInvalidUpdate
+				}
+				ref := buf[p]
+				p++
+				if ref == 3 || ref == 5 {
+					skipBytes()
+				}
+			case wireAny:
+				values := next()
+				if bad || values > uint64(len(buf)-p) {
+					return 0, 0, ErrInvalidUpdate
+				}
+				for range values {
+					if skipAny(); bad {
+						break
+					}
+				}
+			case wireDoc:
+				skipBytes()
+				skipAny()
+			case wireMove:
+				next()
+				next()
+				next()
+			default:
+				return 0, 0, ErrInvalidUpdate
+			}
+		}
+	}
+	if bad {
+		return 0, 0, ErrInvalidUpdate
+	}
+	return int(total), p, nil
+}
+
+// parkingRangesBound reads the delete set s stands at, keeping nothing of it,
+// and is how many of its ranges would park some part on a store whose state
+// vector is sv: a bound on what the update parks (parkingRanges), since its
+// structs only move the store's clocks past sv and the decoder's merge of
+// ranges only joins them. It allocates nothing.
+func parkingRangesBound(s *pendingScanner, sv StateVector) (int, error) {
+	clients := s.uint()
+	if s.err != nil {
+		return 0, s.err
+	}
+	if clients > maxV2Items {
+		return 0, ErrInvalidUpdate
+	}
+	n := 0
+	for range clients {
+		var clock, length uint64
+		var err error
+		if s.v2 != nil {
+			s.v2.resetDsCurVal()
+		}
+		client := ClientID(s.uint())
+		ranges := s.uint()
+		if s.err != nil {
+			return 0, s.err
+		}
+		if ranges > maxV2Items {
+			return 0, ErrInvalidUpdate
+		}
+		next := sv.Clock(client)
+		for range ranges {
+			if s.v2 != nil {
+				if clock, err = s.v2.readDsClock(); err == nil {
+					length, err = s.v2.readDsLen()
+				}
+			} else {
+				clock, length = s.uint(), s.uint()
+				err = s.err
+			}
+			if err != nil {
+				return 0, err
+			}
+			if _, parks := parkedPart(DeleteRange{Clock: clock, Len: length}, next); parks {
+				n++
+			}
+		}
+	}
+	return n, nil
 }
 
 // structClocksOf is the store's state vector once the structs of b's update

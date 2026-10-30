@@ -32,10 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   observer told. The count is taken after the merge, and an update that adds
   no range is never refused, so a delete set a peer sends again, or ranges that
   join parked ones, pass. An update too short to carry more ranges than the cap
-  has room for, such as a keystroke, is not read again for the check. An
-  honest peer deletes only what it holds and sends a struct before or with any
-  delete of it, so its deletes park only while its updates arrive out of
-  order, and only until the structs they name do.
+  has room for, such as a keystroke, is not read again for the check. A longer
+  one is walked once to its delete set, whose ranges that could park are
+  counted as they are read; only an update with more of them than the room
+  left is decoded for the exact count. An honest peer deletes only what it
+  holds and sends a struct before or with any delete of it, so its deletes
+  park only while its updates arrive out of order, and only until the structs
+  they name do.
 - **`crdt`: `Doc.SetMaxPendingItems`, and `provider/websocket` loads a room's
   stored state with the pending cap lifted.** A stored state carries what was
   parked when it was written, which can be more than the cap, so a document
