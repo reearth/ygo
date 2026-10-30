@@ -6,11 +6,7 @@ import (
 	"sort"
 )
 
-// The pending queue parks a re-sent struct once, as Yjs does, because
-// reconnects and stored states re-send structs it already parks.
-// unparked trims only an arrival's front and tail, so one that spans a gap in
-// the queue's clocks parks the clocks held past the gap again, where Yjs
-// holds each clock once.
+// The pending queue parks a re-sent struct once, as Yjs does, since reconnects and stored states re-send parked structs.
 
 // clockSpan is the clocks [start, end) of one client.
 type clockSpan struct{ start, end uint64 }
@@ -216,8 +212,7 @@ func (p *pendingUpdate) heldTailFrom(client ClientID, start, end uint64, gc bool
 	return spans[i].start
 }
 
-// unparked is item without the clocks the pending queue already holds at its
-// start and end, as Yjs merges pending structs.
+// unparked trims only item's held front and tail, so an arrival spanning a gap in the queue's clocks parks the clocks past the gap again.
 func unparked(s *StructStore, item *Item, from uint64) *Item {
 	p := s.pending
 	if p == nil {

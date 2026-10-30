@@ -11,9 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// parkedTail is a writer, client 2, that holds client 9's "ab" and typed n
-// characters after it one keystroke at a time: keystrokes are its updates,
-// tail is everything after "ab" in one update, and ab is client 9's edit.
+// parkedTail returns client 2's per-keystroke updates after client 9's "ab", their combined tail, "ab" itself, and the writer.
 func parkedTail(t *testing.T, n int) (keystrokes [][]byte, tail, ab []byte, writer *Doc) {
 	t.Helper()
 	other := New(WithClientID(9))
@@ -40,10 +38,7 @@ func applyVersioned(t *testing.T, doc *Doc, v2 bool, update []byte) error {
 	return ApplyUpdateV2(doc, converted, nil)
 }
 
-// The same parked update applied again, or the stored state that holds it,
-// parks nothing again (Yjs merges its pending structs): the pending count
-// stays as it was, and a document whose pending cap is exactly that count
-// refuses none of the resends.
+// A resent parked update or stored state parks nothing again, as Yjs merges its pending structs.
 func TestUnit_PendingQueue_AResentParkedStructParksOnce(t *testing.T) {
 	const n = 5
 	keystrokes, tail, ab, writer := parkedTail(t, n)
@@ -52,7 +47,7 @@ func TestUnit_PendingQueue_AResentParkedStructParksOnce(t *testing.T) {
 		for _, k := range keystrokes {
 			require.NoError(t, applyVersioned(t, room, v2, k), "v2=%v", v2)
 		}
-		require.Equal(t, n, room.PendingStats().Items, "v2=%v", v2)
+		require.Equal(t, n, room.PendingStats().Items, "v2=%v: a cap of exactly the pending count must refuse no resend", v2)
 		stored := EncodeStateAsUpdateV1(room, nil)
 		for i := range 3 {
 			require.NoError(t, applyVersioned(t, room, v2, tail), "v2=%v: tail resend %d", v2, i+1)
@@ -97,10 +92,7 @@ func TestUnit_PendingQueue_AResendLongerThanTheParkedTailParksItsNewClocks(t *te
 	}
 }
 
-// A resend of a deleted struct (not a GC placeholder) whose first clocks the
-// queue holds is sliced with the clock before the slice as its origin, as any
-// other struct is, and the document converges with one that got only the
-// longer struct.
+// A resent deleted struct whose first clocks the queue holds is sliced like any other struct.
 func TestUnit_PendingQueue_ASlicedDeletedStructContinuesTheParkedOne(t *testing.T) {
 	craft := func(n int) []byte {
 		it := &Item{ID: ID{Client: 2, Clock: 0}, Origin: &ID{Client: 9, Clock: 1}, Content: NewContentDeleted(n), Deleted: true}
@@ -116,6 +108,7 @@ func TestUnit_PendingQueue_ASlicedDeletedStructContinuesTheParkedOne(t *testing.
 	require.Equal(t, 2, room.PendingStats().Items)
 	require.NoError(t, ApplyUpdateV1(room, ab, nil))
 
+	// The room must converge with a document that got only the longer struct.
 	direct := New(WithClientID(3))
 	require.NoError(t, ApplyUpdateV1(direct, craft(5), nil))
 	require.NoError(t, ApplyUpdateV1(direct, ab, nil))
@@ -156,20 +149,18 @@ func TestUnit_PendingQueue_AResendWhoseTailIsParkedParksItsHead(t *testing.T) {
 	}
 }
 
-// A struct the queue holds, arriving again as a GC struct that can integrate,
-// integrates: an update first integrates what it can and only what it leaves
-// merges with the queue, as in Yjs. The updates are Yjs-encoded: the room
-// parks client 3's entries of client 1's nested array, which it lacks; a
-// GC'd peer's state then carries those clocks as a GC struct, behind client
-// 3's "c", which waits on client 2's group later in the same update; then
-// client 3 types "z" after "c". The texts are what Yjs 13.6 shows after each.
+// A held struct that arrives again as an integrable GC struct integrates, as in Yjs, which merges only what an update leaves.
 func TestUnit_PendingQueue_AHeldStructThatCanIntegrateIntegrates(t *testing.T) {
 	updates := []string{
+		// The room parks client 3's entries of client 1's nested array, which it lacks.
 		"AQEDAQgAAQACdwF4dwF5AA==",
+		// A GC'd peer's state carries those clocks as a GC struct, behind client 3's "c", which waits on client 2's later group.
 		"AgIDAIQCAAFjAAIBAgAEAQF0AWICAwEBAgEBAAE=",
+		// Client 3 types "z" after "c".
 		"AQEDA4QDAAF6AgMBAQIBAQAB",
 		"AQEBAAcBAWEAAA==",
 	}
+	// The texts Yjs 13.6 shows after each update.
 	yjs := []string{"", "bc", "bcz", "bcz"}
 	for _, v2 := range []bool{false, true} {
 		room := New(WithClientID(9))
