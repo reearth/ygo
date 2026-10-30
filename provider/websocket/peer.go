@@ -39,11 +39,11 @@ type peer struct {
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
 	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
-	inputClosed       atomic.Bool   // a close is queued or sent, or the queue overflowed; the read loop drops input from then on
+	inputClosed       atomic.Bool   // set before the server closes, or starts to close, the connection while the read loop runs; the read loop drops input from then on
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
-	// conn.Close() triggering the read loop while a ctx-cancel path also calls
+	// closeConn() waking the read loop while a ctx-cancel path also calls
 	// handleDisconnect). The closed bool under wmu is still needed for the
 	// per-operation guards in broadcast/write/runWriter.
 	disconnectOnce sync.Once
@@ -199,7 +199,7 @@ func (p *peer) handleMessage(data []byte) {
 		reason, _ := dec.ReadVarString() // optional; silent on parse error
 		p.server.log().Info("peer requested close",
 			"room", p.roomName, "reason", reason)
-		_ = p.conn.Close()
+		p.closeConn()
 
 	case msgSyncStatus:
 		// Hocuspocus tag 8 (#55). Server→client ack carrying a single
@@ -491,7 +491,7 @@ func (p *peer) trackAwarenessClients(payload []byte) {
 // removal for all clientIDs the peer owned.
 //
 // disconnectOnce ensures the full teardown body runs at most once even when
-// multiple callers race — e.g. broadcast()'s conn.Close() waking the read loop
+// multiple callers race — e.g. broadcast()'s closeConn() waking the read loop
 // while the ctx-cancel goroutine concurrently reaches this point.
 func (p *peer) handleDisconnect() {
 	p.disconnectOnce.Do(func() {
@@ -819,13 +819,11 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 					"room", other.roomName,
 					"queueSize", cap(other.writeCh))
 			} else {
-				// Disconnect the slow peer; the read loop drops what it already
-				// sent and runs handleDisconnect.
+				// Disconnect the slow peer; the read loop runs handleDisconnect.
 				p.server.log().Warn("peer write queue full; closing slow peer",
 					"room", other.roomName,
 					"queueSize", cap(other.writeCh))
-				other.inputClosed.Store(true)
-				_ = other.conn.Close()
+				other.closeConn()
 			}
 		}
 		other.wmu.Unlock()
@@ -849,15 +847,22 @@ func (p *peer) write(data []byte) {
 	default:
 		// Queue full during a direct send (e.g. handshake reply) — disconnect.
 		// Unlike a silent drop, closing the connection lets the CRDT
-		// pending-structs machinery recover via reconnect-and-resync. The
-		// read loop drops what the peer already sent, so it is not answered.
+		// pending-structs machinery recover via reconnect-and-resync.
 		p.server.log().Warn("peer write queue full during direct send; closing peer",
 			"room", p.roomName,
 			"queueSize", cap(p.writeCh))
-		p.inputClosed.Store(true)
-		_ = p.conn.Close()
+		p.closeConn()
 	}
 	p.wmu.Unlock()
+}
+
+// closeConn closes the connection, and the read loop drops whatever the peer
+// sent that it has not handled yet: frames left in its read buffer are not
+// answered or applied. A client sends its updates again when it reconnects.
+// Safe from any goroutine.
+func (p *peer) closeConn() {
+	p.inputClosed.Store(true)
+	_ = p.conn.Close()
 }
 
 // runWriter is the dedicated per-peer broadcast writer. It drains writeCh

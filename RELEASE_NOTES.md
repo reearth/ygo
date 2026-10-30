@@ -1,16 +1,20 @@
 ## v1.54.1
 
-**Who is affected: a `provider/websocket` server with a peer that fills its
-write queue.**
+**Who is affected: a `provider/websocket` server that closes connections
+itself.**
 
-When a peer's write queue (`PeerWriteQueueSize`, 512 frames by default)
-overflowed, the server closed the connection, but the read loop still handled
-the messages already in its read buffer (up to about 4 KiB). Each buffered
-SyncStep1 made the server encode the room's full state, then refuse it and log
-a warning. The read loop
-now drops that input, as it already did after a queued close. A client that
-reconnects sends its updates again in the sync exchange. No API or wire format
-changes.
+When the server closed a connection for a full write queue
+(`PeerWriteQueueSize`, 512 frames by default, on a direct send or on a
+broadcast under `SlowPeerDisconnect`), a Hocuspocus close message, a
+cancelled request context without a close code, `Shutdown`, or
+`CloseRoom(name, true)`, the read loop still handled the messages already in
+its read buffer (up to about 4 KiB). A buffered SyncStep1 made the server
+encode the room's full state. A buffered update was applied to the room after
+the close, and stored too after `Shutdown` or `CloseRoom`. The read loop now
+drops that input, as it already did after a queued close. Updates a client
+sent but the server had not read when it closed the connection are not saved.
+A client that reconnects sends them again in the sync exchange. No API or wire
+format changes.
 
 ## v1.54.0
 
