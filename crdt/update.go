@@ -561,12 +561,6 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 
 	// Snapshot state vector before applying anything (used for skip/offset logic).
 	sv := txn.doc.store.StateVector()
-	budget := newPendingBudget(txn.doc, sv, update, false)
-	if err := budget.checkBeforeApply(len(update)); err != nil {
-		// Refused before anything changed: the commit tells no observer.
-		txn.refused = true
-		return err
-	}
 
 	numClients, err := dec.ReadVarUint()
 	if err != nil {
@@ -575,11 +569,26 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	if numClients > uint64(len(update)/2) || numClients > maxV2Items {
 		return ErrInvalidUpdate
 	}
+	var superseded groupSet
+	if numClients > 1 {
+		// Fail before integrating anything: a later malformed group must not
+		// leave earlier, superseded groups applied.
+		if superseded, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
+			return wrapUpdateErr(err)
+		}
+	}
+	budget := newPendingBudget(txn.doc, sv, update, false)
+	budget.setSuperseded(superseded)
+	if err := budget.checkBeforeApply(len(update)); err != nil {
+		// Refused before anything changed: the commit tells no observer.
+		txn.refused = true
+		return err
+	}
 
 	// 1. Decode all items, parking any with future-clock deps or same-client gaps.
 	//    Returns the within-update pending list (items whose parent might resolve
 	//    later in this same update).
-	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, update)
+	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, superseded)
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
@@ -613,21 +622,13 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 //	(e) collects items whose parent is unresolved-but-might-be-in-this-update
 //	    into the returned slice for the within-update retry pass.
 //
-// Groups that a later group for the same client supersedes are decoded and
-// dropped (yjs parity). numClients is the count parsed from the header. The
-// apply checked the update against the pending cap before calling it
+// Groups that a later group for the same client supersedes (superseded, which
+// the apply found before it decoded anything) are decoded and dropped (yjs
+// parity). numClients is the count parsed from the header. The apply checked
+// the update against the pending cap before calling it
 // (pendingBudget.checkBeforeApply), so nothing it defers can pass the cap.
-func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, update []byte) ([]*Item, error) {
+func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, superseded groupSet) ([]*Item, error) {
 	var pending []*Item
-	var superseded groupSet
-	if numClients > 1 {
-		// Fail before integrating anything: a later malformed group must not
-		// leave earlier, superseded groups applied.
-		var err error
-		if superseded, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
-			return nil, err
-		}
-	}
 
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {

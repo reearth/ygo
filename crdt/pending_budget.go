@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -55,49 +56,234 @@ func (b *pendingBudget) scanner() *pendingScanner {
 
 // checkBeforeApply refuses the update, before the apply integrates any of it,
 // when its structs would leave more items parked than the pending cap has
-// room for. size is the update's length in bytes. An update with no more
-// structs than the room left cannot pass the cap and is not checked further:
-// a V1 struct takes two bytes of the update at least, so a V1 update of at
-// most twice the room costs a comparison; a V2 update, whose columns can hold
-// many structs in a few bytes, has its structs counted from its group headers
-// first (v2StructCount), which reads no origin, parent or text. Any other
-// update gets the full preflight (check), which decides the refusal.
+// room for. size is the update's length in bytes. It costs what the update
+// can do. A bound that costs nothing to read comes first (mayParkPastRoom):
+// an update that cannot pass the room left, as every keystroke on a document
+// below the cap cannot, is not read. Otherwise one walk of its struct section
+// (walkStructs) counts its structs, reading no string or value. Only a count
+// past the room left runs the exact preflight (check), which decides the
+// refusal. An update whose struct section the walk cannot read is refused:
+// the apply would fail inside that section, after the structs before the
+// failure had integrated.
 //
 // For V2 it must run before the apply reads from its decoder: it reads the
 // apply's own rest cursor and puts it back where the apply began.
 func (b *pendingBudget) checkBeforeApply(size int) error {
-	if !b.v2 && size/2 <= b.remaining {
+	if !b.mayParkPastRoom(size) {
 		return nil
 	}
-	if b.v2 && b.v2Start != nil {
-		// The count reads a copy of the update's own column cursors, on the
-		// stack, and the apply's own rest cursor, which has read nothing yet
-		// and is put back where it began, so it allocates nothing. An update
-		// whose headers do not read is checked by check, which returns the
-		// error.
-		v2 := *b.v2Start
-		n, ok := v2StructCount(&v2)
-		*v2.restDec = b.v2Rest
-		if ok && n <= b.remaining {
-			return nil
-		}
+	n, ok := b.walkStructs()
+	if !ok {
+		return ErrInvalidUpdate
+	}
+	if n <= b.remaining {
+		return nil
 	}
 	return b.check(b.remaining)
+}
+
+// walkStructs is how many structs the update's struct section holds, skips
+// included (a bound on what it can park), read by one walk to the section's
+// end, and whether the walk read the section: frameV1Structs on a V1
+// update's bytes, v2StructCount to the end on a V2 one. It allocates nothing
+// but for JSON content: the V2 walk reads a copy of the update's own column
+// cursors, on the stack, and the apply's own rest cursor, which has read
+// nothing yet and is put back where it began.
+func (b *pendingBudget) walkStructs() (int, bool) {
+	if !b.v2 {
+		n, _, err := frameV1Structs(b.update)
+		return n, err == nil
+	}
+	if b.v2Start == nil {
+		d, err := newV2Decoder(b.update)
+		if err != nil {
+			return 0, false
+		}
+		return v2StructCount(d, true)
+	}
+	v2 := *b.v2Start
+	n, ok := v2StructCount(&v2, true)
+	*v2.restDec = b.v2Rest
+	return n, ok
+}
+
+// mayParkPastRoom is whether the update's structs may leave more items parked
+// than the pending cap has room for, by a bound that costs nothing to read:
+// a V1 struct takes two bytes of the update at least, so a V1 update of at
+// most twice the room cannot; a V2 update, whose columns can hold many structs
+// in a few bytes, cannot when its group headers hold no more structs than the
+// room (v2StructCount, which for an update of one group, as a keystroke is,
+// reads two numbers). size is the update's length in bytes.
+func (b *pendingBudget) mayParkPastRoom(size int) bool {
+	if !b.v2 {
+		return size/2 > b.remaining
+	}
+	if b.v2Start == nil {
+		return true
+	}
+	// The count reads a copy of the update's own column cursors, on the
+	// stack, and the apply's own rest cursor, which has read nothing yet and
+	// is put back where it began, so it allocates nothing. Headers that do not
+	// read leave the question to the exact check, which returns the error.
+	v2 := *b.v2Start
+	n, ok := v2StructCount(&v2, false)
+	*v2.restDec = b.v2Rest
+	return !ok || n > b.remaining
+}
+
+// frameV1Structs steps over the struct section at the start of buf, a V1
+// update, as decodeItem and decodeContent read it, without decoding its
+// strings or values, and is how many structs it holds and where it ends. It
+// works on the bytes directly, a varint at a time. JSON content keeps the
+// pending scanner's reading, since whether its values are JSON or legacy Any
+// decides where they end.
+func frameV1Structs(buf []byte) (structs, end int, err error) {
+	p := 0
+	bad := false
+	next := func() uint64 {
+		v, n := binary.Uvarint(buf[p:])
+		if n <= 0 {
+			bad = true
+			return 0
+		}
+		p += n
+		return v
+	}
+	skipBytes := func() {
+		l := next()
+		if bad || l > uint64(len(buf)-p) {
+			bad = true
+			return
+		}
+		p += int(l)
+	}
+	skipAny := func() {
+		n, err := anycodec.Skip(buf[p:])
+		if err != nil {
+			bad = true
+			return
+		}
+		p += n
+	}
+	clients := next()
+	if bad || clients > maxV2Items {
+		return 0, 0, ErrInvalidUpdate
+	}
+	var total uint64
+	for range clients {
+		n := next()
+		total += n
+		if bad || total > maxV2Items {
+			return 0, 0, ErrInvalidUpdate
+		}
+		next() // client
+		next() // clock
+		for range n {
+			if bad || p >= len(buf) {
+				return 0, 0, ErrInvalidUpdate
+			}
+			info := buf[p]
+			p++
+			tag := info & 0x1f
+			if tag == 0 || tag == 10 {
+				next()
+				continue
+			}
+			if info&flagHasOrigin != 0 {
+				next()
+				next()
+			}
+			if info&flagHasRightOrigin != 0 {
+				next()
+				next()
+			}
+			if info&(flagHasOrigin|flagHasRightOrigin) == 0 {
+				if bad || p >= len(buf) {
+					return 0, 0, ErrInvalidUpdate
+				}
+				named := buf[p] == 1
+				p++
+				if named {
+					skipBytes()
+				} else {
+					next()
+					next()
+				}
+				if info&flagHasParentSub != 0 {
+					skipBytes()
+				}
+			}
+			if bad {
+				return 0, 0, ErrInvalidUpdate
+			}
+			switch tag {
+			case wireDeleted:
+				next()
+			case wireJSON:
+				d := encoding.NewDecoder(buf[p:])
+				js := pendingScanner{rest: d}
+				js.content(tag)
+				if js.err != nil {
+					return 0, 0, js.err
+				}
+				p = len(buf) - d.Remaining()
+			case wireBinary, wireString, wireEmbed:
+				skipBytes()
+			case wireFormat:
+				skipBytes()
+				skipBytes()
+			case wireType:
+				if p >= len(buf) {
+					return 0, 0, ErrInvalidUpdate
+				}
+				ref := buf[p]
+				p++
+				if ref == 3 || ref == 5 {
+					skipBytes()
+				}
+			case wireAny:
+				values := next()
+				if bad || values > uint64(len(buf)-p) {
+					return 0, 0, ErrInvalidUpdate
+				}
+				for range values {
+					if skipAny(); bad {
+						break
+					}
+				}
+			case wireDoc:
+				skipBytes()
+				skipAny()
+			case wireMove:
+				next()
+				next()
+				next()
+			default:
+				return 0, 0, ErrInvalidUpdate
+			}
+		}
+	}
+	if bad {
+		return 0, 0, ErrInvalidUpdate
+	}
+	return int(total), p, nil
 }
 
 // v2StructCount is how many structs the V2 update d decodes holds, skips
 // included, read from its group headers on the rest cursor, and whether it
 // read them. It is a bound on what the update can park, not a count of it.
 // The first group's header follows the update's group count, so an update of
-// one group, as a keystroke is, costs two numbers. A later group's header
-// follows the rest content of the groups before it, so for every group but
-// the last the info column is read run by run (ReadRun), and only the rest
-// content a struct's kind carries is stepped over: a skip's length, binary
-// bytes, an embed's, format's or subdocument's value, the values of an Any
-// (whose number is on the length column, which GC, Deleted and JSON lengths
-// share and which is read only up to an Any) and a move's three numbers.
-// Origins, parents, keys and strings are on other columns and are not read.
-func v2StructCount(d *v2Decoder) (int, bool) {
+// one group, as a keystroke is, costs two numbers unless toEnd asks for the
+// rest cursor to be left at the delete set. A later group's header follows the
+// rest content of the groups before it, so for every group but the last (and
+// for the last too under toEnd) the info column is read run by run (ReadRun),
+// and only the rest content a struct's kind carries is stepped over: a skip's
+// length, binary bytes, an embed's, format's or subdocument's value, the
+// values of an Any (whose number is on the length column, which GC, Deleted
+// and JSON lengths share and which is read only up to an Any) and a move's
+// three numbers. Origins, parents, keys and strings are on other columns and
+// are not read.
+func v2StructCount(d *v2Decoder, toEnd bool) (int, bool) {
 	s := pendingScanner{v2: d, rest: d.restDec}
 	clients := s.uint()
 	if s.err != nil || clients > maxV2Items {
@@ -111,7 +297,7 @@ func v2StructCount(d *v2Decoder) (int, bool) {
 		if s.err != nil || total > maxV2Items {
 			return 0, false
 		}
-		if i == clients-1 {
+		if i == clients-1 && !toEnd {
 			break
 		}
 		s.uint() // the group's first clock; its client is on the client column

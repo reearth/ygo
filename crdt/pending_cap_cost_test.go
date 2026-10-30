@@ -2,7 +2,10 @@ package crdt
 
 import (
 	"math/rand/v2"
+	"reflect"
 	"testing"
+
+	"github.com/reearth/ygo/encoding"
 )
 
 // The pending cap's check before the apply costs a small update nothing: for a
@@ -35,6 +38,21 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 	}); n != 0 {
 		t.Fatalf("the V1 check allocated %v times", n)
 	}
+	// A room too small for the cheap bound to pass, but not for the
+	// keystroke's one struct, takes the walk of its struct section
+	// (frameV1Structs), which allocates nothing either.
+	walked := v1
+	walked.remaining = len(keystroke)/2 - 1
+	if n := testing.AllocsPerRun(100, func() {
+		if !walked.mayParkPastRoom(len(keystroke)) {
+			t.Fatal("the cheap bound passed; the walk was not taken")
+		}
+		if err := walked.checkBeforeApply(len(keystroke)); err != nil {
+			t.Fatal(err)
+		}
+	}); n != 0 {
+		t.Fatalf("the V1 walk allocated %v times", n)
+	}
 
 	dec, err := newV2Decoder(keystrokeV2)
 	if err != nil {
@@ -63,7 +81,9 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 
 // v2StructCount, the bound on a V2 update's structs read from its group
 // headers, is the number of structs the full scan of the update reads, skips
-// included, for updates of several groups holding text, map values, nested
+// included, and so is frameStructs, the walk of a V1 or V2 struct section,
+// which also leaves the scan at the same delete set as the full scan. This
+// holds for updates of several groups holding text, map values, nested
 // arrays, deletes and skips (gappedUpdate), and for every kind of content
 // whose value is on the rest cursor (binary, embeds, formats, Any values,
 // subdocuments) in a group before the last.
@@ -93,8 +113,62 @@ func TestUnit_PendingBudget_V2StructCountIsTheScannedCount(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, ok := v2StructCount(d); !ok || got != want {
+		if got, ok := v2StructCount(d, false); !ok || got != want {
 			t.Fatalf("v2StructCount = %d, %v; the scan reads %d structs", got, ok, want)
+		}
+		// The walk to the end of the struct section, V1 (frameV1Structs) and
+		// V2 (v2StructCount to the end), counts the same structs and stands
+		// where the full scan stands: at the delete set, which reads the same
+		// from both.
+		for _, isV2 := range []bool{false, true} {
+			update := v1
+			if isV2 {
+				update = v2
+			}
+			full := newPendingScanner(update, isV2)
+			for range full.uint() {
+				n := full.uint()
+				full.client()
+				full.uint()
+				for range n {
+					full.item()
+				}
+			}
+			if full.err != nil {
+				t.Fatal(full.err)
+			}
+			var got int
+			var walked, scanned DeleteSet
+			var errWalked, errScanned error
+			if isV2 {
+				d, err := newV2Decoder(update)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var ok bool
+				if got, ok = v2StructCount(d, true); !ok {
+					t.Fatal("v2StructCount to the end did not read the structs")
+				}
+				walked, errWalked = decodeDeleteSetV2(d)
+				scanned, errScanned = decodeDeleteSetV2(full.v2)
+			} else {
+				n, end, err := frameV1Structs(update)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = n
+				walked, errWalked = decodeDeleteSet(encoding.NewDecoder(update[end:]))
+				scanned, errScanned = decodeDeleteSet(full.rest)
+			}
+			if got != want {
+				t.Fatalf("the walk (V2 %v) counts %d structs; the scan reads %d", isV2, got, want)
+			}
+			if errWalked != nil || errScanned != nil {
+				t.Fatalf("V2 %v: the delete set does not read: %v, %v", isV2, errWalked, errScanned)
+			}
+			if !reflect.DeepEqual(walked.clients, scanned.clients) {
+				t.Fatalf("the delete set read after the walk (V2 %v) is %v, after the full scan %v", isV2, walked.clients, scanned.clients)
+			}
 		}
 	}
 	rng := rand.New(rand.NewPCG(340, 2526))

@@ -265,9 +265,10 @@ func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
 // landed, not the room's parked structs or its delete set: a room with 40
 // parked entries and 100 deletions forwards the three characters that
 // integrated and nothing more, when the update fails in a delete set cut
-// short after them.
+// short after them. The cap leaves the update far more room than it is long,
+// so no check before the apply reads it, and the apply fails partway.
 func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing.T) {
-	_, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 50 })
+	_, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 200 })
 	editor := crdt.New(crdt.WithClientID(7))
 	conn := hpDial(t, ts, "room", false, editor)
 	watcherDoc := crdt.New(crdt.WithClientID(9))
@@ -287,8 +288,8 @@ func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing
 	require.Equal(t, []uint64{1, 1, 1}, syncStatuses(t, conn, "room"))
 	watcherSyncBytes(t, watcher, watcherDoc)
 
-	// "abc" integrates; five entries on a map the room never received park in
-	// the ten pending slots left, and the delete set after them is cut short.
+	// "abc" integrates; five entries on a map the room never received park,
+	// well inside the cap, and the delete set after them is cut short.
 	author := crdt.New(crdt.WithClientID(1))
 	root := author.GetMap("m")
 	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
