@@ -23,6 +23,28 @@ func applySync(t *testing.T, doc *crdt.Doc, payload []byte) {
 	require.NoError(t, err)
 }
 
+// landedPart returns the content IDs of the part of update that a document
+// holding only seed integrates before the apply fails.
+func landedPart(t *testing.T, seed, update []byte) crdt.ContentIDs {
+	t.Helper()
+	doc := crdt.New()
+	if seed != nil {
+		require.NoError(t, crdt.ApplyUpdateV1(doc, seed, nil))
+	}
+	landed, err := crdt.ApplyUpdateV1Landed(doc, update, nil)
+	require.Error(t, err)
+	require.NotNil(t, landed)
+	return contentIDs(t, landed)
+}
+
+// contentIDs returns the structs and deletions a V1 update carries.
+func contentIDs(t *testing.T, update []byte) crdt.ContentIDs {
+	t.Helper()
+	ids, err := crdt.ContentIDsFromUpdateV1(update)
+	require.NoError(t, err)
+	return ids
+}
+
 // truncatedEdit returns "hello" written by client 1 and that client's next
 // edit ("!" at 5, delete 1..3) with its last byte cut off: its struct
 // integrates, then its delete set does not decode.
@@ -98,22 +120,32 @@ func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 			var observed atomic.Int32
 			room.OnUpdate(func([]byte, any) { observed.Add(1) })
 
-			err := srv.Inject(ctx, cluster.Inbound{Room: "room", Kind: cluster.KindSync, Data: tc.update})
-			require.ErrorIs(t, err, crdt.ErrInvalidUpdate, "Inject still reports the apply's failure")
+			// Inject reports the apply's failure, and never a broadcast of an
+			// empty part.
+			injectFails := func() {
+				t.Helper()
+				err := srv.Inject(ctx, cluster.Inbound{Room: "room", Kind: cluster.KindSync, Data: tc.update})
+				require.ErrorIs(t, err, crdt.ErrInvalidUpdate)
+				require.NotErrorIs(t, err, ygws.ErrInvalidUpdate)
+			}
+			injectFails()
 			require.Equal(t, tc.roomText, room.GetText("t").ToString())
 
 			if tc.relays {
 				require.Equal(t, int32(1), observed.Load(), "the room's update observers are told of the part that landed")
 				outer, payload := readOne(t, conn, 2*time.Second)
 				require.Equal(t, uint64(0), outer, "the local peer gets what the room committed")
+				_, got, err := ygsync.ReadSyncMessage(payload)
+				require.NoError(t, err)
+				require.Equal(t, landedPart(t, tc.seed, tc.update), contentIDs(t, got),
+					"the frame carries the landed part and nothing else")
 				applySync(t, peerDoc, payload)
 				require.Equal(t, crdt.EncodeStateAsUpdateV1(room, nil), crdt.EncodeStateAsUpdateV1(peerDoc, nil),
 					"the local peer holds what the room holds")
 
 				// Redelivered, the update integrates nothing new: it fails
 				// again and relays nothing more.
-				err = srv.Inject(ctx, cluster.Inbound{Room: "room", Kind: cluster.KindSync, Data: tc.update})
-				require.ErrorIs(t, err, crdt.ErrInvalidUpdate)
+				injectFails()
 			}
 
 			// A later, whole update from another writer is the next frame the
