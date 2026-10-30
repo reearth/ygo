@@ -125,8 +125,8 @@ func TestReadOnly_SyncStep1StillAnswered(t *testing.T) {
 		"read-only peer's SyncStep1 must be answered with SyncStep2")
 }
 
-// #59 — a read-only peer's inbound awareness returns an empty response and is
-// not recorded server-side.
+// A read-only peer's inbound awareness returns an empty response and is not
+// recorded server-side.
 func TestReadOnly_InboundAwarenessGetsEmptyResponseButIsNotRecorded(t *testing.T) {
 	srv := ygws.NewServer()
 	srv.Authorize = func(*http.Request) (ygws.ConnectionConfig, bool) {

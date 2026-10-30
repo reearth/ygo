@@ -37,7 +37,7 @@ type peer struct {
 	closeCode         int           // #104: WS close code queued via enqueueClose (0 = none)
 	closeReason       string        // #104: WS close reason accompanying closeCode
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
-	readOnly          bool          // #59: sync updates and awareness do not change the room; awareness gets an empty response
+	readOnly          bool          // sync updates and awareness do not change the room; awareness gets an empty response
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
 	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
 
