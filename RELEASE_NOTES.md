@@ -23,6 +23,12 @@ allocate nothing: the update's size in V1, and its group headers in V2. Only
 an update that these bounds do not clear gets the full check. No API or wire
 format changes.
 
+An update that fails after part of it integrated, such as one cut short in its
+structs or its delete set, keeps that part, as before. It now also drains the
+pending queue on that part, as a whole update does. Before, an item that an
+earlier update parked behind that part stayed parked in the room, while each
+peer that applied the relayed part integrated it.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully
