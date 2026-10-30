@@ -104,8 +104,9 @@ const defaultMaxPendingItems = 100_000
 // WithMaxPendingItems caps the per-doc pending queue depth — items parked
 // waiting for out-of-order dependencies. Once the cap is reached, further
 // items that would be parked cause ApplyUpdate to return ErrInvalidUpdate.
-// A struct the queue already holds, sent again, is not parked again and does
-// not count. Zero or negative uses the default (100,000).
+// A struct sent again parks without the clocks the queue already holds at its
+// start and end, and one the queue holds whole does not count. Zero or
+// negative uses the default (100,000).
 //
 // This is a defence against a malicious peer crafting an update full of
 // far-future-clock items, which would otherwise grow the pending queue

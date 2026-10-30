@@ -381,6 +381,34 @@ func TestUnit_PendingCover_ABatchParkJoinsTheSpanItTouches(t *testing.T) {
 	require.Equal(t, clockSpan{0, 101}, p.cover.spans[2][0], "the batch joins the span at clock 100")
 }
 
+// A batch park that merges as one span touching the end of the cover joins
+// the last span, so no two spans of the cover touch.
+func TestUnit_PendingCover_ASingleSpanBatchJoinsTheLastSpan(t *testing.T) {
+	item := func(clock uint64, n int) *Item {
+		return &Item{ID: ID{Client: 2, Clock: clock}, Content: NewContentDeleted(n)}
+	}
+	const spans = 10_000
+	p := &pendingUpdate{missing: make(StateVector)}
+	for i := range uint64(spans) {
+		p.items = append(p.items, item(4*i+100, 1))
+	}
+	p.coverOf()
+	last := p.cover.spans[2][spans-1].end
+	const k = coverInsertWork/spans + 1 // more insertion work than the bound
+	batch := make([]*Item, 0, k)
+	for c := range uint64(k) {
+		batch = append(batch, item(last+c, 1))
+	}
+	p.items = append(p.items, batch...)
+	p.addCover(batch)
+	got := p.cover.spans[2]
+	require.Len(t, got, spans)
+	require.Equal(t, clockSpan{last - 1, last + k}, got[spans-1])
+	for i := 1; i < len(got); i++ {
+		require.Greater(t, got[i].start, got[i-1].end, "spans %d and %d touch", i-1, i)
+	}
+}
+
 // A GC struct parked behind a gap is added to the cover's GC spans, so a
 // resend of it parks no second time.
 func TestUnit_PendingQueue_AResentParkedGCStructParksOnce(t *testing.T) {

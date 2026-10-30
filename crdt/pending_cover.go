@@ -6,8 +6,11 @@ import (
 	"sort"
 )
 
-// The pending queue holds each clock once, as Yjs does, because reconnects
-// and stored states re-send structs it already parks.
+// The pending queue parks a re-sent struct once, as Yjs does, because
+// reconnects and stored states re-send structs it already parks.
+// unparked trims only an arrival's front and tail, so one that spans a gap in
+// the queue's clocks parks the clocks held past the gap again, where Yjs
+// holds each clock once.
 
 // clockSpan is the clocks [start, end) of one client.
 type clockSpan struct{ start, end uint64 }
