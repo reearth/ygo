@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Fixed
+
+- **`crdt`: GC turns the items under a deleted nested type into GC structs.**
+  When the GC collected a deleted item that holds a nested type, it replaced
+  the item's content but kept the type's items, and those of the types nested
+  in it, as deleted items with their parent and origins. Yjs stores a GC
+  struct for each of them. The GC at the end of a transaction and `RunGC` now
+  turn every item under a collected type into a GC struct and empty the type,
+  as Yjs `ContentType.gc` does, so an item that arrives later in that type is
+  a GC struct too. For a map entry that holds an array of 10,000 one-entry
+  maps, the encoded state after the delete goes from 133,510 to 40,023 bytes.
+  Content does not change. A write through a handle to a type inside a
+  collected type no longer fires the deep observers above it, as in Yjs.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
