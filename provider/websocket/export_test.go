@@ -76,3 +76,6 @@ func MemoryPersistenceBackoffState(m *MemoryPersistence, room string) (failures 
 	}
 	return l.failures, l.retryAt
 }
+
+// WriteTimeout is the deadline writeToConn sets on each write.
+const WriteTimeout = writeTimeout

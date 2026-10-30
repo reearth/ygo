@@ -19,8 +19,8 @@ import (
 // write times out is torn down while it keeps sending, because only a closed
 // connection makes the read loop run the teardown and fire OnLastPeer.
 func TestInteg_WriterExit_TimedOutWriteTearsDownPeer(t *testing.T) {
-	// writeTimeout in server.go is 10 s; the margin covers scheduling.
-	const teardownBound = 10*time.Second + 5*time.Second
+	// The margin covers scheduling.
+	const teardownBound = ygws.WriteTimeout + 5*time.Second
 
 	srv := ygws.NewServer()
 	lastPeer := make(chan struct{}, 1)

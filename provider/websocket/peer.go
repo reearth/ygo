@@ -858,9 +858,8 @@ func (p *peer) write(data []byte) {
 
 // runWriter is the dedicated per-peer broadcast writer. It drains writeCh
 // and serialises writes to the connection. Exits when writeCh is closed
-// (during teardown) or when a write fails. On a failed write, writeToConn
-// closes the connection before runWriter exits, so the read loop returns and
-// tears down the peer.
+// (during teardown) or when a write fails (writeToConn then closes the
+// connection, so the read loop tears down the peer).
 //
 // This pattern mirrors Rust yrs-warp's per-peer sink task. It replaces
 // the previous "spawn one goroutine per peer per broadcast" model, which
