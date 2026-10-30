@@ -559,6 +559,12 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 
 	// Snapshot state vector before applying anything (used for skip/offset logic).
 	sv := txn.doc.store.StateVector()
+	check := newPendingBudget(txn.doc, sv, update, false)
+	if err := checkParkedDeletes(txn.doc, &check); err != nil {
+		// Refused before anything changed: the commit tells no observer.
+		txn.refused = true
+		return err
+	}
 
 	numClients, err := dec.ReadVarUint()
 	if err != nil {
@@ -585,11 +591,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	unresolvableDs := ds.applyToPartial(txn)
-	if len(unresolvableDs.clients) > 0 {
-		if err := checkParkedDeletes(txn.doc, unresolvableDs); err != nil {
-			return err
-		}
+	if unresolvableDs := ds.applyToPartial(txn); len(unresolvableDs.clients) > 0 {
 		txn.doc.store.pendingDs.Merge(unresolvableDs)
 	}
 

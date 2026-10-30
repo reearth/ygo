@@ -27,13 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot. `WithMaxPendingItems` (and `Server.MaxPendingItems`) now also caps
   them, counted separately from parked items with the same default of 100,000:
   an update whose delete set would grow the parked ranges past the cap returns
-  `ErrInvalidUpdate` before it parks anything, at the point and in the way an
-  update that would park too many items is refused. The count is taken after
-  the merge, and an update that adds no range is never refused, so a delete set
-  a peer sends again, or ranges that join parked ones, pass. An honest peer
-  deletes only what it holds and sends a struct before or with any delete of
-  it, so its deletes park only while its updates arrive out of order, and only
-  until the structs they name do.
+  `ErrInvalidUpdate` before it changes anything, so the document is left as it
+  was: no struct of it is integrated, no delete applied, nothing stored and no
+  observer told. The count is taken after the merge, and an update that adds
+  no range is never refused, so a delete set a peer sends again, or ranges that
+  join parked ones, pass. An update too short to carry more ranges than the cap
+  has room for, such as a keystroke, is not read again for the check. An
+  honest peer deletes only what it holds and sends a struct before or with any
+  delete of it, so its deletes park only while its updates arrive out of
+  order, and only until the structs they name do.
 - **`crdt`: `Doc.SetMaxPendingItems`, and `provider/websocket` loads a room's
   stored state with the pending cap lifted.** A stored state carries what was
   parked when it was written, which can be more than the cap, so a document

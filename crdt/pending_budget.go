@@ -62,20 +62,8 @@ func (b *pendingBudget) check(count int) error {
 	if b.checked || count < b.remaining {
 		return nil
 	}
-	if !b.groupsKnown {
-		v2, rest := b.v2Start, b.v2Rest
-		if b.v2 && v2 == nil {
-			dec, err := newV2Decoder(b.update)
-			if err != nil {
-				return wrapUpdateErr(err)
-			}
-			v2, rest = dec, *dec.restDec
-		}
-		superseded, err := supersededGroups(b.update, v2, rest)
-		if err != nil {
-			return wrapUpdateErr(err)
-		}
-		b.setSuperseded(superseded)
+	if err := b.knowSuperseded(); err != nil {
+		return err
 	}
 	known := make(StateVector, len(b.initial))
 	for client, clock := range b.initial {
@@ -153,6 +141,28 @@ func (b *pendingBudget) check(count int) error {
 		}
 	}
 	b.checked = true
+	return nil
+}
+
+// knowSuperseded finds the groups the decoder drops, when the apply has not
+// recorded them yet.
+func (b *pendingBudget) knowSuperseded() error {
+	if b.groupsKnown {
+		return nil
+	}
+	v2, rest := b.v2Start, b.v2Rest
+	if b.v2 && v2 == nil {
+		dec, err := newV2Decoder(b.update)
+		if err != nil {
+			return wrapUpdateErr(err)
+		}
+		v2, rest = dec, *dec.restDec
+	}
+	superseded, err := supersededGroups(b.update, v2, rest)
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+	b.setSuperseded(superseded)
 	return nil
 }
 

@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"cmp"
+	"math"
 	"slices"
 	"sort"
 )
@@ -284,28 +285,172 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 	return unresolvable
 }
 
-// checkParkedDeletes refuses an update whose delete ranges, ds, the store
-// cannot apply yet, when parking them would grow the parked delete ranges past
-// the cap the pending queue has for parked items (WithMaxPendingItems): the
-// same ErrInvalidUpdate, before anything is parked, that an update parking too
-// many items is refused with. An update that adds no range is never refused,
-// so a delete set a peer sends again, as its sync does after a reconnect, or
-// ranges that join parked ones, pass even on a document that already holds
-// more than the cap.
-func checkParkedDeletes(doc *Doc, ds DeleteSet) error {
+// checkParkedDeletes refuses a remote update, V1 or V2, when its delete set
+// would grow the parked delete ranges past the cap the pending queue has for
+// parked items (WithMaxPendingItems): the same ErrInvalidUpdate that an update
+// parking too many items is refused with. It runs before the apply changes
+// anything, so a refused update leaves the document as it was: no struct is
+// integrated, no delete applied and no observer told. b is the apply's pending
+// budget, which holds the update and the store's state vector as the apply
+// begins.
+//
+// The ranges an update parks are the parts of its delete set past the store's
+// next clock for their client once the update's structs are in
+// (applyToPartial). The count is taken after the merge, and an update that
+// adds no range is never refused: a delete set a peer sends again, as its sync
+// does after a reconnect, or ranges that join parked ones, pass even on a
+// document that already holds more than the cap because it loaded a stored
+// state with the cap lifted (SetMaxPendingItems).
+//
+// It costs what the update can do. Each range of a delete set takes two bytes
+// of the update at least, its clock and its length, so an update too short to
+// carry more ranges than the cap has room for costs a comparison: a keystroke
+// on a document below the cap is never read twice. A longer one is read past
+// its structs for its delete set, and only when more of its ranges reach past
+// the store than the cap has room for are the clocks its structs leave
+// resolved (structClocksOf).
+func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
+	limit := doc.maxPendingItemsLimit()
 	pending := doc.store.pendingDs
-	after := parkedDeleteRangesAfter(pending, ds)
-	if after <= doc.maxPendingItemsLimit() {
-		return nil
-	}
 	before := 0
 	for _, ranges := range pending.clients {
 		before += len(ranges)
 	}
-	if after <= before {
+	room := max(limit-before, 0)
+	if len(b.update)/2 <= room {
+		return nil
+	}
+	ds, err := deleteSetOf(b.scanner(), b.v2)
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+	if n := parkingRanges(ds, b.initial); n == 0 || n <= room {
+		return nil
+	}
+	clocks, err := structClocksOf(b)
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+	after := parkedDeleteRangesAfter(pending, parkedPartsOf(ds, clocks))
+	if after <= limit || after <= before {
 		return nil
 	}
 	return wrapUpdateErr(ErrInvalidUpdate)
+}
+
+// deleteSetOf is the delete set of the update s scans, a V1 one or a V2 one,
+// read past its structs without keeping anything of them.
+func deleteSetOf(s *pendingScanner, v2 bool) (DeleteSet, error) {
+	if s.err != nil {
+		return DeleteSet{}, s.err
+	}
+	clients := s.uint()
+	if clients > maxV2Items {
+		return DeleteSet{}, ErrInvalidUpdate
+	}
+	var total uint64
+	for i := uint64(0); i < clients && s.err == nil; i++ {
+		n := s.uint()
+		total += n
+		if total > maxV2Items {
+			return DeleteSet{}, ErrInvalidUpdate
+		}
+		s.client()
+		s.uint()
+		for j := uint64(0); j < n && s.err == nil; j++ {
+			s.item()
+		}
+	}
+	if s.err != nil {
+		return DeleteSet{}, s.err
+	}
+	if v2 {
+		return decodeDeleteSetV2(s.v2)
+	}
+	return decodeDeleteSet(s.rest)
+}
+
+// structClocksOf is the store's state vector once the structs of b's update
+// are in. The clocks are found as the pending budget finds them
+// (scanPendingGroupsBounded, resolvePendingGroups): a struct is in once its
+// clock follows its client's and its origin, right origin and parent are in,
+// from the store or from the update itself in any order, and the groups the
+// decoder drops count for nothing. Items an earlier update parked do not
+// count: the drain that can integrate them runs after the update's delete set
+// is parked.
+func structClocksOf(b *pendingBudget) (StateVector, error) {
+	if err := b.knowSuperseded(); err != nil {
+		return nil, err
+	}
+	known := make(StateVector, len(b.initial))
+	for client, clock := range b.initial {
+		known[client] = clock
+	}
+	sizing := pendingCollector{}
+	if _, err := scanPendingGroupsBounded(b.scanner(), known, math.MaxInt, &sizing, nil, nil, b.superseded); err != nil {
+		return nil, err
+	}
+	if sizing.heads == 0 {
+		return known, nil
+	}
+	collect := pendingCollector{fill: true, groups: make([]pendingGroup, 0, sizing.heads), sum: make([]byte, 0, sizing.size)}
+	if _, err := scanPendingGroupsBounded(b.scanner(), known, math.MaxInt, &collect, nil, nil, b.superseded); err != nil {
+		return nil, err
+	}
+	if len(collect.groups) > 0 {
+		resolvePendingGroups(collect.groups, collect.sum, known)
+	}
+	return known, nil
+}
+
+// parkedPartsOf is what applyToPartial parks of ds on a store whose state
+// vector is clocks.
+func parkedPartsOf(ds DeleteSet, clocks StateVector) DeleteSet {
+	parked := newDeleteSet()
+	for client, ranges := range ds.clients {
+		next := clocks.Clock(client)
+		for _, r := range ranges {
+			if part, parks := parkedPart(r, next); parks {
+				parked.clients[client] = append(parked.clients[client], part)
+			}
+		}
+	}
+	return parked
+}
+
+// parkingRanges is how many ranges of ds would park some part on a store whose
+// state vector is sv. The update's structs can only move the store's clocks
+// past sv, so no more of them park once they are in.
+func parkingRanges(ds DeleteSet, sv StateVector) int {
+	n := 0
+	for client, ranges := range ds.clients {
+		next := sv.Clock(client)
+		for _, r := range ranges {
+			if _, parks := parkedPart(r, next); parks {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// parkedPart is the part of r, a delete range of a client the store holds up
+// to next, that applyToPartial parks, and whether it parks any: nothing of a
+// range of length zero, every other range as it is when the store holds
+// nothing of the client, a range whose end wraps whole, and otherwise what
+// lies at or past next.
+func parkedPart(r DeleteRange, next uint64) (DeleteRange, bool) {
+	end := r.Clock + r.Len
+	switch {
+	case r.Len == 0:
+		return DeleteRange{}, false
+	case next == 0, end < r.Clock:
+		return r, true
+	case end <= next:
+		return DeleteRange{}, false
+	}
+	start := max(r.Clock, next)
+	return DeleteRange{Clock: start, Len: end - start}, true
 }
 
 // parkedDeleteRangesAfter is how many delete ranges pending would hold once ds

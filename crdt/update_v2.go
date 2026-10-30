@@ -622,6 +622,11 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	budget := newPendingBudget(txn.doc, sv, update, true)
 	budget.v2Start = &initialV2
 	budget.v2Rest = *dec.restDec
+	if err := checkParkedDeletes(txn.doc, &budget); err != nil {
+		// Refused before anything changed: the commit tells no observer.
+		txn.refused = true
+		return err
+	}
 
 	numClients, err := dec.restDec.ReadVarUint()
 	if err != nil {
@@ -828,11 +833,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	unresolvableDs := ds.applyToPartial(txn)
-	if len(unresolvableDs.clients) > 0 {
-		if err := checkParkedDeletes(txn.doc, unresolvableDs); err != nil {
-			return err
-		}
+	if unresolvableDs := ds.applyToPartial(txn); len(unresolvableDs.clients) > 0 {
 		txn.doc.store.pendingDs.Merge(unresolvableDs)
 	}
 

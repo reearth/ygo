@@ -21,9 +21,11 @@ them. Two things about those parked deletes cost every server:
   persist into every snapshot. `WithMaxPendingItems` (and
   `Server.MaxPendingItems`) now caps the parked delete ranges as it caps parked
   items, separately, with the same default of 100,000. An update whose delete
-  set would grow them past the cap is refused with `ErrInvalidUpdate`. An
-  update that adds no range is never refused, so a peer re-sending its parked
-  deletes, as its sync does after a reconnect, is not turned away.
+  set would grow them past the cap is refused with `ErrInvalidUpdate` before
+  it changes anything: the document keeps none of it, and no observer, store
+  or peer is told of it. An update that adds no range is never refused, so a
+  peer re-sending its parked deletes, as its sync does after a reconnect, is
+  not turned away.
 
 `Doc.SetMaxPendingItems` is new, for an owner that loads trusted stored state
 before it caps what arrives after it: a stored state can carry more parked

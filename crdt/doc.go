@@ -109,8 +109,10 @@ const defaultMaxPendingItems = 100_000
 // ApplyUpdate to return ErrInvalidUpdate, and so does an update whose delete
 // set would grow the parked ranges past the cap; ranges an update names again,
 // or that join parked ones, count once, and an update that adds no range is
-// never refused. Zero or negative uses the default (100,000). To load stored
-// state, which can hold more than the cap, see SetMaxPendingItems.
+// never refused. An update refused for its delete ranges is refused before
+// the apply changes anything: the document is as it was and no observer is
+// told. Zero or negative uses the default (100,000). To load stored state,
+// which can hold more than the cap, see SetMaxPendingItems.
 //
 // This is a defence against a malicious peer crafting an update full of
 // far-future-clock items, which would otherwise grow the pending queue
@@ -479,8 +481,13 @@ func (d *Doc) GetText(name string) *YText {
 // The closure must be invoked OUTSIDE d.mu — observers may re-enter Doc
 // methods that acquire d.mu, which would deadlock under the lock.
 //
-// Returns nil only if there is nothing to fire (no observers of any kind).
+// Returns nil only if there is nothing to fire (no observers of any kind), or
+// when the transaction is a remote apply that refused its update before it
+// changed anything (Transaction.refused).
 func buildPhase2(d *Doc, txn *Transaction) func() {
+	if txn.refused {
+		return nil
+	}
 	// Encode the incremental update and snapshot observer slices while still
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
