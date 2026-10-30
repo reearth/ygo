@@ -6,48 +6,25 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestUnit_Peer_WithinBudget(t *testing.T) {
+func TestUnit_Peer_OverBudget(t *testing.T) {
 	tests := []struct {
-		name   string
-		budget int64
-		armed  bool
-		queued int64
-		frame  int
-		want   bool
+		name        string
+		budget      int64
+		handshaking bool
+		queued      int64
+		want        bool
 	}{
-		{
-			name:   "the handshake is taken whatever its size",
-			budget: 100, armed: false, queued: 1_000, frame: 1_000, want: true,
-		},
-		{
-			name:   "a frame larger than the budget is taken on an empty queue",
-			budget: 100, armed: true, queued: 0, frame: 1_000, want: true,
-		},
-		{
-			name:   "the frame after an over-budget one is refused",
-			budget: 100, armed: true, queued: 1_000, frame: 1, want: false,
-		},
-		{
-			name:   "a frame that reaches the budget exactly is taken",
-			budget: 100, armed: true, queued: 40, frame: 60, want: true,
-		},
-		{
-			name:   "one byte past the budget is refused",
-			budget: 100, armed: true, queued: 40, frame: 61, want: false,
-		},
-		{
-			name:   "budget 0 refuses nothing",
-			budget: 0, armed: true, queued: 1 << 40, frame: 1 << 20, want: true,
-		},
-		{
-			name:   "a negative budget is off, like 0",
-			budget: -1, armed: true, queued: 1 << 40, frame: 1 << 20, want: true,
-		},
+		{name: "below the budget", budget: 100, queued: 99, want: false},
+		{name: "at the budget", budget: 100, queued: 100, want: true},
+		{name: "past the budget", budget: 100, queued: 1_000, want: true},
+		{name: "during the handshake", budget: 100, handshaking: true, queued: 1_000, want: false},
+		{name: "budget 0 is off", budget: 0, queued: 1 << 40, want: false},
+		{name: "a negative budget is off", budget: -1, queued: 1 << 40, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &peer{writeBudget: tt.budget, budgetArmed: tt.armed, queuedBytes: tt.queued}
-			assert.Equal(t, tt.want, p.withinBudget(tt.frame))
+			p := &peer{writeBudget: tt.budget, handshaking: tt.handshaking, queuedBytes: tt.queued}
+			assert.Equal(t, tt.want, p.overBudgetLocked())
 		})
 	}
 }
@@ -59,10 +36,10 @@ func TestUnit_Peer_Write_ChargesQueuedBytes(t *testing.T) {
 		return p.queuedBytes
 	}
 
-	p := &peer{server: &Server{}, writeCh: make(chan []byte, 2), writeBudget: 1 << 20}
+	p := &peer{server: &Server{}, writeCh: make(chan []byte, 3), writeBudget: 4}
 	p.write([]byte{1, 2, 3})
 	p.write([]byte{4, 5})
-	assert.Equal(t, int64(5), queued(p), "each frame is charged its own length")
+	assert.Equal(t, int64(5), queued(p), "each frame is charged its own length, and the one that crosses the budget is queued")
 	assert.Len(t, p.writeCh, 2)
 
 	p.wmu.Lock()
@@ -75,4 +52,23 @@ func TestUnit_Peer_Write_ChargesQueuedBytes(t *testing.T) {
 	off.write([]byte{1, 2, 3})
 	assert.Equal(t, int64(0), queued(off), "with no budget nothing is charged")
 	assert.Len(t, off.writeCh, 1)
+}
+
+func TestUnit_Peer_HandshakeIsNotCharged(t *testing.T) {
+	p := &peer{server: &Server{}, writeCh: make(chan []byte, 4), writeBudget: 4}
+	p.setHandshaking(true)
+	p.write([]byte{1, 2, 3, 4, 5})
+	p.write([]byte{6})
+	p.setHandshaking(false)
+	p.write([]byte{7, 8})
+
+	p.wmu.Lock()
+	defer p.wmu.Unlock()
+	assert.Equal(t, int64(2), p.queuedBytes, "only the frame after the handshake is charged")
+	for range 2 {
+		p.creditLocked(len(<-p.writeCh))
+	}
+	assert.Equal(t, int64(2), p.queuedBytes, "the handshake frames leave the queue first, uncharged")
+	p.creditLocked(len(<-p.writeCh))
+	assert.Equal(t, int64(0), p.queuedBytes)
 }

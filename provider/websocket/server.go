@@ -211,10 +211,6 @@ const maxAwarenessClientsPerPeer = 10_000
 // ring), reducing how often the slow-peer path is hit at all.
 const defaultPeerWriteQueueSize = 512
 
-// CloseCauseWriteQueueBytes is the "cause" attribute of the Warn entry logged
-// when a peer is closed for Server.PeerWriteQueueBytes.
-const CloseCauseWriteQueueBytes = "write queue byte budget"
-
 // PersistenceAdapter is implemented by storage backends that want to persist
 // room state across server restarts. It is called on every committed update so
 // implementations should be efficient (e.g. append-only log rather than full
@@ -1103,15 +1099,15 @@ type Server struct {
 	// largest frame: for example, a peer that sends SyncStep1 again and again
 	// and never reads gets a full-state SyncStep2 queued each time.
 	//
-	// A frame that would take a peer past this budget is not queued, and the
-	// peer is closed as for a full queue, on every enqueue path and whatever
-	// the SlowPeerPolicy. The close is logged at Warn with "cause" set to
-	// CloseCauseWriteQueueBytes.
-	//
-	// The handshake a peer gets when it connects is never refused, and a
-	// peer with nothing waiting takes the next frame whatever its size, so a
-	// room whose state is larger than the budget can still be joined and
-	// synced.
+	// When the frames waiting for a peer reach this budget, the next frame
+	// is not queued and the peer is closed as for a full queue, on every
+	// enqueue path and whatever the SlowPeerPolicy. The frame that crosses
+	// the budget is queued whatever its size, and the handshake a peer gets
+	// when it connects is not counted. One peer therefore holds at most the
+	// budget plus one frame, besides its handshake and the frame being
+	// written. A frame that arrives while more than the budget waits closes
+	// even a peer that reads, so set the budget above the largest room state
+	// the server holds.
 	//
 	// Zero (the default) or a negative value means no byte budget. Like the
 	// other config fields, set it before serving.
@@ -2177,6 +2173,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// The handshake is not charged to PeerWriteQueueBytes (see setHandshaking).
+	p.setHandshaking(true)
+
 	// 1. Send sync step-1 — request the peer's state vector.
 	p.sendSync(ygsync.EncodeSyncStep1(rm.doc))
 
@@ -2187,7 +2186,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Send the current awareness state of all active peers.
 	p.sendAwareness(rm.awareness.EncodeUpdate(nil))
-	p.armBudget()
+	p.setHandshaking(false)
 
 	// Read loop — exits when the connection is closed (by peer, by context
 	// cancellation, or by Shutdown).

@@ -15,18 +15,20 @@ The new `Server.PeerWriteQueueBytes` bounds those bytes:
 
 ```go
 srv := ygws.NewServer()
-srv.PeerWriteQueueBytes = 8 << 20 // 8 MiB queued per peer
+srv.PeerWriteQueueBytes = 64 << 20 // 64 MiB waiting per peer
 ```
 
-A frame that would take a peer past the budget is not queued, and the peer is
-closed as for a full queue. This holds on every enqueue path and whatever
-`SlowPeerPolicy` is set, because a peer over its budget drains only if it
-reads. The close is logged at Warn with `cause` set to the new
-`CloseCauseWriteQueueBytes`.
+When the frames waiting for a peer reach the budget, the next frame is not
+queued and the peer is closed as for a full queue. This holds on every enqueue
+path and whatever `SlowPeerPolicy` is set, because a peer over its budget
+drains only if it reads. The close is logged at Warn as
+`peer queued bytes over budget`.
 
-The handshake is never refused, and a peer with nothing queued takes the next
-frame whatever its size, so a room whose state is larger than the budget can
-still be joined and still answers a SyncStep1.
+The frame that crosses the budget is queued whatever its size, and the
+handshake is not counted, so a peer can join a room whose state is larger than
+the budget and get an answer to its SyncStep1. A frame that arrives while more
+than the budget waits closes even a peer that reads, so set the budget above
+the largest room state the server holds.
 
 Zero, the default, means no byte budget: nothing changes for a server that
 does not set it.

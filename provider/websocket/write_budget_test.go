@@ -165,8 +165,9 @@ func TestInteg_PeerWriteQueueBytes_ClosesOverBudgetUnderResyncPolicy(t *testing.
 }
 
 func TestInteg_PeerWriteQueueBytes_RoomLargerThanTheBudget(t *testing.T) {
-	// A new peer gets the whole handshake, and an answer to SyncStep1, though
-	// each full state is larger than the budget.
+	// A new peer asks for the room's state before it reads the handshake, as
+	// y-websocket does on open, and gets both, though each full state is
+	// larger than the budget.
 	const (
 		room     = "oversized"
 		docBytes = 256 << 10
@@ -178,12 +179,12 @@ func TestInteg_PeerWriteQueueBytes_RoomLargerThanTheBudget(t *testing.T) {
 	conn, _, err := dialer.Dial("ws://pipe/"+room, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
+	require.NoError(t, askFullState(conn))
 	doc := crdt.New()
 	drainHandshake(t, conn, doc)
 	txt := doc.GetText("t")
-	assert.Equal(t, docBytes, len(txt.ToString()), "the handshake carries the whole room")
+	assert.Len(t, txt.ToString(), docBytes, "the handshake carries the whole room")
 
-	require.NoError(t, askFullState(conn))
 	outerType, payload := readOne(t, conn, 5*time.Second)
 	require.Equal(t, uint64(0), outerType)
 	require.Greater(t, len(payload), docBytes, "the answer is the full state")
@@ -286,5 +287,5 @@ func TestInteg_PeerWriteQueueBytes_AccountingReturnsToZero(t *testing.T) {
 	require.Eventually(t, func() bool {
 		queued, peers := ygws.PeerQueuedBytes(srv, room)
 		return peers == 1 && queued == 0
-	}, 5*time.Second, 10*time.Millisecond, "the dropped peer leaves nothing charged in the room")
+	}, 5*time.Second, 10*time.Millisecond, "the peer left in the room has nothing charged")
 }

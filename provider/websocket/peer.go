@@ -30,13 +30,14 @@ type peer struct {
 	cidMu      sync.Mutex
 	writeCh    chan []byte   // buffered queue drained by runWriter goroutine
 	writerDone chan struct{} // closed when runWriter exits
-	// queuedBytes is the size of the frames waiting in writeCh, kept only when
-	// writeBudget > 0. budgetArmed is false until the handshake is queued,
-	// which the budget never refuses. Both are guarded by wmu.
-	queuedBytes int64
-	budgetArmed bool
-	// writeBudget is Server.PeerWriteQueueBytes when the peer connected.
-	writeBudget int64
+	// Server.PeerWriteQueueBytes accounting, kept only when writeBudget > 0 and
+	// guarded by wmu (see write_budget.go). queuedBytes is the size of the
+	// charged frames waiting in writeCh. unchargedFrames counts the handshake
+	// frames still in writeCh, queued while handshaking was set.
+	queuedBytes     int64
+	unchargedFrames int
+	handshaking     bool
+	writeBudget     int64 // Server.PeerWriteQueueBytes when the peer connected
 	// needsResync is set (under wmu) when a broadcast is dropped because writeCh
 	// was full under SlowPeerResync. runWriter clears it and sends a full-state
 	// resync once the queue drains, so the peer converges without a reconnect.
@@ -881,9 +882,8 @@ func (p *peer) runWriter() {
 			return
 		}
 		if p.writeBudget > 0 {
-			// The frame has left the queue, whatever the write does.
 			p.wmu.Lock()
-			p.queuedBytes -= int64(len(data))
+			p.creditLocked(len(data))
 			p.wmu.Unlock()
 		}
 		if !p.writeToConn(data) {
