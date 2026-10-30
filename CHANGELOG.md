@@ -9,15 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`provider/websocket`: the part of a relay-injected update a node's room
-  kept never reached that node's peers.** `Server.Inject` applies a cluster
-  relay's sync update item by item, so one that fails partway (a later
-  struct or its delete set does not decode) leaves part
-  of itself in the room, which the room's update observers, persistence among
+- **`provider/websocket`: the part of a relay-injected update that a node's
+  room integrated never reached that node's peers.** `Server.Inject` applies a
+  cluster relay's sync update item by item, so one that fails partway (for
+  example, a later struct or its delete set does not decode) leaves part of
+  itself in the room, which the room's update observers, persistence among
   them, are told of; Inject returned the error and rebroadcast nothing. It now
-  rebroadcasts that part, and only that part (from `crdt.ApplyUpdateV1Landed`),
-  to the node's peers, as a peer's partly applied update reaches the room's
-  other peers since 1.54.0, and still returns the apply's error.
+  rebroadcasts the structs that integrated and the deletions it made (from
+  `crdt.ApplyUpdateV1Landed`) to the node's peers, as a peer's partly applied
+  update reaches the room's other peers since 1.54.0, and still returns the
+  apply's error. Structs the apply parked reach peers when they sync again.
 
 ## [1.54.0] — 2026-10-22
 

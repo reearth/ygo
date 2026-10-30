@@ -5,9 +5,10 @@
 v1.54.0 made a peer's partly applied update reach the room's other peers. A
 relay-injected update that fails after part of it integrated still reached
 none of the receiving node's peers, although the node's room and its store
-held that part. `Server.Inject` now rebroadcasts exactly that part to the
-node's peers and still returns the apply's error. No API or wire format
-changes.
+held that part. `Server.Inject` now rebroadcasts the structs that integrated
+and the deletions it made to the node's peers, and still returns the apply's
+error. Structs the apply parked reach peers when they sync again. No API or
+wire format changes.
 
 ## v1.54.0
 
