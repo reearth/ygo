@@ -166,6 +166,15 @@ For a ready-to-run binary — with flags for origins, connection/room limits, an
 go run github.com/reearth/ygo/cmd/ygo-server -store data.db
 ```
 
+### Hocuspocus sync status
+
+With `Server.HocuspocusFraming` set, the server answers every SyncStep2 or Update the client sends under Sync (tag 0) or SyncReply (tag 4) with one SyncStatus (tag 8) frame, in the order the frames arrived, so the `@hocuspocus/provider` unsynced-changes count drops for each update the room applied:
+
+- **1** when the room fully applied the update.
+- **0** when it did not. An update that overflows `MaxPendingItems` is refused before it changes the room. An update that fails to decode partway still sends the part that integrated to the other peers.
+- **Read-only connection:** an Update gets 0, and a SyncStep2 gets 1 only when the room already holds everything in it.
+- **A sync frame that does not decode** gets no SyncStatus: the server closes the connection with 1002 (protocol error) and handles no later frame from it.
+
 ## Server-side document injection
 
 Backend services — AI agents, HTTP handlers, content pipelines — can push
