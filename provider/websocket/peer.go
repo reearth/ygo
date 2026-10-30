@@ -900,10 +900,8 @@ func (p *peer) runWriter() {
 // disconnect path and teardown — to run concurrently with a write. Returns false
 // when the writer goroutine should exit.
 //
-// A failed write closes the connection. After a write-deadline timeout gorilla's
-// write side is broken, but its read side still works: without the close, a peer
-// that keeps sending would stay in the room with no writer, and its replies would
-// queue on writeCh until the queue overflows.
+// A failed write closes the connection, because gorilla's read side keeps
+// working after a write timeout and the peer would stay in its room otherwise.
 func (p *peer) writeToConn(data []byte) bool {
 	p.wmu.Lock()
 	closed := p.closed

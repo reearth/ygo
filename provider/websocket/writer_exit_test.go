@@ -16,16 +16,8 @@ import (
 )
 
 // TestInteg_WriterExit_TimedOutWriteTearsDownPeer checks that a peer whose
-// write times out is torn down, even while it keeps sending.
-//
-// The client stops reading right after the WebSocket handshake. net.Pipe has
-// no buffer, so the server's first handshake write blocks until the server's
-// write deadline (writeTimeout, 10 s) expires, and the writer goroutine exits.
-// The read side of the connection still works, so the client keeps sending
-// SyncStep1 frames. The server must close the connection when the writer
-// exits, so that the read loop runs the teardown and OnLastPeer fires. Before
-// the fix, nothing closed the connection: the peer stayed in the room and its
-// replies queued on a channel with no writer.
+// write times out is torn down while it keeps sending, because only a closed
+// connection makes the read loop run the teardown and fire OnLastPeer.
 func TestInteg_WriterExit_TimedOutWriteTearsDownPeer(t *testing.T) {
 	// writeTimeout in server.go is 10 s; the margin covers scheduling.
 	const teardownBound = 10*time.Second + 5*time.Second
@@ -50,10 +42,10 @@ func TestInteg_WriterExit_TimedOutWriteTearsDownPeer(t *testing.T) {
 	defer conn.Close()
 	start := time.Now()
 
-	// The client never reads. It sends a SyncStep1 frame at a steady rate;
-	// each one makes the server queue a SyncStep2 reply. The rate stays far
-	// below the default write queue size (512), so a queue overflow cannot
-	// be what tears the peer down.
+	// The client never reads, and net.Pipe has no buffer, so the server's first
+	// write times out. Its SyncStep1 frames keep the read side busy at a rate far
+	// below the default write queue size (512), so a queue overflow cannot be
+	// what tears the peer down.
 	step1 := encoding.EncodeBytes(func(enc *encoding.Encoder) {
 		enc.WriteVarUint(0) // outer msgSync
 		enc.WriteRaw(ygsync.EncodeSyncStep1(crdt.New()))
