@@ -72,16 +72,8 @@ func documentUpdates(t *testing.T, conn *gws.Conn, room string) int {
 	}
 }
 
-// A Hocuspocus-framed room that stores each update as it applies and caps its
-// pending queue refuses an update whose delete set would park more ranges than
-// the cap without changing anything: the update inserts text, deletes text the
-// room holds and names more ranges past the store than the cap. The room's
-// state and text are as they were, its OnUpdate observers are handed nothing,
-// nothing is stored, the other peer gets no document update and the sender
-// gets SyncStatus(0). Before, the room kept the insert and the delete, fired
-// OnUpdate and stored them, while the sender was told 0 and the other peer was
-// sent nothing. The same edit without the ranges past the cap then applies and
-// reaches both.
+// A refused over-cap update must leave the room unchanged: nothing applied,
+// stored or sent to the other peer, and SyncStatus(0) to the sender.
 func TestInteg_RefusedParkedDeleteUpdateLeavesTheRoomUnchanged(t *testing.T) {
 	const limit = 10
 	adapter := &recordingAdapter{}

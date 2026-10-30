@@ -133,6 +133,50 @@ func TestUnit_ApplyUpdate_TheParkedDeletesCheckedAreWhatTheApplyParks(t *testing
 			if len(want.clients) > 0 {
 				parkedSome++
 			}
+			// A second update, now that ranges are parked, never leaves more of
+			// them than the check counts, and the rest of the document leaves
+			// none.
+			for _, full := range []bool{false, true} {
+				claimed := receiver.StateVector()
+				if !full {
+					for _, client := range slices.Sorted(maps.Keys(all)) {
+						if clock, has := all[client], claimed.Clock(client); clock > has {
+							claimed[client] = has + uint64(rng.Int64N(int64(clock-has+1)))
+						}
+					}
+				}
+				update := EncodeStateAsUpdateV1(sender, claimed)
+				if format.v2 {
+					var err error
+					if update, err = UpdateV1ToV2(update); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ds, err := deleteSetOf(newPendingScanner(update, format.v2), format.v2)
+				if err != nil {
+					t.Fatalf("round %d %s: %v", round, format.name, err)
+				}
+				sv := receiver.store.StateVector()
+				budget := newPendingBudget(receiver, sv, update, format.v2)
+				clocks, err := structClocksOf(&budget)
+				if err != nil {
+					t.Fatalf("round %d %s: %v", round, format.name, err)
+				}
+				counted := parkedDeleteRangesAfter(stillParked(receiver.store.pendingDs, sv, clocks), parkedPartsOf(ds, clocks))
+				if format.v2 {
+					err = ApplyUpdateV2(receiver, update, nil)
+				} else {
+					err = ApplyUpdateV1(receiver, update, nil)
+				}
+				if err != nil {
+					t.Fatalf("round %d %s: the second update was refused: %v", round, format.name, err)
+				}
+				got := receiver.PendingStats().DeleteRanges
+				if got > counted || (full && counted != 0) {
+					t.Fatalf("round %d %s (full %v): %d delete ranges are parked, the check counted %d",
+						round, format.name, full, got, counted)
+				}
+			}
 		}
 	}
 	if parkedSome < rounds/4 {

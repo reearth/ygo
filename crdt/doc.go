@@ -99,7 +99,7 @@ func WithCollectionID(id string) DocOption {
 // delete ranges parked waiting for the structs they delete. It is smaller than
 // the decoder's per-update item limit (maxV2Items, 1<<20), so one legal update
 // applied to a document that lacks the state it depends on can exceed it. See
-// WithMaxPendingItems and #46.
+// WithMaxPendingItems.
 const defaultMaxPendingItems = 100_000
 
 // WithMaxPendingItems caps the per-doc pending queue depth — items parked
@@ -116,7 +116,7 @@ const defaultMaxPendingItems = 100_000
 //
 // This is a defence against a malicious peer crafting an update full of
 // far-future-clock items, which would otherwise grow the pending queue
-// without bound (issue #46), or a run of updates whose delete sets name clocks
+// without bound, or a run of updates whose delete sets name clocks
 // of a client nobody holds, which would otherwise grow the pending deletes
 // without bound. An honest peer deletes only what it holds and sends a struct
 // before or with any delete of it, so its deletes park only while its updates

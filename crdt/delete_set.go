@@ -140,23 +140,15 @@ func (ds *DeleteSet) orderedClients() []ClientID {
 	return append(out, rest...)
 }
 
-// retryPendingDs reapplies the store's parked deletions whose structs have
-// arrived since they were parked, in the order Yjs re-reads its encoded
-// pending delete set: clients descending, ranges sorted.
-//
-// A client's ranges are retried only once the store's next clock for it has
-// passed its lowest parked range. A retry tries every range below that clock
-// and parks what lies at or past it, so until the clock moves none of the
-// client's ranges can apply, and an apply that brings nothing for a client
-// costs nothing for its parked ranges, however many there are. Without the
-// gate every apply, in a document holding a client's ranges nothing resolves,
-// sorted and copied all of them: with 100,000 parked ranges one keystroke
-// allocated about 1.6 MB.
+// retryPendingDs reapplies the store's parked deletions in the order Yjs
+// re-reads its encoded pending delete set: clients descending, ranges sorted.
+// It skips a client whose next clock has not passed its lowest parked range,
+// since none of that client's ranges can apply yet.
 func retryPendingDs(txn *Transaction) {
 	store := txn.doc.store
 	var ready DeleteSet
 	for client, ranges := range store.pendingDs.clients {
-		if len(ranges) > 0 && store.NextClock(client) > lowestClock(ranges) {
+		if len(ranges) > 0 && store.NextClock(client) > ranges[0].Clock {
 			if ready.clients == nil {
 				ready = newDeleteSet()
 			}
@@ -181,18 +173,6 @@ func retryPendingDs(txn *Transaction) {
 		}
 	}
 	store.pendingDs = still
-}
-
-// lowestClock is the lowest clock the ranges name. They are sorted wherever
-// they come from a merge or a retry, so this reads the first; it walks them
-// rather than trusting that, since the cost is the client's own ranges once
-// per apply and a wrong answer would hold a range back for good.
-func lowestClock(ranges []DeleteRange) uint64 {
-	lowest := ranges[0].Clock
-	for _, r := range ranges[1:] {
-		lowest = min(lowest, r.Clock)
-	}
-	return lowest
 }
 
 // applyToPartial applies delete-set entries whose target items are
@@ -289,32 +269,12 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 	return unresolvable
 }
 
-// checkParkedDeletes refuses a remote update, V1 or V2, when its delete set
-// would grow the parked delete ranges past the cap the pending queue has for
-// parked items (WithMaxPendingItems): the same ErrInvalidUpdate that an update
-// parking too many items is refused with. It runs before the apply changes
-// anything, so a refused update leaves the document as it was: no struct is
-// integrated, no delete applied and no observer told. b is the apply's pending
-// budget, which holds the update and the store's state vector as the apply
-// begins.
-//
-// The ranges an update parks are the parts of its delete set past the store's
-// next clock for their client once the update's structs are in
-// (applyToPartial). The count is taken after the merge, and an update that
-// adds no range is never refused: a delete set a peer sends again, as its sync
-// does after a reconnect, or ranges that join parked ones, pass even on a
-// document that already holds more than the cap because it loaded a stored
-// state with the cap lifted (SetMaxPendingItems).
-//
-// It costs what the update can do. Each range of a delete set takes two bytes
-// of the update at least, its clock and its length, so an update too short to
-// carry more ranges than the cap has room for costs a comparison: a keystroke
-// on a document below the cap is never read twice. A longer one is walked
-// once past its struct section (frameStructs), and the ranges of its delete
-// set that could park are counted as they are read, keeping nothing
-// (parkingRangesBound). Only when that bound passes the room left does the
-// exact check run: the delete set decoded (deleteSetOf) and the clocks its
-// structs leave resolved (structClocksOf).
+// checkParkedDeletes refuses, before the apply changes anything, an update
+// whose delete set would leave more parked ranges than WithMaxPendingItems
+// allows, so a refused update leaves the document as it was. A range takes at
+// least two bytes, so a short update is accepted on its length alone, and a
+// longer one is first bounded by one walk (frameStructs, parkingRangesBound)
+// before the exact count.
 func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	limit := doc.maxPendingItemsLimit()
 	pending := doc.store.pendingDs
@@ -339,18 +299,42 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	if n := parkingRanges(ds, b.initial); n == 0 || n <= room {
+	if n := parkingRanges(ds, b.initial); n <= room {
 		return nil
 	}
 	clocks, err := structClocksOf(b)
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	after := parkedDeleteRangesAfter(pending, parkedPartsOf(ds, clocks))
+	after := parkedDeleteRangesAfter(stillParked(pending, b.initial, clocks), parkedPartsOf(ds, clocks))
 	if after <= limit || after <= before {
 		return nil
 	}
-	return wrapUpdateErr(ErrInvalidUpdate)
+	return ErrInvalidUpdate
+}
+
+// stillParked is what the retry after the update's structs leaves of pending:
+// the ranges of each client whose clock the structs moved, cut at its clock in
+// clocks.
+func stillParked(pending DeleteSet, initial, clocks StateVector) DeleteSet {
+	still := DeleteSet{clients: make(map[ClientID][]DeleteRange, len(pending.clients))}
+	for client, ranges := range pending.clients {
+		next := clocks.Clock(client)
+		if next == initial.Clock(client) {
+			still.clients[client] = ranges
+			continue
+		}
+		var kept []DeleteRange
+		for _, r := range ranges {
+			if part, parks := parkedPart(r, next); parks {
+				kept = append(kept, part)
+			}
+		}
+		if len(kept) > 0 {
+			still.clients[client] = kept
+		}
+	}
+	return still
 }
 
 // deleteSetOf is the delete set of the update s scans, a V1 one or a V2 one,
@@ -580,13 +564,8 @@ func parkingRangesBound(s *pendingScanner, sv StateVector) (int, error) {
 }
 
 // structClocksOf is the store's state vector once the structs of b's update
-// are in. The clocks are found as the pending budget finds them
-// (scanPendingGroupsBounded, resolvePendingGroups): a struct is in once its
-// clock follows its client's and its origin, right origin and parent are in,
-// from the store or from the update itself in any order, and the groups the
-// decoder drops count for nothing. Items an earlier update parked do not
-// count: the drain that can integrate them runs after the update's delete set
-// is parked.
+// are in, resolved as the pending budget resolves them; items an earlier
+// update parked are left out, so the count it feeds can only be high.
 func structClocksOf(b *pendingBudget) (StateVector, error) {
 	if err := b.knowSuperseded(); err != nil {
 		return nil, err
@@ -643,11 +622,8 @@ func parkingRanges(ds DeleteSet, sv StateVector) int {
 	return n
 }
 
-// parkedPart is the part of r, a delete range of a client the store holds up
-// to next, that applyToPartial parks, and whether it parks any: nothing of a
-// range of length zero, every other range as it is when the store holds
-// nothing of the client, a range whose end wraps whole, and otherwise what
-// lies at or past next.
+// parkedPart is the part of r that applyToPartial parks on a store holding r's
+// client up to next, and whether any of it parks.
 func parkedPart(r DeleteRange, next uint64) (DeleteRange, bool) {
 	end := r.Clock + r.Len
 	switch {

@@ -67,10 +67,8 @@ func textState(client ClientID, s string) []byte {
 	return EncodeStateAsUpdateV1(doc, nil)
 }
 
-// A keystroke costs the same whether or not 100,000 delete ranges of a client
-// nobody holds are parked: a client's parked ranges are retried only once its
-// structs have moved past the lowest of them. Before, every remote apply
-// retried every parked range, copying each into a new set.
+// A keystroke must not pay for parked delete ranges of a client it brings
+// nothing for.
 func TestUnit_ApplyUpdate_AKeystrokeCostsNothingForParkedDeleteRanges(t *testing.T) {
 	const n = 100_000
 	state := textState(7, strings.Repeat("a", 8))
@@ -167,6 +165,48 @@ func TestUnit_ApplyUpdate_ParkedDeleteRangesAreCapped(t *testing.T) {
 			}
 			if got := parked(); got != 1 {
 				t.Fatalf("after filling the gaps %d delete ranges are parked, want 1", got)
+			}
+		})
+	}
+}
+
+// Parked ranges that an update's own structs resolve do not count against the
+// cap the update's new ranges are checked by.
+func TestUnit_ApplyUpdate_ParkedRangesTheUpdateResolvesMakeRoom(t *testing.T) {
+	const limit = 10
+	// Client 98's structs at clocks 0-3 resolve the parked ranges at 0 and 2.
+	structs := textState(98, "abcd")
+	missing := func(n int) []byte {
+		ranges := make([]DeleteRange, n)
+		for i := range n {
+			ranges[i] = DeleteRange{Clock: uint64(2 * i), Len: 1}
+		}
+		update, err := MergeUpdatesV1(structs, deleteRangesUpdate(99, ranges...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return update
+	}
+	for _, format := range applyFormats {
+		t.Run(format.name, func(t *testing.T) {
+			doc := New(WithMaxPendingItems(limit))
+			if err := applyIn(t, doc, format.v2, parkedDeletes(98, limit)); err != nil {
+				t.Fatal(err)
+			}
+			before := EncodeStateAsUpdateV1(doc, nil)
+			updates := observed(doc)
+			if err := applyIn(t, doc, format.v2, missing(3)); !errors.Is(err, ErrInvalidUpdate) {
+				t.Fatalf("an update leaving %d ranges parked was applied with err %v, want ErrInvalidUpdate", limit+1, err)
+			}
+			requireUnchanged(t, doc, before, "", updates)
+			if err := applyIn(t, doc, format.v2, missing(2)); err != nil {
+				t.Fatalf("an update leaving %d ranges parked was refused: %v", limit, err)
+			}
+			if got := doc.PendingStats().DeleteRanges; got != limit {
+				t.Fatalf("%d delete ranges are parked, want %d", got, limit)
+			}
+			if got := doc.GetText("t").ToString(); got != "bd" {
+				t.Fatalf("the text is %q, want %q", got, "bd")
 			}
 		})
 	}
@@ -290,14 +330,8 @@ func requireUnchanged(t *testing.T, doc *Doc, before []byte, text string, update
 	}
 }
 
-// A document refuses an update whose delete set would park more ranges than
-// the cap before it changes anything: an update that inserts text, deletes
-// text the document holds and names more ranges past the store than the cap
-// leaves the document's state, its text, its parked deletes and its observers
-// as they were. Before, the refusal came after the update's structs and
-// resolvable deletes were in: the document kept the insert and the deletes,
-// fired OnUpdate, and returned ErrInvalidUpdate. The same edit without the
-// ranges past the cap then applies.
+// A refused over-cap update must leave the document's state, text, parked
+// deletes and observers unchanged.
 func TestUnit_ApplyUpdate_RefusedParkedDeletesLeaveTheDocumentUnchanged(t *testing.T) {
 	const limit = 10
 	writer := New(WithClientID(5))

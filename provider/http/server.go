@@ -35,7 +35,7 @@ type Server struct {
 	// queue holds items whose dependencies have not yet arrived, waiting for
 	// out-of-order delivery to resolve. It caps, separately, the delete ranges
 	// parked waiting for the structs they delete. Zero or negative uses the
-	// crdt default (100,000). See crdt.WithMaxPendingItems and issue #46.
+	// crdt default (100,000). See crdt.WithMaxPendingItems.
 	MaxPendingItems int
 
 	// AuthFunc, if non-nil, is called on every request before any document is
