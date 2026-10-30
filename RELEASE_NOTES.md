@@ -14,11 +14,11 @@ update was in the room.
 ygo now checks the whole update against the cap before the apply integrates
 any of it. A refused update leaves the document unchanged: nothing integrates,
 nothing parks, no observer is told, and a room stores and relays nothing. An
-update that the cap does not refuse applies as before. The check is cheap: in
-V1 it compares the update's size with the room left in
-the cap, and in V2 it reads the struct count from the update's group headers,
-without allocation. Only an update with more structs than the room left gets
-the full check. No API or wire format changes.
+update that the check reads and finds malformed is also refused before
+anything integrates. An update that the cap does not refuse applies as before.
+Cheap bounds on the update's struct count come first and allocate nothing: the
+update's size in V1, and its group headers in V2. Only an update with more
+structs than the room left gets the full check. No API or wire format changes.
 
 ## v1.54.0
 

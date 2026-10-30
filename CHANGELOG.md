@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the apply returned `ErrInvalidUpdate`. A `provider/websocket` room stored and
   relayed that part and answered the sender `SyncStatus(0)`. The cap now checks
   the whole update before the apply integrates any of it. A refused update
-  leaves the document unchanged, and no observer is told.
+  leaves the document unchanged, and no observer is told. An update that the
+  check reads and finds malformed is also refused before anything integrates.
 
 ## [1.54.0] — 2026-10-22
 
