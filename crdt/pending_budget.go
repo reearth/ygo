@@ -27,12 +27,10 @@ type pendingBudget struct {
 	groupsKnown bool
 }
 
-// newPendingBudget floors the budget at zero, so a document loaded over its
-// cap is refused only growth of its parked items.
 func newPendingBudget(doc *Doc, initial StateVector, update []byte, v2 bool) pendingBudget {
 	remaining := doc.maxPendingItemsLimit()
 	if doc.store.pending != nil {
-		remaining = max(remaining-len(doc.store.pending.items), 0)
+		remaining -= len(doc.store.pending.items)
 	}
 	return pendingBudget{initial: initial, update: update, remaining: remaining, v2: v2}
 }

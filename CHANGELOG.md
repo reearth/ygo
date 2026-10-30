@@ -13,9 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already made, so stored state, which can carry more parked items or ranges
   than the cap, can be loaded with the cap lifted. `provider/websocket` now
   loads each room's stored state that way and sets `MaxPendingItems` before
-  the `OnLoadDocument` hook and any peer's update. A document over its cap is
-  refused only growth of what it has parked, so it still applies an update
-  whose items resolve within it.
+  the `OnLoadDocument` hook and any peer's update. A document over its cap
+  still applies an update whose items resolve within it.
 
 ### Fixed
 

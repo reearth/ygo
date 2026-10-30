@@ -171,13 +171,16 @@ func TestUnit_ApplyUpdate_TheParkedDeletesCheckedAreWhatTheApplyParks(t *testing
 				if err != nil {
 					t.Fatalf("round %d %s: the second update was refused: %v", round, format.name, err)
 				}
-				got := receiver.PendingStats().DeleteRanges
+				got := 0
+				for _, ranges := range receiver.store.pendingDs.clients {
+					got += len(ranges)
+				}
 				if got > counted || (full && counted != 0) {
 					t.Fatalf("round %d %s (full %v): %d delete ranges are parked, the check counted %d",
 						round, format.name, full, got, counted)
 				}
-				if kept := receiver.store.pendingDsRanges; kept != got {
-					t.Fatalf("round %d %s (full %v): the store keeps a count of %d parked ranges, it holds %d",
+				if kept := receiver.PendingStats().DeleteRanges; kept != got {
+					t.Fatalf("round %d %s (full %v): PendingStats reports %d parked ranges, the store holds %d",
 						round, format.name, full, kept, got)
 				}
 			}

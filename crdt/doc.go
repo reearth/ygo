@@ -1044,9 +1044,7 @@ func (d *Doc) PendingStats() PendingStats {
 		sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
 		stats.MissingFor = missing
 	}
-	for _, ranges := range d.store.pendingDs.clients {
-		stats.DeleteRanges += len(ranges)
-	}
+	stats.DeleteRanges = d.store.pendingDsRanges
 	return stats
 }
 

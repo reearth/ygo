@@ -80,6 +80,26 @@ func (s *StructStore) parkDeletes(ds DeleteSet) {
 	}
 }
 
+// takeReadyDeletes removes from pendingDs, and returns, the ranges of each
+// client that gained structs since the last call and whose next clock passed
+// its lowest parked range, since only those can apply.
+func (s *StructStore) takeReadyDeletes() DeleteSet {
+	var ready DeleteSet
+	for client := range s.pendingDsMoved {
+		if ranges := s.pendingDs.clients[client]; len(ranges) > 0 && s.NextClock(client) > ranges[0].Clock {
+			if ready.clients == nil {
+				ready = newDeleteSet()
+			}
+			ready.clients[client] = ranges
+			ready.order = append(ready.order, client)
+			delete(s.pendingDs.clients, client)
+			s.pendingDsRanges -= len(ranges)
+		}
+	}
+	clear(s.pendingDsMoved)
+	return ready
+}
+
 // Find returns the Item that contains the given ID, or nil if not found.
 // An item with Clock c and length l contains IDs with clocks [c, c+l).
 //

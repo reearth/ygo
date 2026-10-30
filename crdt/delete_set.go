@@ -136,35 +136,17 @@ func (ds *DeleteSet) orderedClients() []ClientID {
 	return append(out, rest...)
 }
 
-// retryPendingDs reapplies the store's parked deletions in the order Yjs
-// re-reads its encoded pending delete set: clients descending, ranges sorted.
-// Only a client that gained structs since the last retry, and whose next clock
-// passed its lowest parked range, can have a range to apply, so an apply costs
-// nothing for the others.
+// retryPendingDs reapplies the store's parked deletions that can apply
+// (takeReadyDeletes) in the order Yjs re-reads its encoded pending delete set:
+// clients descending, ranges sorted.
 func retryPendingDs(txn *Transaction) {
 	store := txn.doc.store
-	var ready DeleteSet
-	for client := range store.pendingDsMoved {
-		if ranges := store.pendingDs.clients[client]; len(ranges) > 0 && store.NextClock(client) > ranges[0].Clock {
-			if ready.clients == nil {
-				ready = newDeleteSet()
-			}
-			ready.clients[client] = ranges
-			ready.order = append(ready.order, client)
-			delete(store.pendingDs.clients, client)
-			store.pendingDsRanges -= len(ranges)
-		}
-	}
-	clear(store.pendingDsMoved)
+	ready := store.takeReadyDeletes()
 	if ready.clients == nil {
 		return
 	}
 	slices.SortFunc(ready.order, func(a, b ClientID) int { return cmp.Compare(b, a) })
-	still := ready.applyToPartial(txn)
-	for client, ranges := range still.clients {
-		store.pendingDs.clients[client] = ranges
-		store.pendingDsRanges += len(ranges)
-	}
+	store.parkDeletes(ready.applyToPartial(txn))
 }
 
 // applyToPartial applies delete-set entries whose target items are
@@ -438,8 +420,8 @@ func parkedPart(r DeleteRange, next uint64) (DeleteRange, bool) {
 // parkedDeleteRangesAfter is how many delete ranges pending, which holds before
 // of them, holds after an update that moves the store's clocks from initial to
 // clocks and parks parked: the retry cuts a moved client's ranges at its new
-// clock, and Merge joins ranges that overlap or touch. It reads only the
-// clients the update moves or parks ranges for.
+// clock, and Merge joins ranges that overlap or touch. It recounts only the
+// parked ranges of clients the update moves or parks ranges for.
 func parkedDeleteRangesAfter(pending DeleteSet, before int, initial, clocks StateVector, parked DeleteSet) int {
 	after := before
 	count := func(client ClientID) {

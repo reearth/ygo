@@ -616,14 +616,12 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 // have found the superseded groups for.
 func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, budget *pendingBudget) ([]*Item, error) {
 	var pending []*Item
-	if numClients > 1 && !budget.groupsKnown {
+	if numClients > 1 {
 		// Fail before integrating anything: a later malformed group must not
 		// leave earlier, superseded groups applied.
-		superseded, err := supersededGroups(budget.update, nil, encoding.Decoder{})
-		if err != nil {
+		if err := budget.knowSuperseded(); err != nil {
 			return nil, err
 		}
-		budget.setSuperseded(superseded)
 	} else if !budget.groupsKnown {
 		budget.setSuperseded(nil)
 	}

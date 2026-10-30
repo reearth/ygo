@@ -30,8 +30,8 @@ before it caps what arrives after it: a stored state can carry more parked
 ranges or items than the cap, so a document capped from the start would refuse
 to load it. The websocket server now loads a room's stored state with the cap
 lifted and sets it once the state is in. A document that holds more than its
-cap, from a load or a lowered cap, is refused only further growth of what it
-has parked, so it still applies an update whose items resolve within it.
+cap, from a load or a lowered cap, still applies an update whose items
+resolve within it.
 
 ## v1.54.0
 
