@@ -563,10 +563,10 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 
 	numClients, err := dec.ReadVarUint()
 	if err != nil {
-		return wrapUpdateErr(err)
+		return txn.refuse(wrapUpdateErr(err))
 	}
 	if numClients > uint64(len(update)/2) || numClients > maxV2Items {
-		return ErrInvalidUpdate
+		return txn.refuse(ErrInvalidUpdate)
 	}
 	var superseded groupSet
 	structs := 0
@@ -574,15 +574,14 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		// Fail before integrating anything: a later malformed group must not
 		// leave earlier, superseded groups applied.
 		if superseded, structs, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
-			return wrapUpdateErr(err)
+			return txn.refuse(wrapUpdateErr(err))
 		}
 	}
 	budget := newPendingBudget(txn.doc, sv, update, false)
 	budget.setSuperseded(superseded)
 	budget.structs = structs
 	if err := budget.checkBeforeApply(len(update)); err != nil {
-		txn.refused = true
-		return err
+		return txn.refuse(err)
 	}
 
 	// 1. Decode all items, parking any with future-clock deps or same-client gaps.

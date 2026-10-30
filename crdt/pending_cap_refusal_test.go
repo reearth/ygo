@@ -385,3 +385,34 @@ func TestUnit_PendingBudget_V2StringClocksFollowThePoolNotTheLengths(t *testing.
 		t.Fatalf("%d items are parked, want %d", got, parked)
 	}
 }
+
+// An update that fails before the apply changes anything tells no observer,
+// as one the pending cap refuses does not.
+func TestUnit_ApplyUpdate_FailureBeforeAnyChangeTellsNoObserver(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version int
+		update  []byte
+	}{
+		{"V1 truncated header", 1, []byte{0xff}},
+		{"V1 more groups than bytes", 1, []byte{100, 0}},
+		{"V1 malformed later group", 1, repeatedGroupsUpdate(t, 1, true)},
+		{"V2 truncated header", 2, []byte{0xff}},
+		{"V2 malformed later group", 2, repeatedGroupsUpdate(t, 2, true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := New()
+			before, text := EncodeStateAsUpdateV1(doc, nil), doc.GetText("t").ToString()
+			updates := observed(doc)
+			txns := 0
+			doc.OnAfterTransaction(func(*Transaction) { txns++ })
+			if err := applyVersion(doc, tc.version, tc.update); !errors.Is(err, ErrInvalidUpdate) {
+				t.Fatalf("err %v, want ErrInvalidUpdate", err)
+			}
+			requireUnchanged(t, doc, before, text, updates)
+			if txns != 0 {
+				t.Fatalf("OnAfterTransaction fired %d times, want none", txns)
+			}
+		})
+	}
+}

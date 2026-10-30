@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.54.1] — 2026-10-29
+## [1.54.1] — 2026-10-30
 
 ### Fixed
 
@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   relayed that part and answered the sender `SyncStatus(0)`. The cap now checks
   the whole update before the apply integrates any of it. A refused update
   leaves the document unchanged, and no observer is told. An update that the
-  check reads and finds malformed is also refused before anything integrates.
+  check reads and finds malformed is also refused before anything integrates,
+  and an update that fails before the apply changes anything no longer fires
+  `OnUpdate` or `OnAfterTransaction`.
 
 ## [1.54.0] — 2026-10-22
 

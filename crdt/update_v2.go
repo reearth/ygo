@@ -614,7 +614,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 
 	dec, err := newV2Decoder(update)
 	if err != nil {
-		return err
+		return txn.refuse(err)
 	}
 
 	sv := txn.doc.store.StateVector()
@@ -626,12 +626,12 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	peek := budget.v2Rest
 	numClients, err := peek.ReadVarUint()
 	if err != nil {
-		return wrapUpdateErr(err)
+		return txn.refuse(wrapUpdateErr(err))
 	}
 	// Guard against pathological inputs that encode huge counts via RLE compression.
 	// No realistic update has more client groups than its byte count.
 	if numClients > maxV2Items {
-		return ErrInvalidUpdate
+		return txn.refuse(ErrInvalidUpdate)
 	}
 
 	var pending []*Item
@@ -640,13 +640,12 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		// Fail before integrating anything: a later malformed group must not
 		// leave earlier, superseded groups applied.
 		if superseded, budget.structs, err = supersededGroups(update, &initialV2, budget.v2Rest); err != nil {
-			return wrapUpdateErr(err)
+			return txn.refuse(wrapUpdateErr(err))
 		}
 	}
 	budget.setSuperseded(superseded)
 	if err := budget.checkBeforeApply(len(update)); err != nil {
-		txn.refused = true
-		return err
+		return txn.refuse(err)
 	}
 	*dec.restDec = peek
 
