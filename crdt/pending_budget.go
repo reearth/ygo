@@ -53,6 +53,68 @@ func (b *pendingBudget) scanner() *pendingScanner {
 	return &pendingScanner{v2: &v2, rest: &rest}
 }
 
+// checkBeforeApply refuses the update, before the apply integrates any of it,
+// when its structs would leave more items parked than the pending cap has
+// room for. size is the update's length in bytes. An update with no more
+// structs than the room left cannot pass the cap and is not read again: a V1
+// struct takes two bytes of the update at least, so a V1 update of at most
+// twice the room costs a comparison; a V2 update, whose columns can hold many
+// structs in a few bytes, is read past its structs to count them
+// (skipStructs) first. Any other update gets the full preflight (check).
+//
+// For V2 it must run before the apply reads from its decoder: it scans on the
+// apply's own rest cursor and puts it back where the apply began.
+func (b *pendingBudget) checkBeforeApply(size int) error {
+	if !b.v2 && size/2 <= b.remaining {
+		return nil
+	}
+	if b.v2 && b.v2Start != nil {
+		// A framing scanner of the update's own decoder that allocates
+		// nothing: the column cursors are a copy on the stack, and the rest
+		// cursor is the apply's own, which has read nothing yet and is put
+		// back where it began. The scan's error is not returned from here, so
+		// nothing of the scanner escapes; an update whose structs do not scan
+		// fails the same scan in check, which returns its error.
+		v2 := *b.v2Start
+		n, err := skipStructs(&pendingScanner{v2: &v2, rest: v2.restDec, frame: true})
+		*v2.restDec = b.v2Rest
+		if err == nil && n <= b.remaining {
+			return nil
+		}
+	}
+	return b.check(b.remaining)
+}
+
+// skipStructs reads the update s scans past its structs, keeping nothing of
+// them, and returns how many of them are not skips (tag 10): the most the
+// update can park in the pending queue.
+func skipStructs(s *pendingScanner) (int, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	clients := s.uint()
+	if clients > maxV2Items {
+		return 0, ErrInvalidUpdate
+	}
+	var total uint64
+	structs := 0
+	for i := uint64(0); i < clients && s.err == nil; i++ {
+		n := s.uint()
+		total += n
+		if total > maxV2Items {
+			return 0, ErrInvalidUpdate
+		}
+		s.client()
+		s.uint()
+		for j := uint64(0); j < n && s.err == nil; j++ {
+			if _, skip, _, _ := s.item(); !skip {
+				structs++
+			}
+		}
+	}
+	return structs, s.err
+}
+
 func (b *pendingBudget) check(count int) error {
 	if b.checked || count < b.remaining {
 		return nil

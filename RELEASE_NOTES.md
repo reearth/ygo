@@ -1,3 +1,24 @@
+## v1.54.1
+
+**Who is affected: anyone who sets `WithMaxPendingItems`, or a
+`provider/websocket` or `provider/http` server's `MaxPendingItems`, and
+receives updates whose items park past that cap.**
+
+ygo checked the pending cap only when the decoder reached an item that had to
+park. The items before it in the same update had already integrated. The
+document kept them, `OnUpdate` fired, and `ApplyUpdate` returned
+`ErrInvalidUpdate`. A `provider/websocket` room stored and relayed that part,
+and told the sender `SyncStatus(0)`: the sender did not know that part of its
+update was in the room.
+
+ygo now checks the whole update against the cap before the apply integrates
+any of it. A refused update leaves the document unchanged: nothing integrates,
+nothing parks, no observer is told, and a room stores and relays nothing. An
+update that the cap does not refuse applies as before. A small update costs
+nothing more: in V1 the check compares the update's size with the room left in
+the cap, and in V2 it counts the update's structs without allocation. No API or
+wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

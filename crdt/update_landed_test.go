@@ -47,10 +47,11 @@ func TestUnit_ApplyUpdateV1Landed(t *testing.T) {
 	}
 
 	// The editor inserts "abc" and overwrites w.a, which integrate (the
-	// overwrite deletes the writer's entry), then sets seven entries on a map
-	// the room never received, which overflow the six pending slots left. Its
-	// own deletion of a character travels in the update's delete set, which
-	// the apply never reaches.
+	// overwrite deletes the writer's entry), then sets five entries on a map
+	// the room never received, which park in five of the six pending slots
+	// left. The update is cut short in its delete set, so the apply fails
+	// after its structs integrated or parked: its own deletion of a character
+	// travels in that delete set, which the apply never reaches.
 	editor := newTestDoc(7)
 	require.NoError(t, ApplyUpdateV1(editor, written, nil))
 	author := newTestDoc(1)
@@ -65,14 +66,15 @@ func TestUnit_ApplyUpdateV1Landed(t *testing.T) {
 		et.Insert(txn, 0, "abc", nil)
 		et.Delete(txn, 3, 1)
 		em.Set(txn, "a", 2)
-		for i := range 7 {
+		for i := range 5 {
 			nested.Set(txn, "e"+strconv.Itoa(i), i)
 		}
 	})
-	overflowing := EncodeStateAsUpdateV1(editor, before)
+	cut := EncodeStateAsUpdateV1(editor, before)
+	cut = cut[:len(cut)-1]
 
 	room := newRoom()
-	landed, err := ApplyUpdateV1Landed(room, overflowing, nil)
+	landed, err := ApplyUpdateV1Landed(room, cut, nil)
 	require.ErrorIs(t, err, ErrInvalidUpdate)
 	require.Equal(t, "abc"+strings.Repeat("x", 50), room.GetText("t").ToString(), "the insertion integrated")
 	require.NotNil(t, landed)

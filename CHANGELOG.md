@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-29
+
+### Fixed
+
+- **`crdt`: the pending cap refuses an update before the update changes the
+  document.** `WithMaxPendingItems` refused an update whose items would park
+  past the cap only when the decoder reached those items. The items before
+  them had already integrated, so the document kept them, `OnUpdate` fired, and
+  the apply returned `ErrInvalidUpdate`. A `provider/websocket` room stored and
+  relayed that part and answered the sender `SyncStatus(0)`. The cap now checks
+  the whole update before the apply integrates any of it. A refused update
+  leaves the document unchanged, and no observer is told.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

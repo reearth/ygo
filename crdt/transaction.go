@@ -66,6 +66,11 @@ type Transaction struct {
 	formatCleanup      bool
 	typeObserved       bool
 	afterTypeObservers func()
+	// refused marks a remote apply that refused its update before changing
+	// anything (pendingBudget.checkBeforeApply): there is no update to encode,
+	// nothing to store and nothing for any observer, so the commit fires
+	// nothing.
+	refused bool
 }
 
 // Ctx returns the context associated with this transaction. Transactions

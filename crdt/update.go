@@ -61,11 +61,13 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 
 // ApplyUpdateV1Landed is ApplyUpdateV1 for a caller that must forward what
 // a failed apply left behind. ApplyUpdateV1 integrates an update item by item,
-// so one it rejects (an update that overflows the pending cap, say) can leave
-// part of itself in doc. When the apply fails, landed is a V1 update of exactly
-// what this call integrated: the structs it added to doc's store and the
-// deletions it made, not structs still parked, nor the rest of the document.
-// landed is nil when the apply succeeds or when nothing integrated.
+// so one it rejects partway (a struct it cannot decode after others
+// integrated, say) can leave part of itself in doc. When the apply fails,
+// landed is a V1 update of exactly what this call integrated: the structs it
+// added to doc's store and the deletions it made, not structs still parked,
+// nor the rest of the document. landed is nil when the apply succeeds or when
+// nothing integrated, as for an update the pending cap refuses, which it
+// refuses before the apply changes anything.
 func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, err error) {
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
@@ -559,6 +561,12 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 
 	// Snapshot state vector before applying anything (used for skip/offset logic).
 	sv := txn.doc.store.StateVector()
+	budget := newPendingBudget(txn.doc, sv, update, false)
+	if err := budget.checkBeforeApply(len(update)); err != nil {
+		// Refused before anything changed: the commit tells no observer.
+		txn.refused = true
+		return err
+	}
 
 	numClients, err := dec.ReadVarUint()
 	if err != nil {
@@ -606,10 +614,11 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 //	    into the returned slice for the within-update retry pass.
 //
 // Groups that a later group for the same client supersedes are decoded and
-// dropped (yjs parity). numClients is the count parsed from the header.
+// dropped (yjs parity). numClients is the count parsed from the header. The
+// apply checked the update against the pending cap before calling it
+// (pendingBudget.checkBeforeApply), so nothing it defers can pass the cap.
 func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, update []byte) ([]*Item, error) {
 	var pending []*Item
-	budget := newPendingBudget(txn.doc, sv, update, false)
 	var superseded groupSet
 	if numClients > 1 {
 		// Fail before integrating anything: a later malformed group must not
@@ -619,7 +628,6 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			return nil, err
 		}
 	}
-	budget.setSuperseded(superseded)
 
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
@@ -682,9 +690,6 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			// the cross-update pending limit.
 			if clock > existingEnd {
 				pending = append(pending, item)
-				if err := budget.check(len(pending)); err != nil {
-					return nil, err
-				}
 				clock = itemEnd
 				continue
 			}
@@ -706,9 +711,6 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			// reference to a group not yet decoded) are deferred.
 			if item.Parent == nil {
 				pending = append(pending, item)
-				if err := budget.check(len(pending)); err != nil {
-					return nil, err
-				}
 				clock = itemEnd
 				continue
 			}
@@ -725,9 +727,6 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			if offset == 0 && item.OriginRight != nil &&
 				item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
 				pending = append(pending, item)
-				if err := budget.check(len(pending)); err != nil {
-					return nil, err
-				}
 				clock = itemEnd
 				continue
 			}
