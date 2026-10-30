@@ -187,7 +187,10 @@ func BenchmarkPendingFixedPointFallback(b *testing.B) {
 							return
 						}
 						for len(pending) > 0 {
-							remaining := retryWithinUpdatePending(txn, pending)
+							var remaining []*Item
+							if remaining, err = retryWithinUpdatePending(txn, pending); err != nil {
+								return
+							}
 							if len(remaining) == len(pending) {
 								err = parkWithinUpdatePending(txn, remaining)
 								return

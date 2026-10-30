@@ -489,7 +489,10 @@ func TestUnit_PendingResolver_OverlappingRangesMatchFixedPoint(t *testing.T) {
 						return
 					}
 					for len(pending) > 0 {
-						remaining := retryWithinUpdatePending(txn, pending)
+						var remaining []*Item
+						if remaining, err = retryWithinUpdatePending(txn, pending); err != nil {
+							return
+						}
 						if len(remaining) == len(pending) {
 							err = parkWithinUpdatePending(txn, remaining)
 							return
@@ -532,9 +535,11 @@ func TestUnit_PendingResolver_SameStartCopies(t *testing.T) {
 			pending = []*Item{consumer, long, short}
 		}
 		var remaining []*Item
+		var err error
 		doc.Transact(func(txn *Transaction) {
-			remaining = resolvePendingDependencies(txn, pending)
+			remaining, err = resolvePendingDependencies(txn, pending)
 		})
+		require.NoError(t, err)
 		require.Empty(t, remaining)
 		require.Equal(t, "abcx", text.ToString())
 		doc.Destroy()
@@ -554,7 +559,9 @@ func TestUnit_TryIntegrate_FutureOriginWithKnownParent(t *testing.T) {
 		Content: NewContentString("x"),
 	}
 	doc.Transact(func(txn *Transaction) {
-		require.False(t, tryIntegrate(txn, item))
+		ok, err := tryIntegrate(txn, item)
+		require.False(t, ok)
+		require.NoError(t, err)
 	})
 	require.Equal(t, "abc", text.ToString())
 	require.Equal(t, uint64(0), doc.StateVector().Clock(2))

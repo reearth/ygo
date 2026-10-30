@@ -8,15 +8,21 @@ import (
 // Small queues cost less to retry directly than to index.
 const pendingScheduleThreshold = 32
 
-// retryWithinUpdatePending preserves wire order and reuses the queue's storage.
-func retryWithinUpdatePending(txn *Transaction, pending []*Item) []*Item {
+// retryWithinUpdatePending preserves wire order and reuses the queue's storage,
+// and returns the first refusal.
+func retryWithinUpdatePending(txn *Transaction, pending []*Item) ([]*Item, error) {
 	remaining := pending[:0]
+	var refused error
 	for _, item := range pending {
-		if !tryIntegrate(txn, item) {
+		ok, err := tryIntegrate(txn, item)
+		if refused == nil {
+			refused = err
+		}
+		if !ok {
 			remaining = append(remaining, item)
 		}
 	}
-	return remaining
+	return remaining, refused
 }
 
 // pendingProducer freezes a wire range even if integration trims its Item.
@@ -79,8 +85,9 @@ func pendingClientSuccessors(order []pendingProducer) []int {
 
 // resolvePendingDependencies walks producers before their dependents. Immutable
 // ranges keep searches valid when integration trims an Item. Remaining blocked
-// items are retained for the ordinary fixed-point resolver.
-func resolvePendingDependencies(txn *Transaction, pending []*Item) []*Item {
+// items are retained for the ordinary fixed-point resolver. The first refusal
+// is returned.
+func resolvePendingDependencies(txn *Transaction, pending []*Item) ([]*Item, error) {
 	order := indexPendingProducers(pending)
 	successors := pendingClientSuccessors(order)
 	// Keep the original successor links, then reuse the index for prefix coverage.
@@ -91,7 +98,8 @@ func resolvePendingDependencies(txn *Transaction, pending []*Item) []*Item {
 			current.end, current.index = previous.end, previous.index
 		}
 	}
-	state := make([]byte, len(pending))
+	state := make([]byte, len(pending)) // 0 untried, 1 on stack, 2 left the queue, 3 blocked
+	var refused error
 	stack := make([]int, 0, len(pending))
 	for start := range pending {
 		if state[start] != 0 {
@@ -102,7 +110,11 @@ func resolvePendingDependencies(txn *Transaction, pending []*Item) []*Item {
 			index := stack[len(stack)-1]
 			item := pending[index]
 			state[index] = 1
-			if tryIntegrate(txn, item) {
+			ok, err := tryIntegrate(txn, item)
+			if refused == nil {
+				refused = err
+			}
+			if ok {
 				state[index] = 2
 				stack = stack[:len(stack)-1]
 				// Complete a contiguous client tail before returning to consumers.
@@ -146,7 +158,7 @@ func resolvePendingDependencies(txn *Transaction, pending []*Item) []*Item {
 			remaining = append(remaining, item)
 		}
 	}
-	return remaining
+	return remaining, refused
 }
 
 // pendingWaiter parks a queue index until its client's clock passes clock.
@@ -177,10 +189,12 @@ func pendingBlocker(item *Item, store *StructStore) (ClientID, uint64, bool) {
 // integratePending integrates pending items in dependency order. A rejected
 // item waits on its blocking client and is retried once that client's clock
 // passes the dependency, so each item is retried at most once per dependency.
-// Integrated items are marked in done.
-func integratePending(txn *Transaction, pending []*Item, done []bool) {
+// Items that leave the queue, integrated or refused, are marked in done, and
+// the first refusal is returned.
+func integratePending(txn *Transaction, pending []*Item, done []bool) error {
 	store := txn.doc.store
 	var waiters map[ClientID][]pendingWaiter
+	var refused error
 	stack := make([]int, len(pending))
 	for i := range stack {
 		stack[i] = len(pending) - 1 - i
@@ -189,7 +203,11 @@ func integratePending(txn *Transaction, pending []*Item, done []bool) {
 		index := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		item := pending[index]
-		if !tryIntegrate(txn, item) {
+		ok, err := tryIntegrate(txn, item)
+		if refused == nil {
+			refused = err
+		}
+		if !ok {
 			if client, clock, ok := pendingBlocker(item, store); ok {
 				if waiters == nil {
 					waiters = make(map[ClientID][]pendingWaiter)
@@ -210,6 +228,7 @@ func integratePending(txn *Transaction, pending []*Item, done []bool) {
 		}
 		waiters[item.ID.Client] = heap
 	}
+	return refused
 }
 
 func pushPendingWaiter(heap []pendingWaiter, w pendingWaiter) []pendingWaiter {
@@ -246,17 +265,17 @@ func popPendingWaiter(heap []pendingWaiter) []pendingWaiter {
 }
 
 // resolvePendingWaiters integrates what the dependency walk left and returns
-// the remaining items in queue order.
-func resolvePendingWaiters(txn *Transaction, pending []*Item) []*Item {
+// the remaining items in queue order, with the first refusal.
+func resolvePendingWaiters(txn *Transaction, pending []*Item) ([]*Item, error) {
 	done := make([]bool, len(pending))
-	integratePending(txn, pending, done)
+	refused := integratePending(txn, pending, done)
 	remaining := pending[:0]
 	for i, item := range pending {
 		if !done[i] {
 			remaining = append(remaining, item)
 		}
 	}
-	return remaining
+	return remaining, refused
 }
 
 // parkWithinUpdatePending charges only unresolved items to the persistent cap.
