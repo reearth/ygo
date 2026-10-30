@@ -386,9 +386,10 @@ func TestUnit_PendingBudget_V2StringClocksFollowThePoolNotTheLengths(t *testing.
 	}
 }
 
-// An update whose header or groups do not read fails before the apply changes
-// anything, so it tells no observer, as one the pending cap refuses does not.
-func TestUnit_ApplyUpdate_UnreadableHeaderOrGroupsTellNoObserver(t *testing.T) {
+// An update whose header or a later group's framing does not read fails
+// before the apply changes anything, so it tells no observer, as one the
+// pending cap refuses does not.
+func TestUnit_ApplyUpdate_UnreadableHeaderOrGroupFramingTellsNoObserver(t *testing.T) {
 	emptyColumns := make([]byte, 10) // the V2 feature flag and nine empty columns
 	for _, tc := range []struct {
 		name    string
@@ -415,6 +416,45 @@ func TestUnit_ApplyUpdate_UnreadableHeaderOrGroupsTellNoObserver(t *testing.T) {
 			requireUnchanged(t, doc, before, text, updates)
 			if txns != 0 {
 				t.Fatalf("OnAfterTransaction fired %d times, want none", txns)
+			}
+		})
+	}
+}
+
+// An update that fails after some of it integrated still commits that part,
+// and tells each observer once, so that persistence and the relay get it.
+func TestUnit_ApplyUpdate_PartlyAppliedUpdateTellsItsObservers(t *testing.T) {
+	editor := New(WithClientID(2))
+	text, m := editor.GetText("t"), editor.GetMap("m")
+	editor.Transact(func(txn *Transaction) {
+		text.Insert(txn, 0, "abc", nil)
+		m.Set(txn, "bin", []byte("0123456789"))
+	})
+	v1 := EncodeStateAsUpdateV1(editor, nil)
+	v2 := EncodeStateAsUpdateV2(editor, nil)
+	for _, tc := range []struct {
+		name    string
+		version int
+		update  []byte
+	}{
+		{"V1 cut in its delete set", 1, v1[:len(v1)-1]},
+		{"V1 cut in its second struct", 1, v1[:len(v1)-6]},
+		{"V2 cut in its delete set", 2, v2[:len(v2)-1]},
+		{"V2 cut in its second struct", 2, v2[:len(v2)-6]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := New()
+			updates := observed(doc)
+			txns := 0
+			doc.OnAfterTransaction(func(*Transaction) { txns++ })
+			if err := applyVersion(doc, tc.version, tc.update); !errors.Is(err, ErrInvalidUpdate) {
+				t.Fatalf("err %v, want ErrInvalidUpdate", err)
+			}
+			if got := doc.GetText("t").ToString(); got != "abc" {
+				t.Fatalf("the text is %q, want the part that integrated, %q", got, "abc")
+			}
+			if *updates != 1 || txns != 1 {
+				t.Fatalf("the observers were handed %d updates and %d transactions, want one each", *updates, txns)
 			}
 		})
 	}

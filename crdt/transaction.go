@@ -67,8 +67,8 @@ type Transaction struct {
 	typeObserved       bool
 	afterTypeObservers func()
 	// refused marks a remote apply that failed before it changed anything
-	// (refused for the pending cap, or its header or groups did not read), so
-	// the commit fires nothing.
+	// (refused for the pending cap, or its header or a later group's framing
+	// did not read), so the commit fires nothing.
 	refused bool
 }
 
