@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside an `OnAfterTransaction` callback now emits its update before the
   outer transaction's update, as one started inside an observer already did.
   Yjs queues such a transaction until the outer one is done.
+- **`crdt`: a panicking observer no longer stops the other observers.** When
+  an observer panicked, no observer after it ran: not the other observers of
+  the same type, not deep observers, and not `OnUpdate`, so the update of the
+  transaction was lost to relays and persistence. Now every per-type, deep,
+  `OnAfterTransaction`, `OnUpdate` and `OnSubdocs` observer runs, and the
+  panic then reaches the caller, as Yjs runs its type and deep observers. If
+  more than one panics, the last panic reaches the caller, as in Yjs.
 
 ### Performance
 

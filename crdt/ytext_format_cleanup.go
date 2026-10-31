@@ -140,11 +140,7 @@ func afterTxnPhase(d *Doc, txn *Transaction) func([]byte) {
 	for i, s := range d.onAfterTxn {
 		fns[i] = s.fn
 	}
-	return func([]byte) {
-		for _, fn := range fns {
-			fn(txn)
-		}
-	}
+	return func([]byte) { callAll(fns, func(fn func(*Transaction)) { fn(txn) }) }
 }
 
 // cleanupYTextAfterTransaction deletes the format markers remote left

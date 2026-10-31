@@ -173,7 +173,7 @@ func TestUnit_YText_FormatCleanup_AfterObserverPanic(t *testing.T) {
 
 	assert.PanicsWithValue(t, "observer", func() { syncText(t, a, b, "remote") })
 	assert.Equal(t, 1, countLiveContentFormat(b))
-	assert.Equal(t, []any{nil}, origins, "the cleanup's update; the panic skipped the remote one's")
+	assert.Equal(t, []any{"remote", nil}, origins, "the remote change's update, then the cleanup's")
 	for _, it := range b.store.clients[1] {
 		assert.IsType(t, &ContentDeleted{}, it.Content, "the remote deletion is GC'd")
 	}

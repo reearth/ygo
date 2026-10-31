@@ -971,6 +971,36 @@ func benchObservedTxn(b *testing.B, withObserver bool) {
 func BenchmarkObservedTxn_Apply(b *testing.B)         { benchObservedTxn(b, true) }
 func BenchmarkObservedTxn_ApplyBaseline(b *testing.B) { benchObservedTxn(b, false) }
 
+// BenchmarkObservedTxn_EveryObserverKind measures a single-character append
+// with two type observers, a deep observer, an OnUpdate and an
+// OnAfterTransaction observer. A fresh document every 256 appends keeps the
+// time per append independent of b.N.
+func BenchmarkObservedTxn_EveryObserverKind(b *testing.B) {
+	var doc *Doc
+	var txt *YText
+	fresh := func() {
+		doc = newTestDoc(1)
+		txt = doc.GetText("t")
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "seed", nil) })
+		txt.Observe(func(YTextEvent) {})
+		txt.Observe(func(YTextEvent) {})
+		txt.ObserveDeep(func(*Transaction) {})
+		doc.OnUpdate(func([]byte, any) {})
+		doc.OnAfterTransaction(func(*Transaction) {})
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if i%256 == 0 {
+			b.StopTimer()
+			fresh()
+			b.StartTimer()
+		}
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, txt.Len(), "x", nil) })
+	}
+}
+
 // BenchmarkUndoManager_UndoMapClear undoes the deletion of every key of a
 // 10k-key map, restoring each entry.
 func BenchmarkUndoManager_UndoMapClear(b *testing.B) {

@@ -46,6 +46,14 @@
   started inside an observer already did; Yjs queues it until the outer one
   is done. Peers and stored update logs still
   converge.
+- **A panicking observer no longer stops the other observers.** The other
+  observers of the same type, the deep observers, `OnAfterTransaction`,
+  `OnUpdate` and `OnSubdocs` did not run, so a relay or a store that listens
+  on `OnUpdate` lost that transaction's update. Now every observer runs, and
+  then the panic reaches the caller of `Transact` or `ApplyUpdate` as before.
+  If more than one observer panics, the caller gets the last panic, as in
+  Yjs. Other observers now run after an observer panics, so they must not
+  expect the panicking observer's work to be complete.
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
 - **Faster full-state encodes and snapshots after deletions.** The delete set
