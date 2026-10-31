@@ -1001,6 +1001,40 @@ func BenchmarkUndoManager_UndoMapClear(b *testing.B) {
 	}
 }
 
+// BenchmarkUndoManager_UndoRedo undoes and redoes the newest of depth stack
+// items, so the stack depth stays fixed.
+func BenchmarkUndoManager_UndoRedo(b *testing.B) {
+	for _, depth := range []int{100, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("depth=%d", depth), func(b *testing.B) {
+			um := undoStackOfDepth(depth)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if !um.Undo() || !um.Redo() {
+					b.Fatal("nothing undone")
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkUndoManager_CaptureMergedTyping types and backspaces 1,000 times
+// into one stack item, so each capture merges into a growing delete set.
+func BenchmarkUndoManager_CaptureMergedTyping(b *testing.B) {
+	b.ReportAllocs()
+	for range b.N {
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+		NewUndoManager(doc, []SharedType{txt}, mergeWindow)
+		for range 1_000 {
+			doc.Transact(func(txn *Transaction) {
+				txt.Insert(txn, 0, "ab", nil)
+				txt.Delete(txn, 0, 1)
+			})
+		}
+	}
+}
+
 // buildScatteredFormattedText builds a text of n one-character items inserted
 // at seeded-random positions, so no two merge and a walk over it is O(n).
 func buildScatteredFormattedText(n int) (*Doc, *YText) {

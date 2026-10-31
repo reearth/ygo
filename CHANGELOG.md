@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Performance
+
+- **`crdt`: `UndoManager.Undo` and `Redo` no longer copy the stacks.** Each
+  call copied the deletions of every remaining undo and redo stack item, for a
+  map-key check that rarely runs. So each call took time and memory in
+  proportion to the history, and undoing all of a stack of n items took
+  O(n²) time. The check now reads the stacks in place, as Yjs does. An undo
+  and redo pair with 10,000 stack items went from 356 µs and 645 KiB to
+  6.9 µs and 4.6 KiB (`BenchmarkUndoManager_UndoRedo`). A transaction that
+  merges into the newest stack item no longer copies that item's deletions:
+  1,000 merged keystrokes went from 12.7 ms and 24.1 MiB to 7.6 ms and
+  3.0 MiB (`BenchmarkUndoManager_CaptureMergedTyping`). A stack item that
+  `Undo`, `Redo`, `Clear` or a new edit removes is no longer kept alive by
+  the stack's backing array.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -115,6 +116,11 @@ type UndoManager struct {
 	// captures counts captured transactions, so pop can tell whether an edit
 	// committed while its stack item was being applied.
 	captures uint64
+
+	// stackMu, taken after mu with nothing locked under it, guards the stacks
+	// and their items' deletions for deletedByStacks: that runs under the doc
+	// lock, which callbacks holding mu may take.
+	stackMu sync.Mutex
 
 	// trackedOrigins, when non-nil, limits capture to transactions whose
 	// Origin matches one of the keys. When nil, all local transactions are
@@ -228,15 +234,11 @@ func (u *UndoManager) pop(redo bool) bool {
 			return false
 		}
 		item := (*stack)[len(*stack)-1]
+		u.stackMu.Lock()
+		// Clear the vacated slot so the backing array does not keep item alive.
+		(*stack)[len(*stack)-1] = nil
 		*stack = (*stack)[:len(*stack)-1]
-		// Snapshot the deletions under u.mu: capture replaces them (copy-on-write)
-		// once the doc unlocks.
-		others := make([]DeleteSet, 0, len(u.undoStack)+len(u.redoStack))
-		for _, st := range [][]*StackItem{u.undoStack, u.redoStack} {
-			for _, s := range st {
-				others = append(others, s.deletions)
-			}
-		}
+		u.stackMu.Unlock()
 		if !redo {
 			// The next edit must not merge into the next-older item (Yjs stops
 			// capturing after an undo, not a redo).
@@ -245,26 +247,29 @@ func (u *UndoManager) pop(redo bool) bool {
 		captures, undoLen := u.captures, len(u.undoStack)
 		u.mu.Unlock()
 
-		inverse := u.applyStackItem(item, others)
+		inverse := u.applyStackItem(item)
 		if inverse == nil {
 			continue
 		}
 		u.mu.Lock()
 		raced := u.captures != captures
+		if raced && !redo {
+			// An edit captured during the apply invalidated redo.
+			u.mu.Unlock()
+			return true
+		}
+		u.stackMu.Lock()
 		switch {
-		case redo && raced:
+		case raced:
 			// Edits captured during the apply came after it: keep them on top.
 			at := min(undoLen, len(u.undoStack))
 			u.undoStack = append(u.undoStack[:at], append([]*StackItem{inverse}, u.undoStack[at:]...)...)
 		case redo:
 			u.undoStack = append(u.undoStack, inverse)
-		case raced:
-			// An edit captured during the apply invalidated redo.
-			u.mu.Unlock()
-			return true
 		default:
 			u.redoStack = append(u.redoStack, inverse)
 		}
+		u.stackMu.Unlock()
 		u.fireOnStackItemAdded(inverse, !redo)
 		u.mu.Unlock()
 		return true
@@ -298,6 +303,10 @@ func (u *UndoManager) RedoContext(ctx context.Context) (bool, error) {
 func (u *UndoManager) Clear() {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	u.stackMu.Lock()
+	defer u.stackMu.Unlock()
+	clear(u.undoStack)
+	clear(u.redoStack)
 	u.undoStack = u.undoStack[:0]
 	u.redoStack = u.redoStack[:0]
 }
@@ -340,31 +349,31 @@ func (u *UndoManager) captureTransaction(txn *Transaction) {
 	defer u.mu.Unlock()
 
 	now := time.Now()
-	if len(u.undoStack) > 0 && !u.lastTxnTime.IsZero() && now.Sub(u.lastTxnTime) <= u.captureTimeout {
-		// Copy-on-write: a concurrent Undo may be reading a snapshot of
-		// top.deletions.
+	merge := len(u.undoStack) > 0 && !u.lastTxnTime.IsZero() && now.Sub(u.lastTxnTime) <= u.captureTimeout
+	u.stackMu.Lock()
+	if merge {
 		top := u.undoStack[len(u.undoStack)-1]
 		top.insertions.Merge(item.insertions)
-		merged := cloneDeleteSet(top.deletions)
-		merged.Merge(item.deletions)
-		top.deletions = merged
+		top.deletions.Merge(item.deletions)
 	} else {
 		u.undoStack = append(u.undoStack, item)
+	}
+	// Any new local edit invalidates the redo stack.
+	clear(u.redoStack)
+	u.redoStack = u.redoStack[:0]
+	u.stackMu.Unlock()
+	if !merge {
 		u.fireOnStackItemAdded(item, false)
 	}
 	u.lastTxnTime = now
 	u.captures++
-
-	// Any new local edit invalidates the redo stack.
-	u.redoStack = u.redoStack[:0]
 }
 
 // applyStackItem executes the inverse of item as a new local transaction and
 // returns a new StackItem representing what that inversion did (for the
 // opposite stack). Returns nil if it changed nothing (e.g. every referenced
-// item was already deleted or GC'd). others are the remaining stack items'
-// deletions, consulted by the map-key conflict check.
-func (u *UndoManager) applyStackItem(item *StackItem, others []DeleteSet) *StackItem {
+// item was already deleted or GC'd).
+func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 	var resultItem *StackItem
 
 	u.doc.Transact(func(txn *Transaction) {
@@ -392,7 +401,7 @@ func (u *UndoManager) applyStackItem(item *StackItem, others []DeleteSet) *Stack
 		// the same stack item were created and deleted within it, so they stay
 		// deleted (Yjs popStackItem).
 		var toRedo []*Item
-		pass := &redoPass{set: make(map[*Item]struct{}), insertions: item.insertions, others: others}
+		pass := &redoPass{set: make(map[*Item]struct{}), insertions: item.insertions}
 		u.iterateItems(txn, item.deletions, func(it *Item) {
 			if !it.Deleted || !u.itemInScope(it) || item.insertions.IsDeleted(it.ID) {
 				return
@@ -535,7 +544,7 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 		// that are undo/redo history; any other later value is a remote edit,
 		// which undo must not overwrite (Yjs redoItem).
 		left = item
-		for r := nextSameKey(left); r != nil && (r.redone != nil || p.insertions.IsDeleted(r.ID) || deletedByStacks(p.others, r.ID) || collectedWithParent(r)); r = nextSameKey(left) {
+		for r := nextSameKey(left); r != nil && (r.redone != nil || p.insertions.IsDeleted(r.ID) || u.deletedByStacks(r.ID) || collectedWithParent(r)); r = nextSameKey(left) {
 			left = u.followRedone(txn, r)
 		}
 		if left == nil || nextSameKey(left) != nil {
@@ -582,7 +591,6 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 type redoPass struct {
 	set        map[*Item]struct{} // items this undo restores
 	insertions DeleteSet          // the stack item's insertions
-	others     []DeleteSet        // the other stack items' deletions
 	moves      map[*abstractType]map[*Item][]*Item
 }
 
@@ -721,15 +729,13 @@ func collectedWithParent(r *Item) bool {
 	return true
 }
 
-// deletedByStacks reports whether any stack item's deletions include id (Yjs
-// isDeletedByUndoStack).
-func deletedByStacks(stacks []DeleteSet, id ID) bool {
-	for _, ds := range stacks {
-		if ds.IsDeleted(id) {
-			return true
-		}
-	}
-	return false
+// deletedByStacks reports whether any undo or redo stack item's deletions
+// include id (Yjs isDeletedByUndoStack).
+func (u *UndoManager) deletedByStacks(id ID) bool {
+	u.stackMu.Lock()
+	defer u.stackMu.Unlock()
+	deleted := func(s *StackItem) bool { return s.deletions.IsDeleted(id) }
+	return slices.ContainsFunc(u.undoStack, deleted) || slices.ContainsFunc(u.redoStack, deleted)
 }
 
 // followRedone returns the end of item's redone chain (item itself when
