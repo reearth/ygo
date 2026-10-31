@@ -184,13 +184,9 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 			if r.Len == 0 {
 				continue
 			}
-			// Split at the range boundaries so each live item lies entirely
-			// inside [r.Clock, r.Clock+r.Len). Pre-#72 we deleted overlapping
-			// items whole, which wiped content outside the range when the item
-			// was a locally-squashed run that the sender saw as shorter. A
-			// struct that is already deleted is left whole, as in Yjs
-			// readAndApplyDeleteSet, so a deleted run is not cut into pieces
-			// that may never merge again.
+			// Split a live item at the range boundaries so content outside the
+			// range stays live, and leave a deleted struct whole, as Yjs
+			// readAndApplyDeleteSet does.
 			store := txn.doc.store
 			for _, clock := range [2]uint64{r.Clock, r.Clock + r.Len} {
 				if it := store.Find(ID{Client: client, Clock: clock}); it != nil && !it.Deleted {

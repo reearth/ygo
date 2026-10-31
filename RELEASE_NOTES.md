@@ -6,8 +6,8 @@ states are smaller, and their bytes differ from earlier releases.**
 At the end of each transaction Yjs merges the structs the transaction deleted
 with their neighbours, and the structs it added with the struct on their left,
 also one from an earlier transaction. ygo merged only text that one transaction
-inserted and the halves of a split. Typing or deleting one character per
-transaction, the usual pattern for an editor, so left one struct per keystroke.
+inserted and the halves of a split. So typing or deleting one character per
+transaction, the usual pattern for an editor, left one struct per keystroke.
 In a 5,000-transaction editing session the full V1 state was 30,155 bytes,
 where Yjs writes 16,312. ygo now runs the same merge, and that state is
 byte-identical to Yjs's in V1 and V2. Documents hold fewer items in memory, and

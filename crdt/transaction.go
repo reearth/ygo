@@ -351,18 +351,10 @@ func forHalfClients(txn *Transaction, fn func(ClientID)) {
 // structs: index p names the pair of structs p-1 and p.
 type mergeSpan struct{ lo, hi int }
 
-// mergeClientStructs merges the pairs of client's structs that Yjs's
-// cleanupTransactions tries for txn: tryMergeDeleteSet for txn's deleted
-// ranges, then tryToMergeWithLefts for the structs txn added and for each
-// split half txn recorded.
-//
-// Whether two neighbours merge does not depend on the merges around them, and
-// every change that makes two neighbours mergeable (adding, deleting or
-// splitting a struct) puts the pair in a span. So no mergeable pair is left
-// from earlier transactions, and one forward pass gives Yjs's result and moves
-// the client's structs once. The exception is a change of a struct's MovedBy,
-// an ygo extension Yjs does not have: a pair it makes mergeable stays apart
-// until a later transaction tries it.
+// mergeClientStructs merges, in one forward pass, the pairs of client's
+// structs that Yjs's cleanupTransactions tries for txn. One pass is enough
+// because every change that makes a pair mergeable puts it in a span, except
+// a MovedBy change, which Yjs does not have.
 func mergeClientStructs(txn *Transaction, client ClientID) {
 	store := txn.doc.store
 	structs := store.clients[client]

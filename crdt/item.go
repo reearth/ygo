@@ -549,14 +549,9 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 	return right
 }
 
-// mergeable reports whether right, the struct after left in the same client's
-// structs (so its clock follows left's), can merge into left, so the two
-// encode as one struct. Two GC structs always can (Yjs GC.mergeWith). Two
-// items can under Yjs's Item.mergeWith conditions: right continues left in
-// the list, from left's last unit toward the same right origin, with the same
-// deleted state and content of one mergeable kind. Right then has left's
-// parent and key, as it inherits them from its origin. A struct with a redone
-// link never merges, as the merged struct would keep only one link.
+// mergeable reports whether right, the next struct of left's client, can
+// merge into left so the two encode as one struct, under Yjs's Item.mergeWith
+// and GC.mergeWith rules plus an equal MovedBy, which Yjs does not have.
 func (left *Item) mergeable(right *Item) bool {
 	if leftGC, rightGC := left.isGCOrphan(), right.isGCOrphan(); leftGC || rightGC {
 		_, lok := left.Content.(*ContentDeleted)
@@ -564,7 +559,7 @@ func (left *Item) mergeable(right *Item) bool {
 		return leftGC && rightGC && lok && rok
 	}
 	if left.Right != right || left.Deleted != right.Deleted || left.MovedBy != right.MovedBy ||
-		left.redone != nil || right.redone != nil ||
+		left.redone != nil || right.redone != nil || // a merged struct would give one redone link to all its units
 		right.Origin == nil || *right.Origin != left.lastID() ||
 		!originIDEquals(left.OriginRight, right.OriginRight) {
 		return false
