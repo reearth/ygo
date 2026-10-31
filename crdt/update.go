@@ -648,15 +648,14 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 	applying = true
 
-	// 1. Decode all items, parking any with future-clock deps or same-client gaps.
-	//    Returns the within-update pending list (items whose parent might resolve
-	//    later in this same update).
+	// 1. Decode the items. A one-client update integrates as it decodes; the
+	//    structs of several clients, and anything blocked, are returned.
 	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, budget.superseded)
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
 
-	// 2. Within-update retry pass: items whose parents arrived later in this update.
+	// 2. Integrate them in Yjs's order and park what stays blocked.
 	if err := resolveWithinUpdatePending(txn, withinUpdatePending); err != nil {
 		return err
 	}
@@ -689,11 +688,12 @@ func drainAfterApply(txn *Transaction, err error) (retErr error) {
 // item, and either:
 //
 //	(a) skips fully-integrated items
-//	(b) defers items with same-client clock gaps within this update
-//	(c) integrates GC items directly via store.Append
-//	(d) integrates items whose parent is known via item.integrate
-//	(e) collects items whose parent is unresolved-but-might-be-in-this-update
-//	    into the returned slice for the within-update retry pass.
+//	(b) returns every item of an update with several client groups, which
+//	    integrate in Yjs's order once all are decoded
+//	(c) defers items with same-client clock gaps within this update
+//	(d) integrates GC items directly via store.Append
+//	(e) integrates items whose parent is known via item.integrate
+//	(f) collects items whose parent is unresolved into the returned slice.
 //
 // Groups that a later group for the same client supersedes are decoded and
 // dropped (yjs parity). numClients is the count parsed from the header.
@@ -757,10 +757,11 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 				offset = int(existingEnd - clock)
 			}
 
-			// A predecessor may be deferred until a later client group in this
-			// same message. Resolve the bounded update before charging items to
-			// the cross-update pending limit.
-			if clock > existingEnd {
+			// Yjs integrates several clients' structs highest client first,
+			// whatever the wire order, so they wait until all are decoded. A
+			// predecessor may also be deferred until a later client group in
+			// this same message.
+			if numClients > 1 || clock > existingEnd {
 				pending = append(pending, item)
 				clock = itemEnd
 				continue
@@ -822,14 +823,12 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 	return pending, nil
 }
 
-// resolveWithinUpdatePending retries items deferred during decoding until
-// no more dependencies resolve. tryIntegrate also stores genuine GC orphans
-// without attaching them to a root, and respects same-client clock gaps.
-// Survivors are parked in store.pending within the cross-update limit.
-// Preflight bounds unresolved items before decoding an oversized blocked tail;
-// integration retries deferred items until no further progress is possible.
-// Returns ErrInvalidUpdate (wrapped) if the pending queue cap is exceeded or
-// a deferred item is refused.
+// resolveWithinUpdatePending integrates the items decodeAndPark returned in
+// Yjs's integrateStructs order (integratePending). tryIntegrate also stores
+// genuine GC orphans without attaching them to a root, and respects
+// same-client clock gaps. Survivors are parked in store.pending within the
+// cross-update limit. Returns ErrInvalidUpdate (wrapped) if the pending queue
+// cap is exceeded or a deferred item is refused.
 func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 	remaining, err := resolveDeferred(txn, pending)
 	if err != nil {
@@ -841,43 +840,21 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 	return nil
 }
 
-// resolveDeferred bounds a large queue's retry work with the scheduled
-// resolvers, dropping a refused item and returning the first refusal.
+// resolveDeferred integrates pending in Yjs's order, dropping a refused item,
+// and returns what stays blocked with the first refusal.
 func resolveDeferred(txn *Transaction, pending []*Item) ([]*Item, error) {
-	var refused error
-	keep := func(err error) {
-		if refused == nil {
-			refused = err
+	if len(pending) == 0 {
+		return nil, nil
+	}
+	done := make([]bool, len(pending))
+	refused := integratePending(txn, pending, done, nil)
+	remaining := pending[:0]
+	for i, item := range pending {
+		if !done[i] {
+			remaining = append(remaining, item)
 		}
 	}
-	if len(pending) >= pendingScheduleThreshold {
-		before := len(pending)
-		var err error
-		pending, err = retryWithinUpdatePending(txn, pending)
-		keep(err)
-		if len(pending) == before {
-			return pending, refused
-		}
-	}
-	if len(pending) >= pendingScheduleThreshold {
-		var err error
-		pending, err = resolvePendingDependencies(txn, pending)
-		keep(err)
-	}
-	if len(pending) >= pendingScheduleThreshold {
-		var err error
-		pending, err = resolvePendingWaiters(txn, pending)
-		keep(err)
-	}
-	for len(pending) > 0 {
-		remaining, err := retryWithinUpdatePending(txn, pending)
-		keep(err)
-		if len(remaining) == len(pending) {
-			return remaining, refused
-		}
-		pending = remaining
-	}
-	return nil, refused
+	return remaining, refused
 }
 
 // drainPending runs the doc-level pending drain. It first retries any
@@ -902,8 +879,10 @@ func drainPending(txn *Transaction) error {
 	//   A arriving satisfies B; B (now integrated) satisfies C; etc.
 	//
 	// Matches yrs' apply_update retry gate and Yjs JS's readUpdateV2
-	// recursion, but executed inline so everything integrated during
-	// this call surfaces in a single OnUpdate notification.
+	// recursion, which re-runs integrateStructs over the merged pending
+	// update (integratePending keeps its order), but executed inline so
+	// everything integrated during this call surfaces in a single OnUpdate
+	// notification.
 	var dropped error
 	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
 		items := txn.doc.store.pending.items

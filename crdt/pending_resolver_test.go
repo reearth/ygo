@@ -83,22 +83,6 @@ func TestUnit_PendingResolver_MatchesFixedPoint(t *testing.T) {
 	}
 }
 
-func TestUnit_PendingResolver_ImmutableRanges(t *testing.T) {
-	items := []*Item{
-		{ID: ID{Client: 1, Clock: 1}, Content: NewContentDeleted(100), Deleted: true},
-		{ID: ID{Client: 1, Clock: 2}, Content: NewContentString("x")},
-		{ID: ID{Client: 2}, Content: NewContentString("abc")},
-	}
-	order := indexPendingProducers(items)
-	// Model GC integration trimming into the range. Search keys/ends stay frozen.
-	items[0].ID.Clock = 50
-	items[0].Content = items[0].Content.Splice(49)
-	require.Equal(t, 0, findPendingProducer(order, ID{Client: 1, Clock: 1}))
-	require.Equal(t, 2, findPendingProducer(order, ID{Client: 2, Clock: 2}))
-	require.Equal(t, -1, findPendingProducer(order, ID{Client: 2, Clock: 3}))
-	require.Equal(t, -1, findPendingProducer(order, ID{Client: 3}))
-}
-
 func TestUnit_PendingResolver_ReverseCheckpoint(t *testing.T) {
 	const n = 128
 	for _, version := range []int{1, 2} {
@@ -219,6 +203,25 @@ func referenceWithinUpdatePending(txn *Transaction, pending []*Item) error {
 				}
 			}
 			break
+		}
+		pending = remaining
+	}
+	return nil
+}
+
+// retryPassesWithinUpdatePending retries the whole queue through tryIntegrate
+// until a pass integrates nothing. Unlike referenceWithinUpdatePending it
+// trims overlapping ranges, so it is the reference for overlapping copies.
+func retryPassesWithinUpdatePending(txn *Transaction, pending []*Item) error {
+	for len(pending) > 0 {
+		var remaining []*Item
+		for _, item := range pending {
+			if ok, _ := tryIntegrate(txn, item); !ok {
+				remaining = append(remaining, item)
+			}
+		}
+		if len(remaining) == len(pending) {
+			return parkWithinUpdatePending(txn, remaining)
 		}
 		pending = remaining
 	}
@@ -487,18 +490,8 @@ func TestUnit_PendingResolver_OverlappingRangesMatchFixedPoint(t *testing.T) {
 				doc.Transact(func(txn *Transaction) {
 					if which == 0 {
 						err = resolveWithinUpdatePending(txn, pending)
-						return
-					}
-					for len(pending) > 0 {
-						var remaining []*Item
-						if remaining, err = retryWithinUpdatePending(txn, pending); err != nil {
-							return
-						}
-						if len(remaining) == len(pending) {
-							err = parkWithinUpdatePending(txn, remaining)
-							return
-						}
-						pending = remaining
+					} else {
+						err = retryPassesWithinUpdatePending(txn, pending)
 					}
 				})
 				require.NoError(t, err)
@@ -535,13 +528,12 @@ func TestUnit_PendingResolver_SameStartCopies(t *testing.T) {
 		if longFirst {
 			pending = []*Item{consumer, long, short}
 		}
-		var remaining []*Item
 		var err error
 		doc.Transact(func(txn *Transaction) {
-			remaining, err = resolvePendingDependencies(txn, pending)
+			err = resolveWithinUpdatePending(txn, pending)
 		})
 		require.NoError(t, err)
-		require.Empty(t, remaining)
+		require.Zero(t, doc.PendingStats().Items)
 		require.Equal(t, "abcx", text.ToString())
 		doc.Destroy()
 	}

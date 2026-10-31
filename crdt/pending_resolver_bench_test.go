@@ -156,7 +156,7 @@ func BenchmarkPendingOverlapFallback(b *testing.B) {
 }
 
 // Compare the same complete chain using the fixed-point reference and the
-// retry path directly, without enabling the dependency scheduler.
+// scheduler.
 func BenchmarkPendingFixedPointFallback(b *testing.B) {
 	for _, n := range []int{1000, 5000} {
 		for _, reference := range []bool{true, false} {
@@ -184,18 +184,8 @@ func BenchmarkPendingFixedPointFallback(b *testing.B) {
 					doc.Transact(func(txn *Transaction) {
 						if reference {
 							err = referenceWithinUpdatePending(txn, pending)
-							return
-						}
-						for len(pending) > 0 {
-							var remaining []*Item
-							if remaining, err = retryWithinUpdatePending(txn, pending); err != nil {
-								return
-							}
-							if len(remaining) == len(pending) {
-								err = parkWithinUpdatePending(txn, remaining)
-								return
-							}
-							pending = remaining
+						} else {
+							err = resolveWithinUpdatePending(txn, pending)
 						}
 					})
 					b.StopTimer()

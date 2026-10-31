@@ -106,11 +106,11 @@ func TestUnit_Doc_DrainPanicDropsOnlyThePanickingItem(t *testing.T) {
 
 // Within one update, a panicking struct still stops the scheduler, so the
 // apply returns the panic as an error.
-func TestUnit_ResolvePendingWaiters_PanicPropagates(t *testing.T) {
+func TestUnit_ResolveDeferred_PanicPropagates(t *testing.T) {
 	doc := New(WithClientID(1))
 	doc.Transact(func(txn *Transaction) {
 		mustPanicContaining(t, "parked content panicked", func() {
-			resolvePendingWaiters(txn, []*Item{{ID: ID{Client: 5}, Content: panicContent{}}})
+			_, _ = resolveDeferred(txn, []*Item{{ID: ID{Client: 5}, Content: panicContent{}}})
 		})
 	})
 }

@@ -2,8 +2,6 @@ package crdt
 
 import (
 	"fmt"
-	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -17,18 +15,11 @@ type resolverWorkContent struct {
 }
 
 type resolverWork struct {
-	lengths, indexed int
-	trackIndex       bool
+	lengths int
 }
 
 func (c *resolverWorkContent) Len() int {
 	c.work.lengths++
-	if c.work.trackIndex {
-		pc, _, _, _ := runtime.Caller(1)
-		if f := runtime.FuncForPC(pc); f != nil && strings.HasSuffix(f.Name(), ".indexPendingProducers") {
-			c.work.indexed++
-		}
-	}
 	return c.Content.Len()
 }
 
@@ -110,8 +101,9 @@ func TestUnit_PendingResolver_IntegrateBeforeRefusalWork(t *testing.T) {
 	require.LessOrEqual(t, work.lengths, 32*n, "retry work must remain proportional to the queue")
 }
 
-// A large deferred queue drops a refused item and still resolves the rest.
-func TestUnit_PendingResolver_LargeQueueDropsARefusedItem(t *testing.T) {
+// A refused item in a large deferred queue stops the pass, as Yjs stops when a
+// struct throws: the chain it waited on integrates first, the rest stays out.
+func TestUnit_PendingResolver_LargeQueueStopsAtARefusedItem(t *testing.T) {
 	const n = 64
 	doc := New(WithClientID(100001))
 	defer doc.Destroy()
@@ -134,21 +126,9 @@ func TestUnit_PendingResolver_LargeQueueDropsARefusedItem(t *testing.T) {
 	var err error
 	doc.Transact(func(txn *Transaction) { remaining, err = resolveDeferred(txn, pending) })
 	require.ErrorIs(t, err, ErrInvalidUpdate)
-	require.Empty(t, remaining)
-	require.Len(t, doc.StateVector(), 2*n+1)
+	require.Len(t, remaining, n, "the second chain, after the refusal")
+	require.Len(t, doc.StateVector(), n+1, "the first chain and the GC struct")
 	require.Equal(t, uint64(1), doc.StateVector().Clock(3*n))
-}
-
-func TestUnit_PendingResolver_SmallQueueAvoidsIndex(t *testing.T) {
-	doc := New()
-	defer doc.Destroy()
-	work := resolverWork{trackIndex: true}
-	pending := resolverWorkItems(doc, 16, "origin", &work)
-	var err error
-	doc.Transact(func(txn *Transaction) { err = resolveWithinUpdatePending(txn, pending) })
-	require.NoError(t, err)
-	require.Len(t, doc.StateVector(), 16)
-	require.Zero(t, work.indexed, "small queues should not allocate a producer index")
 }
 
 func TestUnit_PendingResolver_ProgressPreservesBlockedItems(t *testing.T) {

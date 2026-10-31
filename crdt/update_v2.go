@@ -794,10 +794,10 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				offset = int(existingEnd - clock)
 			}
 
-			// A predecessor may be deferred until a later client group in this
-			// same message. Resolve the bounded update before charging items to
-			// the cross-update pending limit.
-			if clock > existingEnd {
+			// Several clients' structs integrate in Yjs's order once all are
+			// decoded, as in the V1 decoder. A predecessor may also be deferred
+			// until a later client group in this same message.
+			if numClients > 1 || clock > existingEnd {
 				pending = append(pending, item)
 				clock = itemEnd
 				continue
