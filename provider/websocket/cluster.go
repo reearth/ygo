@@ -10,7 +10,6 @@ import (
 
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/cluster"
-	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/internal/relaylane"
 )
 
@@ -730,7 +729,8 @@ func (s *Server) teardownRelayRoom(r *room, name string) {
 // Inject applies a remote change delivered by the relay. It satisfies
 // cluster.Sink. KindSync updates are applied to the room's doc with the relay
 // sentinel origin (so the local doc.OnUpdate observer does NOT re-publish them)
-// and rebroadcast to local peers via BroadcastUpdate. KindAwareness updates are
+// and rebroadcast to local peers via BroadcastUpdate, unless the room already
+// held all of the update. KindAwareness updates are
 // merged into the room's awareness with the sentinel origin; the awareness
 // fan-out to peers is driven by the awareness OnUpdate path the server already
 // runs for local peers — but inbound merges fire OnUpdate with the sentinel
@@ -767,7 +767,8 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
-		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, s.relaySentinel); err != nil {
+		_, held, err := rm.applyUpdate(in.Data, s.relaySentinel)
+		if err != nil || held {
 			return err
 		}
 		// Rebroadcast to locally-connected peers. broadcastUpdate re-validates

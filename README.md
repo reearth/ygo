@@ -374,7 +374,7 @@ type PersistenceAdapter interface {
 }
 ```
 
-`LoadDoc` is called once when the first peer connects to a room; the result seeds the in-memory doc. `StoreUpdate` is called on every committed transaction. Writes run on a per-room worker goroutine — slow storage doesn't block peers. Wire an adapter in via `NewServerWithPersistence(adapter)`.
+`LoadDoc` is called once when the first peer connects to a room; the result seeds the in-memory doc. `StoreUpdate` is called on every committed transaction that changes the doc. Writes run on a per-room worker goroutine — slow storage doesn't block peers. Wire an adapter in via `NewServerWithPersistence(adapter)`.
 
 By default (v1.36.0) these writes are coalesced: the worker debounces bursts of updates into a single merged `StoreUpdate` call using a 2s window (reset on each new update) capped by a 10s max wait, matching Hocuspocus's default debounce behaviour. Tune it via `Server.PersistCoalesceWindow` / `Server.PersistCoalesceMaxWait`, or set `PersistCoalesceWindow` to a negative value (e.g. `-1`) to disable coalescing and restore strict one-write-per-update persistence.
 

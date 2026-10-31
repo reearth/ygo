@@ -168,8 +168,9 @@ type Doc struct {
 	// to each observer subscription, enabling correct out-of-order unsubscribe.
 	subIDGen uint64
 
-	// onUpdate observers fire after each committed transaction with the encoded
-	// incremental V1 update bytes and the transaction origin.
+	// onUpdate observers fire after each committed transaction that adds or
+	// deletes something, with the encoded incremental V1 update bytes and the
+	// transaction origin.
 	onUpdate []updateSub
 
 	// onAfterTxn observers fire after each committed transaction with the full
@@ -459,10 +460,16 @@ func (d *Doc) GetText(name string) *YText {
 // Returns nil only if there is nothing to fire (no observers of any kind).
 func buildPhase2(d *Doc, txn *Transaction) func() {
 	// Encode the incremental update and snapshot observer slices while still
-	// holding the lock so we get a consistent view.
+	// holding the lock so we get a consistent view. As in Yjs, a transaction
+	// that adds and deletes nothing fires no update.
 	var updateBytes []byte
-	if len(d.onUpdate) > 0 {
+	var onUpdateSnap []func([]byte, any)
+	if len(d.onUpdate) > 0 && txn.changesDoc() {
 		updateBytes = encodeV1Locked(d, txn.beforeState)
+		onUpdateSnap = make([]func([]byte, any), len(d.onUpdate))
+		for i, s := range d.onUpdate {
+			onUpdateSnap[i] = s.fn
+		}
 	}
 
 	// Snapshot per-type observer closures while the write lock is held.
@@ -507,11 +514,6 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 		}
 	}
 
-	// Snapshot OnUpdate callbacks.
-	onUpdateSnap := make([]func([]byte, any), len(d.onUpdate))
-	for i, s := range d.onUpdate {
-		onUpdateSnap[i] = s.fn
-	}
 	onAfterTxnSnap := make([]func(*Transaction), len(d.onAfterTxn))
 	for i, s := range d.onAfterTxn {
 		onAfterTxnSnap[i] = s.fn
@@ -744,9 +746,9 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 //   - If fn panics (or any Phase 1 work panics), d.mu is released via defer.
 //   - Observers fire with whatever partial state was committed before the
 //     panic: OnUpdate receives a V1 update describing the mutations that
-//     completed (non-empty if fn mutated; minimal but well-formed if fn
-//     panicked before mutating); per-type, deep, and OnAfterTransaction
-//     observers fire for what was recorded in txn.changed.
+//     completed (and does not fire if fn panicked before mutating);
+//     per-type, deep, and OnAfterTransaction observers fire for what was
+//     recorded in txn.changed.
 //   - The original panic is re-raised to the caller after observers fire.
 //   - Rollback is NOT supported. The in-memory doc reflects fn's partial
 //     work. Callers who need atomicity must implement it above Transact.
@@ -779,9 +781,12 @@ func (d *Doc) TransactE(fn func(*Transaction) error, origin ...any) error {
 	return d.transactInternal(context.Background(), fn, origin...)
 }
 
-// OnUpdate registers a callback that fires after every committed transaction.
-// The callback receives the incremental V1 update bytes for that transaction
-// and the origin value passed to Transact. Returns an unsubscribe function.
+// OnUpdate registers a callback that fires after every committed transaction
+// that adds or deletes something, as the Yjs update event does: an apply of
+// an update the document already holds, or a transaction that changes
+// nothing, does not call it. The callback receives the incremental V1 update
+// bytes for that transaction and the origin value passed to Transact.
+// Returns an unsubscribe function.
 //
 // Callbacks that compare the origin (an echo guard, a per-user filter) do so
 // with Go ==, so the caution on Transact's doc applies: pointer origin

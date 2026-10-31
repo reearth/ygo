@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Fixed
+
+- **`crdt`: a transaction that changes nothing no longer calls `OnUpdate`.**
+  `OnUpdate` observers ran after every transaction, with an update of no
+  structs and the document's whole delete set: an update the document already
+  held, a delete of deleted content, a delete set naming clocks the document
+  lacks (which parks), and an empty `Transact`. They now run only when the
+  transaction adds structs or deletes something, as Yjs emits its `update`
+  event. A refused apply that integrated part of its update still calls them
+  for that part. `provider/websocket` therefore stores and relay-publishes no
+  such update, does not send a peer's update to the room's other peers when
+  the room already held all of it (an update it parks still goes out), and
+  `Server.Apply` returns `ErrNoChanges` when `fn`'s transactions change
+  nothing. `mobile` drops its filter for the empty update.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

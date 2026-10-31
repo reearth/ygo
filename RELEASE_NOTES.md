@@ -1,3 +1,27 @@
+## v1.54.1
+
+**Who is affected: code that counts or stores `OnUpdate` calls, and
+`provider/websocket` servers whose clients send updates again.**
+
+`Doc.OnUpdate` observers ran after every transaction, also when the
+transaction changed nothing: an update the document already held (a client
+that reconnects sends again what the server did not acknowledge), a delete of
+content already deleted, a delete set naming clocks the document lacks, or an
+empty `Transact`. Each such call carried an update of no structs and the
+document's whole delete set. A `provider/websocket` server stored each one,
+published it to the cluster relay, and sent the peer's update to every other
+peer in the room. Yjs emits no `update` event then.
+
+`OnUpdate` now runs only when a transaction adds structs or deletes something.
+A refused apply that integrated part of its update still calls it for that
+part, as Yjs does. If your code expected one call per transaction, use
+`OnAfterTransaction`, which still runs for every transaction. A server no
+longer stores or relay-publishes such an update, and it does not send a
+peer's update to the other peers when the room already held all of it. An
+update the room parks still goes to them. `Server.Apply` now returns
+`ErrNoChanges` when `fn`'s transactions change nothing. No API or wire format
+changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully
