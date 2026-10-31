@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.56.0] — 2026-10-31
 
+### Fixed
+
+- **`crdt`: V1 encoders write clients in descending order, as Yjs does.**
+  The struct groups of a V1 update and the entries of a state vector were
+  written with clients ascending, so a V1 update or state vector with more
+  than one client was not byte-identical to Yjs's. This covers
+  `EncodeStateAsUpdateV1`, the `OnUpdate` update, `MergeUpdatesV1`,
+  `DiffUpdateV1`, `UpdateV2ToV1`, `EncodeStateFromSnapshot`,
+  `EncodeStateVectorV1`, `EncodeStateVectorFromUpdate`,
+  `EncodeStateVectorFromUpdateV2` and `EncodeSnapshot`. The V2 encoders and
+  the delete-set encoders already wrote clients descending.
+
 ### Performance
 
 - **`crdt`: delete sets sort without allocating.** `DeleteSet.sortAndCompact`

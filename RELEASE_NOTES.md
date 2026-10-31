@@ -1,5 +1,9 @@
 ## v1.56.0
 
+- **V1 updates and state vectors list clients as Yjs does.** With more than
+  one client, the V1 encoders now write clients in descending order, so their
+  bytes equal Yjs's. A reader of the bytes sees the same document; only code
+  that compares V1 bytes with bytes ygo wrote before sees a change.
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
 - **Faster full-state encodes and snapshots after deletions.** The delete set

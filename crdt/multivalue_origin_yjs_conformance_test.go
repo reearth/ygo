@@ -59,20 +59,6 @@ func multiValueSet(doc *crdt.Doc, kind string) {
 	doc.Transact(func(txn *crdt.Transaction) { m.Set(txn, "k", 3) })
 }
 
-// multiValueUpdate hex-encodes u; a multi-client delete set is re-encoded
-// through MergeUpdatesV1, since ygo's V1 orders its clients ascending and Yjs
-// descending.
-func multiValueUpdate(t *testing.T, u []byte, canonical bool) string {
-	t.Helper()
-	if canonical {
-		var err error
-		if u, err = crdt.MergeUpdatesV1(u); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return hex.EncodeToString(u)
-}
-
 // TestConformance_MultiValueEntry_SetOrigin overwrites a key whose deleted
 // history is one merged multi-value struct, from a clientID below and above
 // the author's: ygo must emit Yjs's bytes (origin = the run's last id), and a
@@ -125,7 +111,7 @@ func TestConformance_MultiValueEntry_SetOrigin(t *testing.T) {
 						}
 						sv := doc.StateVector()
 						multiValueSet(doc, fx.Kind)
-						if got := multiValueUpdate(t, crdt.EncodeStateAsUpdateV1(doc, sv), sc.extra != nil); got != multiValueUpdate(t, mustHex(t, set.Update), sc.extra != nil) {
+						if got := hex.EncodeToString(crdt.EncodeStateAsUpdateV1(doc, sv)); got != set.Update {
 							t.Errorf("%s client=%d gc=%v: update\n got=%s\nwant=%s", tag, set.Client, gc, got, set.Update)
 						}
 						if got := multiValueContent(t, doc, fx.Kind); !reflect.DeepEqual(got, want) {
