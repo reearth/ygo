@@ -118,8 +118,8 @@ When a remote change arrives, the relay calls `srv.Inject(ctx, Inbound)`:
 - `KindSync` → applied to the room's doc with the relay sentinel origin, then
   rebroadcast to local peers via `BroadcastUpdate`.
 - `KindAwareness` → merged into the room's `awareness.Awareness` with the
-  sentinel origin, then fanned out to local peers (only the entries it applied,
-  when a cap refused some).
+  sentinel origin, then fanned out to local peers (as sent when the room
+  applied it exactly, otherwise the room's state for the clients it applied).
 
 `Inject` auto-creates the room if it is not yet resident, so a node with no
 local peers for a room still materialises the converged state (a peer that later

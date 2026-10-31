@@ -223,3 +223,32 @@ func TestApplyUpdateWith_IsLiveSeesEarlierEntries(t *testing.T) {
 		t.Fatal("isLive did not see the removal earlier in the update")
 	}
 }
+
+// Altered is set whenever the room holds something other than what an entry
+// said; an update applied as sent leaves both flags clear.
+func TestApplyUpdateWith_AlteredReportsEntriesNotTakenAsSent(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry rawEntry
+		want  bool
+	}{
+		{"applied as sent", rawEntry{2, 1, `{}`}, false},
+		{"stale", rawEntry{1, 4, `{}`}, true},
+		{"equal clock", rawEntry{1, 5, `{"x":1}`}, true},
+		{"not an object", rawEntry{2, 1, `[1]`}, true},
+		{"null for the local client", rawEntry{0, 9, "null"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := New(0)
+			mustApply(t, a, rawFrame(rawEntry{1, 5, `{}`}))
+			res, err := a.ApplyUpdateWith(rawFrame(c.entry), nil, ApplyOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Altered != c.want || res.Refused {
+				t.Fatalf("Altered=%v Refused=%v, want Altered=%v", res.Altered, res.Refused, c.want)
+			}
+		})
+	}
+}

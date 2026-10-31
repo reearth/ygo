@@ -26,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   neighbouring `Max*` fields. The cap is server-wide. With the gate on, peers
   cannot claim client ID `0`, the room's own awareness client, which no removal
   from the wire could retire, and a connection's departure removes the IDs it
-  introduced and still holds, not every ID it ever named in a frame.
+  introduced and has not itself removed, not every ID it ever named in a
+  frame.
 - **`provider/websocket`: `Server.MaxForeignAwarenessClients` reserves part of a
   room's presence budget for local clients.** Once the room holds this many
   live awareness entries, presence relayed from another node is refused for a
@@ -42,7 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `ApplyOptions`: `Foreign` holds the update to the foreign sub-cap, and
   `Admit` vets each entry, with the lock held, given whether the client is live
   before and after it. The `ApplyResult` it returns lists the clients applied
-  and whether any entry was refused. `SetMaxForeignClients` sets the sub-cap,
+  and whether any entry was refused or not applied as sent.
+  `SetMaxForeignClients` sets the sub-cap,
   which counts live entries only.
 
 ### Changed
@@ -58,12 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retiring IDs, locally or over the relay — used to fill a room and lock new
   live clients out until expiry reclaimed them. An unseen client's null is
   still refused at the cap, and so is a newcomer when every entry is live. A
-  reclaimed tombstone's clock is forgotten early, as `PurgeTombstones` already
-  does after its grace period. This applies to
+  reclaimed tombstone's clock is forgotten early, as `PurgeTombstones` does
+  after its grace period, but without `AwarenessExpiry` too: a delayed stale
+  update for that client is then accepted as new. This applies to
   `Server.MaxAwarenessClientsPerRoom`.
-- **`provider/websocket`: when a cap refuses part of an awareness frame, local
-  peers are sent only the entries that applied.** Previously the frame was
-  forwarded whole, so peers rendered presence the room had refused.
+- **`provider/websocket`: local peers are sent an awareness frame as is only
+  when the room applied it exactly as sent.** Otherwise they get the room's
+  state for the clients it applied. Previously the frame was always forwarded
+  whole, so peers rendered presence the room had refused, discarded as stale,
+  or dropped as invalid.
 
 ## [1.54.0] — 2026-10-22
 

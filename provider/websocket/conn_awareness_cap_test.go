@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
@@ -486,6 +487,48 @@ func TestConnAwarenessCap_RefusedIntroductionsReachNoPeer(t *testing.T) {
 	sendAwFrame(t, conn, awFrame(flood...))
 
 	require.Equal(t, map[uint64]bool{1: true, 2: true}, readAwarenessIDs(t, observer))
+}
+
+// States the room drops as invalid or over a cap never become presence, so
+// they cost no slot; they must not reach other peers either, or one connection
+// could paint any number of cursors on them.
+func TestConnAwarenessCap_DroppedStatesReachNoPeer(t *testing.T) {
+	keys := make([]string, 0, 1001)
+	for i := 0; i < 1001; i++ {
+		keys = append(keys, fmt.Sprintf(`"k%d":1`, i))
+	}
+	cases := []struct {
+		name, state string
+		roomBytes   int64
+	}{
+		{"too deep", strings.Repeat(`{"a":`, 21) + "1" + strings.Repeat("}", 21), 0},
+		{"not an object", `[1]`, 0},
+		{"too many keys", "{" + strings.Join(keys, ",") + "}", 0},
+		{"over the byte cap", `{"pad":"` + strings.Repeat("x", 64) + `"}`, 48},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := NewServer()
+			s.MaxAwarenessClientsPerConn = 4
+			s.MaxAwarenessBytesPerRoom = c.roomBytes
+			ts := httptest.NewServer(s)
+			t.Cleanup(ts.Close)
+			t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+			sender := dialRoomInternal(t, ts, "room")
+			observer := dialRoomInternal(t, ts, "room")
+			drainHandshakeFrames(t, observer)
+
+			const cursor = 9000
+			frame := make([]awEntry, 0, 51)
+			for id := uint64(1); id <= 50; id++ {
+				frame = append(frame, awEntry{id, 1, c.state})
+			}
+			frame = append(frame, awEntry{cursor, 1, `{"c":1}`})
+			sendAwFrame(t, sender, awFrame(frame...))
+
+			require.Equal(t, map[uint64]bool{cursor: true}, readAwarenessIDs(t, observer))
+		})
+	}
 }
 
 // The gate is on by default: an unset cap is 64, not unlimited and not zero.

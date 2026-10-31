@@ -36,12 +36,13 @@ them.
 With the gate on, peers can no longer claim client ID `0`, the room's own
 awareness client: no removal from the wire could retire it, so it stayed until
 the room was evicted. Disconnect behaviour also narrows. A connection's
-departure removes the awareness IDs it introduced and still holds, where before
-it removed every ID the connection had ever named in a frame. Presence a
+departure removes the awareness IDs it introduced and has not itself removed,
+where before it removed every ID the connection had ever named in a frame. Presence a
 connection only updated — an ID another connection or the relay introduced —
 stays with whoever introduced it until that owner leaves, `AwarenessExpiry`
 sweeps it, or the room is evicted. Set `AwarenessExpiry` if your clients take
-over each other's IDs.
+over each other's IDs. Disabling the gate with a negative value keeps the old
+tracking ceiling, but tracks only the IDs that entries the room applied name.
 
 **Who is affected: servers that set `MaxAwarenessClientsPerRoom`.**
 
@@ -51,7 +52,8 @@ without it. Now a new client asserting presence at the cap reclaims the oldest
 tombstone instead. An unseen client's removal is still refused at the cap, and
 so is a newcomer when every entry is live. The reclaimed tombstone's clock is
 forgotten early, the same trade-off `PurgeTombstones` makes after its grace
-period.
+period, though here it can happen without `AwarenessExpiry`: a delayed stale
+update for that client is then accepted as new.
 
 **Who is affected: clustered servers that want to keep relayed presence from
 crowding out local clients.** Opt-in; nothing changes unless you set it.
@@ -78,8 +80,12 @@ Sizing needs care, because a number that looks safe shuts out most of a room:
   per-origin quota would shut it out.
 
 A refused entry is skipped without an error, so the relay does not see a routine
-refusal as a delivery failure, and local peers are sent only the entries that
-applied.
+refusal as a delivery failure.
+
+Local peers now receive an awareness frame as sent only when the room applied
+it exactly; otherwise they get the room's state for the clients it applied, so
+presence the room refused, discarded as stale or dropped as invalid no longer
+reaches them.
 
 New exported API in `awareness`: `Awareness.ApplyUpdateWith` with
 `ApplyOptions`, `AdmitEntry` and `ApplyResult`, which the server uses for both

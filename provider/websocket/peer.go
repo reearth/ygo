@@ -115,6 +115,10 @@ func (p *peer) handleMessage(data []byte) {
 				"room", p.roomName, "err", err)
 			return
 		}
+		if res.Refused {
+			p.server.log().Debug("refused awareness entries past a cap",
+				"room", p.roomName)
+		}
 		if out := awarenessFanout(p.room.awareness, awBytes, res); out != nil {
 			p.broadcastAwareness(out)
 		}
@@ -518,11 +522,11 @@ func (p *peer) applyAwareness(payload []byte) (awareness.ApplyResult, error) {
 }
 
 // awarenessFanout returns what to forward of an applied awareness frame: the
-// frame itself, or, when a cap refused part of it, the room's state for only
-// the clients it applied, so refused presence reaches no one. Nil means there
-// is nothing to forward.
+// frame itself when the room applied it exactly as sent, otherwise the room's
+// state for only the clients it applied, so nothing the room refused or
+// dropped reaches anyone. Nil means there is nothing to forward.
 func awarenessFanout(aw *awareness.Awareness, frame []byte, res awareness.ApplyResult) []byte {
-	if !res.Refused {
+	if !res.Refused && !res.Altered {
 		return frame
 	}
 	if len(res.Applied) == 0 {

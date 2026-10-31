@@ -165,15 +165,17 @@ type Awareness struct {
 	// client reactivates and deleted when the tombstone is purged.
 	removedAt map[uint64]time.Time
 	// tombQ lists tombstones oldest first, so the client cap can reclaim the
-	// oldest in O(1). An entry whose removedAt has since changed is stale: it is
-	// skipped on read and compacted away on write.
-	tombQ []tombRef
+	// oldest in O(1). tombSeq holds each tombstone's queue sequence number; an
+	// entry whose number no longer matches is stale, skipped on read and
+	// compacted away on write.
+	tombQ   []tombRef
+	tombSeq map[uint64]uint64
+	nextSeq uint64
 }
 
-// tombRef is one tombQ entry: the client and the removedAt it was queued at.
+// tombRef is one tombQ entry: the client and its sequence number.
 type tombRef struct {
-	id uint64
-	at time.Time
+	id, seq uint64
 }
 
 // New creates an Awareness instance for the given client.
@@ -185,6 +187,7 @@ func New(clientID uint64) *Awareness {
 		wireBytes: make(map[uint64]int),
 		priorJSON: make(map[uint64][]byte),
 		removedAt: make(map[uint64]time.Time),
+		tombSeq:   make(map[uint64]uint64),
 	}
 }
 
@@ -217,7 +220,8 @@ func (a *Awareness) SetMaxBytes(n int64) {
 // subject to the byte cap (see SetMaxBytes) and so would otherwise grow the
 // states map without limit — without letting removal churn lock live clients
 // out. A reclaimed tombstone's clock is forgotten early, with the trade-off
-// PurgeTombstones describes.
+// PurgeTombstones describes, and this happens with or without
+// StartAutoExpiry.
 //
 // A value of 0 (the default) disables the cap. Local state set via
 // SetLocalState is exempt — the local client is always allowed. Suggested
@@ -591,6 +595,11 @@ type ApplyResult struct {
 	Applied []uint64
 	// Refused reports whether a cap or Admit refused any entry.
 	Refused bool
+	// Altered reports whether any other entry was not applied as sent: it was
+	// discarded as stale, its state was dropped as invalid or over a cap, or
+	// it was a null for the local client. When neither this nor Refused is
+	// set, the room holds exactly what the update says.
+	Altered bool
 }
 
 // ApplyUpdateWith is ApplyUpdate with options, reporting what it applied.
@@ -644,7 +653,7 @@ func (a *Awareness) applyUpdate(update []byte, origin any, opts ApplyOptions, re
 
 	a.mu.Lock()
 	var added, updated, changedUpdated, removed []uint64
-	refused := false
+	refused, altered := false, false
 	isLive := func(id uint64) bool {
 		cs, ok := a.states[id]
 		return ok && cs.State != nil
@@ -663,11 +672,13 @@ func (a *Awareness) applyUpdate(update []byte, origin any, opts ApplyOptions, re
 		//   - strictly-newer clock → accept
 		if exists {
 			if e.clock < current.Clock {
+				altered = true
 				continue
 			}
 			if e.clock == current.Clock {
 				validRemoval := isNullEntry && current.State != nil
 				if !validRemoval {
+					altered = true
 					continue
 				}
 			}
@@ -678,6 +689,7 @@ func (a *Awareness) applyUpdate(update []byte, origin any, opts ApplyOptions, re
 		// the incoming and re-emit local state so peers learn the new value.
 		// Matches Yjs JS / yrs which both detect this and override the remote.
 		if e.clientID == a.clientID && isNullEntry {
+			altered = true
 			if e.clock >= a.clock {
 				a.clock = e.clock + 1
 			}
@@ -708,7 +720,7 @@ func (a *Awareness) applyUpdate(update []byte, origin any, opts ApplyOptions, re
 				remote-- // exclude the exempt local entry from the cap
 			}
 			if remote >= a.maxClients {
-				if isNullEntry || len(a.removedAt) == 0 {
+				if isNullEntry || len(a.tombSeq) == 0 {
 					refused = true
 					continue
 				}
@@ -782,6 +794,9 @@ func (a *Awareness) applyUpdate(update []byte, origin any, opts ApplyOptions, re
 		if reclaim {
 			a.reclaimOldestTombstone()
 		}
+		if isNull && !isNullEntry {
+			altered = true
+		}
 
 		if isNull {
 			// Store nil state with incoming clock to prevent stale re-application.
@@ -823,6 +838,7 @@ func (a *Awareness) applyUpdate(update []byte, origin any, opts ApplyOptions, re
 			// The client is live again — drop any tombstone-age record so a later
 			// purge won't reclaim it. No-op if it was never a tombstone.
 			delete(a.removedAt, e.clientID)
+			delete(a.tombSeq, e.clientID)
 			// Update byte accounting: replace the old size with the new size.
 			a.activeBytes += int64(newSize - oldSize)
 			a.wireBytes[e.clientID] = newSize
@@ -844,7 +860,7 @@ func (a *Awareness) applyUpdate(update []byte, origin any, opts ApplyOptions, re
 	a.mu.Unlock()
 
 	if res != nil {
-		res.Refused = refused
+		res.Refused, res.Altered = refused, altered
 		if n := len(added) + len(updated) + len(removed); n > 0 {
 			res.Applied = make([]uint64, 0, n)
 			res.Applied = append(append(append(res.Applied, added...), updated...), removed...)
@@ -867,17 +883,19 @@ func (a *Awareness) markTombstone(id uint64, at time.Time) {
 	a.removedAt[id] = at
 	// Compact once stale entries outnumber live ones, so the queue stays
 	// within a constant factor of the tombstone count.
-	if len(a.tombQ) >= 2*len(a.removedAt)+16 {
+	if len(a.tombQ) >= 2*len(a.tombSeq)+16 {
 		kept := a.tombQ[:0]
 		for _, t := range a.tombQ {
-			if cur, ok := a.removedAt[t.id]; ok && cur.Equal(t.at) {
+			if seq, ok := a.tombSeq[t.id]; ok && seq == t.seq {
 				kept = append(kept, t)
 			}
 		}
 		clear(a.tombQ[len(kept):])
 		a.tombQ = kept
 	}
-	a.tombQ = append(a.tombQ, tombRef{id: id, at: at})
+	a.nextSeq++
+	a.tombSeq[id] = a.nextSeq
+	a.tombQ = append(a.tombQ, tombRef{id: id, seq: a.nextSeq})
 }
 
 // reclaimOldestTombstone forgets the oldest remote tombstone, freeing its slot
@@ -886,14 +904,10 @@ func (a *Awareness) reclaimOldestTombstone() {
 	for len(a.tombQ) > 0 {
 		t := a.tombQ[0]
 		a.tombQ = a.tombQ[1:]
-		if cur, ok := a.removedAt[t.id]; ok && cur.Equal(t.at) {
+		if seq, ok := a.tombSeq[t.id]; ok && seq == t.seq {
 			a.forgetTombstone(t.id)
 			return
 		}
-	}
-	for id := range a.removedAt { // unreachable while tombQ is kept in step
-		a.forgetTombstone(id)
-		return
 	}
 }
 
@@ -901,6 +915,7 @@ func (a *Awareness) reclaimOldestTombstone() {
 func (a *Awareness) forgetTombstone(id uint64) {
 	delete(a.states, id)
 	delete(a.removedAt, id)
+	delete(a.tombSeq, id)
 	delete(a.meta, id)      // defensive: tombstones carry no meta entry
 	delete(a.wireBytes, id) // defensive: released when the tombstone formed
 }

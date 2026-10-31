@@ -1276,9 +1276,9 @@ type Server struct {
 	// presence at the connection that sends it. An entry that would introduce
 	// one more is refused — not applied, and not forwarded to other peers or
 	// the relay — while the rest of its frame still applies. Zero (the
-	// default) selects 64; a negative value disables the gate and restores the
-	// previous behaviour, including the 10,000-ID tracking ceiling on the
-	// disconnect removal slice. Note the inverted convention: unlike the caps
+	// default) selects 64; a negative value disables the gate and keeps the
+	// previous 10,000-ID tracking ceiling on the disconnect removal slice,
+	// tracking every ID the connection's applied entries name. Note the inverted convention: unlike the caps
 	// above, zero does not disable this one.
 	//
 	// Only IDs this connection introduced and that are still live count, so
@@ -1296,8 +1296,10 @@ type Server struct {
 	//
 	// With the gate on, peers cannot assert state for client ID 0, the room's
 	// own awareness client, which no removal from the wire could retire. A
-	// connection's departure removes the IDs it introduced and still holds;
-	// presence it only updated stays with whoever introduced it.
+	// connection's departure removes the IDs it introduced and has not itself
+	// removed; presence it only updated stays with whoever introduced it. If
+	// another connection removes one of its IDs and then introduces it again,
+	// both answer for it, and the first to leave removes it.
 	MaxAwarenessClientsPerConn int
 
 	// AwarenessExpiry, when > 0, starts a per-room background sweep that marks a

@@ -11,7 +11,7 @@ func applyForeignEntry(t *testing.T, a *Awareness, clientID uint64, stateJSON st
 	}
 }
 
-func TestApplyUpdateForeign_SubCapRefusesNewIDs(t *testing.T) {
+func TestForeignSubCap_SubCapRefusesNewIDs(t *testing.T) {
 	a := New(0)
 	a.SetMaxClients(10)
 	a.SetMaxForeignClients(3)
@@ -24,7 +24,7 @@ func TestApplyUpdateForeign_SubCapRefusesNewIDs(t *testing.T) {
 	}
 }
 
-func TestApplyUpdateForeign_LocalApplyStillFillsFullCap(t *testing.T) {
+func TestForeignSubCap_LocalApplyStillFillsFullCap(t *testing.T) {
 	a := New(0)
 	a.SetMaxClients(10)
 	a.SetMaxForeignClients(3)
@@ -40,7 +40,7 @@ func TestApplyUpdateForeign_LocalApplyStillFillsFullCap(t *testing.T) {
 	}
 }
 
-func TestApplyUpdateForeign_TrackedForeignClientKeepsUpdating(t *testing.T) {
+func TestForeignSubCap_TrackedForeignClientKeepsUpdating(t *testing.T) {
 	a := New(0)
 	a.SetMaxForeignClients(2)
 
@@ -65,7 +65,7 @@ func TestApplyUpdateForeign_TrackedForeignClientKeepsUpdating(t *testing.T) {
 	}
 }
 
-func TestApplyUpdateForeign_TombstonesDoNotSaturate(t *testing.T) {
+func TestForeignSubCap_TombstonesDoNotSaturate(t *testing.T) {
 	a := New(0)
 	a.SetMaxForeignClients(3)
 
@@ -84,7 +84,7 @@ func TestApplyUpdateForeign_TombstonesDoNotSaturate(t *testing.T) {
 	}
 }
 
-func TestApplyUpdateForeign_TombstoneRevivalRespectsSubCap(t *testing.T) {
+func TestForeignSubCap_TombstoneRevivalRespectsSubCap(t *testing.T) {
 	a := New(0)
 	a.SetMaxForeignClients(3)
 
@@ -116,7 +116,7 @@ func TestApplyUpdateForeign_TombstoneRevivalRespectsSubCap(t *testing.T) {
 	}
 }
 
-func TestApplyUpdateForeign_ZeroDisablesSubCap(t *testing.T) {
+func TestForeignSubCap_ZeroDisablesSubCap(t *testing.T) {
 	a := New(0)
 	a.SetMaxClients(10)
 
@@ -128,7 +128,7 @@ func TestApplyUpdateForeign_ZeroDisablesSubCap(t *testing.T) {
 	}
 }
 
-func TestApplyUpdateForeign_LocalClientIDExempt(t *testing.T) {
+func TestForeignSubCap_LocalClientIDExempt(t *testing.T) {
 	a := New(7)
 	a.SetMaxForeignClients(1)
 	a.SetLocalState(map[string]any{"v": "mine"})
@@ -148,7 +148,7 @@ func TestApplyUpdateForeign_LocalClientIDExempt(t *testing.T) {
 	}
 }
 
-func TestApplyUpdateForeign_LocalTombstoneExempt(t *testing.T) {
+func TestForeignSubCap_LocalTombstoneExempt(t *testing.T) {
 	a := New(7)
 	a.SetMaxForeignClients(1)
 	a.SetLocalState(map[string]any{"v": "mine"})
