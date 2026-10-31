@@ -835,14 +835,17 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			// this, an item whose right origin is a missing concurrent client
 			// would integrate at the wrong position — permanent divergence
 			// (review finding C-2). Deferral routes it through the within-update
-			// retry and, failing that, store.pending via itemFutureDep. Only at
-			// offset==0: a split (offset>0) overlaps an already-present item, so
-			// its origins are necessarily satisfied.
-			if offset == 0 && item.OriginRight != nil &&
+			// retry and, failing that, store.pending via itemFutureDep.
+			if item.OriginRight != nil &&
 				item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
 				pending = append(pending, item)
 				clock = itemEnd
 				continue
+			}
+
+			if continuesGC(txn.doc.store, item, offset) {
+				integrateBeforeRefusal(txn, pending)
+				return nil, errGCContinuation
 			}
 
 			// Resolve left neighbor from the Origin ID so that integrate()
@@ -867,29 +870,56 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 // Survivors are parked in store.pending within the cross-update limit.
 // Preflight bounds unresolved items before decoding an oversized blocked tail;
 // integration retries deferred items until no further progress is possible.
-// Returns ErrInvalidUpdate (wrapped) if the pending queue cap is exceeded.
+// Returns ErrInvalidUpdate (wrapped) if the pending queue cap is exceeded or
+// a deferred item is refused.
 func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
-	if len(pending) >= pendingScheduleThreshold {
-		before := len(pending)
-		pending = retryWithinUpdatePending(txn, pending)
-		if len(pending) == before {
-			return parkWithinUpdatePending(txn, pending)
+	remaining, err := resolveDeferred(txn, pending)
+	if err != nil {
+		return err
+	}
+	if len(remaining) > 0 {
+		return parkWithinUpdatePending(txn, remaining)
+	}
+	return nil
+}
+
+// resolveDeferred bounds a large queue's retry work with the scheduled
+// resolvers, dropping a refused item and returning the first refusal.
+func resolveDeferred(txn *Transaction, pending []*Item) ([]*Item, error) {
+	var refused error
+	keep := func(err error) {
+		if refused == nil {
+			refused = err
 		}
 	}
 	if len(pending) >= pendingScheduleThreshold {
-		pending = resolvePendingDependencies(txn, pending)
+		before := len(pending)
+		var err error
+		pending, err = retryWithinUpdatePending(txn, pending)
+		keep(err)
+		if len(pending) == before {
+			return pending, refused
+		}
 	}
 	if len(pending) >= pendingScheduleThreshold {
-		pending = resolvePendingWaiters(txn, pending)
+		var err error
+		pending, err = resolvePendingDependencies(txn, pending)
+		keep(err)
+	}
+	if len(pending) >= pendingScheduleThreshold {
+		var err error
+		pending, err = resolvePendingWaiters(txn, pending)
+		keep(err)
 	}
 	for len(pending) > 0 {
-		remaining := retryWithinUpdatePending(txn, pending)
+		remaining, err := retryWithinUpdatePending(txn, pending)
+		keep(err)
 		if len(remaining) == len(pending) {
-			return parkWithinUpdatePending(txn, remaining)
+			return remaining, refused
 		}
 		pending = remaining
 	}
-	return nil
+	return nil, refused
 }
 
 // drainPending runs the doc-level pending drain. It first retries any
@@ -922,7 +952,9 @@ func drainPending(txn *Transaction) error {
 		txn.doc.store.pending = nil
 
 		done := make([]bool, len(items))
-		integratePending(txn, items, done, &dropped)
+		// A refused parked item is dropped without failing the update, since the
+		// drain cannot tell which update carried it.
+		_ = integratePending(txn, items, done, &dropped)
 		stillPending, stillMissing := unresolvedPending(txn.doc.store, items, done)
 		progressed := len(stillPending) < len(items)
 
@@ -1584,16 +1616,48 @@ func appendTrimmed(store *StructStore, item *Item, existingEnd uint64) {
 	store.Append(item)
 }
 
+// errGCContinuation refuses an item whose new clocks follow its client's GC
+// struct, which Yjs cannot integrate either.
+var errGCContinuation = errors.New("item continues its client's GC struct")
+
+// continuesGC reports whether item, integrated past offset, would take its
+// client's GC struct as its left neighbour, which Yjs throws on unless an
+// origin of the item is a GC struct.
+func continuesGC(store *StructStore, item *Item, offset int) bool {
+	if offset == 0 {
+		return false
+	}
+	structs := store.clients[item.ID.Client]
+	return structs[len(structs)-1].isGCOrphan() && !namesGCStruct(store, item.Origin) && !namesGCStruct(store, item.OriginRight)
+}
+
+// integrateBeforeRefusal integrates the structs the update deferred before an
+// item it refuses whose dependencies are now present, and drops the rest; the
+// caller returns the refusal, so a second one adds nothing.
+func integrateBeforeRefusal(txn *Transaction, pending []*Item) {
+	_, _ = resolveDeferred(txn, pending)
+}
+
+// namesGCStruct reports whether id names a GC struct in store.
+func namesGCStruct(store *StructStore, id *ID) bool {
+	if id == nil {
+		return false
+	}
+	s := store.Find(*id)
+	return s != nil && s.isGCOrphan()
+}
+
 // tryIntegrate attempts to integrate item into the doc store. Returns
 // true on success (item is now integrated into the linked list, or
 // stored as an orphan when its parent is truly unresolvable). Returns
 // false if blocked on a future-clock dependency — the caller should
-// leave it in the pending queue.
+// leave it in the pending queue. An item that continues its client's GC
+// struct also leaves the queue: tryIntegrate returns true and an error.
 //
 // Used by the inline retry loop to drain pending items that may now
 // be integrable. Parallels the normal decode-loop path but with items
 // that have already been decoded.
-func tryIntegrate(txn *Transaction, item *Item) bool {
+func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 	store := txn.doc.store
 
 	// Read bounds directly in the retry hot path; missing clients need no
@@ -1606,12 +1670,12 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 
 	// A same-client clock gap is blocked regardless of content length.
 	if item.ID.Clock > existingEnd {
-		return false
+		return false, nil
 	}
 
 	// Fully covered ranges need no further integration.
 	if item.ID.Clock+uint64(item.Content.Len()) <= existingEnd {
-		return true
+		return true, nil
 	}
 
 	// GC-orphan path (no parent, deleted): store without integration, trimmed
@@ -1626,7 +1690,7 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	// here, so the offset is never negative.
 	if item.Parent == nil && item.Deleted {
 		appendTrimmed(store, item, existingEnd)
-		return true
+		return true, nil
 	}
 
 	// Try to resolve parent via Origin / OriginRight / ParentSub fallback.
@@ -1637,7 +1701,7 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	if item.Parent == nil {
 		if item.Origin != nil {
 			if len(store.clients[item.Origin.Client]) == 0 {
-				return false
+				return false, nil
 			}
 			if oi := store.Find(*item.Origin); oi != nil {
 				item.Parent = oi.Parent
@@ -1645,12 +1709,12 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 					item.ParentSub = oi.ParentSub
 				}
 			} else if item.Origin.Clock >= store.NextClock(item.Origin.Client) {
-				return false // future clock — still blocked
+				return false, nil // future clock — still blocked
 			}
 		}
 		if item.Parent == nil && item.OriginRight != nil {
 			if len(store.clients[item.OriginRight.Client]) == 0 {
-				return false
+				return false, nil
 			}
 			if ori := store.Find(*item.OriginRight); ori != nil {
 				item.Parent = ori.Parent
@@ -1658,7 +1722,7 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 					item.ParentSub = ori.ParentSub
 				}
 			} else if item.OriginRight.Clock >= store.NextClock(item.OriginRight.Client) {
-				return false
+				return false, nil
 			}
 		}
 		// Parent referenced by container item-ID (review finding C-3): resolve
@@ -1667,14 +1731,14 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 		// via the ParentSub fallback below.
 		if item.Parent == nil && item.parentID != nil {
 			if len(store.clients[item.parentID.Client]) == 0 {
-				return false
+				return false, nil
 			}
 			if pi := store.Find(*item.parentID); pi != nil {
 				if ct, ok := pi.Content.(*ContentType); ok {
 					item.Parent = ct.Type
 				}
 			} else if item.parentID.Clock >= store.NextClock(item.parentID.Client) {
-				return false
+				return false, nil
 			}
 		}
 		if item.Parent == nil {
@@ -1685,7 +1749,7 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 			// struct Yjs integrates it as.
 			item.markGCOrphan()
 			appendTrimmed(store, item, existingEnd)
-			return true
+			return true, nil
 		}
 	}
 
@@ -1693,11 +1757,11 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	if item.Origin != nil {
 		items := store.clients[item.Origin.Client]
 		if len(items) == 0 {
-			return false
+			return false, nil
 		}
 		last := items[len(items)-1]
 		if item.Origin.Clock >= last.ID.Clock+uint64(last.Content.Len()) {
-			return false
+			return false, nil
 		}
 	}
 
@@ -1712,12 +1776,17 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	if item.OriginRight != nil {
 		items := store.clients[item.OriginRight.Client]
 		if len(items) == 0 {
-			return false
+			return false, nil
 		}
 		last := items[len(items)-1]
 		if item.OriginRight.Clock >= last.ID.Clock+uint64(last.Content.Len()) {
-			return false
+			return false, nil
 		}
+	}
+
+	offset := int(existingEnd - item.ID.Clock)
+	if continuesGC(store, item, offset) {
+		return true, wrapUpdateErr(errGCContinuation)
 	}
 
 	// Resolve left neighbor for integrate().
@@ -1726,8 +1795,8 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	}
 
 	// A parked range may now overlap the store; integrate only its new suffix.
-	item.integrate(txn, int(existingEnd-item.ID.Clock))
-	return true
+	item.integrate(txn, offset)
+	return true, nil
 }
 
 // itemFutureDep reports whether item is blocked on a future-clock dependency

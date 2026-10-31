@@ -96,6 +96,49 @@ func TestUnit_PendingResolver_DependencyWork(t *testing.T) {
 	}
 }
 
+// The structs an update deferred before a refused item resolve with the same
+// work bound as the ordinary within-update retry.
+func TestUnit_PendingResolver_IntegrateBeforeRefusalWork(t *testing.T) {
+	const n = 512
+	doc := New(WithClientID(100001))
+	defer doc.Destroy()
+	work := resolverWork{}
+	pending := resolverWorkItems(doc, n, "origin", &work)
+	doc.Transact(func(txn *Transaction) { integrateBeforeRefusal(txn, pending) })
+	require.Zero(t, doc.PendingStats().Items)
+	require.Len(t, doc.StateVector(), n)
+	require.LessOrEqual(t, work.lengths, 32*n, "retry work must remain proportional to the queue")
+}
+
+// A large deferred queue drops a refused item and still resolves the rest.
+func TestUnit_PendingResolver_LargeQueueDropsARefusedItem(t *testing.T) {
+	const n = 64
+	doc := New(WithClientID(100001))
+	defer doc.Destroy()
+	root := doc.GetMap("root")
+	gc := &Item{ID: ID{Client: 3 * n}, Content: NewContentDeleted(1), Deleted: true}
+	doc.store.Append(gc)
+	// The refused item waits on the first chain, then continues the GC struct.
+	refused := &Item{ID: ID{Client: 3 * n}, Parent: &root.abstractType, Origin: &ID{Client: 1}, Content: NewContentString("ab")}
+	pending := []*Item{refused}
+	for _, first := range []ClientID{1, n + 1} {
+		for i := ClientID(0); i < n; i++ {
+			item := &Item{ID: ID{Client: first + i}, Parent: &root.abstractType, Content: NewContentDeleted(1)}
+			if i+1 < n {
+				item.Origin = &ID{Client: first + i + 1}
+			}
+			pending = append(pending, item)
+		}
+	}
+	var remaining []*Item
+	var err error
+	doc.Transact(func(txn *Transaction) { remaining, err = resolveDeferred(txn, pending) })
+	require.ErrorIs(t, err, ErrInvalidUpdate)
+	require.Empty(t, remaining)
+	require.Len(t, doc.StateVector(), 2*n+1)
+	require.Equal(t, uint64(1), doc.StateVector().Clock(3*n))
+}
+
 func TestUnit_PendingResolver_SmallQueueAvoidsIndex(t *testing.T) {
 	doc := New()
 	defer doc.Destroy()
@@ -145,7 +188,11 @@ func TestUnit_PendingResolver_CoveredItemWithMissingOrigin(t *testing.T) {
 	text := doc.GetText("text")
 	doc.Transact(func(txn *Transaction) { text.Insert(txn, 0, "x", nil) })
 	duplicate := &Item{ID: ID{Client: 1}, Parent: &text.abstractType, Origin: &ID{Client: 9999}, Content: NewContentString("x")}
-	doc.Transact(func(txn *Transaction) { require.True(t, tryIntegrate(txn, duplicate)) })
+	doc.Transact(func(txn *Transaction) {
+		ok, err := tryIntegrate(txn, duplicate)
+		require.True(t, ok)
+		require.NoError(t, err)
+	})
 	require.Equal(t, "x", text.ToString())
 	require.Equal(t, uint64(1), doc.StateVector().Clock(1))
 	require.Zero(t, doc.PendingStats().Items)

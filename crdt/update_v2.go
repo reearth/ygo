@@ -846,13 +846,17 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			// V2 decodes client groups descending, so a higher-clientID item can
 			// reach here before its lower-clientID right neighbour exists. Without
 			// this the item integrates at the wrong position (permanent
-			// divergence, review finding C-2). Mirrors the V1 guard in update.go;
-			// only at offset==0 (a split's origins are necessarily satisfied).
-			if offset == 0 && item.OriginRight != nil &&
+			// divergence, review finding C-2). Mirrors the V1 guard in update.go.
+			if item.OriginRight != nil &&
 				item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
 				pending = append(pending, item)
 				clock = itemEnd
 				continue
+			}
+
+			if continuesGC(txn.doc.store, item, offset) {
+				integrateBeforeRefusal(txn, pending)
+				return wrapUpdateErr(errGCContinuation)
 			}
 
 			if offset == 0 && item.Origin != nil {

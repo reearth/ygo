@@ -106,7 +106,7 @@ func TestTryIntegrate_GCPlaceholderPartialOverlapIsTrimmed(t *testing.T) {
 		Deleted: true,
 	}
 	d.Transact(func(txn *Transaction) {
-		if !tryIntegrate(txn, item) {
+		if ok, err := tryIntegrate(txn, item); !ok || err != nil {
 			t.Fatal("tryIntegrate refused a GC placeholder whose predecessor is present")
 		}
 	})
