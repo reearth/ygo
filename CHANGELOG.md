@@ -10,26 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`crdt`: structs merge at the end of a transaction as in Yjs.** Yjs merges
-  each struct a transaction deletes with its neighbours, and each struct it
-  adds with the struct on its left, also one an earlier transaction made. ygo
-  merged only text that one transaction inserted and the halves of a split, so
-  a run typed or deleted one transaction at a time kept one struct per
-  transaction, in memory and on the wire. A 5,000-transaction editing session
-  encoded a 30,155-byte V1 state where Yjs writes 16,312 bytes; the state is
-  now byte-identical to Yjs's in V1 and V2, with GC on or off, and on a
-  document that received the session's updates. Encoded states and sync
-  replies are smaller and their bytes differ from earlier releases; apart from
-  the undo and format-cleanup fixes below, decoded content is unchanged.
-  `EncodeStateFromSnapshot` and `CreateDocFromSnapshot` now cut a merged
-  struct at the snapshot's clock.
-  Undo finds a restored item inside a merged run by the unit its link names,
-  as Yjs does; before, undo over a restored neighbour whose copy was split
-  later could restore an item that Yjs leaves deleted. A received delete no
-  longer splits a struct that is already deleted, and a GC struct is never
-  split, as in Yjs, so those runs stay one struct. The format cleanup after a
-  text delete now stops at the first live text or embed after the deletion,
-  as Yjs's `cleanupFormattingGap` does; before, it went one more item and
-  could delete a format end mark that Yjs keeps.
+  each struct a transaction deletes with its neighbours, and each struct it adds
+  with the struct on its left, also one an earlier transaction made. ygo merged
+  only text that one transaction inserted and the halves of a split, so a run
+  typed or deleted one transaction at a time kept one struct per transaction, in
+  memory and on the wire. A 5,000-transaction editing session encoded a
+  30,155-byte V1 state where Yjs writes 16,312 bytes; the state is now
+  byte-identical to Yjs's in V1 and V2, with GC on or off, and on a document
+  that received the session's updates. Encoded states and sync replies are
+  smaller and their bytes differ from earlier releases; apart from the undo and
+  format-cleanup fixes below, decoded content is unchanged.
+  `EncodeStateFromSnapshot` and `CreateDocFromSnapshot` now cut a merged struct
+  at the snapshot's clock. Undo finds a restored item inside a merged run by the
+  unit its link names, as Yjs does; before, undo over a restored neighbour whose
+  copy was split later could restore an item that Yjs leaves deleted. An undo
+  over deleted map values that now merge restores the value Yjs restores, where
+  it restored none. A received delete no longer splits a struct that is already
+  deleted, and a GC struct is never split, as in Yjs, so those runs stay one
+  struct. The format cleanup after a text delete now stops at the first live
+  text or embed after the deletion, as Yjs's `cleanupFormattingGap` does;
+  before, it went one more item and could delete format marks that Yjs keeps.
 
 ## [1.54.0] — 2026-10-22
 

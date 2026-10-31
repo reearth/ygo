@@ -18,7 +18,8 @@ clients in a different order from Yjs.
 
 Undo now finds a restored item by the unit its link names, as Yjs does. Before,
 undoing next to an item whose restored copy was split later could restore an
-item that Yjs leaves deleted.
+item that Yjs leaves deleted. An undo over deleted map values that now merge
+restores the value Yjs restores; before, it could restore none.
 
 A received delete no longer splits a struct that is already deleted, and a GC
 struct is never split, as in Yjs. Such a split could leave a deleted run as
@@ -26,9 +27,9 @@ several structs where Yjs keeps one.
 
 After a text delete, ygo deletes format marks that no longer apply to any text.
 That search now stops at the first live text or embed after the deletion, as
-in Yjs. Before, it went one item further and could delete a format end mark
-that Yjs keeps. On a peer that reused that mark, the format then spread over
-the text after it.
+in Yjs. Before, it went one item further and could delete format marks that
+Yjs keeps. On a peer that reused such a mark, the format then spread over
+the text after it, or was lost from the text the peer inserted.
 
 ## v1.54.0
 

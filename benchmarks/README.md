@@ -81,8 +81,8 @@ BenchmarkB4_Size-16        1   1521173375 ns/op     3428241 v1_bytes   234910 v2
 | V2 size      | < V1 size | 6.9% of V1 | ✅     |
 
 Since v1.54.1 structs merge at the end of each transaction as in Yjs, and
-`BenchmarkB4_Size` reports 387,121 V1 bytes and 226,480 V2 bytes (58.5% of
-V1). The results above predate that change.
+`BenchmarkB4_Size` reports about 387 KB V1 and 226 KB V2 (about 58% of V1); the
+exact bytes vary with its random client ID. The results above predate that change.
 
 > To reproduce: `go test -bench=BenchmarkB4 -benchmem -benchtime=1x -count=3 ./benchmarks/`
 
