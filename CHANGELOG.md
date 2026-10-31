@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Performance
+
+- **`crdt`: sorting a delete set no longer allocates.** The ranges of each
+  client in a delete set, and the clients that V1 and V2 encoding write, were
+  sorted with `sort.Slice`, which allocates on every call. They now use
+  `slices.SortFunc`. Encoding a document in which 4 clients deleted text now
+  allocates 69 objects in V1 (was 84) and 106 in V2 (was 121)
+  (`BenchmarkEncodeStateAsUpdate_DeleteSet`). The bytes do not change.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

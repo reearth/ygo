@@ -2,10 +2,12 @@ package crdt
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
@@ -529,7 +531,7 @@ func encodeDeleteSet(enc *encoding.Encoder, ds DeleteSet) {
 	}
 	// Yjs writes delete set clients in descending order, and applies a delete
 	// set in its encoded order.
-	sort.Slice(clients, func(i, j int) bool { return clients[i] > clients[j] })
+	slices.SortFunc(clients, func(a, b ClientID) int { return cmp.Compare(b, a) })
 	enc.WriteVarUint(uint64(len(clients)))
 	for _, c := range clients {
 		ranges := ds.clients[c]
