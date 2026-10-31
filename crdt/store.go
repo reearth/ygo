@@ -80,7 +80,24 @@ func (s *StructStore) Find(id ID) *Item {
 // findStructIndex returns the index of the last struct in structs that starts
 // at or before clock, or -1 when none does (Yjs findIndexSS).
 func findStructIndex(structs []*Item, clock uint64) int {
-	return sort.Search(len(structs), func(i int) bool { return structs[i].ID.Clock > clock }) - 1
+	n := len(structs)
+	if n == 0 || structs[0].ID.Clock > clock {
+		return -1
+	}
+	first, last := structs[0].ID.Clock, structs[n-1].ID.Clock
+	if last <= clock {
+		return n - 1
+	}
+	// Clocks grow about evenly, so first try the index where clock would sit
+	// if they grew exactly evenly, as Yjs findIndexSS does.
+	i := min(int(float64(clock-first)/float64(last-first)*float64(n-1)), n-2)
+	if structs[i].ID.Clock > clock {
+		return sort.Search(i, func(j int) bool { return structs[j].ID.Clock > clock }) - 1
+	}
+	if structs[i+1].ID.Clock > clock {
+		return i
+	}
+	return i + sort.Search(n-1-i, func(j int) bool { return structs[i+1+j].ID.Clock > clock })
 }
 
 // getItemCleanEnd returns the item ending at exactly (client, clock).
