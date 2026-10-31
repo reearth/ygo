@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.0] — 2026-10-31
+
+### Added
+
+- **`crdt.WithFormatCleanup(enabled)` and `Doc.SetFormatCleanup(enabled)`**
+  turn off, for one document, the local transaction that follows a remote
+  transaction changing formatted text and deletes the format markers it left
+  redundant. A document that replays another document's updates, such as a
+  server's copy of a room or a fold of its stored updates, needs it off: the
+  source never cleaned up after its own local transactions, and its updates
+  already hold the cleanups it did run, so the replay otherwise deletes
+  markers the source keeps. The setter lets a room load its stored state
+  without the cleanup and clean up after later peer updates. The default is
+  unchanged.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

@@ -1,3 +1,18 @@
+## v1.55.0
+
+**Who is affected: code that keeps a copy of a document by applying that
+document's own updates, such as a server's replica of a room or a fold of a
+room's stored updates.**
+
+After a remote transaction that changes formatted text, ygo runs the
+follow-up transaction Yjs runs and deletes the format markers the change left
+redundant. A document never runs it after its own local transactions, so a
+copy that applies those transactions' updates deletes markers the source
+keeps, and its text can render differently. `crdt.WithFormatCleanup(false)`
+turns the cleanup off for one document, and `Doc.SetFormatCleanup` changes it
+after construction, so a room can load its stored state without it and clean
+up after later peer updates. The default is unchanged. No wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully
