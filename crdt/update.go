@@ -123,50 +123,11 @@ func encodeTxnV1Locked(txn *Transaction) []byte {
 			}
 			sv[client] = first
 		}
-		// The V2 decoder records a GC struct's range as deleted before the
-		// struct integrates; a parked one has deleted nothing yet, and its
-		// struct carries the range. Below the store's clock a parked struct
-		// overlaps integrated items, whose deletions are real.
-		if _, ok := ds.clients[client]; ok {
-			if ranges := withoutParked(ds.clients[client], items, store.NextClock(client)); len(ranges) > 0 {
-				ds.clients[client] = ranges
-			} else {
-				delete(ds.clients, client)
-			}
-		}
 	}
 	if len(perClient) == 0 && len(ds.clients) == 0 {
 		return nil
 	}
 	return encodeStructStoreV1(perClient, ds, sv, store)
-}
-
-// withoutParked is the sorted, disjoint ranges less the clocks at or above
-// from that the clock-ordered, disjoint parked structs cover, in one pass over
-// both.
-func withoutParked(ranges []DeleteRange, parked []*Item, from uint64) []DeleteRange {
-	var out []DeleteRange
-	j := 0
-	for _, r := range ranges {
-		start, end := r.Clock, r.Clock+r.Len
-		for j < len(parked) && parked[j].ID.Clock+uint64(parked[j].Content.Len()) <= start {
-			j++
-		}
-		for k := j; k < len(parked) && parked[k].ID.Clock < end; k++ {
-			pStart, pEnd := max(parked[k].ID.Clock, from), parked[k].ID.Clock+uint64(parked[k].Content.Len())
-			if pStart >= pEnd || pStart >= end {
-				continue
-			}
-			if pStart > start {
-				out = append(out, DeleteRange{Clock: start, Len: pStart - start})
-			}
-			start = max(start, pEnd)
-		}
-		if start < end {
-			out = append(out, DeleteRange{Clock: start, Len: end - start})
-		}
-	}
-	return out
 }
 
 // EncodeStateAsUpdateV2 encodes the document state using the Yjs V2

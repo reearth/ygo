@@ -726,8 +726,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				}
 				// Bounded before the replaced-group check, as every struct is,
 				// so apply refuses what the merge decoders refuse.
-				length := uint64(l)
-				itemEnd, err := structEnd(clock, length)
+				itemEnd, err := structEnd(clock, uint64(l))
 				if err != nil {
 					return err
 				}
@@ -735,29 +734,15 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 					clock = itemEnd
 					continue
 				}
-				if itemEnd > existingEnd {
-					// Record the range in the transaction's delete set: items we
-					// already hold here get tombstoned, and items we have never
-					// seen (GC'd before they reached us) are parked in pendingDs
-					// via applyToPartial and retried on later applies.
-					effectiveStart := clock
-					if effectiveStart < existingEnd {
-						effectiveStart = existingEnd
-					}
-					gcLen := int(itemEnd - effectiveStart)
-					if gcLen > 0 {
-						txn.deleteSet.add(ID{Client: client, Clock: effectiveStart}, gcLen)
-					}
-				}
 				// Decode the GC struct into the same placeholder Item the V1
 				// decoder builds (update.go decodeItem, tag 0), so it flows
 				// through the identical clock-accounting, park and offset logic
-				// below instead of short-circuiting past it.
+				// below instead of short-circuiting past it. As in Yjs, a GC
+				// struct adds nothing to the transaction's delete set.
 				//
-				// Short-circuiting is what caused #231. The delete-set entry
-				// above records that the range was deleted, but nothing occupied
-				// the range in the client's struct list and existingEnd never
-				// advanced, so every later struct from this client looked like a
+				// Short-circuiting once left nothing occupying the range in the
+				// client's struct list, and existingEnd never advanced, so every
+				// later struct from this client looked like a
 				// same-client clock gap and was parked in the permanent pending
 				// queue — waiting for a predecessor that was already in this
 				// same update. The V1 path has always appended the placeholder,
@@ -765,10 +750,10 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				// in the group are not falsely gapped").
 				item = &Item{
 					ID:      ID{Client: client, Clock: clock},
-					Content: NewContentDeleted(int(length)),
+					Content: NewContentDeleted(l),
 					Deleted: true,
 				}
-				contentLen = int(length)
+				contentLen = l
 
 			case 10: // Skip struct: withheld clocks; advance the cursor only (see V1 decodeAndPark)
 				l, err := dec.restDec.ReadVarUint()

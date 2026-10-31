@@ -113,9 +113,9 @@ func TestUnit_ApplyUpdateLanded_CarriesWhatTheFailedApplyParked(t *testing.T) {
 	}
 }
 
-// A V2 GC struct that parks is relayed as the struct alone: the V2 decoder
-// records its range in the transaction's delete set before it parks, and a
-// peer that got the range as well would park it as a delete range.
+// A V2 GC struct that parks is relayed as the struct alone: it adds nothing to
+// the transaction's delete set, and a peer that got its range as well would
+// park it as a delete range.
 func TestUnit_ApplyUpdateLanded_RelaysAParkedGCStructWithoutItsRange(t *testing.T) {
 	// A GC struct of client 5 at clock 1, which waits for clock 0, then a
 	// delete set cut short so the apply fails after it parks.
@@ -142,31 +142,6 @@ func TestUnit_ApplyUpdateLanded_RelaysAParkedGCStructWithoutItsRange(t *testing.
 		t.Fatalf("the peer refused the landed update: %v", err)
 	}
 	requireSame(t, room, peer, "after the failed apply")
-}
-
-func TestUnit_WithoutParked(t *testing.T) {
-	item := func(clock uint64, n int) *Item {
-		return &Item{ID: ID{Client: 5, Clock: clock}, Content: NewContentDeleted(n)}
-	}
-	for _, c := range []struct {
-		name   string
-		ranges []DeleteRange
-		parked []*Item
-		from   uint64
-		want   []DeleteRange
-	}{
-		{"no overlap", []DeleteRange{{0, 2}, {10, 2}}, []*Item{item(4, 3)}, 0, []DeleteRange{{0, 2}, {10, 2}}},
-		{"a struct covers a range", []DeleteRange{{4, 3}}, []*Item{item(3, 5)}, 0, nil},
-		{"two structs in one range", []DeleteRange{{0, 10}}, []*Item{item(2, 2), item(6, 1)}, 0, []DeleteRange{{0, 2}, {4, 2}, {7, 3}}},
-		{"a struct spans two ranges", []DeleteRange{{0, 3}, {5, 3}}, []*Item{item(2, 4)}, 0, []DeleteRange{{0, 2}, {6, 2}}},
-		{"adjacent structs", []DeleteRange{{0, 6}}, []*Item{item(1, 2), item(3, 2)}, 0, []DeleteRange{{0, 1}, {5, 1}}},
-		{"a struct over held clocks", []DeleteRange{{6, 4}}, []*Item{item(5, 7)}, 10, []DeleteRange{{6, 4}}},
-		{"a struct partly over held clocks", []DeleteRange{{0, 10}}, []*Item{item(2, 6)}, 5, []DeleteRange{{0, 5}, {8, 2}}},
-	} {
-		if got := withoutParked(c.ranges, c.parked, c.from); !reflect.DeepEqual(got, c.want) {
-			t.Errorf("%s: %v, want %v", c.name, got, c.want)
-		}
-	}
 }
 
 // A struct the room parks while it already holds the start of its clocks is

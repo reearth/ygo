@@ -236,6 +236,16 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// Register in the document store.
 	txn.doc.store.Append(item)
 
+	// As Yjs ContentDeleted.integrate does, an item that arrives with deleted
+	// content is deleted here, so a move that splits it below keeps every part
+	// deleted, and its range joins the delete set after the map block, where Yjs
+	// has already deleted a key's previous winner.
+	arrivedDeleted := 0
+	if _, ok := item.Content.(*ContentDeleted); ok && !item.Deleted {
+		item.Deleted = true
+		arrivedDeleted = item.Content.Len()
+	}
+
 	// #63 — register an embedded subdocument (Content has no integrate hook).
 	// This MUST run here, before the ParentSub last-writer-wins block below,
 	// which can call item.delete(txn) on THIS item when it integrates
@@ -376,6 +386,10 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 			}
 			item.Parent.itemMap[key] = item
 		}
+	}
+
+	if arrivedDeleted > 0 {
+		txn.deleteSet.add(item.ID, arrivedDeleted)
 	}
 
 	// Yjs Item.integrate deletes an item whose parent is already deleted: a
