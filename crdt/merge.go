@@ -44,15 +44,11 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 		if total > maxV2Items {
 			return nil, DeleteSet{}, ErrInvalidUpdate
 		}
-		clientU, err := dec.ReadVarUint()
+		start, err := readID(dec)
 		if err != nil {
 			return nil, DeleteSet{}, wrapUpdateErr(err)
 		}
-		client := ClientID(clientU)
-		clock, err := dec.ReadVarUint()
-		if err != nil {
-			return nil, DeleteSet{}, wrapUpdateErr(err)
-		}
+		client, clock := start.Client, start.Clock
 		// A later group for the client replaces earlier ones, as in apply (yjs parity).
 		var structs []*Item
 		for j := uint64(0); j < numStructs; j++ {
@@ -60,7 +56,9 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 			if err != nil {
 				return nil, DeleteSet{}, wrapUpdateErr(err)
 			}
-			clock += uint64(item.Content.Len())
+			if clock, err = structEnd(clock, uint64(item.Content.Len())); err != nil {
+				return nil, DeleteSet{}, err
+			}
 			// Skip structs are clock-range placeholders, not content. Drop them
 			// from the struct list — advancing clock above leaves a gap that the
 			// encoder re-emits as a skip (Yjs filterSkips). Carrying them would
