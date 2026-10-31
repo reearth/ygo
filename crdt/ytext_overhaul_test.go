@@ -81,10 +81,9 @@ func TestUnit_YText_Format_RepeatedToggles_DoNotInflateStore(t *testing.T) {
 			"of markers: baseline=%d after=%d", baseline, after)
 }
 
-// A4 (MEDIUM) — Delete must tombstone ContentFormat markers that no longer
-// wrap any live content. Yjs JS deleteText calls cleanupFormattingGap which
-// walks the gap and removes orphan markers. Pre-fix ygo leaves the markers
-// as live items in the store, bloating the document over time.
+// A4 (MEDIUM) — Delete runs Yjs's cleanupFormattingGap on the gap it leaves,
+// so deleting all of a formatted run deletes its markers too: the closer
+// overrides the opener, and the closer sets the value bold had before.
 func TestUnit_YText_Delete_CleansUpDanglingFormatMarkers(t *testing.T) {
 	doc := newTestDoc(1)
 	txt := doc.GetText("t")
@@ -104,10 +103,8 @@ func TestUnit_YText_Delete_CleansUpDanglingFormatMarkers(t *testing.T) {
 		"format markers must be tombstoned when their wrapped content is fully deleted")
 }
 
-// A4 cont. — deleting all content inside a Format span tombstones both the
-// opener and the closer (their effect zone is empty). Uses Format (not
-// Insert-with-attrs) because Format inserts both opener AND closer; the
-// Insert-with-attrs case requires the A3 fix that's deferred to a follow-up PR.
+// A4 cont. — deleting all content inside a Format span deletes both the
+// opener and the closer, as Yjs's cleanupFormattingGap does.
 func TestUnit_YText_Delete_WrappedSpan_TombstonesBothMarkers(t *testing.T) {
 	doc := newTestDoc(1)
 	txt := doc.GetText("t")

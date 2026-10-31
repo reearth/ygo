@@ -722,7 +722,7 @@ func (a *YArray) Move(txn *Transaction, fromIndex, toIndex int) {
 	moveItem.integrate(txn, 0)
 }
 
-// deleteRange is shared by YArray and YText to delete a logical range.
+// deleteRange deletes a logical range of a YArray.
 func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 	if length <= 0 {
 		return

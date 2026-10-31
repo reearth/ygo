@@ -74,6 +74,12 @@
   decision skipped the cleanup for every text. Now each text decides for
   itself, as in Yjs. Where markers stay, text inserted there later can take
   their formatting, as it does in Yjs.
+- **A local delete of formatted text cleans up format markers as Yjs does.**
+  `YText.Delete` used its own rule, which kept some markers Yjs deletes and
+  deleted some Yjs keeps, and `ApplyDelta`'s delete deleted none. The same
+  edits then gave different documents in ygo and in Yjs, and text a peer
+  inserted next to such a marker at the same time could get different
+  formatting. Both now use Yjs's `deleteText` rule.
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
 - **Faster full-state encodes and snapshots after deletions.** The delete set

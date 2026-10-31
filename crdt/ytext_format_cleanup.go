@@ -317,10 +317,70 @@ func cleanupYTextFormatting(txn *Transaction, t *abstractType) {
 			cur.update(cf)
 			continue
 		}
-		cleanupFormattingGap(txn, start, end, startAttrs, cur)
+		cleanupFormattingGap(txn, start, end, startAttrs, cur, nil)
 		startAttrs = maps.Clone(cur)
 		start = end
 	}
+}
+
+// cleanupDeleteGap runs cleanupFormattingGap for a local delete whose range
+// began at start and whose cursor stopped before curr, as Yjs's deleteText
+// does, and updates a non-nil cur, the cursor's attributes, as Yjs does.
+// firstLive is the text's first live item before the delete.
+func cleanupDeleteGap(txn *Transaction, start, curr, firstLive *Item, cur *attrState) {
+	// Both maps stay on the stack for the usual few keys.
+	startAttrs, curAttrs := fmtAttrs{}, fmtAttrs{}
+	if !gapStartAttrs(start, firstLive, startAttrs) {
+		return
+	}
+	// curAttrs only steers the updates to cur.
+	if cur != nil {
+		maps.Copy(curAttrs, startAttrs)
+		for it := start; it != curr; it = it.Right {
+			if cf, ok := it.Content.(*ContentFormat); ok && !it.Deleted {
+				curAttrs.update(cf)
+			}
+		}
+	}
+	cleanupFormattingGap(txn, start, curr, startAttrs, curAttrs, cur)
+}
+
+// gapStartAttrs fills attrs, which must be empty, with the attributes in
+// effect before start for the keys of the live markers between start and the
+// next live content item, each as the nearest live marker of its key left of
+// start, or nil (absent), and reports whether the gap holds a live marker;
+// only those keys are needed, since cleanupFormattingGap compares no other.
+// The walk left stops at firstLive, the text's first live item.
+func gapStartAttrs(start, firstLive *Item, attrs fmtAttrs) bool {
+	pending := 0
+	for it := start; it != nil && (it.Deleted || !it.Content.IsCountable()); it = it.Right {
+		if cf, isFmt := it.Content.(*ContentFormat); isFmt && !it.Deleted {
+			if _, seen := attrs[cf.Key]; !seen {
+				attrs[cf.Key] = nil
+				pending++
+			}
+		}
+	}
+	found := pending > 0
+	if start == firstLive {
+		pending = 0
+	}
+	for it := start.Left; it != nil && pending > 0; it = it.Left {
+		if cf, isFmt := it.Content.(*ContentFormat); isFmt && !it.Deleted {
+			if v, seen := attrs[cf.Key]; seen && v == nil {
+				pending--
+				if cf.Val == nil {
+					delete(attrs, cf.Key)
+				} else {
+					attrs[cf.Key] = cf
+				}
+			}
+		}
+		if it == firstLive {
+			break
+		}
+	}
+	return found
 }
 
 // fmtAttrs maps each attribute to the marker that set it, so values keep
@@ -337,8 +397,9 @@ func (a fmtAttrs) update(cf *ContentFormat) {
 
 // cleanupFormattingGap deletes the markers between start and the next live
 // content item that are overwritten within the gap or restate startAttrs,
-// adjusting curAttrs for markers before curr. Mirrors Yjs.
-func cleanupFormattingGap(txn *Transaction, start, curr *Item, startAttrs, curAttrs fmtAttrs) {
+// adjusting curAttrs for markers before curr. A non-nil cur gets the same
+// changes, in the order Yjs's Map takes them. Mirrors Yjs.
+func cleanupFormattingGap(txn *Transaction, start, curr *Item, startAttrs, curAttrs fmtAttrs, cur *attrState) {
 	end := start
 	endFormats := map[string]*ContentFormat{}
 	for end != nil && (!end.Content.IsCountable() || end.Deleted) {
@@ -362,21 +423,31 @@ func cleanupFormattingGap(txn *Transaction, start, curr *Item, startAttrs, curAt
 			if !reachedCurr && jsIdentical(curAttrs[cf.Key], cf) && !jsIdentical(startCF, cf) {
 				if startCF == nil {
 					delete(curAttrs, cf.Key)
+					if cur != nil {
+						cur.del(cf.Key)
+					}
 				} else {
 					curAttrs[cf.Key] = startCF
+					if cur != nil {
+						cur.set(cf.Key, startCF.Val)
+					}
 				}
 			}
 		}
 		if !reachedCurr && !start.Deleted {
 			curAttrs.update(cf)
+			if cur != nil {
+				cur.apply(cf)
+			}
 		}
 	}
 }
 
 // jsIdentical is JavaScript's === on two markers' values, a nil marker
-// standing for an absent attribute (null). Scalars compare by value; a
-// composite value is identical only to itself, as each decoded Yjs marker
-// holds its own object.
+// standing for an absent attribute (null). Scalars compare by value. A map or
+// slice is one JavaScript object: a marker made from another marker's value
+// shares it, as in Yjs, while each decoded marker holds its own. A slice with
+// no capacity has no identity to compare, so it is identical only to itself.
 func jsIdentical(a, b *ContentFormat) bool {
 	if a == b {
 		return true
@@ -401,9 +472,16 @@ func jsIdentical(a, b *ContentFormat) bool {
 		fb, ok := jsNumber(vb)
 		return ok && fa == fb
 	}
+	if va.Type() != vb.Type() {
+		return false
+	}
 	switch va.Kind() {
 	case reflect.String, reflect.Bool:
-		return va.Type() == vb.Type() && av == bv
+		return av == bv
+	case reflect.Map:
+		return va.Pointer() == vb.Pointer()
+	case reflect.Slice:
+		return va.Cap() > 0 && va.Len() == vb.Len() && va.Pointer() == vb.Pointer()
 	}
 	return false
 }

@@ -105,6 +105,38 @@ func BenchmarkYText_Delete(b *testing.B) {
 	}
 }
 
+// BenchmarkYText_DeleteFormatted builds a 1000-character text in which every
+// third five-character word is bold and every fifth italic, then deletes it
+// one character at a time at random positions, so some deletions leave format
+// markers to clean up.
+func BenchmarkYText_DeleteFormatted(b *testing.B) {
+	b.ReportAllocs()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		doc := newTestDoc(1)
+		txt := doc.GetText("text")
+		doc.Transact(func(txn *Transaction) {
+			txt.Insert(txn, 0, strings.Repeat("abcde", 200), nil)
+			for w := 0; w < 200; w += 3 {
+				txt.Format(txn, w*5, 5, Attributes{"bold": true})
+			}
+			for w := 0; w < 200; w += 5 {
+				txt.Format(txn, w*5, 5, Attributes{"italic": true})
+			}
+		})
+		rng := rand.New(rand.NewSource(1))
+		b.StartTimer()
+
+		for txt.Len() > 0 {
+			doc.Transact(func(txn *Transaction) {
+				txt.Delete(txn, rng.Intn(txt.Len()), 1)
+			})
+		}
+	}
+}
+
 // BenchmarkEncodeStateAsUpdateV1 encodes a document that holds ~1000 YText
 // characters into a V1 binary update.
 func BenchmarkEncodeStateAsUpdateV1(b *testing.B) {

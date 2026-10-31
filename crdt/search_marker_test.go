@@ -1138,12 +1138,12 @@ func diffSummary(a, b string) string {
 
 // TestSearchMarker_DeleteAtZero_FirstLiveCacheCoexistsWithMarkers (G6)
 // exercises firstLiveCache and the search-marker cache side by side.
-// deleteRange's index<=0 branch (yarray.go) ALWAYS resolves the head item via
+// YText.Delete at index 0 ALWAYS resolves the head item via
 // t.firstLiveFromStart — unconditionally, regardless of disableMarkers — so a
 // long run of delete-at-0 calls builds a large head-tombstone run that is
 // skipped in O(1) amortized per issue #86. Interleaved positioned deletes
-// elsewhere use findMarkerMut (or, under the force-cold seam, an equivalent
-// full walk). Comparing marker-enabled vs force-cold builds — AND both
+// elsewhere use leftNeighbourAt's findMarkerMut (or, under the force-cold
+// seam, an equivalent full walk). Comparing marker-enabled vs force-cold builds — AND both
 // against a plain-Go-string oracle that replays the identical operation
 // sequence — proves the two caches don't corrupt each other's bookkeeping:
 // the head fast path stays correct whether or not the marker cache beside it
@@ -1348,6 +1348,61 @@ func TestSearchMarker_FormattedInserts_MatchCold(t *testing.T) {
 			}
 			if got, want := hot.GetText("t").ToDelta(), cold.GetText("t").ToDelta(); !reflect.DeepEqual(got, want) {
 				t.Fatalf("seed %d step %d op %d i=%d l=%d: markers %v, cold %v", seed, step, k, i, l, got, want)
+			}
+		}
+	}
+}
+
+// A text that also holds array content from a peer keeps it through a Delete,
+// as Yjs does: random deletes over it leave every search marker at its item's
+// rendered start and read back as on a cold (marker-free) text.
+func TestSearchMarker_DeleteOverKeptContent_MatchCold(t *testing.T) {
+	peerText, peerArray := New(WithClientID(2)), New(WithClientID(3))
+	pt, pa := peerText.GetText("t"), peerArray.GetArray("t")
+	peerText.Transact(func(txn *Transaction) { pt.Insert(txn, 0, "abcd", nil) })
+	peerArray.Transact(func(txn *Transaction) { pa.Push(txn, []any{int64(7)}) })
+	for seed := uint64(0); seed < uint64(raceSeeds(300)); seed++ {
+		hot, cold := New(WithClientID(1)), New(WithClientID(1))
+		cold.GetText("t").baseType().disableMarkers = true
+		for _, d := range []*Doc{hot, cold} {
+			for _, p := range []*Doc{peerText, peerArray} {
+				if err := ApplyUpdateV1(d, EncodeStateAsUpdateV1(p, nil), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		r := rand.New(rand.NewSource(int64(seed)))
+		for step := 0; step < 40; step++ {
+			n := hot.GetText("t").Len()
+			i, l, del := r.Intn(n+1), 1+r.Intn(4), r.Intn(2) == 0 && n > 0
+			if del {
+				i = min(i, n-1)
+				l = min(l, n-i)
+			}
+			for _, d := range []*Doc{hot, cold} {
+				txt := d.GetText("t")
+				d.Transact(func(txn *Transaction) {
+					if del {
+						txt.Delete(txn, i, l)
+					} else {
+						txt.Insert(txn, i, "xyz"[:l%3+1], nil)
+					}
+				})
+			}
+			ht := hot.GetText("t").baseType()
+			for _, m := range ht.markers {
+				idx := 0
+				for it := ht.start; it != nil && it != m.item; it = it.Right {
+					if c, n, _ := ht.renderedStep(it); c {
+						idx += n
+					}
+				}
+				if idx != m.index {
+					t.Fatalf("seed %d step %d: marker on %T at %d, rendered at %d", seed, step, m.item.Content, m.index, idx)
+				}
+			}
+			if got, want := hot.GetText("t").ToDelta(), cold.GetText("t").ToDelta(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("seed %d step %d: markers %v, cold %v", seed, step, got, want)
 			}
 		}
 	}

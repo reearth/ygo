@@ -11,7 +11,7 @@ import (
 // Inserting after leading tombstones (the anchor the YText tombstone-skip fix
 // produces) makes a new live run that is NOT the list head, so item.integrate's
 // new-head branch — the only place firstLiveCache is invalidated on insert —
-// never fires. deleteRange then walks from a stale firstLiveFromStart and
+// never fires. YText.Delete then walks from a stale firstLiveFromStart and
 // deletes the wrong indices. Here the final Delete(2,2) silently no-ops
 // (leaving "edfbγ") instead of removing "fb" (→ "edγ").
 func TestFirstLiveCache_StaleAfterInsertAfterTombstone(t *testing.T) {

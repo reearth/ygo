@@ -96,6 +96,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for every text. Now the decision waits for the type observers even when one
   panics, and leaves out each text whose own observer panicked, as in Yjs. Any
   other changed text with formatting still starts the cleanup.
+- **`crdt`: `YText.Delete` and an `ApplyDelta` delete clean up format markers
+  as Yjs does (#297).** After a deletion, Yjs's `deleteText` looks at the
+  markers from the deleted range to the next character. It deletes each
+  marker that a later marker of the same key overrides, and each marker that
+  sets the value the attribute had before the deleted range. `YText.Delete`
+  used a different rule: it kept some of these markers and deleted some that
+  Yjs keeps. `ApplyDelta`'s delete deleted no markers. So the same edits gave
+  a document with different markers in ygo and in Yjs, and text that a peer
+  inserted next to such a marker at the same time could get different
+  formatting. Both now use Yjs's rule. As in Yjs, the cleanup also compares an
+  object or array attribute value by identity, so a marker that restores such
+  a value matches the marker it was copied from.
 
 ### Performance
 

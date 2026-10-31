@@ -392,138 +392,77 @@ func (txt *YText) InsertEmbed(txn *Transaction, index int, embed any, attrs Attr
 	t.insertText(txn, t.findTextPos(txn, index), NewContentEmbed(embed), attrs, true)
 }
 
-// Delete removes length characters starting at logical position index.
-//
-// After the range is tombstoned, Delete examines ContentFormat markers in
-// the local deletion region and tombstones any that no longer wrap live
-// content — matching Yjs JS's cleanupFormattingGap. Without this, repeated
-// edits leave orphan markers that bloat the store and inflate the encoded
-// delete-set. See #71 vector A4.
-//
-// The scan is gated on txt.hasFormatting: YText that has never had a
-// ContentFormat integrated (the common plain-text case) skips the walk
-// entirely. This mirrors Yjs's `_hasFormatting` flag gating and is the
-// dominant perf win on head-delete workloads in plain-text documents (#86).
-//
-// When the scan does run it is scoped to the region between the item just
-// before the deletion and the first live countable item after it, so the
-// per-Delete cost is O(region size + scope size of any markers found)
-// rather than O(document).
+// Delete removes length characters starting at logical position index, then
+// the format markers the deletion left redundant, as Yjs's deleteText does.
 func (txt *YText) Delete(txn *Transaction, index, length int) {
 	if txt.detached() {
 		txt.buffer(func(txn *Transaction) { txt.Delete(txn, index, length) })
 		return
 	}
-	// Capture the anchor immediately before the deletion start so we can
-	// walk forward from there post-deletion. nil means "start of document."
-	var startAnchor *Item
-	if index > 0 {
-		startAnchor, _ = txt.leftNeighbourAt(index)
-	}
-
-	deleteRange(&txt.abstractType, txn, index, length)
-
-	if !txt.hasFormatting {
-		// No ContentFormat has ever been integrated into this type — nothing
-		// to clean up. Skip the walk: this is the head-delete benchmark's
-		// dominant saving (#86).
+	if length == 0 || index > txt.length {
 		return
 	}
-	txt.cleanupDanglingFormatsInRegion(txn, startAnchor)
+	// The cursor Yjs's findPosition gives: right after the character before
+	// index, before any marker or tombstone that follows it.
+	t := &txt.abstractType
+	var pos itemTextPos
+	if index > 0 {
+		left, offset := t.leftNeighbourAt(index)
+		if offset > 0 {
+			splitItem(txn, left, offset)
+		}
+		pos = itemTextPos{left: left, right: left.Right, index: index}
+	} else {
+		pos.right = t.firstLiveFromStart()
+	}
+	t.deleteText(txn, &pos, length, nil)
 }
 
-// cleanupDanglingFormatsInRegion tombstones ContentFormat items in the local
-// region of a recent deletion whose effect zone now contains no live
-// countable content. Called from Delete with the item immediately before
-// the deletion (#71 vector A4).
-//
-// Two categories of redundancy:
-//   - An opener `{key: val}` is redundant when no live countable item lies
-//     between it and the next same-key marker (the scope boundary).
-//   - A closer `{key: nil}` is redundant when no live opener for the same
-//     key precedes it within scope.
-//
-// The outer walk is bounded: we stop after seeing one live countable item
-// past the deletion, which is enough to cover markers whose scope was
-// changed by this delete. Markers further away are unaffected by this
-// specific deletion.
-func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *Item) {
-	var node *Item
-	if startAnchor == nil {
-		// Sequential head-deletes (the BenchmarkYText_Delete worst case)
-		// accumulate tombstones at txt.start; without the memoised pointer
-		// every cleanup re-walks all of them and the per-delete cost is
-		// O(deletes-so-far). Use the cache instead — issue #86.
-		node = txt.firstLiveFromStart()
-	} else {
-		node = startAnchor.Right
+// deleteText deletes length characters from the cursor pos, then the format
+// markers that the deletion leaves redundant (cleanupDeleteGap). A non-nil
+// cur, the attributes at pos, ends as Yjs leaves the cursor's attributes;
+// ApplyDelta reads them for its next op. Mirrors Yjs deleteText.
+func (t *abstractType) deleteText(txn *Transaction, pos *itemTextPos, length int, cur *attrState) {
+	origLen := length
+	start := pos.right
+	// Read before the loop: once the range is gone, the first live item can
+	// lie past start, and the cleanup's walk left would cross every tombstone.
+	var firstLive *Item
+	if t.hasFormatting {
+		firstLive = t.firstLiveFromStart()
 	}
-	seenLivePast := false
-	for node != nil {
-		next := node.Right
-		if node.Deleted {
-			node = next
-			continue
-		}
-		if cf, ok := node.Content.(*ContentFormat); ok {
-			if cf.Val == nil {
-				// Closer: walk Left until a same-key marker. A tombstoned
-				// marker doesn't count as a live opener.
-				hasLiveOpener := false
-				for p := node.Left; p != nil; p = p.Left {
-					if p.Deleted {
-						continue
-					}
-					pcf, isFmt := p.Content.(*ContentFormat)
-					if !isFmt {
-						continue
-					}
-					if pcf.Key != cf.Key {
-						continue
-					}
-					if pcf.Val != nil {
-						hasLiveOpener = true
-					}
-					break
+	keptContent := false
+	for length > 0 && pos.right != nil {
+		item := pos.right
+		if !item.Deleted {
+			switch c := item.Content.(type) {
+			case *ContentString, *ContentEmbed, *ContentType:
+				if length < item.Content.Len() {
+					splitItem(txn, item, length)
 				}
-				if !hasLiveOpener {
-					node.delete(txn)
+				length -= item.Content.Len()
+				item.delete(txn)
+			case *ContentFormat:
+				if cur != nil {
+					cur.apply(c)
 				}
-			} else {
-				// Opener: walk Right looking for live countable content in
-				// scope (until the next same-key marker).
-				hasLiveInScope := false
-				for n := node.Right; n != nil; n = n.Right {
-					if n.Deleted {
-						continue
-					}
-					if ncf, isFmt := n.Content.(*ContentFormat); isFmt {
-						if ncf.Key == cf.Key {
-							break
-						}
-						continue
-					}
-					if n.Content.IsCountable() {
-						hasLiveInScope = true
-						break
-					}
-				}
-				if !hasLiveInScope {
-					node.delete(txn)
-				}
+			default:
+				pos.index += item.Content.Len()
+				keptContent = true
 			}
-			node = next
-			continue
 		}
-		if node.Content.IsCountable() {
-			if seenLivePast {
-				// We've seen one live countable past the deletion; markers
-				// further on couldn't have been affected by this delete.
-				break
-			}
-			seenLivePast = true
-		}
-		node = next
+		pos.left, pos.right = item, item.Right
+	}
+	if t.hasFormatting && start != nil {
+		cleanupDeleteGap(txn, start, pos.right, firstLive, cur)
+	}
+	switch deleted := origLen - length; {
+	case keptContent:
+		// Content kept inside the range sits between deleted runs, so no
+		// single shift moves every search marker to its item's start.
+		t.clearMarkers()
+	case deleted > 0:
+		t.updateMarkerChanges(pos.index, -deleted)
 	}
 }
 
@@ -580,7 +519,7 @@ func (txt *YText) Format(txn *Transaction, index, length int, attrs Attributes) 
 // walk per op. Format itself is just findTextPos + this call. Mirrors Yjs JS
 // YText.formatText's body (see Format's doc comment for the full rationale).
 func (t *abstractType) applyFormatAtPos(txn *Transaction, pos *itemTextPos, length int, attrs Attributes) {
-	if len(attrs) == 0 || length <= 0 {
+	if length < 0 {
 		return
 	}
 	// Deterministic emission order — Go map iteration is randomized, but
@@ -1268,13 +1207,11 @@ func (txt *YText) ApplyDelta(txn *Transaction, delta []Delta) {
 				t.applyDeltaInsert(txn, pos, d.Insert, d.Attributes)
 			}
 		case DeltaOpDelete:
-			t.applyDeltaDelete(txn, pos, d.Delete)
+			t.deleteText(txn, pos, d.Delete, &pos.cur)
 		case DeltaOpRetain:
-			if len(d.Attributes) > 0 {
-				t.applyFormatAtPos(txn, pos, d.Retain, d.Attributes)
-			} else {
-				pos.advance(txn, d.Retain)
-			}
+			// Yjs runs formatText for every retain, so one of 0 still steps
+			// past tombstones and markers its attributes already match.
+			t.applyFormatAtPos(txn, pos, d.Retain, d.Attributes)
 		}
 	}
 }
@@ -1291,47 +1228,6 @@ func (t *abstractType) applyDeltaInsert(txn *Transaction, pos *itemTextPos, ins 
 		return
 	}
 	t.insertText(txn, pos, NewContentEmbed(ins), attrs, false)
-}
-
-// applyDeltaDelete deletes length countable units starting at the cursor pos,
-// mirroring deleteRange's per-item tombstone walk exactly but resuming from
-// the already-known cursor instead of re-resolving the start item — pos.right
-// is already the correct bracket item, so (unlike deleteRange) no leading
-// split-at-index-in-item step is needed. A delete never advances the cursor's
-// logical index (pos.index is left unchanged; only pos.left/pos.right move).
-// Live ContentFormat markers within the deleted span are walked over (their
-// contribution to pos.cur is applied) rather than skipped blindly, since a
-// delete never removes a marker itself (deleteRange only tombstones countable
-// content) and any such marker is still live and in scope at the cursor after
-// the delete completes.
-func (t *abstractType) applyDeltaDelete(txn *Transaction, pos *itemTextPos, length int) {
-	if length <= 0 {
-		return
-	}
-	origLen := length
-	for pos.right != nil && length > 0 {
-		item := pos.right
-		if !item.Deleted {
-			if cf, ok := item.Content.(*ContentFormat); ok {
-				pos.cur.apply(cf)
-			} else if item.Content.IsCountable() {
-				n := item.Content.Len()
-				if n <= length {
-					item.delete(txn)
-					length -= n
-				} else {
-					splitItem(txn, item, length)
-					item.delete(txn)
-					length = 0
-				}
-			}
-		}
-		pos.left = pos.right
-		pos.right = pos.right.Right
-	}
-	if deleted := origLen - length; deleted > 0 {
-		t.updateMarkerChanges(pos.index, -deleted)
-	}
 }
 
 // ObserveDeep registers fn to be called after any transaction that modifies
