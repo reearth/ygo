@@ -152,7 +152,7 @@ func TestUnit_YText_RemoteCleanupPanicUnlocks(t *testing.T) {
 	assert.Equal(t, 1, countLiveContentFormat(c), "the cleanup's deletion reached the peer")
 }
 
-// The cleanup and the remote change's GC run even when an observer of the
+// The cleanup and the remote change's GC run even when a deep observer of the
 // change panics, as Yjs runs every cleanup step; the panic then reaches the
 // caller with the document unlocked.
 func TestUnit_YText_FormatCleanup_AfterObserverPanic(t *testing.T) {
@@ -164,8 +164,8 @@ func TestUnit_YText_FormatCleanup_AfterObserverPanic(t *testing.T) {
 	b.Transact(func(txn *Transaction) { bt.Format(txn, 2, 1, Attributes{"bold": true}) })
 	var origins []any
 	b.OnUpdate(func(_ []byte, origin any) { origins = append(origins, origin) })
-	bt.Observe(func(e YTextEvent) {
-		if !e.Txn.Local {
+	bt.ObserveDeep(func(txn *Transaction) {
+		if !txn.Local {
 			assert.Equal(t, 2, countLiveContentFormat(b), "the observer runs before the cleanup")
 			panic("observer")
 		}

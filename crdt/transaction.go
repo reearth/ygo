@@ -60,12 +60,15 @@ type Transaction struct {
 	// cancellation.
 	ctx context.Context
 	// formatCleanup marks a remote transaction whose format cleanup runs
-	// once its observers have fired; afterTypeObservers, when set, decides
-	// it after the type observers (typeObserved: there are some), where
-	// Yjs does.
-	formatCleanup      bool
-	typeObserved       bool
-	afterTypeObservers func()
+	// once its observers have fired; decideCleanupAfterTypeObservers defers
+	// that decision until the type observers (typeObserved: there are some)
+	// have run, where Yjs makes it. cleanupSkipped holds the changed types
+	// that take no part in the decision: those deleted at commit, and texts
+	// whose own observers panicked.
+	formatCleanup                   bool
+	typeObserved                    bool
+	decideCleanupAfterTypeObservers bool
+	cleanupSkipped                  map[*abstractType]struct{}
 }
 
 // Ctx returns the context associated with this transaction. Transactions

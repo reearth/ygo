@@ -96,7 +96,17 @@ func (txt *YText) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 	snap := make([]textSub, len(txt.observers))
 	copy(snap, txt.observers)
 	e := YTextEvent{Target: txt, Txn: txn, Delta: delta}
-	return func() { callAll(snap, func(s textSub) { s.fn(e) }) }
+	return func() {
+		// A text whose own observer panics does not start the format cleanup, as in Yjs.
+		returned := false
+		defer func() {
+			if !returned {
+				e.Txn.skipCleanup(&e.Target.abstractType)
+			}
+		}()
+		callAll(snap, func(s textSub) { s.fn(e) })
+		returned = true
+	}
 }
 
 // computeDelta builds a Quill-compatible delta for the changes in txn.

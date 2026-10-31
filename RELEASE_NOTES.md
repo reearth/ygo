@@ -11,6 +11,18 @@ observer panics, the caller gets the last panic, as in Yjs. Other observers
 now run after an observer panics, so they must not expect the panicking
 observer's work to be complete. No API or wire format changes.
 
+**Who is affected: code with a text observer that can panic on a remote
+change.**
+
+After a remote change, ygo deletes the format markers that the change left
+redundant, in a separate transaction with a nil origin. When a text observer
+panicked, ygo still ran this cleanup for that text. When a type observer
+panicked before the decision was made, no text got the cleanup. Now a text
+whose own observer panics does not start the cleanup, and any other changed
+text with formatting still does, as in Yjs. Where markers stay, text inserted
+there later can take their formatting, as it does in Yjs. No API or wire
+format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
