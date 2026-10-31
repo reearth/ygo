@@ -1,3 +1,16 @@
+## v1.55.1
+
+**Who is affected: code with an observer that can panic.**
+
+When an observer panicked, no observer after it ran. The other observers of
+the same type, the deep observers, `OnUpdate`, `OnAfterTransaction` and
+`OnSubdocs` did not run, so a relay or a store that listens on `OnUpdate`
+lost that transaction's update. Now every observer runs, and then the panic
+reaches the caller of `Transact` or `ApplyUpdate` as before. If more than one
+observer panics, the caller gets the last panic, as in Yjs. Other observers
+now run after an observer panics, so they must not expect the panicking
+observer's work to be complete. No API or wire format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

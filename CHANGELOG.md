@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-10-31
+
+### Fixed
+
+- **`crdt`: a panicking observer no longer stops the other observers.** When
+  an observer panicked, no observer after it ran: not the other observers of
+  the same type, not deep observers, and not `OnUpdate`, so the update of the
+  transaction was lost to relays and persistence. Now every per-type, deep,
+  `OnUpdate`, `OnAfterTransaction` and `OnSubdocs` observer runs, and the
+  panic then reaches the caller, as Yjs runs its type and deep observers. If
+  more than one panics, the last panic reaches the caller, as in Yjs.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added
