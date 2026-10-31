@@ -106,7 +106,8 @@ func (t *Transaction) assertLive(method string) {
 }
 
 // GetText returns the named root YText, creating it if it does not exist.
-// Safe to call inside the Transact callback; see the section comment above.
+// It panics if that name already belongs to a different root type. Safe to
+// call inside the Transact callback; see the section comment above.
 func (t *Transaction) GetText(name string) *YText {
 	checkUTF8("Transaction.GetText", "name", name)
 	t.assertLive("GetText")
@@ -114,7 +115,8 @@ func (t *Transaction) GetText(name string) *YText {
 }
 
 // GetMap returns the named root YMap, creating it if it does not exist.
-// Safe to call inside the Transact callback; see the section comment above.
+// It panics if that name already belongs to a different root type. Safe to
+// call inside the Transact callback; see the section comment above.
 func (t *Transaction) GetMap(name string) *YMap {
 	checkUTF8("Transaction.GetMap", "name", name)
 	t.assertLive("GetMap")
@@ -122,7 +124,8 @@ func (t *Transaction) GetMap(name string) *YMap {
 }
 
 // GetArray returns the named root YArray, creating it if it does not exist.
-// Safe to call inside the Transact callback; see the section comment above.
+// It panics if that name already belongs to a different root type. Safe to
+// call inside the Transact callback; see the section comment above.
 func (t *Transaction) GetArray(name string) *YArray {
 	checkUTF8("Transaction.GetArray", "name", name)
 	t.assertLive("GetArray")
@@ -130,8 +133,8 @@ func (t *Transaction) GetArray(name string) *YArray {
 }
 
 // GetXmlFragment returns the named root YXmlFragment, creating it if it does
-// not exist. Safe to call inside the Transact callback; see the section
-// comment above.
+// not exist. It panics if that name already belongs to a different root type.
+// Safe to call inside the Transact callback; see the section comment above.
 func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
 	checkUTF8("Transaction.GetXmlFragment", "name", name)
 	t.assertLive("GetXmlFragment")

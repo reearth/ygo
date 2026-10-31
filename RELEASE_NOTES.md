@@ -107,6 +107,17 @@ document or change merging, encoding, or existing readers.
 
 Closes #317.
 
+**Accessing a root as a different type now panics instead of discarding it.**
+The first accessor fixes a named root's type for the document's lifetime.
+`GetText("x")` after `GetMap("x")` used to replace the map and lose its
+contents; it now panics with an error wrapping the new `crdt.ErrRootTypeMismatch`
+and leaves the map unchanged. A root that has only arrived in a peer's update
+has no type yet, so the first local accessor still decides it, as in Yjs. Code
+that relied on the silent replacement now panics. The mobile bindings recover
+the panic: methods with an error return return one wrapping
+`crdt.ErrRootTypeMismatch`, and `GetText` returns `""`, so a mismatch cannot
+crash the iOS or Android host app. Closes #293.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

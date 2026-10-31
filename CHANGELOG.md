@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops on the first callback error; callbacks must not mutate values or call
   document APIs. Existing readers, merging and wire formats are unchanged.
 
+- **`crdt`: `ErrRootTypeMismatch`.** The panic raised when a named root is
+  accessed as a different type than it already has wraps it, so callers can
+  match it with `errors.Is`.
+
 ### Changed
 
 - **`provider/websocket`: a connection that introduces more than 64 awareness
@@ -77,6 +81,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or dropped as invalid. This also stops re-broadcasting the equal-clock
   echoes y-websocket clients send of every update they apply, which made each
   awareness change cost about N² frames in a room of N clients instead of N.
+
+### Fixed
+
+- **`crdt`: accessing a root as a different type panics instead of discarding
+  it (#293).** The first accessor fixes a named root's type for the document's
+  lifetime; a later accessor of another type used to replace the root and lose
+  its contents. The existing root is now left unchanged. A root that has only
+  arrived in a peer's update has no type yet, so the first local accessor still
+  decides it, as in Yjs.
+- **`mobile`: a root-type mismatch is returned as an error, not a crash.**
+  Methods with an error return return one wrapping `crdt.ErrRootTypeMismatch`;
+  `GetText` returns `""`.
 
 ## [1.54.0] — 2026-10-22
 

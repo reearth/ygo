@@ -55,7 +55,8 @@ func decodeAttrs(attrsJSON []byte) (crdt.Attributes, error) {
 // InsertText inserts text at the given character index of the named YText root,
 // inheriting whatever formatting is in effect at the cursor. index must be in
 // [0, Len]. Returns ErrClosed after Close.
-func (m *Doc) InsertText(name string, index int64, text string) error {
+func (m *Doc) InsertText(name string, index int64, text string) (err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
@@ -79,7 +80,8 @@ func (m *Doc) InsertText(name string, index int64, text string) error {
 // (a JSON object, e.g. {"bold":true}) at the given index. A null attribute value
 // follows Yjs's formatting-removal convention. index must be in [0, Len].
 // Returns ErrClosed after Close.
-func (m *Doc) InsertTextWithAttributes(name string, index int64, text string, attrsJSON []byte) error {
+func (m *Doc) InsertTextWithAttributes(name string, index int64, text string, attrsJSON []byte) (err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
@@ -106,7 +108,8 @@ func (m *Doc) InsertTextWithAttributes(name string, index int64, text string, at
 // DeleteText removes length characters starting at index from the named YText
 // root. index and length must be >= 0 and index+length must be <= Len. Returns
 // ErrClosed after Close.
-func (m *Doc) DeleteText(name string, index, length int64) error {
+func (m *Doc) DeleteText(name string, index, length int64) (err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
@@ -132,7 +135,8 @@ func (m *Doc) DeleteText(name string, index, length int64) error {
 // removes that attribute over the range (Yjs's formatting-removal convention).
 // index and length must be >= 0 and index+length must be <= Len. Returns
 // ErrClosed after Close.
-func (m *Doc) FormatText(name string, index, length int64, attrsJSON []byte) error {
+func (m *Doc) FormatText(name string, index, length int64, attrsJSON []byte) (err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
@@ -160,7 +164,8 @@ func (m *Doc) FormatText(name string, index, length int64, attrsJSON []byte) err
 // InsertArray inserts the JSON array valuesJSON's elements at the given index of
 // the named YArray root. valuesJSON must decode to a JSON array; index must be in
 // [0, Len]. JSON numbers become float64. Returns ErrClosed after Close.
-func (m *Doc) InsertArray(name string, index int64, valuesJSON []byte) error {
+func (m *Doc) InsertArray(name string, index int64, valuesJSON []byte) (err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
@@ -187,7 +192,8 @@ func (m *Doc) InsertArray(name string, index int64, valuesJSON []byte) error {
 // DeleteArray removes length elements starting at index from the named YArray
 // root. index and length must be >= 0 and index+length must be <= Len. Returns
 // ErrClosed after Close.
-func (m *Doc) DeleteArray(name string, index, length int64) error {
+func (m *Doc) DeleteArray(name string, index, length int64) (err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
@@ -210,7 +216,8 @@ func (m *Doc) DeleteArray(name string, index, length int64) error {
 
 // SetMap sets key on the named YMap root to the decoded JSON value valueJSON
 // (any JSON value; numbers become float64). Returns ErrClosed after Close.
-func (m *Doc) SetMap(name string, key string, valueJSON []byte) error {
+func (m *Doc) SetMap(name string, key string, valueJSON []byte) (err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
@@ -228,7 +235,8 @@ func (m *Doc) SetMap(name string, key string, valueJSON []byte) error {
 
 // DeleteMapKey removes key from the named YMap root (a no-op if absent).
 // Returns ErrClosed after Close.
-func (m *Doc) DeleteMapKey(name string, key string) error {
+func (m *Doc) DeleteMapKey(name string, key string) (err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {

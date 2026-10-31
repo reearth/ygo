@@ -151,8 +151,10 @@ try {
 changes flow out through `EncodeStateAsUpdate` / `EncodeDiff` (and to observers)
 like any other update. Each mutator **validates its arguments, wraps the change in
 a single transaction, and returns an `error`** on bad input (out-of-range index,
-malformed JSON) — it never panics, so a bad edit surfaces as a thrown exception in
-Kotlin/Swift rather than a crash. Like every other blocking call, **run mutators
+malformed JSON, a root used as a different type than it already has) — it never
+panics, so a bad edit surfaces as a thrown exception in Kotlin/Swift rather than
+a crash. A root-type mismatch wraps `crdt.ErrRootTypeMismatch`; `GetText`, which
+has no error return, returns `""` instead. Like every other blocking call, **run mutators
 off the UI thread**.
 
 - **Text** — `insertText(name, index, text)`,
