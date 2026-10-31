@@ -177,8 +177,9 @@ func pendingBlocker(item *Item, store *StructStore) (ClientID, uint64, bool) {
 // integratePending integrates pending items in dependency order. A rejected
 // item waits on its blocking client and is retried once that client's clock
 // passes the dependency, so each item is retried at most once per dependency.
-// Integrated items are marked in done.
-func integratePending(txn *Transaction, pending []*Item, done []bool) {
+// Integrated items are marked in done. With a non-nil dropped, a panicking item
+// is marked done so it is not retried, and the last such panic is kept in dropped.
+func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *error) {
 	store := txn.doc.store
 	var waiters map[ClientID][]pendingWaiter
 	stack := make([]int, len(pending))
@@ -189,7 +190,7 @@ func integratePending(txn *Transaction, pending []*Item, done []bool) {
 		index := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		item := pending[index]
-		if !tryIntegrate(txn, item) {
+		if !tryIntegrateOrDrop(txn, item, dropped) {
 			if client, clock, ok := pendingBlocker(item, store); ok {
 				if waiters == nil {
 					waiters = make(map[ClientID][]pendingWaiter)
@@ -210,6 +211,21 @@ func integratePending(txn *Transaction, pending []*Item, done []bool) {
 		}
 		waiters[item.ID.Client] = heap
 	}
+}
+
+// tryIntegrateOrDrop is tryIntegrate that, with a non-nil dropped, reports a
+// panicking item as integrated so the caller stops retrying it.
+func tryIntegrateOrDrop(txn *Transaction, item *Item, dropped *error) (ok bool) {
+	if dropped == nil {
+		return tryIntegrate(txn, item)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			*dropped = integrationPanicErr(r)
+			ok = true
+		}
+	}()
+	return tryIntegrate(txn, item)
 }
 
 func pushPendingWaiter(heap []pendingWaiter, w pendingWaiter) []pendingWaiter {
@@ -249,7 +265,7 @@ func popPendingWaiter(heap []pendingWaiter) []pendingWaiter {
 // the remaining items in queue order.
 func resolvePendingWaiters(txn *Transaction, pending []*Item) []*Item {
 	done := make([]bool, len(pending))
-	integratePending(txn, pending, done)
+	integratePending(txn, pending, done, nil)
 	remaining := pending[:0]
 	for i, item := range pending {
 		if !done[i] {

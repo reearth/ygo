@@ -608,7 +608,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	// that force a Splice on non-splittable content types.
 	defer func() {
 		if r := recover(); r != nil {
-			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+			retErr = integrationPanicErr(r)
 		}
 	}()
 
@@ -833,77 +833,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		txn.doc.store.pendingDs.Merge(unresolvableDs)
 	}
 
-	// pendingDs may be drainable even if pending items aren't — integrated
-	// items from this update might be targets of previously-parked deletes.
-	if len(txn.doc.store.pendingDs.clients) > 0 {
-		retryPendingDs(txn)
-	}
-
-	// Drain pending items whose dependencies have been satisfied by
-	// this update. Inline rather than recursive (Go's sync.Mutex is not
-	// reentrant; ApplyUpdateV2 is already under d.mu via doc.Transact).
-	//
-	// Loop until no progress to handle chained dependencies:
-	//   A arriving satisfies B; B (now integrated) satisfies C; etc.
-	//
-	// Matches yrs' apply_update retry gate and Yjs JS's readUpdateV2
-	// recursion, but executed inline so everything integrated during
-	// this call surfaces in a single OnUpdate notification.
-	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
-		items := txn.doc.store.pending.items
-		txn.doc.store.pending = nil
-
-		var stillPending []*Item
-		stillMissing := make(StateVector)
-		progressed := false
-
-		// Process items with panic-safety: if tryIntegrate panics, re-park
-		// unprocessed items and stillPending back into store.pending so a
-		// subsequent ApplyUpdate can retry them. The outer applyV2Txn recover
-		// (v1.1.1) then converts the panic to an error for the caller.
-		idx := 0
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Restore: anything already re-parked + the unprocessed tail.
-					restore := append(stillPending, items[idx:]...)
-					if len(restore) > 0 {
-						txn.doc.store.pending = &pendingUpdate{items: restore, missing: stillMissing}
-					}
-					panic(r) // re-raise for outer recover
-				}
-			}()
-			for idx = 0; idx < len(items); idx++ {
-				item := items[idx]
-				if tryIntegrate(txn, item) {
-					progressed = true
-				} else {
-					stillPending = append(stillPending, item)
-					if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
-						mergePendingMissing(stillMissing, client, parkedAt)
-					} else if item.ID.Clock > txn.doc.store.NextClock(item.ID.Client) {
-						// Same-client gap still blocks it.
-						mergePendingMissing(stillMissing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
-					}
-				}
-			}
-		}()
-
-		if len(stillPending) > 0 {
-			txn.doc.store.pending = &pendingUpdate{items: stillPending, missing: stillMissing}
-		}
-		// Retry pendingDs — freshly-integrated items may now be targets
-		// of previously-parked delete entries.
-		if progressed && len(txn.doc.store.pendingDs.clients) > 0 {
-			retryPendingDs(txn)
-		}
-		if !progressed {
-			// No progress this pass — infinite-loop guard. Items remain parked.
-			break
-		}
-	}
-
-	return nil
+	return drainPending(txn)
 }
 
 func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info byte) (*Item, int, error) {
