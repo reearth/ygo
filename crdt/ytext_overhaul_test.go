@@ -147,6 +147,41 @@ func TestUnit_YText_Delete_PartialDelete_KeepsMarkers(t *testing.T) {
 		"partial deletion leaves live content in the span; markers must stay")
 }
 
+// A4 cont. — the cleanup stops at the first live item after the deletion,
+// where Yjs's cleanupFormattingGap stops, however that text is split into items. A
+// peer deletes the bold opener, then a local delete of "Z" runs the cleanup.
+// Yjs 13.6.32 deletes only the opener and "Z" and keeps the closer.
+func TestUnit_YText_Delete_CleanupStopsAtFirstLiveItem(t *testing.T) {
+	tests := []struct {
+		name   string
+		parts  []string
+		format [2]int
+		opener uint64
+	}{
+		{"run typed per transaction", []string{"c", "d"}, [2]int{0, 2}, 2},
+		{"run typed at once", []string{"cd"}, [2]int{0, 2}, 2},
+		{"one character bolded", []string{"c", "d", "e"}, [2]int{0, 1}, 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := newTestDoc(2)
+			txt := doc.GetText("t")
+			for _, p := range tt.parts {
+				doc.Transact(func(txn *Transaction) { txt.Insert(txn, txt.Len(), p, nil) })
+			}
+			doc.Transact(func(txn *Transaction) { txt.Format(txn, tt.format[0], tt.format[1], Attributes{"b": true}) })
+			doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "Z", nil) })
+			peerDelete := deleteOnlyUpdateV1(2, DeleteRange{Clock: tt.opener, Len: 1})
+			require.NoError(t, ApplyUpdateV1(doc, peerDelete, nil))
+			doc.Transact(func(txn *Transaction) { txt.Delete(txn, 0, 1) })
+
+			// Opener, then "Z" two clocks later; the closer between them stays.
+			want := []IDRange{{Clock: tt.opener, Len: 1}, {Clock: tt.opener + 2, Len: 1}}
+			assert.Equal(t, want, DeleteSetFromDoc(doc).Ranges(2))
+		})
+	}
+}
+
 // #76 (HIGH) — YText.InsertEmbed adds an embedded object to the rich-text
 // stream. Wire format already supports ContentEmbed; ygo was missing the
 // public API to insert one. Without it, callers couldn't represent images,

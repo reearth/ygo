@@ -1,3 +1,36 @@
+## v1.54.1
+
+**Who is affected: everyone who stores or sends encoded documents. Encoded
+states are smaller, and their bytes differ from earlier releases.**
+
+At the end of each transaction Yjs merges the structs the transaction deleted
+with their neighbours, and the structs it added with the struct on their left,
+also one from an earlier transaction. ygo merged only text that one transaction
+inserted and the halves of a split. So typing or deleting one character per
+transaction, the usual pattern for an editor, left one struct per keystroke.
+In a 5,000-transaction editing session the full V1 state was 30,155 bytes,
+where Yjs writes 16,312. ygo now runs the same merge, and that state is
+byte-identical to Yjs's in V1 and V2. Documents hold fewer items in memory, and
+states, snapshots and sync replies are smaller. Apart from the undo and
+format-cleanup fixes below, decoded content does not change, and earlier
+encodings still decode. A document with more than one client still writes its
+clients in a different order from Yjs.
+
+Undo now finds a restored item by the unit its link names, as Yjs does. Before,
+undoing next to an item whose restored copy was split later could restore an
+item that Yjs leaves deleted. An undo over deleted map values that now merge
+restores the value Yjs restores; before, it could restore none.
+
+A received delete no longer splits a struct that is already deleted, and a GC
+struct is never split, as in Yjs. Such a split could leave a deleted run as
+several structs where Yjs keeps one.
+
+After a text delete, ygo deletes format marks that no longer apply to any text.
+That search now stops at the first live text or embed after the deletion, as
+in Yjs. Before, it went one item further and could delete format marks that
+Yjs keeps. On a peer that reused such a mark, the format then spread over
+the text after it, or was lost from the text the peer inserted.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

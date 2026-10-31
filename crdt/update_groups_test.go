@@ -80,15 +80,17 @@ func TestUnit_SupersededGroups_MatchLastGroupPerClient(t *testing.T) {
 	}
 }
 
-// repeatedGroupsUpdate encodes client 9's "abc", then client 9 again with only
-// "a", then, if malformed, a group whose struct has an unknown content tag.
+// repeatedGroupsUpdate encodes client 9's items "a", "b" and "c", then client
+// 9 again with only "a", then, if malformed, a group whose struct has an
+// unknown content tag. Each letter is typed at the start, so the three never
+// merge into one item.
 func repeatedGroupsUpdate(t *testing.T, version int, malformed bool) []byte {
 	t.Helper()
 	src := New(WithClientID(9))
 	defer src.Destroy()
 	text := src.GetText("t")
 	for _, s := range []string{"a", "b", "c"} {
-		src.Transact(func(txn *Transaction) { text.Insert(txn, text.Len(), s, nil) })
+		src.Transact(func(txn *Transaction) { text.Insert(txn, 0, s, nil) })
 	}
 	items := src.store.clients[9]
 	groups := uint64(2)

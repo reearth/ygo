@@ -44,9 +44,9 @@ func changedText(txn *Transaction) bool {
 }
 
 // afterRemoteObservers finishes a remote transaction once its observers have
-// fired: it runs the format cleanup, GCs the transaction, and fires the
-// cleanup's observers. A panicking cleanup still emits what it deleted, then
-// re-panics.
+// fired: it runs the format cleanup, cleans up the transaction
+// (cleanupTxnLocked: GC and struct merge), and fires the cleanup's observers.
+// A panicking cleanup still emits what it deleted, then re-panics.
 func (d *Doc) afterRemoteObservers(remote *Transaction) {
 	var phase2 func()
 	var panicked any
@@ -61,9 +61,7 @@ func (d *Doc) afterRemoteObservers(remote *Transaction) {
 		if remote.formatCleanup {
 			phase2, panicked = d.formattingCleanupLocked(remote)
 		}
-		if d.gc && d.undoManagerCount == 0 {
-			gcTxnDeleteSet(d, remote)
-		}
+		cleanupTxnLocked(d, remote)
 	}()
 	if phase2 != nil {
 		phase2()
@@ -107,9 +105,7 @@ func (d *Doc) formattingCleanupLocked(remote *Transaction) (phase2 func(), panic
 		}
 		phase2 = buildPhase2(d, txn)
 	}()
-	if d.gc && d.undoManagerCount == 0 {
-		gcTxnDeleteSet(d, txn)
-	}
+	cleanupTxnLocked(d, txn)
 	return phase2, panicked
 }
 

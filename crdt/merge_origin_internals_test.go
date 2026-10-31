@@ -4,18 +4,21 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/reearth/ygo/encoding"
 )
 
-// squashRuns and RunGC merge two adjacent same-client items only when the right
-// one's Origin is the left one's last character (Yjs Item.mergeWith). No client
-// produces a run that breaks only that condition by editing, so these tests
-// write the update themselves.
+// squashRuns, RunGC and the transaction-end merge (Item.mergeable) merge two
+// adjacent same-client items only when the right one's Origin is the left
+// one's last character (Yjs Item.mergeWith). No client produces a run that
+// breaks only that condition by editing, so these tests write the update
+// themselves.
 
 // crossedOriginRun builds "XYab": "X" (5:0), "Y" (1:0, origin X), "a" (3:0,
-// origin Y) and "b" (3:1), where b's Origin is rewritten to X before encoding.
-// YATA still places b after a, so a and b are adjacent, clock-contiguous and
-// share a right origin (none), but b's Origin is not a. It returns the state
-// without b, the update carrying only b, the whole state, and X's state.
+// origin Y) and "b" (3:1, origin X). YATA still places b after a, so a and b
+// are adjacent, clock-contiguous and share a right origin (none), but b's
+// Origin is not a. It returns the state without b, the update carrying only b,
+// the two merged, and X's state.
 func crossedOriginRun(t *testing.T) (withoutB, onlyB, whole, x []byte) {
 	t.Helper()
 	d5 := New(WithClientID(5))
@@ -33,12 +36,22 @@ func crossedOriginRun(t *testing.T) (withoutB, onlyB, whole, x []byte) {
 	t3 := d3.GetText("t")
 	d3.Transact(func(txn *Transaction) { t3.Insert(txn, 2, "a", nil) })
 	withoutB = EncodeStateAsUpdateV1(d3, nil)
-	sv := d3.StateVector()
-	d3.Transact(func(txn *Transaction) { t3.Insert(txn, 3, "b", nil) })
-	b := d3.store.Find(ID{Client: 3, Clock: 1})
-	require.NotNil(t, b)
-	b.Origin = &ID{Client: 5, Clock: 0}
-	return withoutB, EncodeStateAsUpdateV1(d3, sv), EncodeStateAsUpdateV1(d3, nil), x
+
+	// The client typing b would merge it into a, so b's update is written here.
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(1) // clients
+	enc.WriteVarUint(1) // structs
+	enc.WriteVarUint(3) // client
+	enc.WriteVarUint(1) // clock
+	enc.WriteUint8(wireString | flagHasOrigin)
+	enc.WriteVarUint(5) // origin X
+	enc.WriteVarUint(0)
+	enc.WriteVarString("b")
+	enc.WriteVarUint(0) // empty delete set
+	onlyB = enc.Bytes()
+	whole, err := MergeUpdatesV1(withoutB, onlyB)
+	require.NoError(t, err)
+	return withoutB, onlyB, whole, x
 }
 
 func TestUnit_SquashRuns_KeepsAnItemWhoseOriginIsNotTheRunEnd(t *testing.T) {

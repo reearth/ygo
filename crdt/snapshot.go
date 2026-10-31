@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"errors"
+	"slices"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
@@ -319,17 +320,23 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 	var groups []clientGroup
 	for client, items := range doc.store.clients {
 		snapClock := snap.StateVector.Clock(client)
-		var relevant []*Item
-		for _, item := range items {
-			// Include items whose starting clock falls within the snapshot window.
-			// StateVector clocks are always at item boundaries, so no partial overlap.
-			if item.ID.Clock < snapClock {
-				relevant = append(relevant, item)
-			}
+		if snapClock == 0 {
+			continue
 		}
-		if len(relevant) > 0 {
-			groups = append(groups, clientGroup{client, relevant})
+		relevant := slices.Clone(items[:findStructIndex(items, snapClock-1)+1])
+		if len(relevant) == 0 {
+			continue
 		}
+		// A later transaction can merge its struct into the last struct the
+		// snapshot holds, so that struct is written only up to the snapshot's
+		// clock.
+		if last := relevant[len(relevant)-1]; last.ID.Clock+uint64(last.Content.Len()) > snapClock {
+			head := *last
+			head.Content = last.Content.Copy()
+			head.Content.Splice(int(snapClock - last.ID.Clock))
+			relevant[len(relevant)-1] = &head
+		}
+		groups = append(groups, clientGroup{client, relevant})
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].client < groups[j].client })
 
@@ -357,8 +364,7 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 // never be observable again.
 //
 // Caller must hold d.mu. Unlike RunGC this does NOT acquire the lock or
-// run the adjacent-tombstone merge pass — those are for the manual
-// whole-document RunGC entry point.
+// merge tombstones itself; mergeTxnStructs merges them after it.
 func gcTxnDeleteSet(doc *Doc, txn *Transaction) {
 	for client, ranges := range txn.deleteSet.clients {
 		items := doc.store.clients[client]

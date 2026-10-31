@@ -1507,22 +1507,27 @@ func TestUnit_SearchMarker_LargeDocEndAppend(t *testing.T) {
 // ── search-marker position lookup after partial invalidation ────────────────
 
 func TestUnit_SearchMarker_PartialInvalidation_KeepsLowerMarkers(t *testing.T) {
-	// Build two separate ContentString items so leftNeighbourAt stores two
-	// search markers. Then insert at a position that invalidates only the
-	// higher-index marker, exercising the marker-cache "keep entries below the
-	// invalidation point" path.
+	// Three separate ContentString items, each typed at the start so none
+	// merges with another: "ghi", "def", "abc". A marker below the insert
+	// point must survive an insert on an item boundary, which splits nothing,
+	// exercising the marker-cache "keep entries below the invalidation point"
+	// path.
 	doc := newTestDoc(1)
 	txt := doc.GetText("t")
-	// Two separate transactions → two separate items after squashRuns.
-	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "abc", nil) })
-	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 3, "def", nil) })
-	// Insert at index 4 → leftNeighbourAt(4) scans both items and stores search
-	// markers at (3, item_abc) and (6, item_def).
-	// integrate then invalidates markers from index 4:
-	//   marker (3, item_abc): 3 < 4 → KEPT   ← exercises the keep path
-	//   marker (6, item_def): 6 >= 4 → dropped
-	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 4, "X", nil) })
-	assert.Equal(t, 7, txt.Len())
+	for _, s := range []string{"abc", "def", "ghi"} {
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, s, nil) })
+	}
+	require.Len(t, doc.store.clients[1], 3)
+	doc.Transact(func(txn *Transaction) {
+		txt.leftNeighbourAt(3) // marks (3, "def")
+		txt.Insert(txn, 6, "X", nil)
+	})
+	assert.Equal(t, "ghidefXabc", txt.ToString())
+	kept := false
+	for _, m := range txt.markers {
+		kept = kept || (m.index == 3 && m.item.Content.(*ContentString).Str == "def")
+	}
+	assert.True(t, kept, "the marker below the insert point must be kept")
 }
 
 // ── UndoManager.txnAffectsScope returns false ─────────────────────────────────

@@ -107,11 +107,12 @@ func TestUnit_UpdateV1_MultipleTypes(t *testing.T) {
 func TestUnit_UpdateV2_SmallerThanV1(t *testing.T) {
 	doc := newTestDoc(1)
 	txt := doc.GetText("content")
-	// Insert many individual characters so the column-oriented V2 format can
-	// compress repeated client IDs and info bytes via RLE.
+	// Insert many individual characters at the start, so each stays its own
+	// item, and the column-oriented V2 format can compress repeated client IDs
+	// and info bytes via RLE.
 	for i := 0; i < 100; i++ {
 		doc.Transact(func(txn *Transaction) {
-			txt.Insert(txn, txt.Len(), "a", nil)
+			txt.Insert(txn, 0, "a", nil)
 		})
 	}
 

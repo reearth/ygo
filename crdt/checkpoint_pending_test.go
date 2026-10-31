@@ -19,8 +19,9 @@ func TestUnit_Checkpoint_ResolvesSameUpdateBeforePendingLimit(t *testing.T) {
 				defer writer.Destroy()
 				require.NoError(t, ApplyUpdateV1(writer, EncodeStateAsUpdateV1(parent, nil), nil))
 				edited := writer.GetArray("items")
+				// Each item goes right after the seed, so none merges with another.
 				for i := 0; i < 10; i++ {
-					writer.Transact(func(txn *Transaction) { edited.Insert(txn, i+1, []any{i}) })
+					writer.Transact(func(txn *Transaction) { edited.Insert(txn, 1, []any{i}) })
 				}
 				receiver := New(WithMaxPendingItems(3))
 				defer receiver.Destroy()

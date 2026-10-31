@@ -184,21 +184,17 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 			if r.Len == 0 {
 				continue
 			}
-			// Split at the range boundaries so each overlapping item lies
-			// entirely inside [r.Clock, r.Clock+r.Len). Pre-#72 we deleted
-			// overlapping items whole, which wiped content outside the range
-			// when the item was a locally-squashed run that the sender saw as
-			// shorter. getItemCleanStart is a no-op when no item contains the
-			// target clock (boundary already clean or past the store).
-			//
-			// Mirrors Yjs JS iterateDeletedStructs and yrs Update::integrate
-			// which both pre-split at boundaries before tombstoning.
-			if r.Len > 0 {
-				txn.doc.store.getItemCleanStart(txn, ID{Client: client, Clock: r.Clock})
-				txn.doc.store.getItemCleanStart(txn, ID{Client: client, Clock: r.Clock + r.Len})
-				// Splits may have inserted new items; refresh the slice.
-				items = txn.doc.store.clients[client]
+			// Split a live item at the range boundaries so content outside the
+			// range stays live, and leave a deleted struct whole, as Yjs
+			// readAndApplyDeleteSet does.
+			store := txn.doc.store
+			for _, clock := range [2]uint64{r.Clock, r.Clock + r.Len} {
+				if it := store.Find(ID{Client: client, Clock: clock}); it != nil && !it.Deleted {
+					store.getItemCleanStart(txn, ID{Client: client, Clock: clock})
+				}
 			}
+			// Splits may have inserted new items; refresh the slice.
+			items = store.clients[client]
 
 			// Binary search: first item whose end > r.Clock.
 			lo := sort.Search(len(items), func(i int) bool {
@@ -210,7 +206,8 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 				if item.ID.Clock >= r.Clock+r.Len {
 					break
 				}
-				// After our boundary splits, item is entirely inside the range.
+				// A live item lies inside the range after the splits above; an
+				// already-deleted one may extend past either boundary, so clamp.
 				end := r.Clock + r.Len
 				itemEnd := item.ID.Clock + uint64(item.Content.Len())
 				if itemEnd < end {

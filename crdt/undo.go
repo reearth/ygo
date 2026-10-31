@@ -486,7 +486,9 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 			if _, ok := p.set[t]; ok && t.redone == nil {
 				u.redoItem(txn, t, nil, p)
 			}
-			if t = u.followRedone(txn, t); t != nil && t.ID != *cm.Target {
+			// The target can sit inside a merged run, so its copy is looked up
+			// from the target's own unit.
+			if t = u.followRedone(txn, u.doc.store.getItemCleanStart(txn, *cm.Target)); t != nil && t.ID != *cm.Target {
 				// The copy may hold a merged run; TargetLen trims it.
 				content = NewContentMove(&t.ID, cm.TargetLen)
 			}
@@ -505,7 +507,7 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 				if lt.redone == nil {
 					lt = nil
 				} else {
-					lt = u.doc.store.Find(*lt.redone)
+					lt = u.doc.store.getItemCleanStart(txn, *lt.redone)
 				}
 			}
 			if lt != nil && lt.Parent == parent {
@@ -521,7 +523,7 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 				if rt.redone == nil {
 					rt = nil
 				} else {
-					rt = u.doc.store.Find(*rt.redone)
+					rt = u.doc.store.getItemCleanStart(txn, *rt.redone)
 				}
 			}
 			if rt != nil && rt.Parent == parent {
@@ -632,31 +634,12 @@ func (u *UndoManager) redoMove(txn *Transaction, mv, target *Item) {
 	mv.delete(txn)
 }
 
-// yjsMergeable reports whether Yjs would hold left and right as one struct
-// (Item.mergeWith): adjacent, clock-contiguous, same origins and state, and
-// content that merges. Map entries and moved items are never grouped.
+// yjsMergeable reports whether Yjs would hold left and right, list neighbours
+// that this undo restores, as one struct (Item.mergeable). Map entries and
+// moved items are never grouped.
 func yjsMergeable(left, right *Item) bool {
-	n := left.Content.Len()
-	if left.Right != right || left.ID.Client != right.ID.Client || n == 0 ||
-		left.ID.Clock+uint64(n) != right.ID.Clock || left.Deleted != right.Deleted ||
-		left.redone != nil || right.redone != nil || left.MovedBy != nil || right.MovedBy != nil ||
-		left.ParentSub != nil || right.ParentSub != nil ||
-		!originIDEquals(right.Origin, &ID{Client: left.ID.Client, Clock: left.ID.Clock + uint64(n) - 1}) ||
-		!originIDEquals(left.OriginRight, right.OriginRight) {
-		return false
-	}
-	switch left.Content.(type) {
-	case *ContentAny:
-		_, ok := right.Content.(*ContentAny)
-		return ok
-	case *ContentString:
-		_, ok := right.Content.(*ContentString)
-		return ok
-	case *ContentJSON:
-		_, ok := right.Content.(*ContentJSON)
-		return ok
-	}
-	return false
+	return left.ID.Client == right.ID.Client && left.ID.Clock+uint64(left.Content.Len()) == right.ID.Clock &&
+		left.ParentSub == nil && right.ParentSub == nil && left.MovedBy == nil && left.mergeable(right)
 }
 
 // appendContents returns dst, an item's content copy, extended by the content

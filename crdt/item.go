@@ -542,11 +542,74 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 	if item.Parent != nil {
 		item.Parent.clearMarkers()
 	}
-	// #78 H2 — track the right half so tryMergeWithLefts can reverse the split
-	// at transaction commit if no item ends up inserted between the two halves.
+	// Track the right half so mergeTxnStructs can reverse the split at
+	// transaction commit if no item ends up inserted between the two halves.
 	// txn is guaranteed non-nil here (insertItem above would have panicked).
 	txn.mergeStructs = append(txn.mergeStructs, right)
 	return right
+}
+
+// mergeable reports whether right, the next struct of left's client, can
+// merge into left so the two encode as one struct, under Yjs's Item.mergeWith
+// and GC.mergeWith rules plus an equal MovedBy, which Yjs does not have.
+func (left *Item) mergeable(right *Item) bool {
+	if leftGC, rightGC := left.isGCOrphan(), right.isGCOrphan(); leftGC || rightGC {
+		_, lok := left.Content.(*ContentDeleted)
+		_, rok := right.Content.(*ContentDeleted)
+		return leftGC && rightGC && lok && rok
+	}
+	if left.Right != right || left.Deleted != right.Deleted || left.MovedBy != right.MovedBy ||
+		left.redone != nil || right.redone != nil || // a merged struct would give one redone link to all its units
+		right.Origin == nil || *right.Origin != left.lastID() ||
+		!originIDEquals(left.OriginRight, right.OriginRight) {
+		return false
+	}
+	var ok bool
+	switch left.Content.(type) {
+	case *ContentString:
+		_, ok = right.Content.(*ContentString)
+	case *ContentAny:
+		_, ok = right.Content.(*ContentAny)
+	case *ContentJSON:
+		_, ok = right.Content.(*ContentJSON)
+	case *ContentDeleted:
+		_, ok = right.Content.(*ContentDeleted)
+	}
+	// Embeds, formats, types, binaries, docs and moves never merge.
+	return ok
+}
+
+// absorb merges right into left; left.mergeable(right) must hold. The caller
+// removes right from the store.
+func (left *Item) absorb(right *Item) {
+	// A marker on right now names left, whose start is left's length earlier.
+	if t := left.Parent; t != nil {
+		_, n, _ := t.renderedStep(left)
+		for i := range t.markers {
+			if t.markers[i].item == right {
+				t.markers[i].item = left
+				t.markers[i].index -= n
+			}
+		}
+	}
+	switch lc := left.Content.(type) {
+	case *ContentString:
+		lc.append(right.Content.(*ContentString))
+	case *ContentAny:
+		lc.Vals = append(lc.Vals, right.Content.(*ContentAny).Vals...)
+	case *ContentJSON:
+		lc.Vals = append(lc.Vals, right.Content.(*ContentJSON).Vals...)
+	case *ContentDeleted:
+		lc.length += right.Content.Len()
+	}
+	// A key's entry is its rightmost unit, which is now in left.
+	if right.ParentSub != nil && right.Parent != nil && right.Parent.itemMap[*right.ParentSub] == right {
+		right.Parent.itemMap[*right.ParentSub] = left
+	}
+	left.Right = right.Right
+	if right.Right != nil {
+		right.Right.Left = left
+	}
 }
 
 // originIDEquals compares two nullable ID pointers.
@@ -640,22 +703,17 @@ func rearbitrateMoves(txn *Transaction) {
 // resolveMovedItem finds the item at targetID and ensures it covers exactly
 // targetLen clock units starting at targetID.Clock. When the item is part of
 // a larger multi-value ContentAny (common when a delta update arrives without
-// the local splits a sender performed during Move()), splitItem is called to
-// carve out the exact boundary. Returns nil when no item contains targetID.
+// the local splits a sender performed during Move()), it is split at the exact
+// boundaries; a GC struct is returned whole. Returns nil when no item contains
+// targetID.
 func resolveMovedItem(txn *Transaction, targetID *ID, targetLen int) *Item {
-	si := txn.doc.store.Find(*targetID)
+	store := txn.doc.store
+	si := store.getItemCleanStart(txn, *targetID)
 	if si == nil {
 		return nil
 	}
-	// Trim leading prefix: ensure si starts exactly at targetID.Clock.
-	if si.ID.Clock < targetID.Clock {
-		prefix := int(targetID.Clock - si.ID.Clock)
-		si = splitItem(txn, si, prefix) // si is now the right half
-	}
-	// Trim trailing suffix: ensure si covers no more than targetLen units.
 	if targetLen > 0 && si.Content.Len() > targetLen {
-		splitItem(txn, si, targetLen)
-		// si (the left half) now has exactly targetLen units.
+		store.getItemCleanEnd(txn, si.ID.Client, si.ID.Clock+uint64(targetLen)-1)
 	}
 	return si
 }

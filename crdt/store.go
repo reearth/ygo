@@ -66,14 +66,7 @@ func (s *StructStore) Append(item *Item) {
 // search verifies that id.Clock falls within the candidate item's range.
 func (s *StructStore) Find(id ID) *Item {
 	items := s.clients[id.Client]
-	n := len(items)
-	if n == 0 {
-		return nil
-	}
-	// Find the last item whose start Clock is ≤ id.Clock.
-	idx := sort.Search(n, func(i int) bool {
-		return items[i].ID.Clock > id.Clock
-	}) - 1
+	idx := findStructIndex(items, id.Clock)
 	if idx < 0 {
 		return nil
 	}
@@ -84,17 +77,40 @@ func (s *StructStore) Find(id ID) *Item {
 	return nil
 }
 
+// findStructIndex returns the index of the last struct in structs that starts
+// at or before clock, or -1 when none does (Yjs findIndexSS).
+func findStructIndex(structs []*Item, clock uint64) int {
+	n := len(structs)
+	if n == 0 || structs[0].ID.Clock > clock {
+		return -1
+	}
+	first, last := structs[0].ID.Clock, structs[n-1].ID.Clock
+	if last <= clock {
+		return n - 1
+	}
+	// Clocks grow about evenly, so first try the index where clock would sit
+	// if they grew exactly evenly, as Yjs findIndexSS does.
+	i := min(int(float64(clock-first)/float64(last-first)*float64(n-1)), n-2)
+	if structs[i].ID.Clock > clock {
+		return sort.Search(i, func(j int) bool { return structs[j].ID.Clock > clock }) - 1
+	}
+	if structs[i+1].ID.Clock > clock {
+		return i
+	}
+	return i + sort.Search(n-1-i, func(j int) bool { return structs[i+1+j].ID.Clock > clock })
+}
+
 // getItemCleanEnd returns the item ending at exactly (client, clock).
 // If the item at that position spans past clock it is split so the returned
 // item ends exactly at clock. Used when a new item's origin falls inside an
-// existing multi-character item.
+// existing multi-character item. A GC struct is returned whole, as in Yjs.
 func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock uint64) *Item {
 	item := s.Find(ID{Client: client, Clock: clock})
 	if item == nil {
 		return nil
 	}
 	end := item.ID.Clock + uint64(item.Content.Len()) - 1
-	if end == clock {
+	if end == clock || item.isGCOrphan() {
 		return item
 	}
 	// Guard against malformed updates where clock < item.ID.Clock: the
@@ -114,7 +130,8 @@ func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock u
 // returned item starts exactly at clock. Used when a new item's right-origin
 // falls inside an existing multi-character item — the conflict-scan loop in
 // Item.integrate needs the right boundary to be a clean item start so the
-// loop terminates at the correct position.
+// loop terminates at the correct position. A GC struct is returned whole, as
+// in Yjs.
 //
 // Mirrors Yjs JS's `getItemCleanStart` and yrs's `get_item_clean_start`.
 // Returns nil if no item contains the given clock (e.g. the target hasn't
@@ -125,7 +142,7 @@ func (s *StructStore) getItemCleanStart(txn *Transaction, id ID) *Item {
 	if item == nil {
 		return nil
 	}
-	if item.ID.Clock == id.Clock {
+	if item.ID.Clock == id.Clock || item.isGCOrphan() {
 		return item
 	}
 	// Guard against malformed updates where id.Clock < item.ID.Clock: Find

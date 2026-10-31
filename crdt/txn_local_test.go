@@ -59,19 +59,33 @@ func TestUnit_TxnLocal_UndoManagerIgnoresAppliedUpdates(t *testing.T) {
 
 // Applied updates still squash adjacent same-client string runs: squashRuns
 // is gated on nothing but new items, not on Local, so a 50-keystroke history
-// loads as one item rather than fifty.
+// received in one update is relayed as one struct. The receiver's OnUpdate
+// payload is encoded before the transaction-end merge, so only squashRuns
+// makes it one struct.
 func TestUnit_TxnLocal_AppliedUpdatesStillSquash(t *testing.T) {
 	src := newTestDoc(1)
 	stxt := src.GetText("t")
+	var updates [][]byte
+	src.OnUpdate(func(u []byte, _ any) { updates = append(updates, u) })
 	for i := 0; i < 50; i++ {
 		src.Transact(func(txn *Transaction) { stxt.Insert(txn, i, "a", nil) })
 	}
-	dst := newTestDoc(2)
-	if err := dst.ApplyUpdate(EncodeStateAsUpdateV1(src, nil)); err != nil {
+	history, err := MergeUpdatesV1(updates...)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(dst.store.clients[1]); n != 1 {
-		t.Fatalf("receiver stores %d items for one contiguous run, want 1", n)
+	dst := newTestDoc(2)
+	var relayed []byte
+	dst.OnUpdate(func(u []byte, _ any) { relayed = u })
+	if err := dst.ApplyUpdate(history); err != nil {
+		t.Fatal(err)
+	}
+	structs, _, err := decodeStructsV1(New(), relayed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(structs[1]); n != 1 {
+		t.Fatalf("receiver relays %d structs for one contiguous run, want 1", n)
 	}
 	if got := dst.GetText("t").ToString(); got != stxt.ToString() {
 		t.Fatalf("receiver text = %q, want %q", got, stxt.ToString())
