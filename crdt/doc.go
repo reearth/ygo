@@ -70,6 +70,30 @@ func WithGC(gc bool) DocOption {
 	return func(d *Doc) { d.gc = gc }
 }
 
+// WithFormatCleanup controls whether a remote transaction that changes
+// formatted text is followed by the local transaction Yjs runs to remove the
+// format markers it left redundant (cleanupYTextAfterTransaction). Default is
+// true. Set to false for a document that replays another document's
+// transactions, such as a server's copy of a room or a fold of its stored
+// updates: the source never ran the cleanup for its own local transactions,
+// and its log already holds the cleanups it did run, so a replay that cleans
+// up makes changes the source never made.
+func WithFormatCleanup(enabled bool) DocOption {
+	return func(d *Doc) { d.noFormatCleanup = !enabled }
+}
+
+// SetFormatCleanup sets WithFormatCleanup after construction, so a document
+// can load stored state without the cleanup and clean up after later remote
+// changes. It applies to transactions that commit after it returns, and to
+// this document only: a subdocument keeps its own setting. Like the other
+// methods that take the document's lock, it must not be called inside a
+// transaction.
+func (d *Doc) SetFormatCleanup(enabled bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.noFormatCleanup = !enabled
+}
+
 // WithGUID sets the document's subdocument identifier. When a Doc is embedded
 // inside another Doc via ContentDoc, the GUID identifies it across peers.
 func WithGUID(guid string) DocOption {
@@ -153,7 +177,8 @@ type Doc struct {
 	item            *Item // set on integrate when this Doc is embedded as a subdocument (#63)
 	subdocs         map[string]*Doc
 	onSubdocs       []subdocsSub
-	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
+	maxPendingItems int  // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
+	noFormatCleanup bool // see WithFormatCleanup
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -635,7 +660,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		// and GCs the change only then. A type observer may give a text its
 		// first marker, so with type observers to fire the gate waits.
 		deferGC := false
-		if r == nil && !txn.Local {
+		if r == nil && !txn.Local && !d.noFormatCleanup {
 			if needsFormattingCleanup(txn) {
 				txn.formatCleanup, deferGC = true, true
 			} else if txn.typeObserved && changedText(txn) {
