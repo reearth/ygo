@@ -38,6 +38,14 @@
   is encoded at the same point. Peers on either version
   converge, and updates an earlier version stored load as before. With GC
   off, or with an `UndoManager` attached, the bytes do not change.
+- **`OnAfterTransaction` runs before `OnUpdate`.** ygo called `OnUpdate`
+  first; Yjs emits `afterTransaction` first, so code ported from Yjs that
+  reads state set in `afterTransaction` from its `update` handler saw it one
+  transaction late. A transaction started inside an `OnAfterTransaction`
+  callback now emits its update before the outer transaction's update, as one
+  started inside an observer already did; Yjs queues it until the outer one
+  is done. Peers and stored update logs still
+  converge.
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
 - **Faster full-state encodes and snapshots after deletions.** The delete set

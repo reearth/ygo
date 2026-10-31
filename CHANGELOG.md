@@ -58,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not change. The update `ApplyUpdateV1Landed` returns for a failed
   apply is now encoded at commit too, after the GC and the end-of-transaction
   merges, so it holds the same structs as the `OnUpdate` update.
+- **`crdt`: `OnAfterTransaction` fires before `OnUpdate`, as Yjs emits
+  `afterTransaction` before `update`.** A committed transaction now calls
+  per-type observers, deep observers, `OnAfterTransaction`, `OnUpdate`, then
+  `OnSubdocs`, for local and applied updates alike. A transaction started
+  inside an `OnAfterTransaction` callback now emits its update before the
+  outer transaction's update, as one started inside an observer already did.
+  Yjs queues such a transaction until the outer one is done.
 
 ### Performance
 
