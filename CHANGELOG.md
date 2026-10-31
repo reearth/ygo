@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Fixed
+
+- **`crdt`: `OnAfterTransaction` now fires before `OnUpdate`, as Yjs emits
+  `afterTransaction` before `update`.** A committed transaction now calls
+  per-type observers, deep observers, `OnAfterTransaction`, `OnUpdate`, then
+  `OnSubdocs`, for local and applied updates alike. A transaction started
+  inside an `OnAfterTransaction` callback now emits its update before the
+  outer transaction's update, as one started inside an observer already did.
+  Yjs queues such a transaction until the outer one is done.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
