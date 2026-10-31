@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Fixed
+
+- **`provider/websocket`: a peer the server closes while its read loop runs
+  no longer has its buffered input handled.** When the server closed a
+  connection itself, for a
+  full write queue (on a direct send, or on a broadcast under
+  `SlowPeerDisconnect`), for a Hocuspocus close message, for a cancelled
+  request context without a close code, in `Shutdown`, or in
+  `CloseRoom(name, true)`, the read loop still handled the messages already
+  in its read buffer (up to about 4 KiB). For a client that sent SyncStep1 and
+  never read, the server encoded the room's full state for each of them (up
+  to about 400), then refused it for the full queue and logged a warning.
+  Updates in that input were applied after the close, and stored too after
+  `Shutdown` or `CloseRoom`. The read loop now drops that input, as it
+  already did after a queued close. Updates a client sent but the server had
+  not read when it closed the connection are not saved. A client that
+  reconnects sends them again.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

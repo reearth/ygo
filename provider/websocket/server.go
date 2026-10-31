@@ -1420,9 +1420,8 @@ func NewServer() *Server {
 	return s
 }
 
-// Shutdown closes all active peer connections and waits for their goroutines
-// to exit or for ctx to expire. Call this during server shutdown to prevent
-// goroutine leaks and ensure in-flight operations complete cleanly.
+// Shutdown closes all peer connections, dropping input their read loops have
+// not handled, and waits for their goroutines to exit or for ctx to expire.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
 
@@ -1443,27 +1442,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// NOTE the relay context is deliberately NOT cancelled here (#202). It
-	// used to be, and that ordering silently discarded the outbound tail:
-	// peers keep committing for the whole connection-close-plus-persistence
-	// -drain window below, every one of those updates lands in a room lane
-	// whose worker had already exited on ctx.Done() without draining, and no
-	// counter fired. Cancellation now happens at the END of Shutdown, after
-	// the lanes have been retired, drained under the still-live relay
-	// context, and joined. Delaying it is safe for the INBOUND side because
-	// Inject (like Apply and BroadcastUpdate) refuses with ErrServerShutdown
-	// the moment shutdownCh closes — which was this function's first act —
-	// so the relay's delivery goroutine outliving this point cannot mutate
-	// any room; its deliveries just bounce.
+	// The relay context is cancelled at the end, not here, because read loops
+	// can still commit while connections close and their updates must reach a
+	// live room lane.
 
-	// Collect all active peer connections and persistence channels.
+	// Collect all active peers and persistence channels.
 	s.rmu.RLock()
-	var conns []*gws.Conn
+	var peers []*peer
 	var persistDones []chan struct{}
 	for _, r := range s.rooms {
 		r.mu.Lock()
 		for p := range r.peers {
-			conns = append(conns, p.conn)
+			peers = append(peers, p)
 		}
 		r.mu.Unlock()
 		// Stop this room's awareness auto-expiry sweep (if AwarenessExpiry>0
@@ -1490,12 +1480,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.rmu.RUnlock()
 
-	// Close each connection. The peer read loop will exit on the next
-	// ReadMessage call, triggering handleDisconnect cleanup.
-	for _, c := range conns {
-		if err := c.Close(); err != nil {
-			s.log().Debug("shutdown close failed", "err", err)
-		}
+	// Close each connection; each read loop drops unhandled input and runs
+	// handleDisconnect.
+	for _, p := range peers {
+		p.closeConn()
 	}
 
 	// Wait for all persistence goroutines to drain in-flight writes.
@@ -1513,14 +1501,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 
-	// Join the stranded writers (#229). A transaction committed during this
-	// Shutdown — peer read loops keep committing right through the connection
-	// closes above — may have arrived too late for its room's worker, in which
-	// case the committing goroutine performs the adapter write itself. It
-	// blocks on the same persistDone the loop above just waited for, so without
-	// this join Shutdown would routinely return with that write still in
-	// flight, and the usual `srv.Shutdown(ctx); return` shape would kill the
-	// process mid-write — the original bug through a narrower window.
+	// Join the stranded writers, since a read loop can still commit while its
+	// connection closes and its adapter write must finish before Shutdown
+	// returns.
 	//
 	// Placed HERE deliberately: after the persistence join (a stranded writer
 	// cannot even start until its worker has exited) and before the relay steps
@@ -2145,9 +2128,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				p.inputClosed.Store(true)
 				_ = ws.WriteControl(gws.CloseMessage, frame, time.Now().Add(closeFrameTimeout))
 			}
-			_ = ws.Close() // close errors during teardown are expected; not logged
+			p.closeConn()
 		case <-s.shutdownCh:
-			_ = ws.Close() // close errors during teardown are expected; not logged
+			p.closeConn()
 		case <-p.done: // H1: read loop exited normally; nothing to do
 		}
 	}()
@@ -2183,9 +2166,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if p.inputClosed.Load() {
-			// A close is queued or sent: nothing more from this peer lands.
-			// continue, not break: the deferred teardown would drop the
-			// queued close frame or race the one being sent.
+			// Continue, not break, so the deferred teardown neither drops the
+			// queued close frame nor races the one being sent.
 			continue
 		}
 		if firstMessage {

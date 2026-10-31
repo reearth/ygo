@@ -6,12 +6,16 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/awareness"
 )
@@ -107,6 +111,7 @@ func TestPeer_Broadcast_ResyncPolicy_FlagsSlowPeerWithoutClosing(t *testing.T) {
 
 	assert.True(t, needsResync, "overflow under SlowPeerResync should flag the peer for resync")
 	assert.False(t, closed, "overflow under SlowPeerResync must not disconnect the peer")
+	assert.False(t, target.inputClosed.Load(), "overflow under SlowPeerResync must not drop the peer's input")
 	assert.Len(t, target.writeCh, 1, "the stale delta is dropped, not enqueued")
 	assert.Contains(t, buf.String(), "in-place resync", "expected a resync-scheduling log line")
 }
@@ -136,12 +141,57 @@ func TestPeer_MaybeResync_GatingWithoutConn(t *testing.T) {
 	})
 }
 
+// serverConn returns the server side of a real WebSocket connection, for a
+// peer whose conn a test closes but never writes to.
+func serverConn(t *testing.T) *gws.Conn {
+	t.Helper()
+	conns := make(chan *gws.Conn, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := (&gws.Upgrader{}).Upgrade(w, r, nil)
+		if err == nil {
+			conns <- c
+		}
+	}))
+	t.Cleanup(ts.Close)
+	client, _, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	c := <-conns
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
 func TestPeer_Broadcast_DisconnectsSlowPeer(t *testing.T) {
-	// Integration-level coverage lives in TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow
-	// in server_test.go, which uses net.Pipe() connections to make the overflow deterministic.
-	// A unit-level version here would require a fakeConn that makes WriteMessage block
-	// without depending on OS TCP buffers.
-	t.Skip("TODO: unit version needs a fake conn; integration coverage in TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow")
+	// Under SlowPeerDisconnect a full write queue closes the peer, and the read
+	// loop must drop what the peer already sent.
+	var buf bytes.Buffer
+	srv := &Server{SlowPeerPolicy: SlowPeerDisconnect, Logger: captureDebugLogger(&buf)}
+	rm := &room{peers: map[*peer]struct{}{}}
+	target := &peer{server: srv, roomName: "r", conn: serverConn(t), writeCh: make(chan []byte, 1)}
+	target.writeCh <- []byte{0x00} // fill to capacity
+	src := &peer{server: srv, room: rm}
+	rm.peers[target] = struct{}{}
+	rm.peers[src] = struct{}{}
+
+	src.broadcast([]byte{0x01}, true)
+
+	assert.True(t, target.inputClosed.Load(), "the read loop must drop what the closed peer already sent")
+	assert.False(t, src.inputClosed.Load(), "the sender is not closed")
+	assert.Contains(t, buf.String(), "closing slow peer")
+}
+
+func TestPeer_Write_FullQueueDisconnectsPeer(t *testing.T) {
+	// A full write queue on a direct send closes the peer, and the read loop
+	// must drop what the peer already sent.
+	var buf bytes.Buffer
+	p := &peer{server: &Server{Logger: captureDebugLogger(&buf)}, roomName: "r",
+		conn: serverConn(t), writeCh: make(chan []byte, 1)}
+	p.writeCh <- []byte{0x00} // fill to capacity
+
+	p.write([]byte{0x01})
+
+	assert.True(t, p.inputClosed.Load(), "the read loop must drop what the closed peer already sent")
+	assert.Contains(t, buf.String(), "queue full during direct send")
 }
 
 func TestPeer_RunWriter_ExitsOnChannelClose(t *testing.T) {
