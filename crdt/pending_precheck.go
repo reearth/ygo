@@ -7,10 +7,10 @@ func (b *pendingBudget) checkBeforeApply(size int) error {
 		return nil
 	}
 	if b.v2 && b.structs == 0 {
-		n, ok := b.walkStructsV2()
-		if !ok {
+		n, err := b.walkStructsV2()
+		if err != nil {
 			// The apply would fail in this section after earlier structs integrated.
-			return ErrInvalidUpdate
+			return wrapUpdateErr(scanReason(err))
 		}
 		if n <= b.remaining {
 			return nil
@@ -20,13 +20,13 @@ func (b *pendingBudget) checkBeforeApply(size int) error {
 	return b.check()
 }
 
-// walkStructsV2 counts the V2 update's structs, skips included, and reports
-// whether the section reads.
-func (b *pendingBudget) walkStructsV2() (int, bool) {
+// walkStructsV2 counts the V2 update's structs, skips included, or returns why
+// it cannot.
+func (b *pendingBudget) walkStructsV2() (int, error) {
 	v2 := *b.v2Start
-	n, ok := v2StructCount(&v2, true)
+	n, err := v2StructCount(&v2, true)
 	*v2.restDec = b.v2Rest
-	return n, ok
+	return n, err
 }
 
 // firstPassV2 runs scanPendingGroupsV2 on copies of the update's cursors.
@@ -51,35 +51,44 @@ func (b *pendingBudget) mayParkPastRoom(size int) bool {
 	}
 	// On stack copies of the cursors, so that it allocates nothing.
 	v2 := *b.v2Start
-	n, ok := v2StructCount(&v2, false)
+	n, err := v2StructCount(&v2, false)
 	*v2.restDec = b.v2Rest
-	return !ok || n > b.remaining
+	return err != nil || n > b.remaining
 }
 
-// v2StructCount is the V2 update's struct count from its group headers, and
-// whether they read.
-func v2StructCount(d *v2Decoder, toEnd bool) (int, bool) {
+// v2StructCount is the V2 update's struct count from its group headers, or why
+// it cannot be read: an unknown tag is a contentTagError.
+func v2StructCount(d *v2Decoder, toEnd bool) (int, error) {
 	s := pendingScanner{v2: d, rest: d.restDec}
 	clients := s.uint()
-	if s.err != nil || clients > maxV2Items {
-		return 0, false
+	if s.err != nil {
+		return 0, scanReason(s.err)
+	}
+	if clients > maxV2Items {
+		return 0, ErrInvalidUpdate
 	}
 	var total uint64
 	lens := 0 // length-column entries passed and not yet read
 	for i := range clients {
 		structs := s.uint()
 		total += structs
-		if s.err != nil || total > maxV2Items {
-			return 0, false
+		if s.err != nil {
+			return 0, scanReason(s.err)
+		}
+		if total > maxV2Items {
+			return 0, ErrInvalidUpdate
 		}
 		if i == clients-1 && !toEnd {
 			break
 		}
 		s.uint() // the group's first clock; its client is on the client column
+		if s.err != nil {
+			return 0, scanReason(s.err)
+		}
 		for left := int(structs); left > 0; {
 			info, k, err := d.infoDec.ReadRun(left)
 			if err != nil {
-				return 0, false
+				return 0, scanReason(err)
 			}
 			left -= k
 			switch info & 0x1f {
@@ -93,7 +102,7 @@ func v2StructCount(d *v2Decoder, toEnd bool) (int, bool) {
 					}
 					values := s.length()
 					if values > maxV2Items {
-						return 0, false
+						return 0, ErrInvalidUpdate
 					}
 					for range values {
 						s.any()
@@ -116,12 +125,12 @@ func v2StructCount(d *v2Decoder, toEnd bool) (int, bool) {
 					s.uint()
 				}
 			default:
-				return 0, false
+				return 0, tagError(info&0x1f, true)
 			}
 			if s.err != nil {
-				return 0, false
+				return 0, scanReason(s.err)
 			}
 		}
 	}
-	return int(total), true
+	return int(total), nil
 }

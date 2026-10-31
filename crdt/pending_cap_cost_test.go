@@ -156,8 +156,8 @@ func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testi
 					l, s, d, n := f.item()
 					return read{l, s, d, n}
 				})
-				if f.bad || !reflect.DeepEqual(frameReads, wantReads) {
-					t.Fatalf("the V1 frame read %v (bad %v); the scanner reads %v", frameReads, f.bad, wantReads)
+				if f.err != nil || !reflect.DeepEqual(frameReads, wantReads) {
+					t.Fatalf("the V1 frame read %v (err %v); the scanner reads %v", frameReads, f.err, wantReads)
 				}
 				if got, want := len(update)-f.p, full.rest.Remaining(); got != want {
 					t.Fatalf("the V1 frame ends %d bytes before the end, the scanner %d", got, want)
@@ -182,15 +182,15 @@ func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testi
 			if d, err = newV2Decoder(update); err != nil {
 				t.Fatal(err)
 			}
-			if got, ok := v2StructCount(d, false); !ok || got != want {
-				t.Fatalf("v2StructCount = %d, %v; the scan reads %d structs", got, ok, want)
+			if got, err := v2StructCount(d, false); err != nil || got != want {
+				t.Fatalf("v2StructCount = %d, %v; the scan reads %d structs", got, err, want)
 			}
 			d, err = newV2Decoder(update)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got, ok := v2StructCount(d, true); !ok || got != want {
-				t.Fatalf("v2StructCount to the end = %d, %v; the scan reads %d structs", got, ok, want)
+			if got, err := v2StructCount(d, true); err != nil || got != want {
+				t.Fatalf("v2StructCount to the end = %d, %v; the scan reads %d structs", got, err, want)
 			}
 			walked, errWalked := decodeDeleteSetV2(d)
 			scanned, errScanned := decodeDeleteSetV2(full.v2)

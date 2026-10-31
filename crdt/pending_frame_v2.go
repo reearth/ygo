@@ -138,7 +138,7 @@ func (f *v2Frame) content(tag byte) uint64 {
 	case wireJSON, wireAny:
 		n := uintInRun(&f.d.lenDec, f)
 		if n > maxV2Items {
-			f.fail()
+			f.fail(ErrInvalidUpdate)
 			return 0
 		}
 		for i := uint64(0); i < n && f.err == nil; i++ {
@@ -170,14 +170,16 @@ func (f *v2Frame) content(tag byte) uint64 {
 		f.uint()
 		f.uint()
 	default:
-		f.fail()
+		// No update reaches this: the group walk or v2StructCount reads every tag first.
+		f.fail(ErrInvalidUpdate)
 	}
 	return 1
 }
 
-func (f *v2Frame) fail() {
+// fail stops the frame for err, unless it has stopped already.
+func (f *v2Frame) fail(err error) {
 	if f.err == nil {
-		f.err = ErrInvalidUpdate
+		f.err = err
 	}
 }
 
@@ -187,9 +189,10 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 	read := 0
 	f := v2Frame{d: d}
 	clients := f.uint()
-	// A failed read is ErrInvalidUpdate, so nothing of the decoder copy escapes
-	// through its errors.
-	if f.err != nil || clients > maxV2Items {
+	if f.err != nil {
+		return result, scanReason(f.err)
+	}
+	if clients > maxV2Items {
 		return result, ErrInvalidUpdate
 	}
 	var total uint64
@@ -213,6 +216,11 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 		depCached := false
 		for j := uint64(0); j < n && f.err == nil; j++ {
 			length, skip, deps, numDeps := f.item()
+			if f.err != nil {
+				// A struct the frame cannot read refuses the update for that
+				// reason, before any count of it.
+				break
+			}
 			end := clock + length
 			if end < clock {
 				return result, ErrInvalidUpdate
@@ -246,7 +254,7 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 			}
 			clock = end
 			read++
-			if unread := pendingUnread(structs, read, i+1 == clients, n-j-1); unread >= 0 && f.err == nil && result.pending+unread <= remaining {
+			if unread := pendingUnread(structs, read, i+1 == clients, n-j-1); unread >= 0 && result.pending+unread <= remaining {
 				return result, nil
 			}
 		}
@@ -255,7 +263,7 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 		}
 	}
 	if f.err != nil {
-		return result, ErrInvalidUpdate
+		return result, scanReason(f.err)
 	}
 	return result, nil
 }

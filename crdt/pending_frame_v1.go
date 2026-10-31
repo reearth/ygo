@@ -12,11 +12,26 @@ import (
 type v1Frame struct {
 	buf []byte
 	p   int
-	bad bool
+	// err is why the frame went bad, as the decoder names it, or nil.
+	err error
 }
 
-func (f *v1Frame) fail() {
-	f.bad, f.p = true, len(f.buf)
+// fail stops the frame for err. It keeps scanReason's value, never err, so a
+// decoder copy that err comes from stays on the stack.
+func (f *v1Frame) fail(err error) {
+	if f.err == nil {
+		f.err = scanReason(err)
+	}
+	f.p = len(f.buf)
+}
+
+// eof stops the frame for a read past the end; it is small enough for the
+// readers that call it to inline.
+func (f *v1Frame) eof() {
+	if f.err == nil {
+		f.err = encoding.ErrUnexpectedEOF
+	}
+	f.p = len(f.buf)
 }
 
 func (f *v1Frame) uint() uint64 {
@@ -29,8 +44,12 @@ func (f *v1Frame) uint() uint64 {
 
 func (f *v1Frame) uintSlow() uint64 {
 	v, n := binary.Uvarint(f.buf[f.p:])
-	if n <= 0 {
-		f.fail()
+	if n == 0 {
+		f.eof()
+		return 0
+	}
+	if n < 0 {
+		f.fail(encoding.ErrOverflow)
 		return 0
 	}
 	f.p += n
@@ -39,7 +58,7 @@ func (f *v1Frame) uintSlow() uint64 {
 
 func (f *v1Frame) byte() byte {
 	if f.p >= len(f.buf) {
-		f.fail()
+		f.eof()
 		return 0
 	}
 	b := f.buf[f.p]
@@ -51,7 +70,7 @@ func (f *v1Frame) byte() byte {
 func (f *v1Frame) bytes() []byte {
 	l := f.uint()
 	if l > uint64(len(f.buf)-f.p) {
-		f.fail()
+		f.eof()
 		return nil
 	}
 	b := f.buf[f.p : f.p+int(l)]
@@ -60,12 +79,12 @@ func (f *v1Frame) bytes() []byte {
 }
 
 func (f *v1Frame) any() {
-	if f.bad {
+	if f.err != nil {
 		return
 	}
 	n, err := anycodec.Skip(f.buf[f.p:])
 	if err != nil {
-		f.fail()
+		f.fail(err)
 		return
 	}
 	f.p += n
@@ -115,10 +134,10 @@ func (f *v1Frame) content(tag byte) uint64 {
 	case wireAny:
 		n := f.uint()
 		if n > uint64(len(f.buf)-f.p) {
-			f.fail()
+			f.fail(ErrInvalidUpdate)
 			return 0
 		}
-		for i := uint64(0); i < n && !f.bad; i++ {
+		for i := uint64(0); i < n && f.err == nil; i++ {
 			f.any()
 		}
 		return n
@@ -139,7 +158,7 @@ func (f *v1Frame) content(tag byte) uint64 {
 		f.uint()
 		f.uint()
 	default:
-		f.fail()
+		f.fail(tagError(tag, false))
 	}
 	return 1
 }
@@ -150,11 +169,11 @@ func (f *v1Frame) frameJSON() uint64 {
 	start := f.p
 	n := f.uint()
 	if n > uint64(len(f.buf)-f.p) {
-		f.fail()
+		f.fail(ErrInvalidUpdate)
 		return 0
 	}
 	if n == 0 || !isAnyTag(f.buf[f.p]) {
-		for i := uint64(0); i < n && !f.bad; i++ {
+		for i := uint64(0); i < n && f.err == nil; i++ {
 			f.bytes()
 		}
 		return n
@@ -163,7 +182,7 @@ func (f *v1Frame) frameJSON() uint64 {
 	js := pendingScanner{rest: d}
 	js.content(wireJSON)
 	if js.err != nil {
-		f.fail()
+		f.fail(js.err)
 		return 0
 	}
 	f.p = len(f.buf) - d.Remaining()
@@ -177,12 +196,15 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 	read := 0
 	f := v1Frame{buf: update}
 	clients := f.uint()
-	if f.bad || clients > maxV2Items {
+	if f.err != nil {
+		return result, f.err
+	}
+	if clients > maxV2Items {
 		return result, ErrInvalidUpdate
 	}
 	var total uint64
 	first := true
-	for i := uint64(0); i < clients && !f.bad; i++ {
+	for i := uint64(0); i < clients && f.err == nil; i++ {
 		n := f.uint()
 		total += n
 		if total > maxV2Items {
@@ -199,8 +221,13 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 		var depClient ClientID
 		var depClock uint64
 		depCached := false
-		for j := uint64(0); j < n && !f.bad; j++ {
+		for j := uint64(0); j < n && f.err == nil; j++ {
 			length, skip, deps, numDeps := f.item()
+			if f.err != nil {
+				// A struct the frame cannot read refuses the update for that
+				// reason, before any count of it.
+				break
+			}
 			end := clock + length
 			if end < clock {
 				return result, ErrInvalidUpdate
@@ -234,7 +261,7 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 			}
 			clock = end
 			read++
-			if unread := pendingUnread(structs, read, i+1 == clients, n-j-1); unread >= 0 && !f.bad && result.pending+unread <= remaining {
+			if unread := pendingUnread(structs, read, i+1 == clients, n-j-1); unread >= 0 && result.pending+unread <= remaining {
 				return result, nil
 			}
 		}
@@ -242,8 +269,8 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 			known[client] = knownClock
 		}
 	}
-	if f.bad {
-		return result, ErrInvalidUpdate
+	if f.err != nil {
+		return result, f.err
 	}
 	return result, nil
 }

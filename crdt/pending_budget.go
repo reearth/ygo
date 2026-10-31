@@ -118,9 +118,6 @@ func (b *pendingBudget) check() error {
 			result.pending += bounded.permanent
 		}
 		if err != nil {
-			if err == ErrInvalidUpdate {
-				return err
-			}
 			return wrapUpdateErr(err)
 		}
 		if result.pending <= b.remaining {
@@ -789,7 +786,7 @@ func (s *pendingScanner) content(tag byte) uint64 {
 		s.uint()
 		s.uint()
 	default:
-		s.err = ErrInvalidUpdate
+		s.err = tagError(tag, s.v2 != nil)
 	}
 	return 1
 }

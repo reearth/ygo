@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
@@ -14,13 +15,52 @@ func (s groupSet) has(i uint64) bool {
 	return w < uint64(len(s)) && s[w]&(1<<(i%64)) != 0
 }
 
+// scanReason is why a scan stopped for err, as the decoder names it: the
+// decoder error value that err is, unknownTagErr for a contentTagError, or
+// ErrInvalidUpdate. It returns only package values or a new error, never its
+// argument, so a scanner's decoder copies stay on the stack.
+func scanReason(err error) error {
+	if t, ok := err.(contentTagError); ok {
+		return unknownTagErr(t&v2TagError != 0, byte(t))
+	}
+	for _, reason := range [...]error{encoding.ErrUnexpectedEOF, encoding.ErrOverflow, encoding.ErrUnknownTag, encoding.ErrInvalidUTF8, encoding.ErrDepthExceeded} {
+		if err == reason {
+			return reason
+		}
+	}
+	return ErrInvalidUpdate
+}
+
+// unknownTagErr is the decoders' error for an unknown content tag.
+func unknownTagErr(v2 bool, tag byte) error {
+	if v2 {
+		return fmt.Errorf("unknown V2 content tag: %d", tag)
+	}
+	return fmt.Errorf("unknown content tag: %d", tag)
+}
+
+// contentTagError is a scan's error for an unknown content tag: the tag, with
+// v2TagError set in a V2 update. It holds no reference into the scanner.
+type contentTagError uint16
+
+const v2TagError contentTagError = 1 << 8
+
+func tagError(tag byte, v2 bool) contentTagError {
+	if v2 {
+		return v2TagError | contentTagError(tag)
+	}
+	return contentTagError(tag)
+}
+
+func (t contentTagError) Error() string { return unknownTagErr(t&v2TagError != 0, byte(t)).Error() }
+
 // supersededGroups marks wire groups that a later group for the same client
 // replaces, since Yjs integrates only the last, and counts the update's
 // structs.
 func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set groupSet, structs int, err error) {
-	ordered, n, total, ok := scanGroupClients(update, v2, rest, nil)
-	if !ok {
-		return nil, 0, ErrInvalidUpdate
+	ordered, n, total, err := scanGroupClients(update, v2, rest, nil)
+	if err != nil {
+		return nil, 0, err
 	}
 	if ordered {
 		return nil, int(total), nil
@@ -30,10 +70,10 @@ func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set 
 		index  uint32
 	}
 	entries := make([]entry, 0, n)
-	if _, _, _, ok := scanGroupClients(update, v2, rest, func(i uint64, client ClientID) {
+	if _, _, _, err := scanGroupClients(update, v2, rest, func(i uint64, client ClientID) {
 		entries = append(entries, entry{client, uint32(i)})
-	}); !ok {
-		return nil, 0, ErrInvalidUpdate
+	}); err != nil {
+		return nil, 0, err
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].client != entries[j].client {
@@ -53,9 +93,9 @@ func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set 
 }
 
 // scanGroupClients walks every group header and struct, reporting whether the
-// clients are strictly monotonic and the struct count, and returns ok rather
-// than an error to keep the decoder copies on the stack.
-func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit func(uint64, ClientID)) (ordered bool, groups, structs uint64, ok bool) {
+// clients are strictly monotonic and the struct count. Its error holds no
+// reference to the decoder copies.
+func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit func(uint64, ClientID)) (ordered bool, groups, structs uint64, err error) {
 	s := pendingScanner{frame: true}
 	if v2 == nil {
 		rest = *encoding.NewDecoder(update)
@@ -68,7 +108,7 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 	}
 	n := s.uint()
 	if n > maxV2Items {
-		return false, 0, 0, false
+		return false, 0, 0, ErrInvalidUpdate
 	}
 	ordered = true
 	var previous ClientID
@@ -78,7 +118,7 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 		items := s.uint()
 		total += items
 		if total > maxV2Items {
-			return false, 0, 0, false
+			return false, 0, 0, ErrInvalidUpdate
 		}
 		client := s.client()
 		s.uint()
@@ -100,5 +140,8 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 			s.item()
 		}
 	}
-	return ordered, n, total, s.err == nil
+	if s.err != nil {
+		return false, 0, 0, scanReason(s.err)
+	}
+	return ordered, n, total, nil
 }
