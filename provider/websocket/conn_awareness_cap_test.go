@@ -505,6 +505,7 @@ func TestConnAwarenessCap_DroppedStatesReachNoPeer(t *testing.T) {
 		{"not an object", `[1]`, 0},
 		{"too many keys", "{" + strings.Join(keys, ",") + "}", 0},
 		{"over the byte cap", `{"pad":"` + strings.Repeat("x", 64) + `"}`, 48},
+		{"empty", "", 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -529,6 +530,21 @@ func TestConnAwarenessCap_DroppedStatesReachNoPeer(t *testing.T) {
 			require.Equal(t, map[uint64]bool{cursor: true}, readAwarenessIDs(t, observer))
 		})
 	}
+}
+
+// A removal spelled as an empty state frees the slot, so peers must be told it
+// as a null: y-protocols fails to parse an empty state and keeps the client.
+func TestConnAwarenessCap_EmptyStateRemovalReachesPeersAsNull(t *testing.T) {
+	_, ts := newConnCapServer(t, 2)
+	sender := dialRoomInternal(t, ts, "room")
+	observer := dialRoomInternal(t, ts, "room")
+	drainHandshakeFrames(t, observer)
+
+	const id = 100
+	sendAwFrame(t, sender, awFrame(liveEntry(id, 1)))
+	require.Equal(t, map[uint64]bool{id: true}, readAwarenessIDs(t, observer))
+	sendAwFrame(t, sender, awFrame(awEntry{id, 2, ""}))
+	require.Equal(t, map[uint64]string{id: "null"}, readAwarenessStates(t, observer))
 }
 
 // The gate is on by default: an unset cap is 64, not unlimited and not zero.

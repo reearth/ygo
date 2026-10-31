@@ -44,8 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Admit` vets each entry, with the lock held, given whether the client is live
   before and after it. The `ApplyResult` it returns lists the clients applied
   and whether any entry was refused or not applied as sent.
-  `SetMaxForeignClients` sets the sub-cap,
-  which counts live entries only.
+  `SetMaxForeignClients` sets the sub-cap, which counts live entries only.
 
 ### Changed
 
@@ -68,7 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the room applied it exactly as sent.** Otherwise they get the room's
   state for the clients it applied. Previously the frame was always forwarded
   whole, so peers rendered presence the room had refused, discarded as stale,
-  or dropped as invalid.
+  or dropped as invalid. This also stops re-broadcasting the equal-clock
+  echoes y-websocket clients send of every update they apply, which made each
+  awareness change cost about N² frames in a room of N clients instead of N.
 
 ## [1.54.0] — 2026-10-22
 

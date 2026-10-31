@@ -37,12 +37,12 @@ With the gate on, peers can no longer claim client ID `0`, the room's own
 awareness client: no removal from the wire could retire it, so it stayed until
 the room was evicted. Disconnect behaviour also narrows. A connection's
 departure removes the awareness IDs it introduced and has not itself removed,
-where before it removed every ID the connection had ever named in a frame. Presence a
-connection only updated — an ID another connection or the relay introduced —
-stays with whoever introduced it until that owner leaves, `AwarenessExpiry`
-sweeps it, or the room is evicted. Set `AwarenessExpiry` if your clients take
+where before it removed every ID the connection had ever named in a frame.
+Presence a connection only updated — an ID another connection or the relay
+introduced — stays with whoever introduced it until that owner leaves,
+`AwarenessExpiry` sweeps it, or the room is evicted. Set `AwarenessExpiry` if your clients take
 over each other's IDs. Disabling the gate with a negative value keeps the old
-tracking ceiling, but tracks only the IDs that entries the room applied name.
+tracking ceiling, but tracks only IDs named by entries the room applied.
 
 **Who is affected: servers that set `MaxAwarenessClientsPerRoom`.**
 
@@ -85,7 +85,9 @@ refusal as a delivery failure.
 Local peers now receive an awareness frame as sent only when the room applied
 it exactly; otherwise they get the room's state for the clients it applied, so
 presence the room refused, discarded as stale or dropped as invalid no longer
-reaches them.
+reaches them. It also stops the server re-broadcasting the equal-clock echoes
+y-websocket clients send of every awareness update they apply, so an update
+costs about N frames in a room of N clients rather than N².
 
 New exported API in `awareness`: `Awareness.ApplyUpdateWith` with
 `ApplyOptions`, `AdmitEntry` and `ApplyResult`, which the server uses for both

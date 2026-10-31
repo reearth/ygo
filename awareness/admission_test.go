@@ -236,6 +236,9 @@ func TestApplyUpdateWith_AlteredReportsEntriesNotTakenAsSent(t *testing.T) {
 		{"stale", rawEntry{1, 4, `{}`}, true},
 		{"equal clock", rawEntry{1, 5, `{"x":1}`}, true},
 		{"not an object", rawEntry{2, 1, `[1]`}, true},
+		{"empty state for a live client", rawEntry{1, 6, ""}, true},
+		{"null for a live client", rawEntry{1, 6, "null"}, false},
+		{"null for an unseen client", rawEntry{2, 1, "null"}, true},
 		{"null for the local client", rawEntry{0, 9, "null"}, true},
 	}
 	for _, c := range cases {

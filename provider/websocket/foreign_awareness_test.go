@@ -152,6 +152,17 @@ func TestForeignAwareness_RefusedPresenceReachesNoPeer(t *testing.T) {
 // the client IDs it names.
 func readAwarenessIDs(t *testing.T, conn *gws.Conn) map[uint64]bool {
 	t.Helper()
+	ids := map[uint64]bool{}
+	for id := range readAwarenessStates(t, conn) {
+		ids[id] = true
+	}
+	return ids
+}
+
+// readAwarenessStates reads frames until an awareness update arrives and
+// returns each client's raw state as sent.
+func readAwarenessStates(t *testing.T, conn *gws.Conn) map[uint64]string {
+	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 	for {
@@ -168,16 +179,16 @@ func readAwarenessIDs(t *testing.T, conn *gws.Conn) map[uint64]bool {
 		dec = encoding.NewDecoder(payload)
 		n, err := dec.ReadVarUint()
 		require.NoError(t, err)
-		ids := map[uint64]bool{}
+		states := map[uint64]string{}
 		for i := uint64(0); i < n; i++ {
 			id, err := dec.ReadVarUint()
 			require.NoError(t, err)
 			_, err = dec.ReadVarUint()
 			require.NoError(t, err)
-			_, err = dec.ReadVarString()
+			state, err := dec.ReadVarString()
 			require.NoError(t, err)
-			ids[id] = true
+			states[id] = state
 		}
-		return ids
+		return states
 	}
 }

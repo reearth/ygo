@@ -596,9 +596,10 @@ type ApplyResult struct {
 	// Refused reports whether a cap or Admit refused any entry.
 	Refused bool
 	// Altered reports whether any other entry was not applied as sent: it was
-	// discarded as stale, its state was dropped as invalid or over a cap, or
-	// it was a null for the local client. When neither this nor Refused is
-	// set, the room holds exactly what the update says.
+	// discarded as stale, its state was dropped as invalid or over a cap, it
+	// removed a client that was not live or was not spelled null, or it was a
+	// null for the local client. When neither this nor Refused is set, every
+	// entry is a live state the room now holds or a null that retired one.
 	Altered bool
 }
 
@@ -794,7 +795,9 @@ func (a *Awareness) applyUpdate(update []byte, origin any, opts ApplyOptions, re
 		if reclaim {
 			a.reclaimOldestTombstone()
 		}
-		if isNull && !isNullEntry {
+		// Only a literal null retiring a live client is taken as sent: peers
+		// parse "" as an error, not a removal.
+		if isNull && (!wasActive || string(e.jsonBytes) != "null") {
 			altered = true
 		}
 
