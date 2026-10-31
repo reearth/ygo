@@ -1,3 +1,17 @@
+## v1.55.1
+
+**Who is affected: anyone who calls `Observe` or `ObserveDeep` on a nested
+type, or `ObserveDeep` on a type that contains nested types.**
+
+A write into a nested type after it was deleted, or in the transaction that
+deleted it, called that type's observers and the deep observers of its
+ancestors. A peer's write that it made before it saw the deletion did this
+when GC is off. Deleting a nested type that had children also called its own
+`Observe` and `ObserveDeep`. These observers now get no call, as in Yjs. Code
+that relied on these calls to see that a type was deleted must use the
+observers of its nearest live ancestor, the type that lost the entry, which
+still fire for the deletion. No API or wire format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
