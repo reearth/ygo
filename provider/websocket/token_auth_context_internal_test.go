@@ -48,6 +48,14 @@ func sendToken(t *testing.T, c *gws.Conn, room, token string) {
 	})))
 }
 
+// frameTag returns a frame's outer tag and a decoder positioned after it.
+func frameTag(data []byte) (uint64, *encoding.Decoder) {
+	dec := encoding.NewDecoder(data)
+	_, _ = dec.ReadVarString() // docName
+	tag, _ := dec.ReadVarUint()
+	return tag, dec
+}
+
 // readTag reads c until a frame with the given outer tag, and returns a
 // decoder positioned after the tag, or the read error.
 func readTag(t *testing.T, c *gws.Conn, tag uint64) (*encoding.Decoder, error) {
@@ -58,9 +66,7 @@ func readTag(t *testing.T, c *gws.Conn, tag uint64) (*encoding.Decoder, error) {
 		if err != nil {
 			return nil, err
 		}
-		dec := encoding.NewDecoder(data)
-		_, _ = dec.ReadVarString() // docName
-		if got, _ := dec.ReadVarUint(); got == tag {
+		if got, dec := frameTag(data); got == tag {
 			return dec, nil
 		}
 	}
@@ -81,8 +87,9 @@ func readAuthReply(t *testing.T, c *gws.Conn) (uint64, string, error) {
 
 // sendWrite sends an update that sets key in the "writes" map, then waits for
 // the reply to a QueryAwareness sent after it, so the server has handled the
-// update when it returns.
-func sendWrite(t *testing.T, c *gws.Conn, room, key string, client crdt.ClientID) {
+// update when it returns. It returns the text of each Auth reply c read
+// before that reply.
+func sendWrite(t *testing.T, c *gws.Conn, room, key string, client crdt.ClientID) []string {
 	t.Helper()
 	doc := crdt.New(crdt.WithClientID(client))
 	m := doc.GetMap("writes")
@@ -96,8 +103,20 @@ func sendWrite(t *testing.T, c *gws.Conn, room, key string, client crdt.ClientID
 		enc.WriteVarString(room)
 		enc.WriteVarUint(msgQueryAwareness)
 	})))
-	_, err := readTag(t, c, msgAwareness)
-	require.NoError(t, err)
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(2*time.Second)))
+	var authReplies []string
+	for {
+		_, data, err := c.ReadMessage()
+		require.NoError(t, err)
+		switch tag, dec := frameTag(data); tag {
+		case msgAwareness:
+			return authReplies
+		case msgAuth:
+			_, _ = dec.ReadVarUint() // sub-type
+			text, _ := dec.ReadVarString()
+			authReplies = append(authReplies, text)
+		}
+	}
 }
 
 // Two connections to one room send the same token, the revoked one after the
@@ -132,9 +151,64 @@ func TestUnit_Server_OnTokenAuthContext_ALateTokenIsAnsweredOnItsOwnConnection(t
 	require.Equal(t, "readonly", scope)
 
 	sendWrite(t, revoked, room, "revoked", 11)
-	sendWrite(t, live, room, "live", 12)
+	assert.Empty(t, sendWrite(t, live, room, "live", 12),
+		"late auth reply crossed sockets: the live connection got another connection's answer")
 	assert.ElementsMatch(t, []string{"live"}, srv.GetDoc(room).GetMap("writes").Keys(),
 		"only the live connection's write reaches the room")
+}
+
+// A late answer reaches only the connection that asked, not a replacement in
+// the room that sent the same token (a reply-broadcast overlay fails here).
+func TestUnit_Server_OnTokenAuthContext_ALateAnswerDoesNotReachAReplacement(t *testing.T) {
+	const room, token = "r1", "shared-token"
+	oldAsked, release := make(chan struct{}), make(chan struct{})
+	srv := NewServer()
+	srv.HocuspocusFraming = true
+	srv.OnTokenAuthContext = func(ctx context.Context, gotRoom, gotToken string) (ConnectionConfig, error) {
+		if gotRoom != room || gotToken != token {
+			return ConnectionConfig{}, errors.New("unexpected room or token")
+		}
+		if ctx.Value(connectionKey{}) != "old" {
+			return ConnectionConfig{}, nil
+		}
+		close(oldAsked)
+		select { // bounded, as the hook's doc asks
+		case <-release: // the embedder revoked the old connection
+			return ConnectionConfig{ReadOnly: true}, nil
+		case <-time.After(5 * time.Second):
+			return ConnectionConfig{}, errors.New("the test never released the hook")
+		}
+	}
+	ts := serveNamed(t, srv)
+
+	old := dialRoomInternal(t, ts, room+"?name=old")
+	sendToken(t, old, room, token)
+	select {
+	case <-oldAsked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no hook call carried the old connection's context")
+	}
+
+	replacement := dialRoomInternal(t, ts, room+"?name=replacement")
+	sendToken(t, replacement, room, token)
+	sub, scope, err := readAuthReply(t, replacement)
+	require.NoError(t, err)
+	require.Equal(t, authTypeAuthenticated, sub)
+	require.Equal(t, "read-write", scope)
+
+	close(release)
+	sub, scope, err = readAuthReply(t, old)
+	require.NoError(t, err, "the old connection got no answer to its token; it may have gone to another connection")
+	require.Equal(t, authTypeAuthenticated, sub)
+	require.Equal(t, "readonly", scope)
+	// The old connection's read loop handles this write after the late
+	// answer, so the answer is complete when sendWrite returns.
+	sendWrite(t, old, room, "old", 11)
+
+	assert.Empty(t, sendWrite(t, replacement, room, "replacement", 12),
+		"late auth reply crossed sockets: the replacement got another connection's answer")
+	assert.ElementsMatch(t, []string{"replacement"}, srv.GetDoc(room).GetMap("writes").Keys(),
+		"only the replacement's write reaches the room")
 }
 
 // OnTokenAuthContext is called in place of OnTokenAuth when both are set.

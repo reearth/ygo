@@ -999,11 +999,15 @@ type Server struct {
 
 	// OnTokenAuthContext is OnTokenAuth with the context of the request
 	// ServeHTTP served the connection on (r.Context(), with the values the
-	// embedder put on it), so the hook knows which connection sent the token:
-	// two connections to one room can send the same token. It has OnTokenAuth's
-	// contract, and takes precedence over it when both are set. The hook runs
-	// on the connection's read loop, so neither a client disconnect nor
-	// Shutdown cancels ctx while it runs: bound any wait in the hook.
+	// embedder put on it). Nothing on ctx names the connection unless the
+	// embedder puts it there: to tell apart two connections to one room that
+	// send the same token, put a connection key on r.Context() before
+	// ServeHTTP, and keep any per-connection state under that key. It has
+	// OnTokenAuth's contract, and takes precedence over it when both are set.
+	// The hook runs on the connection's read loop, before ServeHTTP returns.
+	// Neither a client disconnect nor Shutdown cancels ctx while it runs, only
+	// a cancel the embedder put on r.Context() does: bound any wait in the
+	// hook.
 	OnTokenAuthContext func(ctx context.Context, room, token string) (ConnectionConfig, error)
 
 	// OnLoadDocument, if non-nil, is called once per room immediately
@@ -2144,9 +2148,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = ws.Close() // close errors during teardown are expected; not logged
 	}()
 
-	// Close the WebSocket when the HTTP request context is cancelled
-	// (e.g. graceful server shutdown via Shutdown, or client disconnect
-	// detected by the HTTP layer). This unblocks the read loop below.
+	// Close the WebSocket when the embedder cancels the request context, or on
+	// Shutdown (shutdownCh). This unblocks the read loop below. net/http does
+	// not cancel the context of a hijacked connection before ServeHTTP returns.
 	ctx := r.Context()
 	go func() {
 		select {

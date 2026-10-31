@@ -30,10 +30,11 @@
 // "read-write" or "readonly" scope, per the returned ConnectionConfig); a
 // non-nil error replies PermissionDenied and closes the connection with the
 // Hocuspocus 4401 code. Set Server.OnTokenAuthContext instead when the hook
-// needs the connection's request context, to tell apart two connections that
-// send the same token. When both are nil (the default), Auth (tag 2)
-// frames are ignored — the legacy y-websocket behavior, preserved for
-// backward compatibility with clients that never send them.
+// needs the connection's request context: with a key the embedder puts on it,
+// the hook can tell apart two connections that send the same token. When both
+// are nil (the default), Auth (tag 2) frames are ignored — the legacy
+// y-websocket behavior, preserved for backward compatibility with clients
+// that never send them.
 //
 // Set Server.HocuspocusFraming to true to additionally read and write the
 // Hocuspocus docName-prefixed wire framing (VarString(docName) + frame),
