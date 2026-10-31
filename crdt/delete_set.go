@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"cmp"
+	"math"
 	"slices"
 	"sort"
 )
@@ -135,19 +136,16 @@ func (ds *DeleteSet) orderedClients() []ClientID {
 	return append(out, rest...)
 }
 
-// retryPendingDs reapplies the store's parked deletions in the order Yjs
-// re-reads its encoded pending delete set: clients descending, ranges sorted.
+// retryPendingDs reapplies the parked deletions that can now apply, in the
+// order Yjs re-reads its pending delete set.
 func retryPendingDs(txn *Transaction) {
 	store := txn.doc.store
-	pending := store.pendingDs
-	store.pendingDs = newDeleteSet()
-	pending.order = make([]ClientID, 0, len(pending.clients))
-	for c := range pending.clients {
-		pending.order = append(pending.order, c)
-		pending.sortAndCompact(c)
+	ready := store.takeReadyDeletes()
+	if ready.clients == nil {
+		return
 	}
-	slices.SortFunc(pending.order, func(a, b ClientID) int { return cmp.Compare(b, a) })
-	store.pendingDs = pending.applyToPartial(txn)
+	slices.SortFunc(ready.order, func(a, b ClientID) int { return cmp.Compare(b, a) })
+	store.parkDeletes(ready.applyToPartial(txn))
 }
 
 // applyToPartial applies delete-set entries whose target items are
@@ -242,4 +240,215 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 		}
 	}
 	return unresolvable
+}
+
+// checkParkedDeletes refuses, before anything changes, an update whose delete
+// set would grow the parked ranges past WithMaxPendingItems.
+func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
+	limit := doc.maxPendingItemsLimit()
+	pending := doc.store.pendingDs
+	before := doc.store.pendingDsRanges
+	room := max(limit-before, 0)
+	// A delete range takes at least 2 bytes, a clock and a length, so a delete
+	// set read from at most twice the room in bytes cannot park past it.
+	if b.deleteSetLimit()/2 <= room {
+		return nil
+	}
+	if err := b.walkGroups(); err != nil {
+		return wrapUpdateErr(err)
+	}
+	if n, err := parkingRangesBound(b.deleteSetScanner(), b.initial); err != nil {
+		return wrapUpdateErr(err)
+	} else if n <= room {
+		return nil
+	}
+	ds, err := deleteSetOf(b)
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+	clocks, err := structClocksOf(b)
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+	after := parkedDeleteRangesAfter(pending, before, b.initial, clocks, parkedPartsOf(ds, clocks))
+	if after <= limit || after <= before {
+		return nil
+	}
+	return ErrInvalidUpdate
+}
+
+// deleteSetOf reads the delete set of b's V1 or V2 update, where the walk of
+// its structs found it.
+func deleteSetOf(b *pendingBudget) (DeleteSet, error) {
+	if err := b.walkGroups(); err != nil {
+		return DeleteSet{}, err
+	}
+	s := b.deleteSetScanner()
+	if b.v2 {
+		return decodeDeleteSetV2(s.v2)
+	}
+	return decodeDeleteSet(s.rest)
+}
+
+// parkingRangesBound counts, without allocating, the ranges of the delete set s
+// stands at that would park on a store at sv, an upper bound on what the update
+// parks.
+func parkingRangesBound(s *pendingScanner, sv StateVector) (int, error) {
+	clients := s.uint()
+	if s.err != nil {
+		return 0, s.err
+	}
+	if clients > maxV2Items {
+		return 0, ErrInvalidUpdate
+	}
+	n := 0
+	for range clients {
+		var clock, length uint64
+		var err error
+		if s.v2 != nil {
+			s.v2.resetDsCurVal()
+		}
+		client := ClientID(s.uint())
+		ranges := s.uint()
+		if s.err != nil {
+			return 0, s.err
+		}
+		if ranges > maxV2Items {
+			return 0, ErrInvalidUpdate
+		}
+		next := sv.Clock(client)
+		for range ranges {
+			if s.v2 != nil {
+				if clock, err = s.v2.readDsClock(); err == nil {
+					length, err = s.v2.readDsLen()
+				}
+			} else {
+				clock, length = s.uint(), s.uint()
+				err = s.err
+			}
+			if err != nil {
+				return 0, err
+			}
+			if _, parks := parkedPart(DeleteRange{Clock: clock, Len: length}, next); parks {
+				n++
+			}
+		}
+	}
+	return n, nil
+}
+
+// structClocksOf is the store's state vector once b's update structs are in,
+// leaving out earlier parked items so the count it feeds can only be high.
+func structClocksOf(b *pendingBudget) (StateVector, error) {
+	if err := b.knowSuperseded(); err != nil {
+		return nil, err
+	}
+	known := make(StateVector, len(b.initial))
+	for client, clock := range b.initial {
+		known[client] = clock
+	}
+	sizing := pendingCollector{}
+	if _, err := scanPendingGroupsBounded(b.scanner(), known, math.MaxInt, &sizing, nil, nil, b.superseded); err != nil {
+		return nil, err
+	}
+	if sizing.heads == 0 {
+		return known, nil
+	}
+	collect := pendingCollector{fill: true, groups: make([]pendingGroup, 0, sizing.heads), sum: make([]byte, 0, sizing.size)}
+	if _, err := scanPendingGroupsBounded(b.scanner(), known, math.MaxInt, &collect, nil, nil, b.superseded); err != nil {
+		return nil, err
+	}
+	if len(collect.groups) > 0 {
+		resolvePendingGroups(collect.groups, collect.sum, known)
+	}
+	return known, nil
+}
+
+// parkedPartsOf is what applyToPartial parks of ds on a store at clocks.
+func parkedPartsOf(ds DeleteSet, clocks StateVector) DeleteSet {
+	parked := newDeleteSet()
+	for client, ranges := range ds.clients {
+		if parts := cutParked(ranges, clocks.Clock(client)); len(parts) > 0 {
+			parked.clients[client] = parts
+		}
+	}
+	return parked
+}
+
+// parkedPart is the part of r that applyToPartial parks when r's client is held
+// up to next.
+func parkedPart(r DeleteRange, next uint64) (DeleteRange, bool) {
+	end := r.Clock + r.Len
+	switch {
+	case r.Len == 0:
+		return DeleteRange{}, false
+	case next == 0, end < r.Clock:
+		return r, true
+	case end <= next:
+		return DeleteRange{}, false
+	}
+	start := max(r.Clock, next)
+	return DeleteRange{Clock: start, Len: end - start}, true
+}
+
+// parkedDeleteRangesAfter is how many ranges pending holds after an update
+// moves the clocks from initial to clocks and parks parked, recounting only the
+// clients it touches.
+func parkedDeleteRangesAfter(pending DeleteSet, before int, initial, clocks StateVector, parked DeleteSet) int {
+	after := before
+	count := func(client ClientID) {
+		have := pending.clients[client]
+		if next := clocks.Clock(client); next != initial.Clock(client) {
+			have = cutParked(have, next)
+		}
+		after += mergedRangeCount(have, parked.clients[client]) - len(pending.clients[client])
+	}
+	for client := range parked.clients {
+		count(client)
+	}
+	for client, clock := range clocks {
+		if _, counted := parked.clients[client]; !counted && clock != initial.Clock(client) && len(pending.clients[client]) > 0 {
+			count(client)
+		}
+	}
+	return after
+}
+
+// cutParked is what the retry leaves of a client's parked ranges once the store
+// holds it up to next.
+func cutParked(ranges []DeleteRange, next uint64) []DeleteRange {
+	var kept []DeleteRange
+	for _, r := range ranges {
+		if part, parks := parkedPart(r, next); parks {
+			kept = append(kept, part)
+		}
+	}
+	return kept
+}
+
+// mergedRangeCount is how many ranges sortAndCompact leaves of have and add,
+// computed on copies so neither changes.
+func mergedRangeCount(have, add []DeleteRange) int {
+	byClock := func(a, b DeleteRange) int { return cmp.Compare(a.Clock, b.Clock) }
+	have, add = slices.Clone(have), slices.Clone(add)
+	slices.SortFunc(have, byClock)
+	slices.SortFunc(add, byClock)
+	count, end := 0, uint64(0)
+	for i, j := 0, 0; i < len(have) || j < len(add); {
+		var r DeleteRange
+		if j == len(add) || (i < len(have) && have[i].Clock <= add[j].Clock) {
+			r = have[i]
+			i++
+		} else {
+			r = add[j]
+			j++
+		}
+		if count > 0 && end >= r.Clock {
+			end = max(end, r.Clock+r.Len)
+			continue
+		}
+		count++
+		end = r.Clock + r.Len
+	}
+	return count
 }

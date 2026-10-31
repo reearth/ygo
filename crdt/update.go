@@ -559,6 +559,12 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 
 	// Snapshot state vector before applying anything (used for skip/offset logic).
 	sv := txn.doc.store.StateVector()
+	budget := newPendingBudget(txn.doc, sv, update, false)
+	if err := checkParkedDeletes(txn.doc, &budget); err != nil {
+		// Refused before anything changed: the commit tells no observer.
+		txn.refused = true
+		return err
+	}
 
 	numClients, err := dec.ReadVarUint()
 	if err != nil {
@@ -571,7 +577,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	// 1. Decode all items, parking any with future-clock deps or same-client gaps.
 	//    Returns the within-update pending list (items whose parent might resolve
 	//    later in this same update).
-	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, update)
+	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, &budget)
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
@@ -585,9 +591,8 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	unresolvableDs := ds.applyToPartial(txn)
-	if len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
+	if unresolvableDs := ds.applyToPartial(txn); len(unresolvableDs.clients) > 0 {
+		txn.doc.store.parkDeletes(unresolvableDs)
 	}
 
 	drainPending(txn)
@@ -605,21 +610,20 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 //	(e) collects items whose parent is unresolved-but-might-be-in-this-update
 //	    into the returned slice for the within-update retry pass.
 //
-// Groups that a later group for the same client supersedes are decoded and
-// dropped (yjs parity). numClients is the count parsed from the header.
-func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, update []byte) ([]*Item, error) {
+// Groups a later group for the same client supersedes are decoded and dropped
+// (yjs parity), using the superseded groups budget may already know.
+func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, budget *pendingBudget) ([]*Item, error) {
 	var pending []*Item
-	budget := newPendingBudget(txn.doc, sv, update, false)
-	var superseded groupSet
 	if numClients > 1 {
 		// Fail before integrating anything: a later malformed group must not
 		// leave earlier, superseded groups applied.
-		var err error
-		if superseded, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
+		if err := budget.knowSuperseded(); err != nil {
 			return nil, err
 		}
+	} else if !budget.groupsKnown {
+		budget.setSuperseded(nil)
 	}
-	budget.setSuperseded(superseded)
+	superseded := budget.superseded
 
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
@@ -1175,7 +1179,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentMove(target, int(targetLen)), nil
 
 	default:
-		return nil, fmt.Errorf("unknown content tag: %d", tag)
+		return nil, unknownTagErr(false, tag)
 	}
 }
 
@@ -1300,9 +1304,11 @@ func clientsSorted[T any](m map[ClientID]T) []ClientID {
 	return out
 }
 
+// wrapUpdateErr names err as an invalid update once: an error that already is
+// one is returned as it is.
 func wrapUpdateErr(err error) error {
-	if err == nil {
-		return nil
+	if err == nil || errors.Is(err, ErrInvalidUpdate) {
+		return err
 	}
 	return fmt.Errorf("%w: %v", ErrInvalidUpdate, err)
 }

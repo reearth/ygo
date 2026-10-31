@@ -1209,10 +1209,8 @@ type Server struct {
 	// crdt.MergeUpdatesV1). Tests inject a failing merge to exercise fallback.
 	mergeFn func(...[]byte) ([]byte, error)
 
-	// MaxPendingItems caps the per-document pending-items queue depth. The
-	// queue holds items whose dependencies have not yet arrived, waiting for
-	// out-of-order delivery to resolve. Zero or negative uses the crdt default
-	// (100,000). See crdt.WithMaxPendingItems and issue #46.
+	// MaxPendingItems caps each document's parked items and, separately, parked
+	// delete ranges (crdt.WithMaxPendingItems).
 	MaxPendingItems int
 
 	// HandshakeTimeout caps how long a peer may stay connected without sending
@@ -1733,10 +1731,8 @@ func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	if s.MaxRooms > 0 && len(s.rooms) >= s.MaxRooms {
 		return nil, false, ErrTooManyRooms
 	}
-	docOpts := []crdt.DocOption{}
-	if s.MaxPendingItems > 0 {
-		docOpts = append(docOpts, crdt.WithMaxPendingItems(s.MaxPendingItems))
-	}
+	// The pending cap stays lifted until loadRoom has loaded the stored state.
+	docOpts := []crdt.DocOption{crdt.WithMaxPendingItems(math.MaxInt)}
 	aw := awareness.New(0)
 	if s.MaxAwarenessBytesPerRoom > 0 {
 		aw.SetMaxBytes(s.MaxAwarenessBytesPerRoom)
@@ -1801,6 +1797,8 @@ func (s *Server) releaseInflight(rm *room) {
 // leak that administrative CloseRoom cannot even clear (#182 follow-up).
 func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 	loadErr := s.loadRoomDoc(r, name)
+	// Cap only after the stored state is in, since it can hold more than the cap.
+	r.doc.SetMaxPendingItems(s.MaxPendingItems)
 	// #60 — fire OnLoadDocument AFTER persistence bootstrap but BEFORE the
 	// persistence worker starts, so a hook returning an error fails room creation
 	// cleanly. Runs off-lock now (#182), so a slow hook no longer stalls other

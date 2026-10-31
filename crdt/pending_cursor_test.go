@@ -367,6 +367,11 @@ func TestUnit_PendingBudget_SupersededKeepsClientOrder(t *testing.T) {
 // Preserve wire order and duplicate client groups in both formats. skips
 // inserts a skip of the given length after a group's first struct.
 func pendingGuardUpdate(source *Doc, groups [][]*Item, skips map[int]uint64, version int) []byte {
+	return groupsUpdate(source, groups, skips, newDeleteSet(), version)
+}
+
+// groupsUpdate is pendingGuardUpdate with the delete set ds.
+func groupsUpdate(source *Doc, groups [][]*Item, skips map[int]uint64, ds DeleteSet, version int) []byte {
 	enc := encoding.NewEncoder()
 	var v2 *v2Encoder
 	if version == 2 {
@@ -403,9 +408,9 @@ func pendingGuardUpdate(source *Doc, groups [][]*Item, skips map[int]uint64, ver
 		}
 	}
 	if v2 != nil {
-		encodeDeleteSetV2(v2, newDeleteSet())
+		encodeDeleteSetV2(v2, ds)
 		return v2.toBytes()
 	}
-	encodeDeleteSet(enc, newDeleteSet())
+	encodeDeleteSet(enc, ds)
 	return enc.Bytes()
 }

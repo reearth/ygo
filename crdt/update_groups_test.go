@@ -63,7 +63,7 @@ func TestUnit_SupersededGroups_MatchLastGroupPerClient(t *testing.T) {
 					require.NoError(t, err)
 					rest = *v2.restDec
 				}
-				set, err := supersededGroups(update, v2, rest)
+				set, _, err := supersededGroups(update, v2, rest)
 				require.NoError(t, err)
 				last := map[ClientID]int{}
 				for i, c := range clients {

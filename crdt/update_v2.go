@@ -622,6 +622,11 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	budget := newPendingBudget(txn.doc, sv, update, true)
 	budget.v2Start = &initialV2
 	budget.v2Rest = *dec.restDec
+	if err := checkParkedDeletes(txn.doc, &budget); err != nil {
+		// Refused before anything changed: the commit tells no observer.
+		txn.refused = true
+		return err
+	}
 
 	numClients, err := dec.restDec.ReadVarUint()
 	if err != nil {
@@ -634,15 +639,16 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 
 	var pending []*Item
-	var superseded groupSet
 	if numClients > 1 {
 		// Fail before integrating anything: a later malformed group must not
 		// leave earlier, superseded groups applied.
-		if superseded, err = supersededGroups(update, &initialV2, budget.v2Rest); err != nil {
+		if err := budget.knowSuperseded(); err != nil {
 			return wrapUpdateErr(err)
 		}
+	} else if !budget.groupsKnown {
+		budget.setSuperseded(nil)
 	}
-	budget.setSuperseded(superseded)
+	superseded := budget.superseded
 
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
@@ -828,9 +834,8 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	unresolvableDs := ds.applyToPartial(txn)
-	if len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
+	if unresolvableDs := ds.applyToPartial(txn); len(unresolvableDs.clients) > 0 {
+		txn.doc.store.parkDeletes(unresolvableDs)
 	}
 
 	// pendingDs may be drainable even if pending items aren't — integrated
@@ -1138,7 +1143,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentMove(target, int(targetLen)), nil
 
 	default:
-		return nil, fmt.Errorf("unknown V2 content tag: %d", tag)
+		return nil, unknownTagErr(true, tag)
 	}
 }
 

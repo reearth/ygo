@@ -94,23 +94,23 @@ func WithCollectionID(id string) DocOption {
 	}
 }
 
-// defaultMaxPendingItems is the default cap on items parked in the per-doc
-// pending queue waiting for out-of-order dependencies. It is smaller than the
-// decoder's per-update item limit (maxV2Items, 1<<20), so one legal update
-// applied to a document that lacks the state it depends on can exceed it. See
-// WithMaxPendingItems and #46.
+// defaultMaxPendingItems is the default cap on parked items and, separately,
+// parked delete ranges (see WithMaxPendingItems).
 const defaultMaxPendingItems = 100_000
 
-// WithMaxPendingItems caps the per-doc pending queue depth — items parked
-// waiting for out-of-order dependencies. Once the cap is reached, further
-// items that would be parked cause ApplyUpdate to return ErrInvalidUpdate.
-// Zero or negative uses the default (100,000).
-//
-// This is a defence against a malicious peer crafting an update full of
-// far-future-clock items, which would otherwise grow the pending queue
-// without bound. See issue #46.
+// WithMaxPendingItems caps parked items and, separately, parked delete ranges
+// (default 100,000 when n <= 0), so ApplyUpdate returns ErrInvalidUpdate rather
+// than let a peer grow either without bound.
 func WithMaxPendingItems(n int) DocOption {
 	return func(d *Doc) { d.maxPendingItems = n }
+}
+
+// SetMaxPendingItems sets the WithMaxPendingItems cap after construction, so
+// stored state that exceeds it can load uncapped first.
+func (d *Doc) SetMaxPendingItems(n int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.maxPendingItems = n
 }
 
 // updateSub pairs a unique subscription ID with its callback so that
@@ -456,8 +456,12 @@ func (d *Doc) GetText(name string) *YText {
 // The closure must be invoked OUTSIDE d.mu — observers may re-enter Doc
 // methods that acquire d.mu, which would deadlock under the lock.
 //
-// Returns nil only if there is nothing to fire (no observers of any kind).
+// Returns nil when there is nothing to fire: no observers, or a refused remote
+// apply (Transaction.refused).
 func buildPhase2(d *Doc, txn *Transaction) func() {
+	if txn.refused {
+		return nil
+	}
 	// Encode the incremental update and snapshot observer slices while still
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
@@ -579,8 +583,8 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 // exposed to fn via Transaction.Ctx().
 //
 // fn's returned error is captured as the named return value retErr.
-// Observers fire regardless of whether fn returned an error; the error
-// is propagated to the caller only after the observers have fired.
+// Observers fire, unless a remote apply was refused (Transaction.refused),
+// before fn's error is returned.
 //
 // See docs/superpowers/specs/2026-04-21-transact-panic-safety-design.md
 // for the full rationale on the defer/recover structure.
@@ -1023,9 +1027,7 @@ func (d *Doc) PendingStats() PendingStats {
 		sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
 		stats.MissingFor = missing
 	}
-	for _, ranges := range d.store.pendingDs.clients {
-		stats.DeleteRanges += len(ranges)
-	}
+	stats.DeleteRanges = d.store.pendingDsRanges
 	return stats
 }
 
