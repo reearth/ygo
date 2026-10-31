@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and whether any entry was refused or not applied as sent.
   `SetMaxForeignClients` sets the sub-cap, which counts live entries only.
 
+- **`crdt`: inspect live text-formatting boundaries with `YText.WalkFormatting` (#317).**
+  The callback receives each non-deleted formatting marker's key and value,
+  including boundaries that have no visible text and are absent from `ToDelta`.
+  `YXmlText` inherits the method. The walk holds the document read lock and
+  stops on the first callback error; callbacks must not mutate values or call
+  document APIs. Existing readers, merging and wire formats are unchanged.
+
 ### Changed
 
 - **`provider/websocket`: a connection that introduces more than 64 awareness
