@@ -1,3 +1,8 @@
+## v1.56.0
+
+- **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
+  are unchanged.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

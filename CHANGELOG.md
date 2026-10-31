@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.0] — 2026-10-31
+
+### Performance
+
+- **`crdt`: delete sets sort without allocating.** `DeleteSet.sortAndCompact`
+  and the V1 and V2 delete-set encoders sorted with `sort.Slice`, which
+  allocates three times per call; they now use `slices.SortFunc`. The output
+  is unchanged.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added
