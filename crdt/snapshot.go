@@ -331,7 +331,8 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 			groups = append(groups, clientGroup{client, relevant})
 		}
 	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i].client < groups[j].client })
+	// Yjs writes clients in descending order.
+	sort.Slice(groups, func(i, j int) bool { return groups[i].client > groups[j].client })
 
 	enc.WriteVarUint(uint64(len(groups)))
 	for _, g := range groups {

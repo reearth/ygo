@@ -241,7 +241,8 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 			groups = append(groups, clientGroup{client, relevant, svClock})
 		}
 	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i].client < groups[j].client })
+	// Yjs writes clients in descending order.
+	sort.Slice(groups, func(i, j int) bool { return groups[i].client > groups[j].client })
 
 	deleteSet := buildDeleteSet(doc.store)
 
@@ -955,9 +956,9 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 			}
 			parentItem := doc.store.Find(ID{Client: ClientID(pc), Clock: pk})
 			if parentItem == nil {
-				// Container not integrated yet. EncodeStateAsUpdate sorts groups
-				// ascending by client, so a lower-clientID item written into a
-				// higher-clientID peer's nested type decodes before its parent.
+				// Container not integrated yet. EncodeStateAsUpdate writes groups
+				// descending by client, so a higher-clientID item written into a
+				// lower-clientID peer's nested type decodes before its parent.
 				// Defer instead of hard-failing (Yjs pendingStructs parity,
 				// review finding C-3): record the parent ID and let integration
 				// resolve it once the container arrives.
@@ -1291,12 +1292,14 @@ func decodeDeleteSet(dec *encoding.Decoder) (DeleteSet, error) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// clientsSorted returns m's clients in descending order, the order Yjs writes
+// a state vector in.
 func clientsSorted[T any](m map[ClientID]T) []ClientID {
 	out := make([]ClientID, 0, len(m))
 	for c := range m {
 		out = append(out, c)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	sort.Slice(out, func(i, j int) bool { return out[i] > out[j] })
 	return out
 }
 
