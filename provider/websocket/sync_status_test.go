@@ -1,6 +1,7 @@
 package websocket_test
 
 import (
+	"encoding/hex"
 	"errors"
 	"net/http/httptest"
 	"strconv"
@@ -310,20 +311,97 @@ func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing
 	assert.Less(t, got, 128, "the broadcast carries what this update left, not the 40 earlier parked entries or the delete set")
 }
 
-// watcherSyncBytes reads conn's frames up to the Pong of a Ping it sends,
-// applies every sync frame to doc, and returns the sync frames' total size.
+// The other peers get the update yjs emits for a peer's update cut inside its
+// delete set, plus the structs the room parked; the hex is from
+// crdt/testdata/truncated_ds_yjs_fixtures.json.
+func TestInteg_SyncStatus_TruncatedDeleteSetRelaysWhatApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix, update, relayed, text string
+	}{
+		{
+			// One struct and client 300000's range applied; client 1's ranges cut.
+			name:    "structs and the ranges read",
+			prefix:  "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+			update:  "0101010b84010a015102e0a712010003",
+			relayed: "0101010b84010a015101e0a712010003",
+			text:    "hello worldQ",
+		},
+		{
+			// The struct parks and the cut comes before any range: only the
+			// parked struct is relayed.
+			name:    "nothing but the parked struct",
+			prefix:  "01010100040101740661626364656600",
+			update:  "0101010784010601680101",
+			relayed: "01010107840106016800",
+			text:    "abcdef",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts := hocuspocusServer(t, nil)
+			editor := crdt.New(crdt.WithClientID(7))
+			conn := hpDial(t, ts, "room", false, editor)
+			watcherDoc := crdt.New(crdt.WithClientID(9))
+			watcher := hpDial(t, ts, "room", false, watcherDoc)
+
+			prefix, err := hex.DecodeString(tc.prefix)
+			require.NoError(t, err)
+			update, err := hex.DecodeString(tc.update)
+			require.NoError(t, err)
+			hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(prefix))
+			require.Equal(t, []uint64{1}, syncStatuses(t, conn, "room"))
+			watcherUpdates(t, watcher, watcherDoc)
+
+			hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(update))
+			require.Equal(t, []uint64{0}, syncStatuses(t, conn, "room"))
+			var want []string
+			if tc.relayed != "" {
+				want = []string{tc.relayed}
+			}
+			assert.Equal(t, want, watcherUpdates(t, watcher, watcherDoc))
+			assert.Equal(t, tc.text, watcherDoc.GetText("t").ToString())
+		})
+	}
+}
+
+// watcherUpdates returns the hex of the Update payloads among
+// watcherSyncFrames.
+func watcherUpdates(t *testing.T, conn *gws.Conn, doc *crdt.Doc) []string {
+	t.Helper()
+	var updates []string
+	for _, body := range watcherSyncFrames(t, conn, doc) {
+		msgType, payload, err := ygsync.ReadSyncMessage(body)
+		require.NoError(t, err)
+		if msgType == ygsync.MsgUpdate {
+			updates = append(updates, hex.EncodeToString(payload))
+		}
+	}
+	return updates
+}
+
+// watcherSyncBytes returns the total size of watcherSyncFrames.
 func watcherSyncBytes(t *testing.T, conn *gws.Conn, doc *crdt.Doc) int {
 	t.Helper()
-	hpSend(t, conn, "room", tagPing, nil)
 	total := 0
+	for _, body := range watcherSyncFrames(t, conn, doc) {
+		total += len(body)
+	}
+	return total
+}
+
+// watcherSyncFrames reads conn's frames up to the Pong of a Ping it sends,
+// applies every sync frame to doc, and returns the sync frames' bodies.
+func watcherSyncFrames(t *testing.T, conn *gws.Conn, doc *crdt.Doc) [][]byte {
+	t.Helper()
+	hpSend(t, conn, "room", tagPing, nil)
+	var bodies [][]byte
 	for {
 		tag, body, err := hpRead(conn, "room", 2*time.Second)
 		require.NoError(t, err)
 		switch tag {
 		case tagPong:
-			return total
+			return bodies
 		case tagSync:
-			total += len(body)
+			bodies = append(bodies, body)
 			_, err := ygsync.ApplySyncMessage(doc, body, nil)
 			require.NoError(t, err)
 		}

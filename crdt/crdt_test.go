@@ -1607,3 +1607,33 @@ func TestUnit_DeleteSet_EncodedClientOrder(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, got2.orderedClients(), "V2")
 }
+
+// A delete set cut before its end returns the ranges read before the cut,
+// merged, so a repeated range is applied once.
+func TestUnit_DecodeDeleteSet_CompactsRangesReadBeforeAnError(t *testing.T) {
+	// Client 7: (0,2), (1,2), then a third range cut after its clock.
+	enc := encoding.NewEncoder()
+	for _, v := range []uint64{1, 7, 3, 0, 2, 1, 2, 5} {
+		enc.WriteVarUint(v)
+	}
+	ds, err := decodeDeleteSet(encoding.NewDecoder(enc.Bytes()))
+	require.Error(t, err)
+	assert.Equal(t, []DeleteRange{{Clock: 0, Len: 3}}, ds.clients[7], "V1")
+
+	// The same ranges as three V2 groups for client 7, the last cut the same way.
+	enc2 := newV2Encoder()
+	enc2.restEnc.WriteVarUint(3)
+	for _, clock := range []uint64{0, 1, 0} {
+		enc2.restEnc.WriteVarUint(7)
+		enc2.restEnc.WriteVarUint(1)
+		enc2.resetDsCurVal()
+		enc2.writeDsClock(clock)
+		enc2.writeDsLen(2)
+	}
+	b := enc2.toBytes()
+	dec2, err := newV2Decoder(b[:len(b)-1])
+	require.NoError(t, err)
+	ds, err = decodeDeleteSetV2(dec2)
+	require.Error(t, err)
+	assert.Equal(t, []DeleteRange{{Clock: 0, Len: 3}}, ds.clients[7], "V2")
+}

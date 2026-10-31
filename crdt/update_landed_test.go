@@ -51,7 +51,8 @@ func TestUnit_ApplyUpdateV1Landed(t *testing.T) {
 	}
 
 	// The editor's text and overwrite integrate and five map entries park
-	// before its cut-short delete set fails the apply.
+	// before its cut-short delete set fails the apply; the range read before
+	// the cut, which deletes one x, applies.
 	editor := newTestDoc(7)
 	require.NoError(t, ApplyUpdateV1(editor, written, nil))
 	author := newTestDoc(1)
@@ -76,15 +77,15 @@ func TestUnit_ApplyUpdateV1Landed(t *testing.T) {
 	room := newRoom()
 	landed, err := ApplyUpdateV1Landed(room, cut, nil)
 	require.ErrorIs(t, err, ErrInvalidUpdate)
-	require.Equal(t, "abc"+strings.Repeat("x", 50), room.GetText("t").ToString(), "the insertion integrated")
+	require.Equal(t, "abc"+strings.Repeat("x", 49), room.GetText("t").ToString(), "the insertion and the deletion read before the cut applied")
 	require.NotNil(t, landed)
 
 	ids, err := ContentIDsFromUpdateV1(landed)
 	require.NoError(t, err)
 	assert.Equal(t, []ClientID{7}, ids.Inserts.Clients(), "only structs this apply integrated or parked")
 	assert.Equal(t, []IDRange{{Clock: 0, Len: 9}}, ids.Inserts.Ranges(7), `"abc", w.a and the five parked entries`)
-	assert.Equal(t, []ClientID{3}, ids.Deletes.Clients(), "only the deletion this apply made")
-	assert.Equal(t, []IDRange{{Clock: 100, Len: 1}}, ids.Deletes.Ranges(3), "the overwritten w.a")
+	assert.Equal(t, []ClientID{3}, ids.Deletes.Clients(), "only the deletions this apply made")
+	assert.Equal(t, []IDRange{{Clock: 50, Len: 1}, {Clock: 100, Len: 1}}, ids.Deletes.Ranges(3), "the deleted x and the overwritten w.a")
 
 	// A peer that held what the room held before ends where the room did,
 	// parked entries included.

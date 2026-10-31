@@ -874,12 +874,9 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 
 	// Decode delete set
-	ds, err := decodeDeleteSetV2(dec)
-	if err != nil {
-		return wrapUpdateErr(err)
-	}
-	if unresolvableDs := ds.applyToPartial(txn); len(unresolvableDs.clients) > 0 {
-		txn.doc.store.parkDeletes(unresolvableDs)
+	ds, dsErr := decodeDeleteSetV2(dec)
+	if err := applyDecodedDeleteSet(txn, ds, dsErr); err != nil {
+		return err
 	}
 
 	return nil
@@ -1184,15 +1181,19 @@ func decodeTypeContentV2(dec *v2Decoder, doc *Doc, typeRef byte) (*abstractType,
 	}
 }
 
-func decodeDeleteSetV2(dec *v2Decoder) (DeleteSet, error) {
-	ds := newOrderedDeleteSet()
+// decodeDeleteSetV2 is decodeDeleteSet for V2, with the same result after an error.
+func decodeDeleteSetV2(dec *v2Decoder) (ds DeleteSet, err error) {
+	ds = newOrderedDeleteSet()
+	defer func() {
+		for c := range ds.clients {
+			ds.sortAndCompact(c)
+		}
+	}()
 	n, err := dec.restDec.ReadVarUint()
 	if err != nil {
 		return ds, err
 	}
-	if n > maxV2Items {
-		return ds, ErrInvalidUpdate
-	}
+	// Each pass reads input bytes, so the counts need no cap, and Yjs has none.
 	for i := uint64(0); i < n; i++ {
 		dec.resetDsCurVal()
 		clientU, err := dec.restDec.ReadVarUint()
@@ -1202,9 +1203,6 @@ func decodeDeleteSetV2(dec *v2Decoder) (DeleteSet, error) {
 		numRanges, err := dec.restDec.ReadVarUint()
 		if err != nil {
 			return ds, err
-		}
-		if numRanges > maxV2Items {
-			return ds, ErrInvalidUpdate
 		}
 		client := ClientID(clientU)
 		for j := uint64(0); j < numRanges; j++ {
@@ -1221,9 +1219,6 @@ func decodeDeleteSetV2(dec *v2Decoder) (DeleteSet, error) {
 			}
 			ds.clients[client] = append(ds.clients[client], DeleteRange{Clock: clock, Len: length})
 		}
-	}
-	for c := range ds.clients {
-		ds.sortAndCompact(c)
 	}
 	return ds, nil
 }

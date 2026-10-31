@@ -1,0 +1,3366 @@
+[
+  {
+    "name": "two-clients/v1/0",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a0151",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/1",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/2",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/3",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a7",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/4",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a712",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/5",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a71201",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/6",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a7120100",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/7",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a712010003",
+    "expected": {
+      "error": true,
+      "text": "hello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015101e0a712010003",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "hello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/8",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a71201000301",
+    "expected": {
+      "error": true,
+      "text": "hello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015101e0a712010003",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "hello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/9",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a7120100030102",
+    "expected": {
+      "error": true,
+      "text": "hello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015101e0a712010003",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "hello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/10",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a712010003010200",
+    "expected": {
+      "error": true,
+      "text": "hello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015101e0a712010003",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "hello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/11",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a71201000301020001",
+    "expected": {
+      "error": true,
+      "text": "ello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ]
+        ],
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015102e0a71201000301010001",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "ello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ]
+          ],
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/12",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a7120100030102000109",
+    "expected": {
+      "error": true,
+      "text": "ello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ]
+        ],
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015102e0a71201000301010001",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "ello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ]
+          ],
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v1/13",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "0101010b84010a015102e0a712010003010200010902",
+    "expected": {
+      "error": false,
+      "text": "ello worQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ],
+          [
+            9,
+            2
+          ]
+        ],
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015102e0a712010003010200010902",
+      "mergeThrows": false,
+      "diffThrows": false,
+      "convertThrows": false,
+      "settled": {
+        "text": "ello worQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ],
+            [
+              9,
+              2
+            ]
+          ],
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/0",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/1",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/2",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/3",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a7",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/4",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a712",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/5",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a71201",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/6",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a7120100",
+    "expected": {
+      "error": true,
+      "text": "helloXYZ worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "helloXYZ worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/7",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a712010002",
+    "expected": {
+      "error": true,
+      "text": "hello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015101e0a712010003",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "hello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/8",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a71201000201",
+    "expected": {
+      "error": true,
+      "text": "hello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015101e0a712010003",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "hello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/9",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a7120100020102",
+    "expected": {
+      "error": true,
+      "text": "hello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015101e0a712010003",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "hello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/10",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a712010002010200",
+    "expected": {
+      "error": true,
+      "text": "hello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015101e0a712010003",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "hello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/11",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a71201000201020000",
+    "expected": {
+      "error": true,
+      "text": "ello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ]
+        ],
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015102e0a71201000301010001",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "ello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ]
+          ],
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/12",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a7120100020102000008",
+    "expected": {
+      "error": true,
+      "text": "ello worldQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ]
+        ],
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015102e0a71201000301010001",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "ello worldQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ]
+          ],
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "two-clients/v2/13",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+    "update": "000002410001140001840301510100000001010b02e0a712010002010200000801",
+    "expected": {
+      "error": false,
+      "text": "ello worQ",
+      "sv": {
+        "1": 12,
+        "300000": 3
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ],
+          [
+            9,
+            2
+          ]
+        ],
+        "300000": [
+          [
+            0,
+            3
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0101010b84010a015102e0a712010003010200010902",
+      "mergeThrows": false,
+      "diffThrows": false,
+      "convertThrows": false,
+      "settled": {
+        "text": "ello worQ",
+        "sv": {
+          "1": 12,
+          "300000": 3
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ],
+            [
+              9,
+              2
+            ]
+          ],
+          "300000": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v1/0",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "010101078401060168",
+    "expected": {
+      "error": true,
+      "text": "abcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {},
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v1/1",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010107840106016801",
+    "expected": {
+      "error": true,
+      "text": "abcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {},
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v1/2",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0101010784010601680101",
+    "expected": {
+      "error": true,
+      "text": "abcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {},
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v1/3",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "010101078401060168010102",
+    "expected": {
+      "error": true,
+      "text": "abcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {},
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v1/4",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010107840106016801010201",
+    "expected": {
+      "error": true,
+      "text": "abcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {},
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v1/5",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0101010784010601680101020101",
+    "expected": {
+      "error": true,
+      "text": "acdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "000101010101",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "acdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v1/6",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "010101078401060168010102010104",
+    "expected": {
+      "error": true,
+      "text": "acdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "000101010101",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "acdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v1/7",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010107840106016801010201010401",
+    "expected": {
+      "error": false,
+      "text": "acdf",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            1,
+            1
+          ],
+          [
+            4,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "0001010201010401",
+      "mergeThrows": false,
+      "diffThrows": false,
+      "convertThrows": false,
+      "settled": {
+        "text": "acdf",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              1,
+              1
+            ],
+            [
+              4,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v2/0",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010c00018403016801000000010107",
+    "expected": {
+      "error": true,
+      "text": "abcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {},
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v2/1",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010c0001840301680100000001010701",
+    "expected": {
+      "error": true,
+      "text": "abcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {},
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v2/2",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010c000184030168010000000101070101",
+    "expected": {
+      "error": true,
+      "text": "abcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {},
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v2/3",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010c00018403016801000000010107010102",
+    "expected": {
+      "error": true,
+      "text": "abcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {},
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v2/4",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010c0001840301680100000001010701010201",
+    "expected": {
+      "error": true,
+      "text": "abcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {},
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v2/5",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010c000184030168010000000101070101020100",
+    "expected": {
+      "error": true,
+      "text": "acdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "000101010101",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "acdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v2/6",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010c00018403016801000000010107010102010002",
+    "expected": {
+      "error": true,
+      "text": "acdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "000101010101",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "acdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "parked-struct/v2/7",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010c0001840301680100000001010701010201000200",
+    "expected": {
+      "error": false,
+      "text": "acdf",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            1,
+            1
+          ],
+          [
+            4,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": true,
+      "pendingDeletes": false,
+      "update": "0001010201010401",
+      "mergeThrows": false,
+      "diffThrows": false,
+      "convertThrows": false,
+      "settled": {
+        "text": "acdf",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              1,
+              1
+            ],
+            [
+              4,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": true,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/0",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "010101068401050151",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/1",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/2",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102e0",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/3",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102e0a7",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/4",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102e0a712",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/5",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102e0a71201",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/6",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102e0a7120100",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/7",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102e0a712010001",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/8",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102e0a71201000101",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/9",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102e0a7120100010101",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/10",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102e0a712010001010101",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v1/11",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "01010106840105015102e0a71201000101010101",
+    "expected": {
+      "error": false,
+      "text": "acdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {
+        "1": [
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": true,
+      "update": "0101010684010501510101010101",
+      "mergeThrows": false,
+      "diffThrows": false,
+      "convertThrows": false,
+      "settled": {
+        "text": "acdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {
+          "1": [
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": true,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/0",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a00018403015101000000010106",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/1",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/2",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602e0",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/3",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602e0a7",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/4",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602e0a712",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/5",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602e0a71201",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/6",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602e0a7120100",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/7",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602e0a712010000",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/8",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602e0a71201000001",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/9",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602e0a7120100000101",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/10",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602e0a712010000010101",
+    "expected": {
+      "error": true,
+      "text": "abcdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {},
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "01010106840105015100",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abcdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {},
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "missing-client/v2/11",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000024100010a0001840301510100000001010602e0a71201000001010100",
+    "expected": {
+      "error": false,
+      "text": "acdefQ",
+      "sv": {
+        "1": 7
+      },
+      "deleted": {
+        "1": [
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": true,
+      "update": "0101010684010501510101010101",
+      "mergeThrows": false,
+      "diffThrows": false,
+      "convertThrows": false,
+      "settled": {
+        "text": "acdefQ",
+        "sv": {
+          "1": 7
+        },
+        "deleted": {
+          "1": [
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": true,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v1/0",
+    "format": "v1",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "010101038401020164",
+    "expected": {
+      "error": true,
+      "text": "abcd",
+      "sv": {
+        "1": 4
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": true,
+      "update": "01010103840102016400",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": "0101010484010301650101010301"
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v1/1",
+    "format": "v1",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "01010103840102016401",
+    "expected": {
+      "error": true,
+      "text": "abcd",
+      "sv": {
+        "1": 4
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": true,
+      "update": "01010103840102016400",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": "0101010484010301650101010301"
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v1/2",
+    "format": "v1",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "0101010384010201640101",
+    "expected": {
+      "error": true,
+      "text": "abcd",
+      "sv": {
+        "1": 4
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": true,
+      "update": "01010103840102016400",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": "0101010484010301650101010301"
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v1/3",
+    "format": "v1",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "010101038401020164010101",
+    "expected": {
+      "error": true,
+      "text": "abcd",
+      "sv": {
+        "1": 4
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": true,
+      "update": "01010103840102016400",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": "0101010484010301650101010301"
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v1/4",
+    "format": "v1",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "01010103840102016401010100",
+    "expected": {
+      "error": true,
+      "text": "abcd",
+      "sv": {
+        "1": 4
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": true,
+      "update": "01010103840102016400",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": "0101010484010301650101010301"
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v1/5",
+    "format": "v1",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "0101010384010201640101010001",
+    "expected": {
+      "error": false,
+      "text": "bce",
+      "sv": {
+        "1": 5
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ],
+          [
+            3,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "010201038401020164840103016501010200010301",
+      "mergeThrows": false,
+      "diffThrows": false,
+      "convertThrows": false,
+      "settled": {
+        "text": "bce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ],
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v2/0",
+    "format": "v2",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "0000024100010400018403016401000000010103",
+    "expected": {
+      "error": true,
+      "text": "abcd",
+      "sv": {
+        "1": 4
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": true,
+      "update": "01010103840102016400",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": "0101010484010301650101010301"
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v2/1",
+    "format": "v2",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "000002410001040001840301640100000001010301",
+    "expected": {
+      "error": true,
+      "text": "abcd",
+      "sv": {
+        "1": 4
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": true,
+      "update": "01010103840102016400",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": "0101010484010301650101010301"
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v2/2",
+    "format": "v2",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "00000241000104000184030164010000000101030101",
+    "expected": {
+      "error": true,
+      "text": "abcd",
+      "sv": {
+        "1": 4
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": true,
+      "update": "01010103840102016400",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": "0101010484010301650101010301"
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v2/3",
+    "format": "v2",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "0000024100010400018403016401000000010103010101",
+    "expected": {
+      "error": true,
+      "text": "abcd",
+      "sv": {
+        "1": 4
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": true,
+      "update": "01010103840102016400",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": "0101010484010301650101010301"
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v2/4",
+    "format": "v2",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "000002410001040001840301640100000001010301010100",
+    "expected": {
+      "error": true,
+      "text": "abcd",
+      "sv": {
+        "1": 4
+      },
+      "deleted": {},
+      "pendingStructs": true,
+      "pendingDeletes": true,
+      "update": "01010103840102016400",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "abce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": "0101010484010301650101010301"
+      }
+    }
+  },
+  {
+    "name": "earlier-parked/v2/5",
+    "format": "v2",
+    "gc": false,
+    "prefixV1": "0103010004010174036162630a0184010301650101010301",
+    "update": "00000241000104000184030164010000000101030101010000",
+    "expected": {
+      "error": false,
+      "text": "bce",
+      "sv": {
+        "1": 5
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ],
+          [
+            3,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "010201038401020164840103016501010200010301",
+      "mergeThrows": false,
+      "diffThrows": false,
+      "convertThrows": false,
+      "settled": {
+        "text": "bce",
+        "sv": {
+          "1": 5
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ],
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "many-ranges/v1",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "00010181804000010201",
+    "expected": {
+      "error": true,
+      "text": "bdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ],
+          [
+            2,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0001010200010201",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "bdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ],
+            [
+              2,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "many-ranges/v2",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "000000000000010000000000010181804000000100",
+    "expected": {
+      "error": true,
+      "text": "bdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ],
+          [
+            2,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0001010200010201",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "bdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ],
+            [
+              2,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "many-clients/v1",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0081804001010001",
+    "expected": {
+      "error": true,
+      "text": "bcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "000101010001",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "bcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "many-clients/v2",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "00000000000001000000000081804001010000",
+    "expected": {
+      "error": true,
+      "text": "bcdef",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "000101010001",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "bcdef",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "many-ranges-second-group/v1",
+    "format": "v1",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "000201010001018180400401",
+    "expected": {
+      "error": true,
+      "text": "bcdf",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ],
+          [
+            4,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0001010200010401",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "bcdf",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ],
+            [
+              4,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  },
+  {
+    "name": "many-ranges-second-group/v2",
+    "format": "v2",
+    "gc": true,
+    "prefixV1": "01010100040101740661626364656600",
+    "update": "0000000000000100000000000201010000018180400400",
+    "expected": {
+      "error": true,
+      "text": "bcdf",
+      "sv": {
+        "1": 6
+      },
+      "deleted": {
+        "1": [
+          [
+            0,
+            1
+          ],
+          [
+            4,
+            1
+          ]
+        ]
+      },
+      "pendingStructs": false,
+      "pendingDeletes": false,
+      "update": "0001010200010401",
+      "mergeThrows": true,
+      "diffThrows": true,
+      "convertThrows": true,
+      "settled": {
+        "text": "bcdf",
+        "sv": {
+          "1": 6
+        },
+        "deleted": {
+          "1": [
+            [
+              0,
+              1
+            ],
+            [
+              4,
+              1
+            ]
+          ]
+        },
+        "pendingStructs": false,
+        "pendingDeletes": false,
+        "update": ""
+      }
+    }
+  }
+]

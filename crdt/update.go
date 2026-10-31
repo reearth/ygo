@@ -700,12 +700,9 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		return err
 	}
 
-	ds, err := decodeDeleteSet(dec)
-	if err != nil {
-		return wrapUpdateErr(err)
-	}
-	if unresolvableDs := ds.applyToPartial(txn); len(unresolvableDs.clients) > 0 {
-		txn.doc.store.parkDeletes(unresolvableDs)
+	ds, dsErr := decodeDeleteSet(dec)
+	if err := applyDecodedDeleteSet(txn, ds, dsErr); err != nil {
+		return err
 	}
 
 	return nil
@@ -1372,15 +1369,20 @@ func decodeTypeContent(dec *encoding.Decoder, doc *Doc, typeClass byte) (*abstra
 	}
 }
 
-func decodeDeleteSet(dec *encoding.Decoder) (DeleteSet, error) {
-	ds := newOrderedDeleteSet()
+// decodeDeleteSet returns the ranges it read in full, sorted and merged per
+// client, also on an error, since Yjs has applied those by then.
+func decodeDeleteSet(dec *encoding.Decoder) (ds DeleteSet, err error) {
+	ds = newOrderedDeleteSet()
+	defer func() {
+		for c := range ds.clients {
+			ds.sortAndCompact(c)
+		}
+	}()
 	n, err := dec.ReadVarUint()
 	if err != nil {
 		return ds, err
 	}
-	if n > maxV2Items {
-		return ds, ErrInvalidUpdate
-	}
+	// Each pass reads input bytes, so the counts need no cap, and Yjs has none.
 	for i := uint64(0); i < n; i++ {
 		clientU, err := dec.ReadVarUint()
 		if err != nil {
@@ -1389,9 +1391,6 @@ func decodeDeleteSet(dec *encoding.Decoder) (DeleteSet, error) {
 		numRanges, err := dec.ReadVarUint()
 		if err != nil {
 			return ds, err
-		}
-		if numRanges > maxV2Items {
-			return ds, ErrInvalidUpdate
 		}
 		client := ClientID(clientU)
 		for j := uint64(0); j < numRanges; j++ {
@@ -1411,9 +1410,6 @@ func decodeDeleteSet(dec *encoding.Decoder) (DeleteSet, error) {
 			}
 			ds.clients[client] = append(ds.clients[client], DeleteRange{Clock: clock, Len: length})
 		}
-	}
-	for c := range ds.clients {
-		ds.sortAndCompact(c)
 	}
 	return ds, nil
 }

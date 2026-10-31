@@ -148,6 +148,19 @@ func retryPendingDs(txn *Transaction) {
 	store.parkDeletes(ready.applyToPartial(txn))
 }
 
+// applyDecodedDeleteSet parks the ranges it cannot apply only when the decode
+// succeeded, since Yjs readAndApplyDeleteSet drops them when it throws partway.
+func applyDecodedDeleteSet(txn *Transaction, ds DeleteSet, err error) error {
+	unresolvable := ds.applyToPartial(txn)
+	if err != nil {
+		return wrapUpdateErr(err)
+	}
+	if len(unresolvable.clients) > 0 {
+		txn.doc.store.parkDeletes(unresolvable)
+	}
+	return nil
+}
+
 // applyToPartial applies delete-set entries whose target items are
 // integrated, and returns a new DeleteSet containing entries whose
 // target items are absent (or the uncovered suffix of a range whose
@@ -257,14 +270,14 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	if err := b.walkGroups(); err != nil {
 		return wrapUpdateErr(err)
 	}
-	if n, err := parkingRangesBound(b.deleteSetScanner(), b.initial); err != nil {
-		return wrapUpdateErr(err)
-	} else if n <= room {
+	// A delete set that does not read parks nothing, so the apply reads it and
+	// keeps what came before the cut, as Yjs does.
+	if n, err := parkingRangesBound(b.deleteSetScanner(), b.initial); err != nil || n <= room {
 		return nil
 	}
 	ds, err := deleteSetOf(b)
 	if err != nil {
-		return wrapUpdateErr(err)
+		return nil
 	}
 	clocks, err := structClocksOf(b)
 	if err != nil {
@@ -292,14 +305,12 @@ func deleteSetOf(b *pendingBudget) (DeleteSet, error) {
 
 // parkingRangesBound counts, without allocating, the ranges of the delete set s
 // stands at that would park on a store at sv, an upper bound on what the update
-// parks.
+// parks. Each pass reads input bytes, so the counts need no cap, and Yjs has
+// none.
 func parkingRangesBound(s *pendingScanner, sv StateVector) (int, error) {
 	clients := s.uint()
 	if s.err != nil {
 		return 0, s.err
-	}
-	if clients > maxV2Items {
-		return 0, ErrInvalidUpdate
 	}
 	n := 0
 	for range clients {
@@ -312,9 +323,6 @@ func parkingRangesBound(s *pendingScanner, sv StateVector) (int, error) {
 		ranges := s.uint()
 		if s.err != nil {
 			return 0, s.err
-		}
-		if ranges > maxV2Items {
-			return 0, ErrInvalidUpdate
 		}
 		next := sv.Clock(client)
 		for range ranges {
