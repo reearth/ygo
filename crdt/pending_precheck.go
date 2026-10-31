@@ -9,7 +9,7 @@ func (b *pendingBudget) checkBeforeApply(size int) error {
 	if b.v2 && b.structs == 0 {
 		n, err := b.walkStructsV2()
 		if err != nil {
-			// The apply would fail in this section after earlier structs integrated.
+			// The apply would refuse this section too; refusing here spares decoding it.
 			return wrapUpdateErr(scanReason(err))
 		}
 		if n <= b.remaining {
