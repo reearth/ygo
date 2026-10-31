@@ -2156,7 +2156,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The room's state goes only in answer to the peer's own step-1, so a
 	// joiner receives it once.
 	p.sendSync(ygsync.EncodeSyncStep1(rm.doc))
-	p.sendAwareness(rm.awareness.EncodeUpdate(nil))
+	// Awareness goes only when someone is present, as the reference servers
+	// send it.
+	if len(rm.awareness.GetStates()) > 0 {
+		p.sendAwareness(rm.awareness.EncodeUpdate(nil))
+	}
 
 	// Read loop — exits when the connection is closed (by peer, by context
 	// cancellation, or by Shutdown).

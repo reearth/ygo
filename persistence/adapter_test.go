@@ -253,22 +253,26 @@ func dialWS(t *testing.T, ts *httptest.Server, room string) *gws.Conn {
 	return conn
 }
 
-// drainWS sends doc's SyncStep1 and reads the three frames that follow (sync
-// step-1 and awareness on connect, then the sync step-2 reply), applying the
-// sync ones to doc.
-func drainWS(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
+// drainWS joins conn with doc: it sends doc's SyncStep1 and reads up to and
+// including the sync step-2 reply, applying the sync frames to doc.
+func drainWS(t testing.TB, conn *gws.Conn, doc *crdt.Doc) {
 	t.Helper()
 	require.NoError(t, conn.WriteMessage(gws.BinaryMessage, syncStep1Frame(doc)))
-	for i := 0; i < 3; i++ {
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		_, data, err := conn.ReadMessage()
 		_ = conn.SetReadDeadline(time.Time{})
 		require.NoError(t, err)
 		dec := encoding.NewDecoder(data)
 		outer, err := dec.ReadVarUint()
 		require.NoError(t, err)
-		if outer == 0 { // msgSync
-			_, _ = ygsync.ApplySyncMessage(doc, dec.RemainingBytes(), nil)
+		if outer != 0 { // msgSync
+			continue
+		}
+		payload := dec.RemainingBytes()
+		_, _ = ygsync.ApplySyncMessage(doc, payload, nil)
+		if sub, _, err := ygsync.ReadSyncMessage(payload); err == nil && sub == ygsync.MsgSyncStep2 {
+			return
 		}
 	}
 }

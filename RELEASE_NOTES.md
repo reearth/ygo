@@ -12,7 +12,9 @@ and ygo's `provider/client` all send SyncStep1 on connect and need no change.
 A custom client that waits for the server's state without sending SyncStep1
 now receives none, and must send SyncStep1 as these providers do. A client
 whose Hocuspocus token `OnTokenAuth` rejects, and that sends the token before
-its SyncStep1, now receives no document state. No API or wire format changes.
+its SyncStep1, now receives no document state. A peer that joins a room where
+nobody has set awareness state no longer receives an empty awareness frame on
+connect. No API or wire format changes.
 
 ## v1.54.0
 

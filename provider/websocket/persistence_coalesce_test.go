@@ -490,27 +490,11 @@ func dialWS(t *testing.T, ts *httptest.Server, room string) *gws.Conn {
 	return conn
 }
 
-// drainWS sends doc's SyncStep1 as a provider does, then reads the three
-// frames that follow (sync step-1 and awareness on connect, then the sync
-// step-2 reply) and applies any sync frames into doc. A fixed read count is
-// used because gorilla's reader is permanently broken by a deadline expiry.
+// drainWS sends doc's SyncStep1 as a provider does, then reads up to and
+// including the sync step-2 reply, applying the sync frames into doc.
 func drainWS(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
 	t.Helper()
-	require.NoError(t, conn.WriteMessage(gws.BinaryMessage, syncStep1Frame(doc)))
-	for i := 0; i < 3; i++ {
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		_, data, err := conn.ReadMessage()
-		_ = conn.SetReadDeadline(time.Time{})
-		require.NoError(t, err)
-		dec := encoding.NewDecoder(data)
-		outer, err := dec.ReadVarUint()
-		require.NoError(t, err)
-		if outer == msgSync {
-			if _, err := ygsync.ApplySyncMessage(doc, dec.RemainingBytes(), nil); err != nil {
-				t.Fatalf("apply sync frame: %v", err)
-			}
-		}
-	}
+	require.NoError(t, drainConnErr(conn, doc))
 }
 
 // syncStep1Frame returns the msgSync frame carrying doc's SyncStep1.

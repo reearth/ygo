@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 	ygws "github.com/reearth/ygo/provider/websocket"
@@ -144,6 +145,57 @@ func TestInteg_Join_RejectedTokenGetsNoState(t *testing.T) {
 		}
 	}
 	assert.Zero(t, step2, "SyncStep2 frames the rejected client received")
+}
+
+// connectTags sends a Ping and returns the outer tag of every frame the
+// server sent before the Pong.
+func connectTags(t *testing.T, conn *gws.Conn, hocuspocus bool, room string) []uint64 {
+	t.Helper()
+	require.NoError(t, conn.WriteMessage(gws.BinaryMessage, joinFrame(hocuspocus, room, tagPing, nil)))
+	var tags []uint64
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := conn.ReadMessage()
+		require.NoError(t, err)
+		dec := encoding.NewDecoder(data)
+		if hocuspocus {
+			_, err = dec.ReadVarString()
+			require.NoError(t, err)
+		}
+		tag, err := dec.ReadVarUint()
+		require.NoError(t, err)
+		if tag == tagPong {
+			return tags
+		}
+		tags = append(tags, tag)
+	}
+}
+
+// On connect a peer gets SyncStep1, and awareness only when the room holds
+// awareness states, as y-websocket's and Hocuspocus's servers send them.
+func TestInteg_Join_AwarenessOnlyWhenTheRoomHasStates(t *testing.T) {
+	for _, hocuspocus := range []bool{false, true} {
+		t.Run(framingName(hocuspocus), func(t *testing.T) {
+			srv := ygws.NewServer()
+			srv.HocuspocusFraming = hocuspocus
+			ts := httptest.NewServer(srv)
+			t.Cleanup(ts.Close)
+
+			first := dial(t, ts, "room")
+			assert.Equal(t, []uint64{tagSync}, connectTags(t, first, hocuspocus, "room"),
+				"a room without awareness states sends only SyncStep1")
+
+			present := awareness.New(42)
+			present.SetLocalState(map[string]any{"name": "a"})
+			require.NoError(t, first.WriteMessage(gws.BinaryMessage, joinFrame(hocuspocus, "room", tagAwareness,
+				encoding.EncodeBytes(func(enc *encoding.Encoder) { enc.WriteVarBytes(present.EncodeUpdate(nil)) }))))
+			connectTags(t, first, hocuspocus, "room") // the awareness is applied before the Pong
+
+			second := dial(t, ts, "room")
+			assert.Equal(t, []uint64{tagSync, tagAwareness}, connectTags(t, second, hocuspocus, "room"),
+				"a room with an awareness state sends SyncStep1, then awareness")
+		})
+	}
 }
 
 // seedText returns an OnLoadDocument hook that fills YText "t" with text.

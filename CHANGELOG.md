@@ -13,13 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   On connect the server sent SyncStep1, a SyncStep2 with the room's full
   state, and awareness. It then answered the peer's own SyncStep1 with a
   second full SyncStep2, so every join downloaded the document twice (200,042
-  bytes of SyncStep2 for a 100,000-character text). The server now sends only
-  SyncStep1 and awareness on connect, and the room's state in answer to the
-  peer's SyncStep1, as the y-websocket and Hocuspocus servers do. This holds
-  on both framings and for read-only peers. A client that never sends
-  SyncStep1 now gets no document state. A rejected Hocuspocus token now also
-  stops a client that sends its token before its SyncStep1 from receiving the
-  room's state.
+  bytes of SyncStep2 for a 100,000-character text). The server now sends
+  SyncStep1 on connect, awareness only when the room holds awareness states,
+  and the room's state in answer to the peer's SyncStep1, as the y-websocket
+  and Hocuspocus servers do. This holds on both framings and for read-only
+  peers. A client that never sends SyncStep1 now gets no document state. A
+  rejected Hocuspocus token now also stops a client that sends its token
+  before its SyncStep1 from receiving the room's state.
 
 ## [1.54.0] — 2026-10-22
 

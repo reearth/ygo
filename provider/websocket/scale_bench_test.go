@@ -18,7 +18,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	gws "github.com/gorilla/websocket"
 
@@ -40,30 +39,15 @@ func dialWSBench(b *testing.B, ts *httptest.Server, room string) *gws.Conn {
 	return conn
 }
 
-// drainHandshakeBench sends an empty SyncStep1 and reads and discards the
-// three frames that follow (sync step-1 and awareness on connect, then the
-// sync step-2 reply).
-// Adapted from drainWS: this benchmark only cares that clients are fully
-// joined before timing starts, not the frame contents, so unlike drainWS it
-// does not decode/apply sync frames into a local doc.
+// drainHandshakeBench joins conn with an empty doc (see drainConnErr), so the
+// benchmark's clients are fully joined before timing starts.
 //
 // It returns an error rather than calling b.Fatalf directly so the caller
 // can close the partially-joined connection first — failing straight into
 // b.Fatalf here would leak the socket (never recorded anywhere for cleanup)
 // on a mid-setup failure, e.g. a tight fd ulimit at N=500.
 func drainHandshakeBench(conn *gws.Conn) error {
-	if err := conn.WriteMessage(gws.BinaryMessage, syncStep1Frame(crdt.New())); err != nil {
-		return fmt.Errorf("send sync step 1: %w", err)
-	}
-	for i := 0; i < 3; i++ {
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		_, _, err := conn.ReadMessage()
-		_ = conn.SetReadDeadline(time.Time{})
-		if err != nil {
-			return fmt.Errorf("drain handshake frame %d: %w", i, err)
-		}
-	}
-	return nil
+	return drainConnErr(conn, crdt.New())
 }
 
 // drainLoop continuously reads (and discards) messages from conn until the
