@@ -82,6 +82,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   these, and now ygo does not either. The deletion still calls the observers
   of the type that lost the entry and the deep observers of its live
   ancestors.
+- **`crdt`: observers of the types one transaction changed fire in a fixed
+  order, the one Yjs uses.** `Observe` callbacks fire in the order the
+  transaction first changed each type, and `ObserveDeep` callbacks in that
+  order with each type's ancestors after it. ygo took this order from a Go
+  map, so it changed from one run to the next. An applied update changes its
+  types in the order its structs integrate, then in the order of its
+  deletions, as in Yjs.
 
 ### Performance
 

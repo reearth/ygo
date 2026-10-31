@@ -39,7 +39,7 @@ func newTxn(doc *Doc) *Transaction {
 		Local:       true,
 		deleteSet:   newDeleteSet(),
 		beforeState: doc.store.StateVector(),
-		changed:     make(map[*abstractType]map[string]struct{}),
+		changed:     make(map[*abstractType]changedType),
 	}
 }
 

@@ -28,8 +28,9 @@ type Transaction struct {
 	deleteSet   DeleteSet
 	beforeState StateVector
 	afterState  StateVector
-	// changed tracks which types (and which map keys within them) were modified.
-	changed map[*abstractType]map[string]struct{}
+	// changed tracks which types were modified, and what about each. Add
+	// entries only through addChanged, which records the order too.
+	changed map[*abstractType]changedType
 	// newItems collects ContentString items integrated during this transaction.
 	// Used by squashRuns to merge adjacent same-client runs after observers fire.
 	newItems []*Item
@@ -321,14 +322,26 @@ func squashRuns(txn *Transaction) {
 	}
 }
 
+// changedType is one entry of a transaction's changed map: the map keys the
+// transaction changed in that type, and the type's place in the order the
+// transaction first changed each of its types, which is the order Yjs fires
+// their observers in. An entry is never removed, so the orders of one
+// transaction's entries are 0 to len(changed)-1, which buildPhase2 uses as
+// indices.
+type changedType struct {
+	keys  map[string]struct{}
+	order int
+}
+
 // addChanged records that a type was modified, optionally under a specific key.
+// It is the only writer of changed, which keeps the orders dense.
 func (txn *Transaction) addChanged(t *abstractType, key string) {
-	keys, ok := txn.changed[t]
+	c, ok := txn.changed[t]
 	if !ok {
-		keys = make(map[string]struct{})
-		txn.changed[t] = keys
+		c = changedType{keys: make(map[string]struct{}), order: len(txn.changed)}
+		txn.changed[t] = c
 	}
-	keys[key] = struct{}{}
+	c.keys[key] = struct{}{}
 }
 
 // addSubdocAdded records that d was newly embedded (integrated) during this

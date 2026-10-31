@@ -61,6 +61,12 @@
   Code that relied on these calls to see that a type was deleted must use the
   observers of the type that lost the entry, which still fire for the
   deletion.
+- **Observers fire in a fixed order.** The observers of the types a
+  transaction changed fired in Go map order, which changes from run to run.
+  Now `Observe` callbacks fire in the order the transaction first changed each
+  type, then `ObserveDeep` callbacks fire for each changed type and its
+  ancestors in that order, as in Yjs. For an applied update, the order is the
+  order its structs integrate, then the order of its deletions.
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
 - **Faster full-state encodes and snapshots after deletions.** The delete set

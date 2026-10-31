@@ -190,7 +190,7 @@ func TestUnit_YText_FormatCleanup_CoalescedMatchesPerItem(t *testing.T) {
 					gcTxnDeleteSet(d, remote)
 				}
 				txn := &Transaction{doc: d, Local: true, deleteSet: newOrderedDeleteSet(),
-					changed: map[*abstractType]map[string]struct{}{}, ctx: context.Background()}
+					changed: map[*abstractType]changedType{}, ctx: context.Background()}
 				cleanup(remote, txn)
 				ds = txn.deleteSet
 			})

@@ -129,8 +129,8 @@ Lifecycle:
 1. Collect all inserts and deletes.
 2. Squash consecutive same-client items (run-length optimisation).
 3. Fire `beforeObserverCalls`.
-4. Fire `observe()` on each changed type.
-5. Fire `observeDeep()` recursively.
+4. Fire `observe()` on each changed type, in the order the transaction first changed it.
+5. Fire `observeDeep()` on each changed type and then its ancestors, in that order.
 6. Fire `afterTransaction`.
 7. Emit the binary update event for the transport layer, only for a transaction that adds or deletes something.
 

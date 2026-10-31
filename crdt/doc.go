@@ -481,20 +481,33 @@ func buildPhase2(d *Doc, txn *Transaction) func(update []byte) {
 	// Snapshot per-type observer closures and deep-observer chains while the
 	// write lock is held. prepareFire copies each type's observer slice and
 	// builds the event struct, so concurrent Observe/Unobserve calls (which also
-	// hold the write lock) cannot race with the fire loop below (N-C1).
-	fireFns := make([]func(), 0, len(txn.changed))
+	// hold the write lock) cannot race with the fire loop below (N-C1). Walking
+	// up from each changed type in order gives Yjs's changedParentTypes order.
+	// The changed types in the order the transaction first changed each one,
+	// which its entries hold. A transaction that changed up to eight types
+	// orders them in this call's own buffer.
+	var orderBuf [8]*abstractType
+	changed := orderBuf[:0]
+	if len(txn.changed) > len(orderBuf) {
+		changed = make([]*abstractType, 0, len(txn.changed))
+	}
+	changed = changed[:len(txn.changed)]
+	for t, c := range txn.changed {
+		changed[c.order] = t
+	}
+	fireFns := make([]func(), 0, len(changed))
 	type deepEntry struct {
 		fns []func(*Transaction)
 	}
 	firedDeep := make(map[*abstractType]struct{})
 	var deepSnap []deepEntry
-	for t, keys := range txn.changed {
+	for _, t := range changed {
 		// Yjs calls no observer for a type that is deleted when the transaction ends.
 		if t.item != nil && t.item.Deleted {
 			continue
 		}
 		if t.owner != nil {
-			if fn := t.owner.prepareFire(txn, keys); fn != nil {
+			if fn := t.owner.prepareFire(txn, txn.changed[t].keys); fn != nil {
 				fireFns = append(fireFns, fn)
 			}
 		}
@@ -682,7 +695,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		// added 1 alloc per txn even when no ContentString was inserted, which
 		// hurt array/map-only workloads more than it helped text workloads
 		// (the squashRuns target).
-		changed: make(map[*abstractType]map[string]struct{}, 4),
+		changed: make(map[*abstractType]changedType, 4),
 		ctx:     ctx,
 	}
 

@@ -111,7 +111,7 @@ func (d *Doc) formattingCleanupLocked(remote *Transaction) (phase2 func([]byte),
 		Local:       true,
 		deleteSet:   newOrderedDeleteSet(),
 		beforeState: d.store.StateVector(),
-		changed:     make(map[*abstractType]map[string]struct{}, 1),
+		changed:     make(map[*abstractType]changedType, 1),
 		ctx:         context.Background(),
 	}
 	func() {
