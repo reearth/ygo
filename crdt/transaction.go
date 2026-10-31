@@ -393,13 +393,18 @@ func mergeClientStructs(txn *Transaction, client ClientID) {
 	if len(spans) == 0 {
 		return
 	}
-	// A merge carries on to the left while the pairs there merge.
+	// A merge carries on to the left while the pairs there merge. With the
+	// spans sorted by lo, a span walks only over pairs above every earlier
+	// span's hi: below that, the earlier spans cover the pairs already. So no
+	// pair is walked twice.
+	slices.SortFunc(spans, func(a, b mergeSpan) int { return a.lo - b.lo })
+	reach := 0
 	for i := range spans {
-		for spans[i].lo > 1 && structs[spans[i].lo-1].mergeable(structs[spans[i].lo]) {
+		for spans[i].lo > reach+1 && structs[spans[i].lo-1].mergeable(structs[spans[i].lo]) {
 			spans[i].lo--
 		}
+		reach = max(reach, spans[i].hi)
 	}
-	slices.SortFunc(spans, func(a, b mergeSpan) int { return a.lo - b.lo })
 	w, next := 0, 0 // structs[:w] is done; structs[next:] is not yet visited
 	for i := 0; i < len(spans); {
 		lo, hi := spans[i].lo, spans[i].hi
