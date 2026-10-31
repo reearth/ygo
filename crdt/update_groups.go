@@ -16,12 +16,16 @@ func (s groupSet) has(i uint64) bool {
 }
 
 // scanReason is why a scan stopped for err, as the decoder names it: the
-// decoder error value that err is, unknownTagErr for a contentTagError, or
-// ErrInvalidUpdate. It returns only package values or a new error, never its
-// argument, so a scanner's decoder copies stay on the stack.
+// decoder error value that err is, unknownTagErr for a contentTagError, a
+// typeRefError's value, or ErrInvalidUpdate. It returns only package values or
+// a new error, never its argument, so a scanner's decoder copies stay on the
+// stack.
 func scanReason(err error) error {
 	if t, ok := err.(contentTagError); ok {
 		return unknownTagErr(t&v2TagError != 0, byte(t))
+	}
+	if t, ok := err.(typeRefError); ok {
+		return t
 	}
 	for _, reason := range [...]error{encoding.ErrUnexpectedEOF, encoding.ErrOverflow, encoding.ErrUnknownTag, encoding.ErrInvalidUTF8, encoding.ErrDepthExceeded} {
 		if err == reason {

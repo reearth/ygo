@@ -151,8 +151,11 @@ func (f *v1Frame) content(tag byte) uint64 {
 		f.bytes()
 		f.bytes()
 	case wireType:
-		if ref := f.byte(); ref == 3 || ref == 5 {
+		switch ref := f.byte(); {
+		case typeRefHasName(ref):
 			f.bytes()
+		case ref > maxTypeRef:
+			f.fail(typeRefError(ref))
 		}
 	case wireDoc:
 		f.bytes()

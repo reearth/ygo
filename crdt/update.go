@@ -566,6 +566,19 @@ func typeClassOf(ct *ContentType) (byte, string) {
 	}
 }
 
+// typeRefHasName reports whether a type ref is followed by a name: the node
+// name of a YXmlElement or the hook name of a YXmlHook.
+func typeRefHasName(ref byte) bool { return ref == 3 || ref == 5 }
+
+// maxTypeRef is YXmlText, the highest type ref Yjs defines.
+const maxTypeRef = 6
+
+// typeRefError refuses a type ref Yjs has no type for, as Yjs readContentType
+// does; it holds no reference into the decoder that read it.
+type typeRefError uint64
+
+func (e typeRefError) Error() string { return fmt.Sprintf("unknown type ref: %d", uint64(e)) }
+
 func buildDeleteSet(store *StructStore) DeleteSet {
 	ds := newDeleteSet()
 	for _, items := range store.clients {
@@ -1331,12 +1344,7 @@ func decodeTypeContent(dec *encoding.Decoder, doc *Doc, typeClass byte) (*abstra
 		return &xt.abstractType, nil
 
 	default:
-		// Unknown type class: placeholder rawType.
-		r := &rawType{}
-		r.doc = doc
-		r.itemMap = make(map[string]*Item)
-		r.owner = r
-		return &r.abstractType, nil
+		return nil, typeRefError(typeClass)
 	}
 }
 

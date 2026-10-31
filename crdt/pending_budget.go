@@ -828,13 +828,16 @@ func (s *pendingScanner) content(tag byte) uint64 {
 			s.any()
 		}
 	case wireType:
+		// Framing reads the type too, so a pre-apply scan refuses an unknown ref.
 		var ref byte
 		if s.v2 == nil {
-			ref = s.byte()
-		} else if !s.frame {
+			if ref = s.byte(); ref > maxTypeRef && s.err == nil {
+				s.err = typeRefError(ref)
+			}
+		} else {
 			ref, s.err = s.v2.readTypeRef()
 		}
-		if ref == 3 || ref == 5 {
+		if typeRefHasName(ref) {
 			s.key()
 		}
 	case wireDoc:

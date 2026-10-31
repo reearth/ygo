@@ -273,6 +273,10 @@ func (d *v2Decoder) readString() (string, error) {
 
 func (d *v2Decoder) readTypeRef() (byte, error) {
 	v, err := d.typeRefDec.Read()
+	if err == nil && v > maxTypeRef {
+		// Checked before the byte conversion, so that 261 cannot read as 5.
+		return 0, typeRefError(v)
+	}
 	return byte(v), err
 }
 
@@ -1090,11 +1094,7 @@ func decodeTypeContentV2(dec *v2Decoder, doc *Doc, typeRef byte) (*abstractType,
 		return &xt.abstractType, nil
 
 	default:
-		r := &rawType{}
-		r.doc = doc
-		r.itemMap = make(map[string]*Item)
-		r.owner = r
-		return &r.abstractType, nil
+		return nil, typeRefError(typeRef)
 	}
 }
 

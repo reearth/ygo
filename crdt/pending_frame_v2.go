@@ -163,7 +163,11 @@ func (f *v2Frame) content(tag byte) uint64 {
 		f.key()
 		f.any()
 	case wireType:
-		if ref := byte(uintInRun(&f.d.typeRefDec, f)); ref == 3 || ref == 5 {
+		// Checked before the byte conversion, so that 261 cannot read as 5.
+		switch ref := uintInRun(&f.d.typeRefDec, f); {
+		case ref > maxTypeRef:
+			f.fail(typeRefError(ref))
+		case typeRefHasName(byte(ref)):
 			f.key()
 		}
 	case wireDoc:
