@@ -4,6 +4,15 @@
   one client, the V1 encoders now write clients in descending order, so their
   bytes equal Yjs's. A reader of the bytes sees the same document; only code
   that compares V1 bytes with bytes ygo wrote before sees a change.
+- **The update `OnUpdate` hands out carries only the transaction's
+  deletions.** It carried every deletion the document held, so each update
+  grew with the document's history: after 1,000 separate deletions, a
+  one-character insert gave a 2,951-byte update where Yjs sends 12. Every
+  `provider/websocket` server stores, relays and broadcasts these updates. A
+  reader that keeps every update, as the persistence adapters do, still holds
+  every deletion. A reader that kept only the newest update and relied on it
+  to list every earlier deletion must keep them all, or read the state with
+  `EncodeStateAsUpdateV1`, which still writes every deletion.
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
 - **Faster full-state encodes and snapshots after deletions.** The delete set

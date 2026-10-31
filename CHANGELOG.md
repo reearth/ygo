@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EncodeStateVectorV1`, `EncodeStateVectorFromUpdate`,
   `EncodeStateVectorFromUpdateV2` and `EncodeSnapshot`. The V2 encoders and
   the delete-set encoders already wrote clients descending.
+- **`crdt`: the update `OnUpdate` observers receive carries only the
+  transaction's deletions.** It carried the whole document's delete set, so
+  every update grew with the document's deletion history: after 1,000
+  separate deletions, a one-character insert gave a 2,951-byte update. It now
+  gives 12 bytes, as Yjs's `update` event does.
+  `provider/websocket`'s `Server.Apply` no longer returns `ErrUpdateTooLarge`
+  for a small edit to a room with a long deletion history.
 
 ### Performance
 
