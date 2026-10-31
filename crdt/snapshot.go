@@ -349,8 +349,8 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 	return enc.Bytes()
 }
 
-// gcTxnDeleteSet is the per-transaction counterpart to RunGC (#78 H1, v1.15.0).
-// Called from transactInternal under the doc lock, after buildPhase2 has
+// gcTxnDeleteSet is the per-transaction counterpart to RunGC.
+// Called from collectAndEncodeLocked under the doc lock, after buildPhase2 has
 // captured observer deltas. For every item tombstoned in this transaction,
 // replaces its Content with a length-only ContentDeleted placeholder so
 // long-running documents don't retain full content for items that will

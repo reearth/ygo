@@ -44,10 +44,13 @@ func changedText(txn *Transaction) bool {
 }
 
 // afterRemoteObservers finishes a remote transaction once its observers have
-// fired: it runs the format cleanup, GCs the transaction, and fires the
-// cleanup's observers. A panicking cleanup still emits what it deleted, then
-// re-panics.
+// fired: it runs the format cleanup and fires the cleanup's observers. A
+// panicking cleanup still emits what it deleted, then re-panics.
 func (d *Doc) afterRemoteObservers(remote *Transaction) {
+	defer func() { remote.deletedFormats = nil }()
+	if !remote.formatCleanup {
+		return
+	}
 	var phase2 func()
 	var panicked any
 	func() {
@@ -58,12 +61,7 @@ func (d *Doc) afterRemoteObservers(remote *Transaction) {
 				panicked = p
 			}
 		}()
-		if remote.formatCleanup {
-			phase2, panicked = d.formattingCleanupLocked(remote)
-		}
-		if d.gc && d.undoManagerCount == 0 {
-			gcTxnDeleteSet(d, remote)
-		}
+		phase2, panicked = d.formattingCleanupLocked(remote)
 	}()
 	if phase2 != nil {
 		phase2()
@@ -73,13 +71,39 @@ func (d *Doc) afterRemoteObservers(remote *Transaction) {
 	}
 }
 
+// prepareRemoteCleanup decides, for a committing remote transaction txn,
+// whether afterRemoteObservers must run its format cleanup, and if so records
+// what the cleanup needs before the GC. Yjs cleans up the format markers a
+// remote change left redundant after the change's observers, in a follow-up
+// local transaction; a type observer may give a text its first marker, so
+// with type observers to fire the decision waits for them. Caller must hold
+// d.mu, after buildPhase2.
+func (d *Doc) prepareRemoteCleanup(txn *Transaction) bool {
+	if txn.Local {
+		return false
+	}
+	if needsFormattingCleanup(txn) {
+		txn.formatCleanup = true
+	} else if txn.typeObserved && changedText(txn) {
+		txn.afterTypeObservers = func() {
+			d.mu.Lock()
+			txn.formatCleanup = needsFormattingCleanup(txn)
+			d.mu.Unlock()
+		}
+	} else {
+		return false
+	}
+	recordDeletedFormats(txn)
+	return true
+}
+
 // formattingCleanupLocked runs Yjs's cleanupYTextAfterTransaction for the
 // remote transaction remote in a new local transaction with a nil origin, as
 // Yjs does, and returns that transaction's observer phase and any panic the
 // cleanup raised. A cleanup that deleted nothing fires only the
 // after-transaction observers, as Yjs emits no update without content. Like
 // a panicking Transact, a panicking cleanup still emits the deletions it
-// made. It must run under d.mu before remote's deleted content is GC'd.
+// made.
 func (d *Doc) formattingCleanupLocked(remote *Transaction) (phase2 func(), panicked any) {
 	txn := &Transaction{
 		doc:         d,
@@ -103,13 +127,15 @@ func (d *Doc) formattingCleanupLocked(remote *Transaction) (phase2 func(), panic
 	}
 	func() {
 		if panicked != nil {
-			defer func() { _ = recover() }()
+			defer func() {
+				if recover() != nil {
+					phase2 = nil
+				}
+			}()
 		}
 		phase2 = buildPhase2(d, txn)
+		collectAndEncodeLocked(d, txn)
 	}()
-	if d.gc && d.undoManagerCount == 0 {
-		gcTxnDeleteSet(d, txn)
-	}
 	return phase2, panicked
 }
 
@@ -152,23 +178,29 @@ func cleanupYTextAfterTransaction(remote, txn *Transaction) {
 		})
 	}
 	// Visit deletions as Yjs does: clients in first-deletion order, each
-	// client's ranges sorted and merged. Each gap is cleaned once: cleaning
-	// it again from another of its items deletes nothing.
+	// client's ranges sorted and merged. The GC has replaced the deleted
+	// content since, so a deleted format marker is known from the record taken
+	// before it. Each gap is cleaned once: cleaning it again from another of
+	// its items deletes nothing.
 	cleaned := map[*Item]bool{}
-	ds := remote.deleteSet
-	for _, client := range ds.orderedClients() {
-		sorted := DeleteSet{clients: map[ClientID][]DeleteRange{client: slices.Clone(ds.clients[client])}}
-		sorted.sortAndCompact(client)
+	sorted := cloneDeleteSet(remote.deleteSet)
+	for _, client := range sorted.order {
 		for _, r := range sorted.clients[client] {
 			storeRange(store, client, r.Clock, r.Clock+r.Len, func(it *Item) {
 				p := it.Parent
 				if p == nil || !p.cleanFormatting || needFull[p] {
 					return
 				}
-				if isContentFormat(it) {
-					addFull(p)
-				} else if !cleaned[it] {
+				// it may hold several deleted items since a merge; Yjs visits
+				// each, so text before the first marker still gets its gap cleaned.
+				lo := max(it.ID.Clock, r.Clock)
+				hi := min(it.ID.Clock+uint64(it.Content.Len()), r.Clock+r.Len)
+				f, format := firstDeletedFormat(remote, client, lo, hi)
+				if (!format || f > lo) && !cleaned[it] {
 					cleanupContextlessFormattingGap(txn, it, cleaned)
+				}
+				if format {
+					addFull(p)
 				}
 			})
 		}
@@ -176,6 +208,38 @@ func cleanupYTextAfterTransaction(remote, txn *Transaction) {
 	for _, t := range full {
 		cleanupYTextFormatting(txn, t)
 	}
+}
+
+// recordDeletedFormats records, before the GC replaces their content, the
+// clocks of the format markers remote deleted, sorted per client.
+func recordDeletedFormats(remote *Transaction) {
+	store := remote.doc.store
+	for client, ranges := range remote.deleteSet.clients {
+		for _, r := range ranges {
+			storeRange(store, client, r.Clock, r.Clock+r.Len, func(it *Item) {
+				if isContentFormat(it) {
+					if remote.deletedFormats == nil {
+						remote.deletedFormats = make(map[ClientID][]uint64)
+					}
+					remote.deletedFormats[client] = append(remote.deletedFormats[client], it.ID.Clock)
+				}
+			})
+		}
+	}
+	for _, clocks := range remote.deletedFormats {
+		slices.Sort(clocks)
+	}
+}
+
+// firstDeletedFormat returns the lowest clock in [lo, hi) of a format marker
+// of client that remote deleted.
+func firstDeletedFormat(remote *Transaction, client ClientID, lo, hi uint64) (uint64, bool) {
+	clocks := remote.deletedFormats[client]
+	i, _ := slices.BinarySearch(clocks, lo)
+	if i < len(clocks) && clocks[i] < hi {
+		return clocks[i], true
+	}
+	return 0, false
 }
 
 func sortedStateClients(sv StateVector) []ClientID {

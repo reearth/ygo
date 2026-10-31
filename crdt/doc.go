@@ -472,16 +472,10 @@ func (d *Doc) GetText(name string) *YText {
 // and returns a closure that fires all observers in the correct order.
 // The closure must be invoked OUTSIDE d.mu — observers may re-enter Doc
 // methods that acquire d.mu, which would deadlock under the lock.
+// OnUpdate observers receive txn.update, which collectAndEncodeLocked sets.
 //
 // Returns nil only if there is nothing to fire (no observers of any kind).
 func buildPhase2(d *Doc, txn *Transaction) func() {
-	// Encode the incremental update and snapshot observer slices while still
-	// holding the lock so we get a consistent view.
-	var updateBytes []byte
-	if len(d.onUpdate) > 0 {
-		updateBytes = encodeV1Locked(d, txn.beforeState)
-	}
-
 	// Snapshot per-type observer closures while the write lock is held.
 	// prepareFire copies each type's observer slice and builds the event struct,
 	// so concurrent Observe/Unobserve calls (which also hold the write lock)
@@ -574,8 +568,10 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 				fn(txn)
 			}
 		}
+		update := txn.update
+		txn.update = nil // a retained event or transaction need not keep the bytes
 		for _, fn := range onUpdateSnap {
-			fn(updateBytes, txn.Origin)
+			fn(update, txn.Origin)
 		}
 		for _, fn := range onAfterTxnSnap {
 			fn(txn)
@@ -585,6 +581,29 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 				fn(subdocsEv)
 			}
 		}
+	}
+}
+
+// collectAndEncodeLocked runs txn's GC and then encodes txn's update for the
+// OnUpdate observers, as Yjs cleanupTransactions encodes the update after
+// tryGcDeleteSet, so content txn both inserted and deleted is sent as
+// ContentDeleted. Caller must hold d.mu.
+//
+// When an UndoManager is attached we skip auto-GC: undoing a deletion
+// re-inserts a COPY of the deleted item's content (applyStackItem →
+// redoItem), which only works if that original content is still present.
+// Yjs handles this with a per-item keep flag; we take the conservative
+// position of disabling auto-GC entirely while any UndoManager is
+// registered. RunGC remains available as the explicit manual entry point.
+func collectAndEncodeLocked(d *Doc, txn *Transaction) {
+	if d.gc && d.undoManagerCount == 0 {
+		gcTxnDeleteSet(d, txn)
+	}
+	if len(d.onUpdate) > 0 {
+		txn.update = encodeV1Locked(d, txn.beforeState)
+	}
+	if txn.landed != nil {
+		*txn.landed = encodeTxnV1Locked(txn)
 	}
 }
 
@@ -647,38 +666,20 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			phase2 = buildPhase2(d, txn)
 		}
 
-		// Yjs cleans up the format markers a remote change left redundant
-		// after the change's observers, in a follow-up local transaction,
-		// and GCs the change only then. A type observer may give a text its
-		// first marker, so with type observers to fire the gate waits.
-		deferGC := false
-		if r == nil && !txn.Local {
-			if needsFormattingCleanup(txn) {
-				txn.formatCleanup, deferGC = true, true
-			} else if txn.typeObserved && changedText(txn) {
-				txn.afterTypeObservers = func() {
-					d.mu.Lock()
-					txn.formatCleanup = needsFormattingCleanup(txn)
-					d.mu.Unlock()
-				}
-				deferGC = true
-			}
-		}
+		cleanup := r == nil && d.prepareRemoteCleanup(txn)
 
-		// #78 H1 — Auto-GC at transaction commit. Runs AFTER buildPhase2 so
-		// the observer Deltas have already been computed against the original
-		// content; runs BEFORE Unlock so other goroutines never see partially-
-		// GC'd state. No-op when doc.gc is false.
-		//
-		// When an UndoManager is attached we skip auto-GC: undoing a deletion
-		// re-inserts a COPY of the deleted item's content (applyStackItem →
-		// redoItem), which only works if that original content is still present.
-		// Yjs handles this with a per-item keep flag; we take the conservative
-		// position of disabling auto-GC entirely while any UndoManager is
-		// registered. RunGC remains available as the explicit manual entry point.
-		if d.gc && d.undoManagerCount == 0 && !deferGC {
-			gcTxnDeleteSet(d, txn)
-		}
+		// Collect and encode after buildPhase2 computed the observer events
+		// and before Unlock, so no goroutine sees a partly collected state.
+		func() {
+			if r != nil {
+				defer func() {
+					if recover() != nil {
+						phase2 = nil
+					}
+				}()
+			}
+			collectAndEncodeLocked(d, txn)
+		}()
 
 		// Mark the transaction committed BEFORE releasing the lock so the
 		// txn-scoped accessors fail loudly from observers (which receive the
@@ -687,7 +688,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		txn.done = true
 		d.mu.Unlock()
 
-		if deferGC {
+		if cleanup {
 			// Runs even if an observer panics, as Yjs runs the cleanup.
 			defer d.afterRemoteObservers(txn)
 		}
@@ -799,6 +800,8 @@ func (d *Doc) TransactE(fn func(*Transaction) error, origin ...any) error {
 // OnUpdate registers a callback that fires after every committed transaction.
 // The callback receives the incremental V1 update bytes for that transaction
 // and the origin value passed to Transact. Returns an unsubscribe function.
+// With GC on, the update is encoded after the transaction's GC, as in Yjs, so
+// content the transaction both inserted and deleted is sent as a tombstone.
 //
 // Callbacks that compare the origin (an echo guard, a per-user filter) do so
 // with Go ==, so the caution on Transact's doc applies: pointer origin
