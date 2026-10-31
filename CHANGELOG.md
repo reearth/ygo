@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Performance
+
+- **`crdt`: encoding against a state vector finds each client's new structs
+  by binary search, as Yjs `writeStructs` does.** `EncodeStateAsUpdateV1`,
+  `EncodeStateAsUpdateV2` and the update `OnUpdate` observers receive read
+  the length of every item of every client and copied the matches into a new
+  slice. Encoding a 1,000-item text now allocates 5 objects and 6.1 KiB in V1
+  (was 16 and 23.3 KiB) and 29 objects and 37.9 KiB in V2 (was 40 and
+  55.0 KiB). The bytes do not change.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
