@@ -1,3 +1,23 @@
+## v1.54.1
+
+**Who is affected: documents with GC on (the default) that delete a nested
+type: a map entry, array element or XML node that holds a map, array, text or
+XML type.**
+
+When the GC collected a deleted nested type, it kept the items under that
+type as deleted items, each with its parent and origins. Yjs turns them into
+GC structs. The GC at the end of a transaction and `RunGC` now do the same,
+and an item that arrives later in a collected type is stored as a GC struct,
+as in Yjs. `RunGC` also merges neighbouring GC structs of one client into
+one, as Yjs does at the end of a transaction.
+
+Content does not change, but encoded state does: after such a delete, the
+state that `EncodeStateAsUpdate` returns holds GC structs where it held
+deleted items, and is smaller. A write through a handle to a type inside a
+collected type no longer fires the deep observers of the types above it, as
+in Yjs. A state that an earlier version stored loads as before, and peers on
+either version converge. No API or wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

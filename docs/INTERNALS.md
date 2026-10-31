@@ -132,11 +132,11 @@ The cache is invalidated (cleared) only when an item is inserted in the **middle
 
 ## Garbage collection walk
 
-When `doc.GC = true`, `RunGC` uses a two-pass algorithm:
+When GC is on (the default; `crdt.WithGC(false)` turns it off), `RunGC` uses a two-pass algorithm:
 
-**Pass 1 — tombstone replacement:** Walk the linked list of every type in the document. For each deleted item whose content is not already `ContentDeleted`, replace it with `ContentDeleted{Len: item.Content.Len()}`. This frees memory for the original content (strings, binaries, etc.) while preserving the item's position in the list so other items' `Origin` pointers remain valid.
+**Pass 1 — tombstone replacement:** Walk every client's items in the `StructStore`. For each deleted item whose content is not already `ContentDeleted`, replace it with `ContentDeleted{Len: item.Content.Len()}`. This frees memory for the original content (strings, binaries, etc.) while preserving the item's position in the list so other items' `Origin` pointers remain valid. If the item holds a nested type, every item under that type, at any depth, becomes a GC struct (no parent and no origins) and the type is left empty, as Yjs `ContentType.gc` does. Pass 1 runs on every client before pass 2.
 
-**Pass 2 — tombstone merging:** Scan the per-client slice in `StructStore`. Adjacent `ContentDeleted` items that are contiguous in both the linked list (`prev.Right == item`) and clock space are collapsed into a single item, reducing list length.
+**Pass 2 — tombstone merging:** Scan the per-client slice in `StructStore`. Adjacent `ContentDeleted` items that are contiguous in both the linked list (`prev.Right == item`) and clock space are collapsed into a single item, reducing list length. So are neighbouring GC structs with consecutive clocks, as Yjs `GC.mergeWith` merges them.
 
 GC is skipped for items whose clock falls within the state vector of an active `Snapshot`.
 

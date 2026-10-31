@@ -352,9 +352,10 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 // gcTxnDeleteSet is the per-transaction counterpart to RunGC (#78 H1, v1.15.0).
 // Called from transactInternal under the doc lock, after buildPhase2 has
 // captured observer deltas. For every item tombstoned in this transaction,
-// replaces its Content with a length-only ContentDeleted placeholder so
-// long-running documents don't retain full content for items that will
-// never be observable again.
+// replaces its Content with a length-only ContentDeleted placeholder, and the
+// items under a nested type it holds with GC structs, so long-running
+// documents don't retain full content for items that will never be
+// observable again.
 //
 // Caller must hold d.mu. Unlike RunGC this does NOT acquire the lock or
 // run the adjacent-tombstone merge pass — those are for the manual
@@ -386,16 +387,54 @@ func gcTxnDeleteSet(doc *Doc, txn *Transaction) {
 				if _, alreadyGC := item.Content.(*ContentDeleted); alreadyGC {
 					continue
 				}
-				item.Content = NewContentDeleted(item.Content.Len())
+				item.gc()
 			}
 		}
 	}
 }
 
+// gc replaces the content of the deleted item with a ContentDeleted of the
+// same length, and turns the items under a nested type it holds into GC
+// structs, as Yjs Item.gc and ContentType.gc do.
+func (item *Item) gc() {
+	switch c := item.Content.(type) {
+	case *ContentDeleted:
+		return
+	case *ContentType:
+		if c.Type != nil {
+			gcTypeItems(c.Type)
+		}
+	}
+	item.Content = NewContentDeleted(item.Content.Len())
+}
+
+// gcTypeItems turns every item under root into a GC struct without recursion, so nesting depth does not grow the stack.
+func gcTypeItems(root *abstractType) {
+	t, child := root, root.start
+	for {
+		if child == nil {
+			t.start = nil
+			clear(t.itemMap)
+			if t == root {
+				return
+			}
+			child, t = t.item, t.item.Parent
+		} else if ct, ok := child.Content.(*ContentType); ok && ct.Type != nil {
+			t, child = ct.Type, ct.Type.start
+			continue
+		}
+		next := child.Right
+		child.markGCOrphan()
+		child = next
+	}
+}
+
 // RunGC replaces the content of deleted items with lightweight ContentDeleted
 // tombstones, freeing memory while preserving the structural position information
-// required for CRDT correctness. It then merges adjacent ContentDeleted items
-// from the same client into single nodes, compacting the linked list.
+// required for CRDT correctness. The items under a deleted nested type become
+// GC structs, as in Yjs. It then merges neighbouring GC structs, and adjacent
+// ContentDeleted items, from the same client into single nodes, compacting the
+// linked list.
 //
 // This is a no-op when doc.gc is false. After RunGC runs, RestoreDocument can
 // no longer reconstruct states that predate the GC'd deletions — take snapshots
@@ -407,30 +446,39 @@ func RunGC(doc *Doc) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 
-	for client, items := range doc.store.clients {
-		// Pass 1: replace deleted item content with ContentDeleted tombstones.
+	// Pass 1 runs on every client before pass 2 because a nested type's items can belong to any client.
+	for _, items := range doc.store.clients {
 		for _, item := range items {
 			if item.Deleted {
-				if _, alreadyGC := item.Content.(*ContentDeleted); !alreadyGC {
-					item.Content = NewContentDeleted(item.Content.Len())
-				}
+				item.gc()
 			}
 		}
+	}
 
-		// Pass 2: merge adjacent ContentDeleted items that are consecutive in
-		// both the store slice and the linked list. Merging them reduces the
-		// number of nodes future origin lookups must traverse.
+	// Pass 2: merge neighbouring GC structs, and adjacent ContentDeleted items
+	// that are consecutive in both the store slice and the linked list, into
+	// single nodes, which shortens the store and the encoded state.
+	for client, items := range doc.store.clients {
 		kept := make([]*Item, 0, len(items))
 		for _, item := range items {
-			prevCD, prevIsCDItem := func() (*ContentDeleted, bool) {
-				if len(kept) == 0 {
-					return nil, false
-				}
-				p := kept[len(kept)-1]
-				cd, ok := p.Content.(*ContentDeleted)
-				return cd, ok
-			}()
+			var prev *Item
+			var prevCD *ContentDeleted
+			if len(kept) > 0 {
+				prev = kept[len(kept)-1]
+				prevCD, _ = prev.Content.(*ContentDeleted)
+			}
 			itemCD, itemIsCD := item.Content.(*ContentDeleted)
+			if prevCD == nil || !itemIsCD {
+				kept = append(kept, item)
+				continue
+			}
+
+			// Two GC structs merge, as Yjs GC.mergeWith merges them: a client's
+			// structs in the store have contiguous clocks.
+			if prev.isGCOrphan() && item.isGCOrphan() {
+				prevCD.length += itemCD.length
+				continue
+			}
 
 			// Merge only when both are tombstones, directly adjacent in the
 			// linked list (no gap, no interleaving items), clocks are
@@ -438,14 +486,7 @@ func RunGC(doc *Doc) {
 			// tombstone still encodes item's position: item's Origin is prev's
 			// last clock and both share an OriginRight (Yjs Item.mergeWith).
 			// A live item whose origin is inside item moves on decode otherwise.
-			prev := func() *Item {
-				if len(kept) == 0 {
-					return nil
-				}
-				return kept[len(kept)-1]
-			}()
-			if prevIsCDItem && itemIsCD &&
-				gcMergeable(prev, item) &&
+			if gcMergeable(prev, item) &&
 				prev.Right == item && item.Left == prev &&
 				prev.ID.Clock+uint64(prev.Content.Len()) == item.ID.Clock &&
 				item.Origin != nil && item.Origin.Client == client && item.Origin.Clock == item.ID.Clock-1 &&

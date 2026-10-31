@@ -151,6 +151,7 @@ type Doc struct {
 	autoLoad        bool
 	collectionID    string
 	item            *Item // set on integrate when this Doc is embedded as a subdocument (#63)
+	parent          *Doc  // the document item belongs to, set with item; the GC can clear item's Parent
 	subdocs         map[string]*Doc
 	onSubdocs       []subdocsSub
 	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
@@ -226,12 +227,12 @@ func (d *Doc) Load() {
 		return
 	}
 	d.shouldLoad = true
-	item := d.item
+	item, parent := d.item, d.parent
 	d.mu.Unlock()
-	if item == nil || item.Parent == nil {
+	if item == nil {
 		return
 	}
-	item.Parent.doc.Transact(func(txn *Transaction) {
+	parent.Transact(func(txn *Transaction) {
 		// A detached/overwritten subdoc leaves item tombstoned but d.item still
 		// pointing at it; reporting it as loaded would be spurious (the doc is
 		// no longer resident in the parent's registry). item.Deleted is read

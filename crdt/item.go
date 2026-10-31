@@ -255,7 +255,7 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		if cd.Doc.item != nil && cd.Doc.item != item {
 			panic(ErrSubdocAlreadyIntegrated)
 		}
-		cd.Doc.item = item
+		cd.Doc.item, cd.Doc.parent = item, txn.doc
 		txn.addSubdocAdded(cd.Doc)
 		if cd.Doc.shouldLoad {
 			txn.addSubdocLoaded(cd.Doc)
