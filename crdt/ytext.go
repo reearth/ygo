@@ -97,9 +97,15 @@ func (txt *YText) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 	copy(snap, txt.observers)
 	e := YTextEvent{Target: txt, Txn: txn, Delta: delta}
 	return func() {
-		for _, s := range snap {
-			s.fn(e)
-		}
+		// A text whose own observer panics does not start the format cleanup, as in Yjs.
+		returned := false
+		defer func() {
+			if !returned {
+				e.Txn.skipCleanup(&e.Target.abstractType)
+			}
+		}()
+		callAll(snap, func(s textSub) { s.fn(e) })
+		returned = true
 	}
 }
 

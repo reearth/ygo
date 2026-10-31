@@ -1,3 +1,28 @@
+## v1.55.1
+
+**Who is affected: code with an observer that can panic.**
+
+When an observer panicked, no observer after it ran. The other observers of
+the same type, the deep observers, `OnUpdate`, `OnAfterTransaction` and
+`OnSubdocs` did not run, so a relay or a store that listens on `OnUpdate`
+lost that transaction's update. Now every observer runs, and then the panic
+reaches the caller of `Transact` or `ApplyUpdate` as before. If more than one
+observer panics, the caller gets the last panic, as in Yjs. Other observers
+now run after an observer panics, so they must not expect the panicking
+observer's work to be complete. No API or wire format changes.
+
+**Who is affected: code with a text observer that can panic on a remote
+change.**
+
+After a remote change, ygo deletes the format markers that the change left
+redundant, in a separate transaction with a nil origin. When a text observer
+panicked, ygo still ran this cleanup for that text. When a type observer
+panicked before the decision was made, no text got the cleanup. Now a text
+whose own observer panics does not start the cleanup, and any other changed
+text with formatting still does, as in Yjs. Where markers stay, text inserted
+there later can take their formatting, as it does in Yjs. No API or wire
+format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
