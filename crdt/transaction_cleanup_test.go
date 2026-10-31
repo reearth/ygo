@@ -106,7 +106,7 @@ func countItemsForClient(doc *Doc, client ClientID) int {
 	return len(doc.store.clients[client])
 }
 
-// H2 — directly exercise splitItem + tryMergeWithLefts via the store
+// H2 — directly exercise splitItem + mergeTxnStructs via the store
 // helpers. Forces a clean split, then verifies it is reversed when no item is
 // inserted between the halves before transaction commit.
 func TestUnit_Transaction_H2_DirectSplitRemerge(t *testing.T) {
@@ -117,7 +117,7 @@ func TestUnit_Transaction_H2_DirectSplitRemerge(t *testing.T) {
 	require.Equal(t, 1, countItemsForClient(doc, 1))
 
 	// Force a split via getItemCleanEnd, which calls splitItem under the hood.
-	// No item is integrated between the halves, so tryMergeWithLefts must
+	// No item is integrated between the halves, so mergeTxnStructs must
 	// reverse the split at commit.
 	doc.Transact(func(txn *Transaction) {
 		_ = doc.store.getItemCleanEnd(txn, 1, 2) // split after clock 2
@@ -130,7 +130,7 @@ func TestUnit_Transaction_H2_DirectSplitRemerge(t *testing.T) {
 }
 
 // H2 — when an item IS inserted between the halves, the split must stay.
-// This guards against a regression where tryMergeWithLefts merges blindly.
+// This guards against a regression where mergeTxnStructs merges blindly.
 func TestUnit_Transaction_H2_DoesNotMergeWhenItemInserted(t *testing.T) {
 	docA := New(WithGC(false), WithClientID(1))
 	docB := New(WithGC(false), WithClientID(2))

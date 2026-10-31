@@ -120,9 +120,9 @@ Given a set of items with a total order on IDs `(client, clock)`, the integratio
 
 **Why `originRight`?** If `L` is deleted before `i` arrives, a single-origin approach would have no anchor. `originRight` provides a fallback: scan forward until `R` is found, then apply the rule above relative to the reconstructed position. This is the key correctness property that distinguishes YATA from simpler list CRDTs.
 
-## Run-length squashing (YText optimisation)
+## Struct merging at transaction end
 
-When a transaction closes, consecutive `ContentString` items from the same client with no intervening deleted or formatted items are merged into a single item with a longer `length`. This keeps the linked list short for the common case of sequential typing, matching the behaviour of the JS reference implementation and its performance characteristics.
+When a transaction closes, ygo merges neighbouring structs of one client as Yjs's `cleanupTransactions` does: each struct the transaction deleted with its neighbours, and each struct it added (or split) with the struct on its left, which can come from an earlier transaction. Two structs merge when they encode as one: two GC structs, or two items that are neighbours in the list with consecutive clocks, where the right one's origin is the left one's last ID, with the same right origin, deleted state and move, neither redone, and both string, `Any`, JSON or deleted content of one kind. This keeps the linked list and the encoded state as short as Yjs's for typing and deleting one character per transaction.
 
 ## LRU position cache
 

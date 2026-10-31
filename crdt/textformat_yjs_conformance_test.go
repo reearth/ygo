@@ -180,21 +180,22 @@ func jsNumbers(v any) any {
 	return v
 }
 
-// textFormatUnits lists a V1 update's structs, one clock unit per deleted
-// struct, plus its compacted delete set. Yjs merges adjacent GC'd structs at
-// commit and ygo does not, so two updates that differ only there list the
-// same units.
+// idString writes an optional ID for a test's struct listing.
+func idString(p *ID) string {
+	if p == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d:%d", p.Client, p.Clock)
+}
+
+// textFormatUnits lists a V1 update's structs, clients ascending, plus its
+// compacted delete set, so two updates that differ only in client order list
+// the same structs.
 func textFormatUnits(t *testing.T, u []byte) []string {
 	t.Helper()
 	structs, ds, err := decodeStructsV1(New(), u)
 	if err != nil {
 		t.Fatal(err)
-	}
-	id := func(p *ID) string {
-		if p == nil {
-			return "-"
-		}
-		return fmt.Sprintf("%d:%d", p.Client, p.Clock)
 	}
 	clients := make([]ClientID, 0, len(structs))
 	for c := range structs {
@@ -204,17 +205,7 @@ func textFormatUnits(t *testing.T, u []byte) []string {
 	var out []string
 	for _, c := range clients {
 		for _, it := range structs[c] {
-			if cd, ok := it.Content.(*ContentDeleted); ok {
-				for k := range cd.Len() {
-					origin := it.Origin
-					if k > 0 {
-						origin = &ID{Client: c, Clock: it.ID.Clock + uint64(k) - 1}
-					}
-					out = append(out, fmt.Sprintf("%d:%d o=%s r=%s deleted", c, it.ID.Clock+uint64(k), id(origin), id(it.OriginRight)))
-				}
-				continue
-			}
-			out = append(out, fmt.Sprintf("%d:%d o=%s r=%s %T%+v", c, it.ID.Clock, id(it.Origin), id(it.OriginRight), it.Content, it.Content))
+			out = append(out, fmt.Sprintf("%d:%d o=%s r=%s %T%+v", c, it.ID.Clock, idString(it.Origin), idString(it.OriginRight), it.Content, it.Content))
 		}
 	}
 	dsClients := ds.Clients()

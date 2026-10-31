@@ -624,23 +624,15 @@ func callAll[T any](xs []T, fn func(T)) {
 	}
 }
 
-// collectAndEncodeLocked runs txn's GC and then encodes txn's update for the
-// OnUpdate observers, as Yjs cleanupTransactions encodes the update after
-// tryGcDeleteSet, so content txn both inserted and deleted is sent as
-// ContentDeleted. As in Yjs, the update carries only txn's deletions, sorted
-// and merged, and a transaction that adds and deletes nothing has none.
-// Caller must hold d.mu.
-//
-// When an UndoManager is attached we skip auto-GC: undoing a deletion
-// re-inserts a COPY of the deleted item's content (applyStackItem →
-// redoItem), which only works if that original content is still present.
-// Yjs handles this with a per-item keep flag; we take the conservative
-// position of disabling auto-GC entirely while any UndoManager is
-// registered. RunGC remains available as the explicit manual entry point.
+// collectAndEncodeLocked runs txn's GC, merges its structs and then encodes
+// txn's update for the OnUpdate observers, as Yjs cleanupTransactions encodes
+// the update after tryGcDeleteSet and the merge, so content txn both inserted
+// and deleted is sent as ContentDeleted and a merged run is one struct. As in
+// Yjs, the update carries only txn's deletions, sorted and merged, and a
+// transaction that adds and deletes nothing has none. cleanupTxnLocked says
+// when the GC is skipped; the merge runs either way. Caller must hold d.mu.
 func collectAndEncodeLocked(d *Doc, txn *Transaction) (update []byte) {
-	if d.gc && d.undoManagerCount == 0 {
-		gcTxnDeleteSet(d, txn)
-	}
+	cleanupTxnLocked(d, txn)
 	if len(d.onUpdate) > 0 && txn.changesDoc() {
 		update = encodeV1Locked(d, txn.beforeState, cloneDeleteSet(txn.deleteSet))
 	}
@@ -759,10 +751,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 	txn.afterState = d.store.StateVector()
 
 	squashRuns(txn)
-	// #78 H2 — Re-merge transient splits. Must run after squashRuns so any
-	// new-item run that squash-collapsed disappears from tryMergeWithLefts's
-	// view (its left.Right == item check filters out absorbed items).
-	tryMergeWithLefts(txn)
+	mergeSplitHalves(txn)
 	return retErr
 }
 

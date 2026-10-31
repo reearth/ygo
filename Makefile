@@ -64,6 +64,7 @@ fixtures:
 	node testutil/gen_fixtures_dupgroups.js
 	node testutil/gen_fixtures_interleaved.js
 	node testutil/gen_fixtures_clientorder.js
+	node testutil/gen_fixtures_mergestructs.js
 
 # mobile/ is its own module (see mobile/README.md); these need Go 1.26+.
 mobile-test:

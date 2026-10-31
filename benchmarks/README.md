@@ -40,18 +40,19 @@ go test -bench=BenchmarkB4 -benchmem -count=3 ./benchmarks/
 | B4 Apply        | < 2 s     | Apply full 182 k-op real trace to empty doc |
 | B4 Encode V1    | < 200 ms  | Encode final state as V1 binary update      |
 | B4 Encode V2    | < 300 ms  | Encode final state as V2 binary update      |
-| B4 Decode       | < 2 s     | Decode + apply full V1 snapshot (3.4 MB)    |
+| B4 Decode       | < 2 s     | Decode + apply full V1 snapshot             |
 
-**Decode target note:** Decoding a full-state V1 snapshot of the B4 document
-requires allocating and integrating 182 k individual `Item` objects (one per
-character insertion in the original trace), resulting in ~932 k heap allocations
-and significant GC pressure.  The practical ceiling on current hardware is
-~1–2 s.  Future work (arena allocation, inlined `*ID` fields) could bring this
-below 200 ms; tracked in ROADMAP Phase 9.
+**Decode target note:** Before v1.54.1, ygo kept one `Item` per character
+insertion, so decoding a full-state V1 snapshot of the B4 document allocated
+and integrated 182 k `Item` objects (~932 k heap allocations) with significant
+GC pressure. Since v1.54.1 structs merge at the end of each transaction as in
+Yjs, so the snapshot holds far fewer structs. Future work (arena allocation,
+inlined `*ID` fields) could bring decoding below 200 ms; tracked in ROADMAP
+Phase 9.
 
 V2 encoding is allowed more time than V1 because its column-oriented RLE
-compression produces a meaningfully smaller payload (typically 5–10% of V1
-size), trading encoding CPU for network bandwidth.
+compression produces a smaller payload, trading encoding CPU for network
+bandwidth.
 
 ## Latest Results
 
@@ -78,6 +79,10 @@ BenchmarkB4_Size-16        1   1521173375 ns/op     3428241 v1_bytes   234910 v2
 | B4 Encode V2 | < 300 ms  | ~9.0 ms    | ✅     |
 | B4 Decode    | < 2 s     | ~1.18 s    | ✅     |
 | V2 size      | < V1 size | 6.9% of V1 | ✅     |
+
+Since v1.54.1 structs merge at the end of each transaction as in Yjs, and
+`BenchmarkB4_Size` reports 387,121 V1 bytes and 226,480 V2 bytes (58.5% of
+V1). The results above predate that change.
 
 > To reproduce: `go test -bench=BenchmarkB4 -benchmem -benchtime=1x -count=3 ./benchmarks/`
 

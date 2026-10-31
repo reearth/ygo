@@ -146,6 +146,55 @@ func TestConformance_InterleavedHistories_MatchYjs(t *testing.T) {
 	}
 }
 
+// structsByClient decodes a V1 update into a description of each client's
+// structs, so two encodings compare independently of client order.
+func structsByClient(t *testing.T, update []byte) map[ClientID][]string {
+	t.Helper()
+	structs, _, err := decodeStructsV1(New(), update)
+	require.NoError(t, err)
+	out := make(map[ClientID][]string, len(structs))
+	for client, items := range structs {
+		for _, it := range items {
+			sub := "-"
+			if it.ParentSub != nil {
+				sub = *it.ParentSub
+			}
+			out[client] = append(out[client], fmt.Sprintf("%d:%d len=%d o=%s r=%s sub=%s gc=%v %T%+v",
+				it.ID.Client, it.ID.Clock, it.Content.Len(), idString(it.Origin), idString(it.OriginRight), sub,
+				it.isGCOrphan(), it.Content, it.Content))
+		}
+	}
+	return out
+}
+
+// TestConformance_InterleavedHistories_StructsMatchYjs applies each
+// yjs-authored multi-peer history in order and asserts that re-encoding the
+// document writes every client's structs as yjs does: the same runs of
+// deleted and live items, not one struct per transaction.
+func TestConformance_InterleavedHistories_StructsMatchYjs(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "interleaved_yjs_fixtures.json"))
+	require.NoError(t, err)
+	var fixtures []interleavedFixture
+	require.NoError(t, json.Unmarshal(raw, &fixtures))
+	require.NotEmpty(t, fixtures)
+	for _, fx := range fixtures {
+		t.Run(fx.Name, func(t *testing.T) {
+			doc := New()
+			for _, u := range fx.V1.Updates {
+				require.NoError(t, ApplyUpdateV1(doc, mustHex(t, u), nil))
+			}
+			got := structsByClient(t, EncodeStateAsUpdateV1(doc, nil))
+			want := structsByClient(t, mustHex(t, fx.V1.State))
+			for client, structs := range want {
+				if !reflect.DeepEqual(got[client], structs) {
+					t.Errorf("client %d: %d structs, yjs %d", client, len(got[client]), len(structs))
+				}
+			}
+			require.Len(t, got, len(want))
+		})
+	}
+}
+
 // interleavedTyping is the turn-taking shape: peers append to one text in
 // turn, so every struct's origin is the previous peer's struct.
 func interleavedTyping(people, steps int) (state []byte, updates [][]byte, want string) {
