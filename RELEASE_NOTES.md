@@ -1,3 +1,15 @@
+## v1.54.1
+
+**Who is affected: anyone who uses `UndoManager` with a long undo or redo
+history.**
+
+`Undo` and `Redo` copied the deletions of every item on both stacks each
+time they ran. So each call took time in proportion to the history, and
+undoing 32,000 separate edits one by one took 20 s. It now takes 172 ms,
+the same per call at every depth, as in Yjs. Removed stack items are also
+freed now, not kept by the stack. Undo and redo results do not change. No
+API or wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

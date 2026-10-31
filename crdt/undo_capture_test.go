@@ -1,6 +1,8 @@
 package crdt
 
 import (
+	"fmt"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -324,6 +326,173 @@ func TestInteg_UndoManager_ConcurrentCaptureAndUndo(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+// Four goroutines undo and redo while a fifth edits and clears, so stack
+// changes race the map-key check that reads the stacks; run under -race.
+func TestInteg_UndoManager_ConcurrentUndoersAndClear(t *testing.T) {
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	um := NewUndoManager(doc, []SharedType{m})
+	// Every other value is deleted by its own stack item, so restoring an older
+	// value walks past values that undo history deleted.
+	edit := func(i int) {
+		doc.Transact(func(txn *Transaction) { m.Set(txn, "k", i) })
+		um.StopCapturing()
+		if i%2 == 0 {
+			doc.Transact(func(txn *Transaction) { m.Delete(txn, "k") })
+			um.StopCapturing()
+		}
+	}
+	for i := range 200 {
+		edit(i)
+	}
+	var wg sync.WaitGroup
+	for g := range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 300 {
+				switch {
+				case g > 0:
+					um.Undo()
+					um.Redo()
+				case i%25 == 24:
+					um.Clear()
+				default:
+					edit(i)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// An edit that an observer makes while an undo or redo is applied is
+// captured first: after an undo it leaves the redo stack empty, and after a
+// redo it stays on top of the redo's inverse.
+func TestUnit_UndoManager_EditDuringApply(t *testing.T) {
+	for _, redo := range []bool{false, true} {
+		t.Run(fmt.Sprintf("redo=%v", redo), func(t *testing.T) {
+			doc := newTestDoc(1)
+			m := doc.GetMap("m")
+			um := NewUndoManager(doc, []SharedType{m})
+			doc.Transact(func(txn *Transaction) { m.Set(txn, "k", 1) })
+			if redo {
+				require.True(t, um.Undo())
+			}
+			edited := false
+			unobserve := m.ObserveDeep(func(txn *Transaction) {
+				if txn.Origin == um && !edited {
+					edited = true
+					doc.Transact(func(txn *Transaction) { m.Set(txn, "edit", true) })
+				}
+			})
+			defer unobserve()
+
+			if !redo {
+				require.True(t, um.Undo())
+				require.Equal(t, 1, um.UndoStackSize())
+				require.Zero(t, um.RedoStackSize())
+				return
+			}
+			require.True(t, um.Redo())
+			require.Equal(t, 2, um.UndoStackSize())
+			require.True(t, um.Undo())
+			require.False(t, m.Has("edit"))
+			require.True(t, m.Has("k"))
+		})
+	}
+}
+
+// undoStackOfDepth returns an UndoManager whose undo stack holds depth items,
+// each setting its own key of map "m".
+func undoStackOfDepth(depth int) *UndoManager {
+	doc := newTestDoc(1)
+	m := doc.GetMap("m")
+	um := NewUndoManager(doc, []SharedType{m})
+	for i := range depth {
+		doc.Transact(func(txn *Transaction) { m.Set(txn, "k"+strconv.Itoa(i), i) })
+		um.StopCapturing()
+	}
+	return um
+}
+
+// Undo and Redo read the other stack items in place, as Yjs popStackItem
+// does, so the bytes they allocate do not grow with the stacks.
+func TestUnit_UndoManager_UndoRedoBytesIndependentOfStackDepth(t *testing.T) {
+	const cycles = 8
+	allocated := func(depth int) uint64 {
+		um := undoStackOfDepth(depth)
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for range cycles {
+			require.True(t, um.Undo())
+			require.True(t, um.Redo())
+		}
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	shallow, deep := allocated(10), allocated(10_000)
+	// A copy of 10,000 stack items per Undo and Redo adds about 5 MiB here.
+	require.LessOrEqual(t, deep, shallow+64<<10, "shallow=%d deep=%d", shallow, deep)
+}
+
+// A stack item that Undo, Redo, Clear or a new edit removes from a stack is
+// not kept alive by the stack's backing array.
+func TestUnit_UndoManager_RemovedStackItemsAreFreed(t *testing.T) {
+	tests := []struct {
+		name  string
+		run   func(doc *Doc, m *YMap, um *UndoManager)
+		freed []int // indexes of the added stack items, in OnStackItemAdded order
+	}{
+		{"undo pops the item", func(doc *Doc, m *YMap, um *UndoManager) {
+			require.True(t, um.Undo())
+		}, []int{1}},
+		{"an edit clears the redo stack", func(doc *Doc, m *YMap, um *UndoManager) {
+			require.True(t, um.Undo())
+			doc.Transact(func(txn *Transaction) { m.Set(txn, "c", 3) })
+		}, []int{1, 2}},
+		{"clear", func(doc *Doc, m *YMap, um *UndoManager) {
+			require.True(t, um.Undo())
+			um.Clear()
+		}, []int{0, 2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := newTestDoc(1)
+			m := doc.GetMap("m")
+			um := NewUndoManager(doc, []SharedType{m})
+			var done []chan struct{}
+			um.OnStackItemAdded(func(item *StackItem, _ bool) {
+				ch := make(chan struct{})
+				done = append(done, ch)
+				runtime.SetFinalizer(item, func(*StackItem) { close(ch) })
+			})
+			doc.Transact(func(txn *Transaction) { m.Set(txn, "a", 1) })
+			um.StopCapturing()
+			doc.Transact(func(txn *Transaction) { m.Set(txn, "b", 2) })
+			tt.run(doc, m, um)
+			for _, i := range tt.freed {
+				require.True(t, collected(done[i]), "stack item %d is still reachable", i)
+			}
+			runtime.KeepAlive(um)
+		})
+	}
+}
+
+// collected runs the collector until done closes, or reports false.
+func collected(done <-chan struct{}) bool {
+	for range 20 {
+		runtime.GC()
+		select {
+		case <-done:
+			return true
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	return false
 }
 
 // Undo stops capturing, so an edit right after it starts a new stack item
