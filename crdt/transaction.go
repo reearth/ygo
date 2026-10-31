@@ -66,6 +66,16 @@ type Transaction struct {
 	formatCleanup      bool
 	typeObserved       bool
 	afterTypeObservers func()
+	// update is the V1 update OnUpdate observers receive, encoded after the
+	// transaction's GC.
+	update []byte
+	// landed, when set, receives ApplyUpdateV1Landed's update of what this
+	// failed apply integrated, encoded after the GC like update.
+	landed *[]byte
+	// deletedFormats holds, per client and sorted, the clocks of the format
+	// markers this remote transaction deleted, recorded for the format
+	// cleanup before the GC.
+	deletedFormats map[ClientID][]uint64
 }
 
 // Ctx returns the context associated with this transaction. Transactions

@@ -1,3 +1,27 @@
+## v1.55.1
+
+**Who is affected: anyone who relays or stores the updates `OnUpdate`
+receives, with GC on. In `provider/websocket` that is persistence, the
+cluster relay, `Server.Apply`, and the update a server relays after a failed
+apply.**
+
+ygo encoded a transaction's update before its GC, so content that the
+transaction both inserted and deleted went out in full, where Yjs sends a
+`ContentDeleted` tombstone. Relays sent that content to peers, and
+persistence stored it. Now the update is encoded after the GC, as in Yjs,
+for local transactions and for remote applies. The update that
+`ApplyUpdateV1Landed` returns for a failed apply is now encoded at the same
+point, so it holds the same structs as the `OnUpdate` update, also with GC
+off.
+
+The update bytes change: for such a transaction they are smaller, and they
+are the bytes Yjs sends. Peers on either version converge, and updates that
+an earlier version stored load as before. A remote change to a text that an
+observer watches, or that has format markers, is now collected at commit,
+before its observers fire, as every other change is. With GC off, or with an
+`UndoManager` attached, the `OnUpdate` bytes do not change. No API or wire
+format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

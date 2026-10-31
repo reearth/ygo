@@ -70,7 +70,7 @@ func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, er
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
 		if err = applyV1Txn(txn, update); err != nil {
-			landed = encodeTxnV1Locked(txn)
+			txn.landed = &landed // encoded at commit, after the GC, as OnUpdate's update is
 		}
 	}, origin)
 	return landed, err
