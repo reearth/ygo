@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-10-31
+
+### Fixed
+
+- **`crdt`: V1 updates and state vectors list clients in yjs's order
+  ([#274](https://github.com/reearth/ygo/issues/274)).** yjs writes the struct
+  groups of an update and the entries of a state vector with clients
+  descending. ygo's V1 encoders wrote them ascending, so a V1 update or state
+  vector with more than one client was not byte-identical to yjs's.
+  `EncodeStateAsUpdateV1`, the `OnUpdate` payload, `MergeUpdatesV1`,
+  `DiffUpdateV1`, `UpdateV2ToV1`, `EncodeStateFromSnapshot`,
+  `EncodeStateVectorV1`, `EncodeStateVectorFromUpdate`,
+  `EncodeStateVectorFromUpdateV2` and `EncodeSnapshot` now write clients
+  descending, as the V2 encoders already did. Decoders accept either order.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

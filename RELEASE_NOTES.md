@@ -1,3 +1,18 @@
+## v1.55.1
+
+**Who is affected: anyone who compares, hashes or stores ygo's encoded bytes.
+Decoded content does not change.**
+
+V1 updates and state vectors with more than one client now list the clients in
+descending order, as yjs does. Before, ygo wrote them in ascending order, so
+these bytes were different from yjs's. This changes the bytes of
+`EncodeStateAsUpdateV1`, the `OnUpdate` payload, `MergeUpdatesV1`,
+`DiffUpdateV1`, `UpdateV2ToV1`, `EncodeStateFromSnapshot`,
+`EncodeStateVectorV1`, `EncodeStateVectorFromUpdate`,
+`EncodeStateVectorFromUpdateV2` and `EncodeSnapshot`. If you hash or
+deduplicate encoded updates, an update that you encode again gets a new hash.
+Both orders still decode. No API changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
