@@ -268,8 +268,8 @@ func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 
 // applyToRoom applies update to the room's document. ApplyUpdateV1 integrates
 // item by item, so an update that overflows MaxPendingItems can leave part of
-// itself in the room; when it fails, applyToRoom broadcasts that part, and only
-// that part, to the room's other peers.
+// itself in the room; when it fails, applyToRoom broadcasts that part (what
+// integrated and what parked), and only that part, to the room's other peers.
 func (p *peer) applyToRoom(update []byte) error {
 	landed, err := crdt.ApplyUpdateV1Landed(p.room.doc, update, p)
 	if err != nil && landed != nil {
