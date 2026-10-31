@@ -916,10 +916,8 @@ func (p *peer) closeConn() {
 	_ = p.conn.Close()
 }
 
-// runWriter is the dedicated per-peer broadcast writer. It drains writeCh
-// and serialises writes to the connection. Exits when writeCh is closed
-// (during teardown) or when a write fails (the connection is then dead;
-// the read loop will tear down the peer).
+// runWriter is the dedicated per-peer broadcast writer, serialising writeCh
+// to the connection until writeCh closes or a write fails.
 //
 // This pattern mirrors Rust yrs-warp's per-peer sink task. It replaces
 // the previous "spawn one goroutine per peer per broadcast" model, which
@@ -958,6 +956,9 @@ func (p *peer) runWriter() {
 // through writeCh), and gorilla/websocket permits conn.Close() — used by the
 // disconnect path and teardown — to run concurrently with a write. Returns false
 // when the writer goroutine should exit.
+//
+// A failed write closes the connection with closeConn, because gorilla's read
+// side outlives a write timeout and would keep the peer in its room.
 func (p *peer) writeToConn(data []byte) bool {
 	p.wmu.Lock()
 	closed := p.closed
@@ -972,11 +973,13 @@ func (p *peer) writeToConn(data []byte) bool {
 		})
 	}
 	if err := p.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-		p.server.log().Debug("set write deadline failed", "err", err)
+		p.server.log().Debug("set write deadline failed; closing", "room", p.roomName, "err", err)
+		p.closeConn()
 		return false
 	}
 	if err := p.conn.WriteMessage(gws.BinaryMessage, data); err != nil {
 		p.server.log().Warn("write to peer failed; closing", "room", p.roomName, "err", err)
+		p.closeConn()
 		return false
 	}
 	return true

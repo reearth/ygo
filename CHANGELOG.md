@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`provider/websocket`: a failed write closes the peer's connection.** When
+  a write to a peer failed, for example because its 10-second write deadline
+  expired, the peer's writer stopped but the connection stayed open. A peer
+  that kept sending stayed in its room, `OnLastPeer` did not fire, and its
+  replies queued with no writer until the queue overflowed. The writer now
+  closes the connection, and the read loop removes the peer without handling
+  the frames left in its read buffer.
 - **`provider/websocket`: when the server closes a peer while its read loop
   runs, the loop drops the input it has not handled.** This applies to a full
   write queue (on a direct send, or on a broadcast under

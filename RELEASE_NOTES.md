@@ -3,6 +3,11 @@
 **Who is affected: every `provider/websocket` server.** No wire format
 changes.
 
+- **A failed write closes the connection.** Each write to a peer has a
+  10-second deadline. When a write failed, the peer's writer stopped but the
+  connection stayed open, so a peer that kept sending stayed in its room and
+  `OnLastPeer` did not fire. The server now closes the connection and removes
+  the peer.
 - **A peer that the server closes has its unread input dropped.** When the
   server closed a connection itself (a full write queue, a Hocuspocus close
   message, a cancelled request context without a close code, `Shutdown` or
