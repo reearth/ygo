@@ -660,10 +660,13 @@ count. Since v1.49.0 (#229) that separation is enforced:
   re-stored on the exit path under a background context — the same
   retain-and-re-flush rule that already applied to a coalesced batch.
 - **A transaction committed while `Shutdown` is running still reaches the
-  adapter.** Peer read loops keep committing for the whole
-  close-connections-and-join window, so the room's persistence worker publishes
-  its retirement before its final drain; a commit that arrives too late for
-  that drain is written by the committing goroutine itself.
+  adapter.** A peer's read loop can still commit the message it was handling
+  when its connection closed, and a slow hook or apply can stretch that across
+  the whole close-connections-and-join window, so the room's persistence worker
+  publishes its retirement before its final drain; a commit that arrives too
+  late for that drain is written by the committing goroutine itself. Messages
+  the read loop had not started to handle when the connection closed are
+  dropped, not applied.
 - **`Shutdown` joins those writes** (bounded by the caller's context) before
   returning, so `srv.Shutdown(ctx)` followed by exiting the process does not
   kill a write in flight.

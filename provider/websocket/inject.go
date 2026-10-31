@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"sync"
 
-	gws "github.com/gorilla/websocket"
-
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/internal/updatecheck"
@@ -478,8 +476,8 @@ func encodeBroadcastWire(update []byte) []byte {
 //
 // If peers are connected:
 //   - force=false: returns ErrRoomHasPeers without modifying state.
-//   - force=true:  closes each peer connection, waits for disconnect
-//     handlers to run, then deletes the room.
+//   - force=true:  closes each peer connection, dropping input its read loop
+//     has not handled, waits for disconnect handlers, then deletes the room.
 //
 // CloseRoom is primarily intended for releasing rooms created by Apply
 // that never accumulated peer connections. In eager-evict mode
@@ -532,14 +530,14 @@ func (s *Server) CloseRoom(name string, force bool) error {
 		return ErrRoomHasPeers
 	}
 
-	// Collect connection handles and done channels for force-close.
-	var conns []*gws.Conn
+	// Collect peers and done channels for force-close.
+	var peers []*peer
 	var dones []chan struct{}
 	if peerCount > 0 {
-		conns = make([]*gws.Conn, 0, peerCount)
+		peers = make([]*peer, 0, peerCount)
 		dones = make([]chan struct{}, 0, peerCount)
 		for p := range rm.peers {
-			conns = append(conns, p.conn)
+			peers = append(peers, p)
 			dones = append(dones, p.done)
 		}
 	}
@@ -549,8 +547,8 @@ func (s *Server) CloseRoom(name string, force bool) error {
 	// Close each connection outside the locks. handleDisconnect reacquires
 	// s.rmu and rm.mu, so we MUST have released both before entering this
 	// block to avoid deadlock.
-	for _, c := range conns {
-		_ = c.Close()
+	for _, p := range peers {
+		p.closeConn()
 	}
 	for _, d := range dones {
 		<-d

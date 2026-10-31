@@ -1,3 +1,16 @@
+## v1.56.0
+
+**Who is affected: every `provider/websocket` server.** No wire format
+changes.
+
+- **A peer that the server closes has its unread input dropped.** When the
+  server closed a connection itself (a full write queue, a Hocuspocus close
+  message, a cancelled request context without a close code, `Shutdown` or
+  `CloseRoom(name, true)`), the read loop still handled the messages in its
+  read buffer, and applied and stored the updates among them. It now drops
+  them. Updates the server had not read when it closed the connection are not
+  saved. A client that reconnects sends them again in the sync exchange.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
