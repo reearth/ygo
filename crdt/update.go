@@ -43,7 +43,7 @@ var ErrInvalidUpdate = errors.New("crdt: invalid update")
 func EncodeStateAsUpdateV1(doc *Doc, sv StateVector) []byte {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
-	return withParked(doc, sv, encodeV1Locked(doc, sv), encodeStructStoreV1, MergeUpdatesV1)
+	return withParked(doc, sv, encodeV1Locked(doc, sv, buildDeleteSet(doc.store)), encodeStructStoreV1, MergeUpdatesV1)
 }
 
 // ApplyUpdateV1 decodes and integrates a V1 binary update into doc.
@@ -221,7 +221,9 @@ func DecodeStateVectorV1(data []byte) (StateVector, error) {
 
 // ── V1 encoding ───────────────────────────────────────────────────────────────
 
-func encodeV1Locked(doc *Doc, sv StateVector) []byte {
+// encodeV1Locked encodes the structs of doc newer than sv, and ds, as a V1
+// update. Called with the document lock held.
+func encodeV1Locked(doc *Doc, sv StateVector, ds DeleteSet) []byte {
 	type clientGroup struct {
 		client     ClientID
 		items      []*Item
@@ -243,8 +245,6 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].client < groups[j].client })
 
-	deleteSet := buildDeleteSet(doc.store)
-
 	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
 		enc.WriteVarUint(uint64(len(groups)))
 		for _, g := range groups {
@@ -259,7 +259,7 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 				encodeItem(enc, item, offset, doc.store)
 			}
 		}
-		encodeDeleteSet(enc, deleteSet)
+		encodeDeleteSet(enc, ds)
 	})
 }
 

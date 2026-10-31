@@ -170,6 +170,26 @@ func TestObserve_NoOpTransactionDoesNotFire(t *testing.T) {
 	assertNoRecv(t, rec.ch, 250*time.Millisecond)
 }
 
+func TestObserve_NoOpTransactionAfterADeletionDoesNotFire(t *testing.T) {
+	d := NewDoc()
+	if err := d.InsertText("t", 0, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DeleteText("t", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	rec := newRecorder(4)
+	sub := d.Observe(rec)
+	defer sub.Close()
+
+	// The no-op's update carries no deletions, so the bridge drops it as it
+	// does on a document that never deleted anything.
+	if err := d.InsertText("t", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	assertNoRecv(t, rec.ch, 250*time.Millisecond)
+}
+
 func TestObserve_SequentialEdits_ReproduceFinalState(t *testing.T) {
 	d := NewDoc()
 	rec := newRecorder(64)
