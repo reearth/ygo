@@ -60,6 +60,9 @@ type DocOption func(*Doc)
 
 // WithClientID sets a fixed ClientID instead of generating a random one.
 // Useful in tests and server-side scenarios where the ID must be deterministic.
+// Keep it at most 2^55-1, the largest client a V2 update can carry: the
+// decoders refuse a larger one, so other documents could not load this one's
+// updates. Yjs client IDs are 32 bits.
 func WithClientID(id ClientID) DocOption {
 	return func(d *Doc) { d.clientID = id }
 }

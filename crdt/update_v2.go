@@ -237,7 +237,7 @@ func (d *v2Decoder) readLeftID() (ID, error) {
 	if err != nil {
 		return ID{}, err
 	}
-	return ID{Client: ClientID(client), Clock: uint64(clock)}, nil
+	return v2ID(client, clock)
 }
 
 func (d *v2Decoder) readRightID() (ID, error) {
@@ -248,6 +248,16 @@ func (d *v2Decoder) readRightID() (ID, error) {
 	clock, err := d.rightClockDec.Read()
 	if err != nil {
 		return ID{}, err
+	}
+	return v2ID(client, clock)
+}
+
+// v2ID is the ID the client and clock columns give, refused when the clock,
+// a running sum of diffs, is below 0 (as uint64 it would be past 2^63) or
+// past maxSafeInteger.
+func v2ID(client uint64, clock int64) (ID, error) {
+	if clock < 0 || clock > maxSafeInteger {
+		return ID{}, ErrInvalidUpdate
 	}
 	return ID{Client: ClientID(client), Clock: uint64(clock)}, nil
 }
@@ -316,22 +326,33 @@ func (d *v2Decoder) readBuf() ([]byte, error) {
 
 func (d *v2Decoder) resetDsCurVal() { d.dsCurrVal = 0 }
 
+// readDsClock reads a delete range's clock, a diff from the end of the range
+// before, refused past maxSafeInteger.
 func (d *v2Decoder) readDsClock() (uint64, error) {
 	diff, err := d.restDec.ReadVarUint()
 	if err != nil {
 		return 0, err
 	}
-	d.dsCurrVal += diff
+	if d.dsCurrVal, err = structEnd(d.dsCurrVal, diff); err != nil {
+		return 0, err
+	}
+	if d.dsCurrVal > maxSafeInteger {
+		return 0, ErrInvalidUpdate
+	}
 	return d.dsCurrVal, nil
 }
 
+// readDsLen reads a delete range's length, refused when the range would reach
+// a clock past maxSafeInteger.
 func (d *v2Decoder) readDsLen() (uint64, error) {
 	v, err := d.restDec.ReadVarUint()
 	if err != nil {
 		return 0, err
 	}
 	l := v + 1
-	d.dsCurrVal += l
+	if d.dsCurrVal, err = structEnd(d.dsCurrVal, l); err != nil {
+		return 0, err
+	}
 	return l, nil
 }
 
@@ -683,11 +704,17 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				if err != nil {
 					return wrapUpdateErr(err)
 				}
+				// Bounded before the replaced-group check, as every struct is,
+				// so apply refuses what the merge decoders refuse.
+				length := uint64(l)
+				itemEnd, err := structEnd(clock, length)
+				if err != nil {
+					return err
+				}
 				if drop {
+					clock = itemEnd
 					continue
 				}
-				length := uint64(l)
-				itemEnd := clock + length
 				if itemEnd > existingEnd {
 					// Record the range in the transaction's delete set: items we
 					// already hold here get tombstoned, and items we have never
@@ -728,7 +755,9 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				if err != nil {
 					return wrapUpdateErr(err)
 				}
-				clock += l
+				if clock, err = structEnd(clock, l); err != nil {
+					return err
+				}
 				continue
 
 			default:
@@ -739,11 +768,17 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 					return wrapUpdateErr(derr)
 				}
 				if drop {
+					if clock, err = structEnd(clock, uint64(contentLen)); err != nil {
+						return err
+					}
 					continue
 				}
 			}
 
-			itemEnd := clock + uint64(contentLen)
+			itemEnd, err := structEnd(clock, uint64(contentLen))
+			if err != nil {
+				return err
+			}
 			if itemEnd <= existingEnd {
 				clock = itemEnd
 				continue
@@ -1126,7 +1161,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		clock, err := dec.restDec.ReadVarUint()
+		clock, err := readClock(dec.restDec)
 		if err != nil {
 			return nil, err
 		}

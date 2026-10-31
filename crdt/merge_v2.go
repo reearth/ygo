@@ -64,7 +64,9 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 					Content: NewContentDeleted(l),
 					Deleted: true,
 				})
-				clock += uint64(l)
+				if clock, err = structEnd(clock, uint64(l)); err != nil {
+					return nil, DeleteSet{}, err
+				}
 			case 10: // skip struct: a clock-range placeholder, not content.
 				l, err := dec.restDec.ReadVarUint()
 				if err != nil {
@@ -72,14 +74,18 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 				}
 				// Advance clock but don't carry the skip (encodeItemV2 can't
 				// encode it); the gap is re-emitted as a skip by the encoder.
-				clock += l
+				if clock, err = structEnd(clock, l); err != nil {
+					return nil, DeleteSet{}, err
+				}
 			default:
 				item, contentLen, err := decodeItemV2(dec, scratch, client, clock, info)
 				if err != nil {
 					return nil, DeleteSet{}, wrapUpdateErr(err)
 				}
 				structs = append(structs, item)
-				clock += uint64(contentLen)
+				if clock, err = structEnd(clock, uint64(contentLen)); err != nil {
+					return nil, DeleteSet{}, err
+				}
 			}
 		}
 		out[client] = structs

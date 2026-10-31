@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-31
+
+### Fixed
+
+- **`crdt`: an update can no longer leave a document holding a clock or
+  client its own state encodings cannot carry.** The decoders took clocks
+  past 2^53-1, which no Yjs peer can create (JavaScript's
+  `Number.MAX_SAFE_INTEGER`): V1 up to 2^56-1, and V2 also an origin clock
+  that runs below zero, read as a value past 2^63. V1 also took client IDs
+  past 2^55-1, the most a V2 update can carry. After a crafted update:
+  - `EncodeStateAsUpdateV2` panicked on a parked origin clock of 2^54 or a
+    client of 2^55.
+  - A parked struct whose clock V1 cannot read back (after a skip past 2^56,
+    or a negative V2 origin) made `EncodeStateAsUpdateV1` drop every parked
+    struct and deletion from the state, so a copy loaded from it lost other
+    peers' parked edits.
+
+  The apply and merge decoders now refuse such clocks and clients with
+  `ErrInvalidUpdate`, and the state encodings leave out only a parked part
+  that does not merge.
+
+  **Upgrade note:** a document saved by an earlier release after it accepted
+  such an update (a struct, delete range or reference past 2^53-1, or a
+  client past 2^55-1) is now refused whole when it loads. No Yjs peer can
+  make such a document. A document made with `WithClientID` past 2^55-1 is
+  refused too: its V2 encoding already panicked, and now its V1 updates do
+  not load either. Where the stored log keeps such an update as an entry of
+  its own, apply the entries one at a time and skip those that return
+  `ErrInvalidUpdate`; a compacted state that holds it does not load.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
