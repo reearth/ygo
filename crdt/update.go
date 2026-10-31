@@ -69,13 +69,27 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 // deletions it made, not structs still parked, nor the rest of the document.
 // landed is nil when the apply succeeds or when nothing integrated.
 func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, err error) {
+	landed, _, err = ApplyUpdateV1Held(doc, update, origin)
+	return landed, err
+}
+
+// ApplyUpdateV1Held is ApplyUpdateV1Landed that also reports whether doc
+// already held all of update, so the apply changed and parked nothing and a
+// peer that holds the same document needs none of it. It decides under the
+// lock the apply holds, so a concurrent apply cannot change the answer.
+func ApplyUpdateV1Held(doc *Doc, update []byte, origin any) (landed []byte, held bool, err error) {
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
 		if err = applyV1Txn(txn, update); err != nil {
 			landed = encodeTxnV1Locked(txn)
+		} else if !txn.changesDoc() {
+			// An apply that changed nothing either held all of update or parked part of it.
+			if structs, ds, decodeErr := decodeStructsV1(New(), update); decodeErr == nil {
+				held = storeContains(txn.doc.store, structs, ds)
+			}
 		}
 	}, origin)
-	return landed, err
+	return landed, held, err
 }
 
 // encodeTxnV1Locked encodes the structs txn has added to the store so far and

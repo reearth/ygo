@@ -79,27 +79,6 @@ func drainAll(ch <-chan recUpdate, quiesce time.Duration) []recUpdate {
 	}
 }
 
-func TestEmptyUpdateV1_IsNonEmptyCanonicalBytes(t *testing.T) {
-	if len(emptyUpdateV1) == 0 {
-		t.Fatal("emptyUpdateV1 must be the canonical no-op update, not empty")
-	}
-	// A real edit's update must NOT be classified as empty.
-	d := NewDoc()
-	rec := newRecorder(4)
-	sub := d.Observe(rec)
-	defer sub.Close()
-	if err := d.InsertText("t", 0, "hi"); err != nil {
-		t.Fatal(err)
-	}
-	r, ok := recv(t, rec.ch, time.Second)
-	if !ok {
-		t.Fatal("expected a delivery for a real edit")
-	}
-	if isEmptyUpdateV1(r.update) {
-		t.Fatal("a real edit's update was misclassified as the empty update")
-	}
-}
-
 func TestObserve_LocalEditFires_ReproducesOnPeer(t *testing.T) {
 	d := NewDoc()
 	rec := newRecorder(4)
@@ -162,8 +141,7 @@ func TestObserve_NoOpTransactionDoesNotFire(t *testing.T) {
 	sub := d.Observe(rec)
 	defer sub.Close()
 
-	// Inserting empty text is a crdt no-op: OnUpdate still fires with the
-	// canonical empty update, but the bridge must drop it.
+	// Inserting empty text is a crdt no-op, so OnUpdate does not fire.
 	if err := d.InsertText("t", 0, ""); err != nil {
 		t.Fatal(err)
 	}

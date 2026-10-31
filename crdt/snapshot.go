@@ -168,20 +168,26 @@ func DocContainsUpdateV1(doc *Doc, update []byte) (bool, error) {
 	}
 	doc.mu.RLock()
 	defer doc.mu.RUnlock()
+	return storeContains(doc.store, structs, ds), nil
+}
+
+// storeContains reports whether store holds every struct and deletion of a
+// decoded update. Caller must hold the document lock.
+func storeContains(store *StructStore, structs map[ClientID][]*Item, ds DeleteSet) bool {
 	for client, items := range structs {
-		held := doc.store.NextClock(client)
+		held := store.NextClock(client)
 		for _, item := range items {
 			if item.ID.Clock+uint64(item.Content.Len()) > held {
-				return false, nil
+				return false
 			}
 		}
 	}
 	for client, ranges := range ds.clients {
-		if !storeDeletes(doc.store.clients[client], ranges) {
-			return false, nil
+		if !storeDeletes(store.clients[client], ranges) {
+			return false
 		}
 	}
-	return true, nil
+	return true
 }
 
 // storeDeletes reports whether every clock in ranges is held by a deleted

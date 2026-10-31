@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.56.0] — 2026-10-31
 
+### Added
+
+- **`crdt.ApplyUpdateV1Held(doc, update, origin)`** applies a V1 update as
+  `ApplyUpdateV1Landed` does and also reports whether the document already
+  held all of it, so that the apply changed and parked nothing. It decides
+  under the lock the apply holds. `provider/websocket` uses it to send a
+  peer's update on unless the room already held it, without decoding the
+  update a second time when the apply changes the document.
+
 ### Fixed
 
 - **`crdt`: V1 encoders write clients in descending order, as Yjs does.**
@@ -25,6 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gives 12 bytes, as Yjs's `update` event does.
   `provider/websocket`'s `Server.Apply` no longer returns `ErrUpdateTooLarge`
   for a small edit to a room with a long deletion history.
+- **`crdt`: a transaction that changes nothing no longer calls `OnUpdate`.**
+  `OnUpdate` observers ran after every transaction, with an update of no
+  structs: an update the document already held, a delete of deleted content,
+  a delete set naming clocks the document lacks (which parks), and an empty
+  `Transact`. They now run only when the transaction adds structs or deletes
+  something, as Yjs emits its `update` event. A refused apply that integrated
+  part of its update still calls them for that part. `provider/websocket`
+  therefore stores and relay-publishes no such update, does not send a peer's
+  update to the room's other peers when the room already held all of it (an
+  update it parks still goes out), and `Server.Apply` returns `ErrNoChanges`
+  when `fn`'s transactions change nothing. `mobile` drops its filter for the
+  empty update.
 
 ### Performance
 

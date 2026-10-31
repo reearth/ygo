@@ -132,7 +132,7 @@ Lifecycle:
 4. Fire `observe()` on each changed type.
 5. Fire `observeDeep()` recursively.
 6. Fire `afterTransaction`.
-7. Emit the binary update event for the transport layer.
+7. Emit the binary update event for the transport layer, only for a transaction that adds or deletes something.
 
 ### Doc
 

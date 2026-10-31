@@ -1,5 +1,8 @@
 ## v1.56.0
 
+- **New: `crdt.ApplyUpdateV1Held`.** It applies a V1 update as
+  `ApplyUpdateV1Landed` does and also reports whether the document already
+  held all of it, so a peer that holds the same document needs none of it.
 - **V1 updates and state vectors list clients as Yjs does.** With more than
   one client, the V1 encoders now write clients in descending order, so their
   bytes equal Yjs's. A reader of the bytes sees the same document; only code
@@ -13,6 +16,18 @@
   every deletion. A reader that kept only the newest update and relied on it
   to list every earlier deletion must keep them all, or read the state with
   `EncodeStateAsUpdateV1`, which still writes every deletion.
+- **`OnUpdate` runs only for a transaction that changes the document.** It
+  ran after every transaction, also for an update the document already held
+  (a client that reconnects sends again what the server did not
+  acknowledge), a delete of deleted content, or an empty `Transact`. A
+  refused apply that integrated part of its update still calls it for that
+  part, as Yjs does. If your code expected one call per transaction, use
+  `OnAfterTransaction`, which still runs for every transaction. A
+  `provider/websocket` server no longer stores or relay-publishes such an
+  update, and does not send a peer's update to the other peers when the room
+  already held all of it; an update the room parks still goes to them.
+  `Server.Apply` returns `ErrNoChanges` when `fn`'s transactions change
+  nothing.
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
 - **Faster full-state encodes and snapshots after deletions.** The delete set
