@@ -183,9 +183,7 @@ func TestUnit_SupersededGroups_StateVectorFromUpdate(t *testing.T) {
 		}
 		raw, err := encode(update)
 		require.NoError(t, err)
-		sv, err := DecodeStateVectorV1(raw)
-		require.NoError(t, err)
-		require.Equal(t, StateVector{9: 1}, sv, "V%d", version)
+		require.Equal(t, []byte{1, 9, 1}, raw, "V%d", version)
 	}
 }
 

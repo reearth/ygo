@@ -323,30 +323,87 @@ func DiffUpdateV1(update []byte, sv StateVector) ([]byte, error) {
 	return encodeStructStoreV1(perClient, ds, sv, store), nil
 }
 
-// EncodeStateVectorFromUpdate extracts the state vector described by a V1 update
-// — the next clock per client (max struct end) — without integrating it. Useful
-// for computing what a peer is missing directly from an update. (#57)
+// EncodeStateVectorFromUpdate extracts the state vector described by a V1
+// update without integrating it: each client's clock is the end of its
+// structs from clock 0 up to the first Skip or gap, as Yjs reports it.
 func EncodeStateVectorFromUpdate(update []byte) ([]byte, error) {
-	perClient, _, _, err := buildMergeStore([][]byte{update}, decodeStructsV1)
-	if err != nil {
-		return nil, err
+	return encodeStateVectorFromUpdate(update, false)
+}
+
+// encodeStateVectorFromUpdate reads the structs of a V1 or V2 update in wire
+// order, as Yjs encodeStateVectorFromUpdate does, so a client's consecutive
+// groups count as one run, a Skip of any length ends the run, and the delete
+// set is never read.
+func encodeStateVectorFromUpdate(update []byte, v2 bool) ([]byte, error) {
+	type entry struct {
+		client ClientID
+		clock  uint64
 	}
-	sv := make(StateVector, len(perClient))
-	for c, items := range perClient {
-		var maxEnd uint64
-		for _, it := range items {
-			if end := it.ID.Clock + uint64(it.Content.Len()); end > maxEnd {
-				maxEnd = end
-			}
+	var entries []entry
+	var client ClientID
+	var clock uint64
+	started, stop := false, false
+	s := newPendingScanner(update, v2)
+	groups := s.uint()
+	if groups > maxV2Items {
+		return nil, ErrInvalidUpdate
+	}
+	var total uint64
+	for i := uint64(0); i < groups && s.err == nil; i++ {
+		n := s.uint()
+		// The same bounds as the decoders, so a run-length V2 column cannot
+		// declare more structs than an apply would read.
+		if n > maxV2Items-total {
+			return nil, ErrInvalidUpdate
 		}
-		sv[c] = maxEnd
+		total += n
+		c := s.client()
+		at := s.uint()
+		if s.err == nil && c > maxClient {
+			return nil, ErrInvalidUpdate
+		}
+		for j := uint64(0); j < n && s.err == nil; j++ {
+			length, skip, _, _ := s.item()
+			if s.err != nil {
+				break
+			}
+			end, err := structEnd(at, length)
+			if err != nil {
+				return nil, err
+			}
+			switch {
+			case !started:
+				// Yjs starts the first run from the first struct, a Skip too.
+				client, started, stop = c, true, at != 0
+				if !stop {
+					clock = end
+				}
+			case c != client:
+				if clock != 0 {
+					entries = append(entries, entry{client, clock})
+				}
+				client, clock, stop = c, 0, at != 0
+			}
+			if skip {
+				stop = true
+			}
+			if !stop {
+				clock = end
+			}
+			at = end
+		}
 	}
-	clients := clientsSorted(sv)
+	if s.err != nil {
+		return nil, wrapUpdateErr(scanReason(s.err))
+	}
+	if clock != 0 {
+		entries = append(entries, entry{client, clock})
+	}
 	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
-		enc.WriteVarUint(uint64(len(clients)))
-		for _, c := range clients {
-			enc.WriteVarUint(uint64(c))
-			enc.WriteVarUint(sv[c])
+		enc.WriteVarUint(uint64(len(entries)))
+		for _, e := range entries {
+			enc.WriteVarUint(uint64(e.client))
+			enc.WriteVarUint(e.clock)
 		}
 	}), nil
 }

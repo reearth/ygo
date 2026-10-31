@@ -838,11 +838,8 @@ func (s *pendingScanner) content(tag byte) uint64 {
 			s.key()
 		}
 	case wireDoc:
-		if s.v2 == nil {
-			s.bytes()
-		} else {
-			s.text()
-		}
+		// The guid is a checked string, as the decoder and Yjs read it.
+		s.text()
 		s.any()
 	case wireMove:
 		s.uint()

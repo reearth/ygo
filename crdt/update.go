@@ -1232,7 +1232,8 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentAny(vals...), nil
 
 	case wireDoc:
-		guidBytes, err := dec.ReadVarBytes()
+		// A guid that is not UTF-8 is refused here, where WithGUID would panic.
+		guid, err := dec.ReadVarString()
 		if err != nil {
 			return nil, err
 		}
@@ -1240,7 +1241,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		return NewContentDoc(newSubdocFromOpts(string(guidBytes), optsAny)), nil
+		return NewContentDoc(newSubdocFromOpts(guid, optsAny)), nil
 
 	case wireMove:
 		clientU, err := dec.ReadVarUint()

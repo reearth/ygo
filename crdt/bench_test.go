@@ -283,6 +283,42 @@ func BenchmarkMergeUpdatesV1(b *testing.B) {
 	}
 }
 
+// BenchmarkEncodeStateVectorFromUpdate reads the state vector of 10 clients'
+// merged updates (100 chars each).
+func BenchmarkEncodeStateVectorFromUpdate(b *testing.B) {
+	var v1, v2 [][]byte
+	for i := 0; i < 10; i++ {
+		doc, _ := buildTextDocWithClient(uint64(i+1), 100)
+		v1 = append(v1, EncodeStateAsUpdateV1(doc, nil))
+		v2 = append(v2, EncodeStateAsUpdateV2(doc, nil))
+	}
+	merged1, err := MergeUpdatesV1(v1...)
+	if err != nil {
+		b.Fatal(err)
+	}
+	merged2, err := MergeUpdatesV2(v2...)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, bc := range []struct {
+		name   string
+		update []byte
+		encode func([]byte) ([]byte, error)
+	}{
+		{"V1", merged1, EncodeStateVectorFromUpdate},
+		{"V2", merged2, EncodeStateVectorFromUpdateV2},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := bc.encode(bc.update); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // buildTextDocWithClient is like buildTextDoc but lets callers specify the
 // client ID, which avoids clock collisions when building multiple peer docs.
 func buildTextDocWithClient(clientID uint64, n int) (*Doc, *YText) {
