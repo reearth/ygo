@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-10-31
+
+### Fixed
+
+- **`crdt`: an update whose item continues its client's GC struct is
+  refused.** If a client's last struct in the document was a GC struct and an
+  update carried that client's item from an earlier clock, ygo integrated the
+  item's new clocks to the right of the GC struct. The item was then outside
+  its type's list, but the type's length counted it, and the document encoded
+  it. Yjs throws on such an update. `ApplyUpdateV1`/`V2` now return an error
+  wrapping `ErrInvalidUpdate` before the item changes the document. The
+  structs ygo integrated before it in wire order stay applied, and so do the
+  structs it deferred whose dependencies are then present, other than another
+  refused item; `ApplyUpdateV1Landed` returns them. Yjs integrates clients in
+  another order, so the two can keep different structs. An item that waits in
+  the pending queue, from this update or an earlier one, is dropped when its
+  dependency arrives, and the update applies without an error; its client's
+  later parked structs stay parked. Yjs throws on that update and also drops
+  the parked structs it had not reached. An item whose origin or right origin
+  is a GC struct is not refused.
+
+  ygo has not yet made GC structs of everything Yjs does: the children of a
+  deleted nested type, and an item next to a GC struct. So it still applies
+  such an item where Yjs throws or makes it a GC struct, with the defect
+  above, and it refuses some updates that Yjs applies. It also refuses some
+  that Yjs parks. Yjs checks the dependencies of a struct the document
+  already holds and, if one is not in the document and the update cannot
+  supply it first, parks the rest of that struct's client and every struct
+  that waits on them. ygo skips such a struct, so an item that Yjs parks this
+  way can integrate and be refused.
+- **`crdt`: an item whose right origin has not arrived waits for it.** An item
+  that overlapped clocks the document held integrated before its right origin
+  arrived. It now waits in the pending queue, as Yjs does for a right origin
+  of another client.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

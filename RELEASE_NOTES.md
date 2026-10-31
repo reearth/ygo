@@ -1,3 +1,28 @@
+## v1.55.1
+
+**Who is affected: anyone who applies updates from peers they do not fully
+trust.**
+
+An update can carry a client's item from a clock the document already holds
+as that client's GC struct. ygo integrated the rest of the item to the right
+of the GC struct, outside its type's list: the type's `Len` counted it, the
+text did not show it, and every update ygo encoded from the document carried
+it. Yjs throws on such an update. `ApplyUpdateV1`/`V2` now refuse it with an
+error wrapping `ErrInvalidUpdate`, and the item does not change the document.
+The structs of the update that ygo integrated before the item stay applied;
+Yjs integrates clients in another order, so it can keep different ones. If
+the item waits in the pending queue, it is dropped when its dependency
+arrives, and that update applies without an error, where Yjs throws on it.
+
+ygo has not yet made GC structs of everything Yjs does (the children of a
+deleted nested type, and an item next to a GC struct). Until it does, the
+defect can still happen where Yjs has such a GC struct, and ygo can refuse an
+update that Yjs applies.
+
+An item that overlapped clocks the document held, and whose right origin had
+not arrived, integrated at once. It now waits for its right origin, as Yjs
+does for a right origin of another client. No API changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
