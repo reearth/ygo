@@ -167,8 +167,8 @@ func TestUnit_PendingBudget_OverlappingGroups(t *testing.T) {
 		data := pendingOverlappingGroups(version)
 		for _, cap := range []int{0, 1, 2} {
 			budget := pendingBudget{initial: StateVector{}, update: data, remaining: cap, v2: version == 2}
-			want := referencePendingBudgetCheck(budget, cap)
-			got := budget.check(cap)
+			want := referencePendingBudgetCheck(budget)
+			got := budget.check()
 			require.Equal(t, want == nil, got == nil, "V%d cap=%d want=%v got=%v", version, cap, want, got)
 		}
 		doc := New(WithMaxPendingItems(1))

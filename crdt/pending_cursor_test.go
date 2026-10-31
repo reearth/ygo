@@ -59,10 +59,10 @@ func TestUnit_PendingBudget_OverlapWakeMatchesReference(t *testing.T) {
 	}
 	for _, version := range []int{1, 2} {
 		b := pendingBudget{initial: StateVector{}, update: pendingGuardUpdate(source, groups, nil, version), remaining: 0, v2: version == 2}
-		if want := referencePendingBudgetCheck(b, 0); want != nil {
+		if want := referencePendingBudgetCheck(b); want != nil {
 			t.Fatalf("V%d invalid complete fixture: %v", version, want)
 		}
-		if want, got := referencePendingBudgetCheck(b, 0), b.check(0); (want == nil) != (got == nil) {
+		if want, got := referencePendingBudgetCheck(b), b.check(); (want == nil) != (got == nil) {
 			t.Errorf("V%d reference=%v worklist=%v", version, want, got)
 		}
 	}
@@ -89,7 +89,7 @@ func TestUnit_PendingBudget_SkipInWorklistMatchesReference(t *testing.T) {
 		update := pendingGuardUpdate(source, groups, map[int]uint64{0: 1}, version)
 		for _, rem := range []int{0, 1, 2} {
 			b := pendingBudget{initial: StateVector{}, update: update, remaining: rem, v2: version == 2}
-			if want, got := referencePendingBudgetCheck(b, rem), b.check(rem); (want == nil) != (got == nil) {
+			if want, got := referencePendingBudgetCheck(b), b.check(); (want == nil) != (got == nil) {
 				t.Errorf("V%d remaining=%d: reference=%v worklist=%v", version, rem, want, got)
 			}
 		}
@@ -269,7 +269,7 @@ func TestUnit_PendingBudget_WireBoundsMatchReference(t *testing.T) {
 				update := encode(groups, newDeleteSet(), nil, source.store)
 				for _, cap := range []int{0, 1, 2} {
 					b := pendingBudget{initial: initial, update: update, v2: version == 2, remaining: cap}
-					if want, got := referencePendingBudgetCheck(b, cap), b.check(cap); (want == nil) != (got == nil) {
+					if want, got := referencePendingBudgetCheck(b), b.check(); (want == nil) != (got == nil) {
 						t.Fatalf("cap=%d reference=%v preflight=%v", cap, want, got)
 					}
 				}
@@ -332,7 +332,7 @@ func TestUnit_PendingBudget_ClientRangeMatchesReference(t *testing.T) {
 					update := pendingGuardUpdate(source, groups, nil, version)
 					for _, cap := range []int{0, 1, 2, 3} {
 						b := pendingBudget{initial: initial, update: update, v2: version == 2, remaining: cap}
-						if want, got := referencePendingBudgetCheck(b, cap), b.check(cap); (want == nil) != (got == nil) {
+						if want, got := referencePendingBudgetCheck(b), b.check(); (want == nil) != (got == nil) {
 							t.Fatalf("cap=%d reference=%v preflight=%v", cap, want, got)
 						}
 					}
@@ -354,10 +354,17 @@ func TestUnit_PendingBudget_SupersededKeepsClientOrder(t *testing.T) {
 	for _, version := range []int{1, 2} {
 		update := pendingGuardUpdate(source, [][]*Item{x(2), x(9), x(4), x(6), x(9)}, nil, version)
 		b := pendingBudget{update: update, v2: version == 2}
-		require.NoError(t, b.check(0))
+		require.NoError(t, b.check())
 		require.True(t, b.superseded.has(1), "V%d", version)
 		var r pendingClientRange
-		_, err := scanPendingGroups(newPendingScanner(update, version == 2), StateVector{}, 0, &r, b.superseded)
+		var err error
+		if version == 2 {
+			d, derr := newV2Decoder(update)
+			require.NoError(t, derr)
+			_, err = scanPendingGroupsV2(d, StateVector{}, 0, &r, b.superseded, 0)
+		} else {
+			_, err = scanPendingGroupsV1(update, StateVector{}, 0, &r, b.superseded, 0)
+		}
 		require.NoError(t, err)
 		require.True(t, r.ordered, "V%d", version)
 		require.Equal(t, [2]ClientID{2, 9}, [2]ClientID{r.min, r.max})

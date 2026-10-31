@@ -204,7 +204,7 @@ func referenceWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			for _, item := range remaining {
 				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
 					if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
-						return wrapUpdateErr(ErrInvalidUpdate)
+						return ErrInvalidUpdate
 					}
 					if txn.doc.store.pending == nil {
 						txn.doc.store.pending = &pendingUpdate{
