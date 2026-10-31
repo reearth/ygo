@@ -1,8 +1,122 @@
-## v1.54.1
+## v1.55.0
 
-**Who is affected: callers that access the same named document root through different shared types, including clients applying updates from peers.** The first accessor fixes the root's type for the document's lifetime; a later accessor using another type now panics instead of silently replacing the root and losing its contents.
+**Who is affected: servers that bridge many awareness clients over a single
+websocket connection.** Everyone else sees no change.
 
-Accessing a named document root through a different shared type now panics instead of silently replacing the existing root and losing its contents. The mobile bindings convert that panic to an error (or an empty string for `GetText`) so a mismatch cannot crash the iOS or Android host app.
+`Server.MaxAwarenessClientsPerConn` is new and on by default. A client can claim
+any awareness client ID, so one connection could fill a room's presence budget
+and, with a relay attached, have the fabricated IDs fanned to every node that
+holds the room. Each entry of a frame is now judged as the room applies it: an
+entry that would take a connection past the cap is refused, logged at debug,
+and reaches neither the room, its other peers nor the relay, while the rest of
+the frame applies.
+
+`0`, the default, selects 64. A negative value disables the gate and restores
+the previous behaviour, and a positive value is used as given. This inverts the
+`0 = unlimited` convention of `MaxAwarenessBytesPerRoom` and
+`MaxAwarenessClientsPerRoom`.
+
+The cap is not a limit on room size. Only client IDs the connection introduced
+that are still live count against it. A browser tab introduces one. The
+timeout-removal broadcasts y-protocols clients send, which name other clients'
+IDs as nulls, and the full-state echoes they send, which re-assert IDs the room
+already holds, cost nothing.
+
+Because a removal frees the slot, the cap bounds concurrent presence rather
+than how many IDs a connection creates over its lifetime: each ID a connection
+introduces and retires leaves a tombstone. `MaxAwarenessClientsPerRoom` bounds
+tombstones, and `AwarenessExpiry` reclaims them; neither is on by default, so
+set both if untrusted peers can reach the server.
+
+An embedder that fans many users through one connection introduces as many IDs
+as it carries, so it must raise the cap or disable it. The setting is
+server-wide: a trusted bridge beside untrusted browsers raises it for all of
+them.
+
+With the gate on, peers can no longer claim client ID `0`, the room's own
+awareness client: no removal from the wire could retire it, so it stayed until
+the room was evicted. Disconnect behaviour also narrows. A connection's
+departure removes the awareness IDs it introduced and has not itself removed,
+where before it removed every ID the connection had ever named in a frame.
+Presence a connection only updated — an ID another connection or the relay
+introduced — stays with whoever introduced it until that owner leaves,
+`AwarenessExpiry` sweeps it, or the room is evicted. Set `AwarenessExpiry` if your clients take
+over each other's IDs. Disabling the gate with a negative value keeps the old
+tracking ceiling, but tracks only IDs named by entries the room applied.
+
+**Who is affected: servers that set `MaxAwarenessClientsPerRoom`.**
+
+Removal tombstones count toward the cap, so churn could fill a room with them
+and lock new clients out until `AwarenessExpiry` reclaimed them, or for good
+without it. Now a new client asserting presence at the cap reclaims the oldest
+tombstone instead. An unseen client's removal is still refused at the cap, and
+so is a newcomer when every entry is live. The reclaimed tombstone's clock is
+forgotten early, the same trade-off `PurgeTombstones` makes after its grace
+period, though here it can happen without `AwarenessExpiry`: a delayed stale
+update for that client is then accepted as new.
+
+**Who is affected: clustered servers that want to keep relayed presence from
+crowding out local clients.** Opt-in; nothing changes unless you set it.
+
+`Server.MaxForeignAwarenessClients` refuses presence relayed from another node,
+for a client ID that is not currently live (new, or removed and returning), once
+the room holds this many live awareness entries. A client that is live keeps
+updating. `0`, the default, disables it, and a value at or above a bounded
+`MaxAwarenessClientsPerRoom` has no effect.
+
+Sizing needs care, because a number that looks safe shuts out most of a room:
+
+- Set it as a large fraction of `MaxAwarenessClientsPerRoom`. Reserving
+  roughly 1/8 of the cap for local clients is a reasonable starting point.
+- In an N-node cluster, relayed presence is legitimately about (N-1)/N of a
+  room's users, so the reservation you want is the small side. A sub-cap sized
+  like a minority quota shuts out most of the room.
+- `Inject` creates a room with no local peers when it is not resident, and all
+  presence in it is relayed. There the sub-cap is that node's entire presence
+  ceiling for the room. Without it the ceiling is `MaxAwarenessClientsPerRoom`,
+  or none when that is unset.
+- The threshold counts all live entries, local and relayed, so once local
+  clients fill the room, relayed presence is shut out sooner than a true
+  per-origin quota would shut it out.
+
+A refused entry is skipped without an error, so the relay does not see a routine
+refusal as a delivery failure.
+
+Local peers now receive an awareness frame as sent only when the room applied
+it exactly; otherwise they get the room's state for the clients it applied, so
+presence the room refused, discarded as stale or dropped as invalid no longer
+reaches them. It also stops the server re-broadcasting the equal-clock echoes
+y-websocket clients send of every awareness update they apply, so an update
+costs about N frames in a room of N clients rather than N².
+
+New exported API in `awareness`: `Awareness.ApplyUpdateWith` with
+`ApplyOptions`, `AdmitEntry` and `ApplyResult`, which the server uses for both
+caps, and `Awareness.SetMaxForeignClients`. `docs/CLUSTERING.md` covers both
+settings.
+
+**`YText.WalkFormatting` exposes live formatting boundaries.** Concurrent
+formatting and deletion can leave formatting markers without visible text.
+`ToDelta` describes visible text, so those markers are absent from its output.
+Applications that validate formatting keys and values or account for live CRDT
+items can inspect them through the new callback. `YXmlText` inherits the method.
+
+The walk holds the document read lock. Call it outside transactions, and do not
+mutate values or call document APIs from the callback. Returning an error stops
+the walk and returns that error unchanged. The helper does not modify the
+document or change merging, encoding, or existing readers.
+
+Closes #317.
+
+**Accessing a root as a different type now panics instead of discarding it.**
+The first accessor fixes a named root's type for the document's lifetime.
+`GetText("x")` after `GetMap("x")` used to replace the map and lose its
+contents; it now panics with an error wrapping the new `crdt.ErrRootTypeMismatch`
+and leaves the map unchanged. A root that has only arrived in a peer's update
+has no type yet, so the first local accessor still decides it, as in Yjs. Code
+that relied on the silent replacement now panics. The mobile bindings recover
+the panic: methods with an error return return one wrapping
+`crdt.ErrRootTypeMismatch`, and `GetText` returns `""`, so a mismatch cannot
+crash the iOS or Android host app. Closes #293.
 
 ## v1.54.0
 
