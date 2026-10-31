@@ -79,3 +79,26 @@ func MemoryPersistenceBackoffState(m *MemoryPersistence, room string) (failures 
 
 // WriteTimeout is the deadline writeToConn sets on each write.
 const WriteTimeout = writeTimeout
+
+// PeerQueuedBytes reports the bytes charged to room's peers and its peer
+// count, or (0, 0) for a room the server does not hold.
+func PeerQueuedBytes(s *Server, room string) (bytes int64, peers int) {
+	s.rmu.RLock()
+	rm, ok := s.rooms[room]
+	s.rmu.RUnlock()
+	if !ok {
+		return 0, 0
+	}
+	rm.mu.Lock()
+	targets := make([]*peer, 0, len(rm.peers))
+	for p := range rm.peers {
+		targets = append(targets, p)
+	}
+	rm.mu.Unlock()
+	for _, p := range targets {
+		p.wmu.Lock()
+		bytes += p.queuedBytes
+		p.wmu.Unlock()
+	}
+	return bytes, len(targets)
+}

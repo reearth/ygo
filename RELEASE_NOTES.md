@@ -3,6 +3,23 @@
 **Who is affected: every `provider/websocket` server.** No wire format
 changes.
 
+- **`Server.PeerWriteQueueBytes` bounds the bytes waiting for a peer.** A
+  peer's write queue is bounded in frames (`PeerWriteQueueSize`, 512 by
+  default), not in bytes, and the server answers each SyncStep1 with the
+  room's full state on the sender's own queue. A peer that never reads could
+  make the server keep 512 copies of the document. Set a budget above the
+  largest room state:
+
+  ```go
+  srv := ygws.NewServer()
+  srv.PeerWriteQueueBytes = 64 << 20 // 64 MiB waiting per peer
+  ```
+
+  When the frames that wait for a peer reach the budget, the next frame
+  closes the peer, whatever `SlowPeerPolicy` is set, and the close is logged
+  at Warn as `peer queued bytes over budget`. A frame that arrives while the
+  budget or more waits closes even a peer that reads. Zero, the default,
+  changes nothing.
 - **A failed write closes the connection.** Each write to a peer has a
   10-second deadline. When a write failed, the peer's writer stopped but the
   connection stayed open, so a peer that kept sending stayed in its room and

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.56.0] — 2026-10-31
 
+### Added
+
+- **`provider/websocket`: `Server.PeerWriteQueueBytes` bounds the bytes
+  waiting in a peer's write queue.** `PeerWriteQueueSize` bounds that queue
+  in frames only, and the server answers each SyncStep1 with the room's full
+  state on the sender's own queue. So a peer that sends SyncStep1 and does not
+  read made the server keep one copy of the document for each message, up to
+  512 copies, while the connection stayed open. With the budget set, when the
+  frames that wait for a peer reach it, the next frame closes the peer, on
+  every enqueue path and whatever `SlowPeerPolicy` is set, and the read loop
+  drops the input the peer already sent. The close is logged at Warn as
+  `peer queued bytes over budget`. The frame that crosses the budget is
+  queued whatever its size, and the connect handshake is not counted. A frame
+  that arrives while the budget or more waits closes even a peer that reads,
+  so set the budget above the largest room state. Zero, the default, or a
+  negative value means no budget.
+
 ### Fixed
 
 - **`provider/websocket`: a failed write closes the peer's connection.** When
