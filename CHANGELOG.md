@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not load either. Where the stored log keeps such an update as an entry of
   its own, apply the entries one at a time and skip those that return
   `ErrInvalidUpdate`; a compacted state that holds it does not load.
+- **`crdt`/`provider/websocket`: a partly applied update reaches the other
+  peers with what it parked.** When an apply failed after part of the update
+  integrated, `ApplyUpdateV1Landed` returned only the structs it added and the
+  deletions it made, so `provider/websocket` relayed none of the structs the
+  failed apply parked, waiting for something the room lacked. Once that
+  arrived, the room drained them and showed their content, and the peers never
+  received it. The landed update now also carries the structs the failed
+  apply parked, so a peer that applies it parks the same structs, as it would
+  had the update applied and been relayed whole.
 
 ## [1.54.0] — 2026-10-22
 

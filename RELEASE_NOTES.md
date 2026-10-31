@@ -19,6 +19,17 @@ the stored log keeps such an update as an entry of its own, apply the
 entries one at a time and skip those that return `ErrInvalidUpdate`; a
 compacted state that holds it does not load.
 
+**Who is affected: `provider/websocket` servers whose peers send updates
+that the room applies only in part.**
+
+An update the room applies only in part is relayed to the room's other peers
+as the part the room kept. That part left out the structs the failed apply
+parked, waiting for something the room lacked. When it arrived, the room
+drained them and showed their content, and the other peers never received
+it, so they stayed behind the room until a full resync. The relayed part now
+carries the parked structs as well, and the peers park and later drain the
+same content as the room. An update that applies whole is relayed as before.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully
