@@ -543,9 +543,9 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 // The scanner retains nothing. V1 reads the caller's buffer; V2 uses its
 // normal column decoder without building a key dictionary or decoding
 // Any/JSON values into object trees. A framing scanner only finds struct
-// boundaries: it skips text and JSON without validating or counting them, and
-// in V2 never reads the clock, string, key or type columns. The decoder still
-// validates everything.
+// boundaries and type refs: it skips text and JSON without validating or
+// counting them, and in V2 never reads the clock, string or key columns. The
+// decoder still validates everything.
 type pendingScanner struct {
 	rest  *encoding.Decoder
 	v2    *v2Decoder
@@ -802,13 +802,16 @@ func (s *pendingScanner) content(tag byte) uint64 {
 			s.any()
 		}
 	case wireType:
+		// Framing reads the type too, so a pre-apply scan refuses an unknown ref.
 		var ref byte
 		if s.v2 == nil {
-			ref = s.byte()
-		} else if !s.frame {
+			if ref = s.byte(); ref > maxTypeRef {
+				s.err = errUnknownTypeRef(uint64(ref))
+			}
+		} else {
 			ref, s.err = s.v2.readTypeRef()
 		}
-		if ref == 3 || ref == 5 {
+		if typeRefHasName(ref) {
 			s.key()
 		}
 	case wireDoc:

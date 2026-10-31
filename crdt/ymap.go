@@ -289,7 +289,7 @@ func (m *YMap) Get(key string) (any, bool) {
 	// nested Y.Text/Y.Map/Y.Array reads back as (nil, false) even though the
 	// type is fully materialised and reachable via ToJSON.
 	if ct, ok := item.Content.(*ContentType); ok {
-		return ct.Type.owner, ct.Type.owner != nil
+		return readOwner(ct.Type.owner), ct.Type.owner != nil
 	}
 	return lastPlainVal(item.Content)
 }

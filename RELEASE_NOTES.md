@@ -1,3 +1,29 @@
+## v1.55.1
+
+**Who is affected: documents that hold a Yjs `Y.XmlHook`, and anyone who
+applies updates from peers they do not fully trust.**
+
+ygo decoded a Yjs `Y.XmlHook` (type ref 5) to an untyped placeholder and
+dropped its hook name. Every update ygo encoded from the document wrote the
+hook as an empty `YArray`: the state a server sends to a late joiner, the
+`OnUpdate` output it stores, `MergeUpdates` and `DiffUpdate` results. A Yjs
+client that loaded that state got an empty array without the hook's entries.
+ygo now keeps the hook and its name and writes them back byte for byte as Yjs
+does. `ToJSON`, `Entries`, `ToSlice` and observer values, which gave `null`
+for a hook, now give its entries as an object, as Yjs `toJSON` does.
+`YXmlFragment.Children()` now includes a hook, so its indexes match `Len()`,
+and `ToXML` renders the hook as `[object Object]`, as Yjs `toString` does.
+`YMap.Get` and `YArray.Get` return a hook as a `*YMap`. State that an older
+ygo already stored keeps the hook as an empty `YArray`.
+
+An update with a type ref above 6 (no Yjs type has one) was accepted and
+written back as a `YArray`. Yjs refuses such an update, and ygo now refuses it
+too: `ApplyUpdateV1`/`V2` and the other functions that decode updates return
+an error wrapping `ErrInvalidUpdate`. An update with several client groups is
+refused before any group is applied. In an update with one client group, the
+structs before the bad one stay applied, as for any other malformed struct.
+No API changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
