@@ -72,12 +72,15 @@ func dialConnErr(ts *httptest.Server, room string, h http.Header) (*gws.Conn, er
 }
 
 // drainConnErr is the error-returning equivalent of drainWS (see dialConnErr
-// for why): it reads the three handshake frames the server always sends on
-// connect and applies any sync frames into doc, reporting failure via the
+// for why): it sends doc's SyncStep1 and reads up to and including the sync
+// step-2 reply, applying the sync frames into doc, reporting failure via the
 // returned error rather than require/assert.
 func drainConnErr(conn *gws.Conn, doc *crdt.Doc) error {
-	for i := 0; i < 3; i++ {
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.WriteMessage(gws.BinaryMessage, syncStep1Frame(doc)); err != nil {
+		return fmt.Errorf("send sync step 1: %w", err)
+	}
+	for i := 0; ; i++ {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		_, data, err := conn.ReadMessage()
 		_ = conn.SetReadDeadline(time.Time{})
 		if err != nil {
@@ -88,13 +91,17 @@ func drainConnErr(conn *gws.Conn, doc *crdt.Doc) error {
 		if err != nil {
 			return fmt.Errorf("decode outer varuint: %w", err)
 		}
-		if outer == msgSync {
-			if _, err := ygsync.ApplySyncMessage(doc, dec.RemainingBytes(), nil); err != nil {
-				return fmt.Errorf("apply sync frame: %w", err)
-			}
+		if outer != msgSync {
+			continue
+		}
+		payload := dec.RemainingBytes()
+		if _, err := ygsync.ApplySyncMessage(doc, payload, nil); err != nil {
+			return fmt.Errorf("apply sync frame: %w", err)
+		}
+		if sub, _, err := ygsync.ReadSyncMessage(payload); err == nil && sub == ygsync.MsgSyncStep2 {
+			return nil
 		}
 	}
-	return nil
 }
 
 // roomState looks up the room directly (internal test, same package) and

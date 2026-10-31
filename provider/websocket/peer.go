@@ -1035,7 +1035,7 @@ func (p *peer) maybeResync() bool {
 	p.wmu.Unlock()
 
 	// Build resync frames without holding wmu: crdt.Doc and Awareness are
-	// internally synchronised (mirrors the initial-sync path).
+	// internally synchronised.
 	step2 := syncFrame(encodeSyncStep2Msg(crdt.EncodeStateAsUpdateV1(p.room.doc, nil)))
 	aw := awarenessFrame(p.room.awareness.EncodeUpdate(nil))
 

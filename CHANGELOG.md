@@ -44,6 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Shutdown` or `CloseRoom`. Updates that the server had not read when it
   closed the connection are not saved. A client that reconnects sends them
   again.
+- **`provider/websocket`: a joining peer receives the room's state once.** On
+  connect the server sent SyncStep1, a SyncStep2 with the room's full state
+  and awareness, then answered the peer's own SyncStep1 with a second full
+  SyncStep2, so every join downloaded the document twice. The server now
+  sends SyncStep1 on connect, awareness only when the room holds awareness
+  states, and the room's state only in answer to the peer's SyncStep1, as the
+  y-websocket and Hocuspocus servers do. This holds on both framings and for
+  read-only peers. A client that never sends SyncStep1 now gets no snapshot
+  of the room's state, only the updates broadcast after it joins. A client
+  that sends a Hocuspocus token `OnTokenAuth` rejects before its SyncStep1 no
+  longer gets the snapshot either, but updates broadcast before the rejection
+  can still reach it: withhold content with `AuthFunc` or `Authorize`.
 
 ## [1.55.0] — 2026-10-31
 

@@ -32,6 +32,18 @@ changes.
   read buffer, and applied and stored the updates among them. It now drops
   them. Updates the server had not read when it closed the connection are not
   saved. A client that reconnects sends them again in the sync exchange.
+- **A joining peer receives the room's state once.** The server sent the
+  room's full state on connect and again in its answer to the peer's
+  SyncStep1. It now sends the state only in that answer, and awareness on
+  connect only when the room holds awareness states, as the y-websocket and
+  Hocuspocus servers do. `y-websocket`, `@hocuspocus/provider` and ygo's
+  `provider/client` send SyncStep1 on connect and need no change. **A custom
+  client that waits for the server's state without sending SyncStep1 now
+  receives no snapshot**, only the updates broadcast after it joins. A client
+  whose Hocuspocus token `OnTokenAuth` rejects, and that sends the token
+  before its SyncStep1, no longer receives the snapshot either, but updates
+  broadcast before the rejection can still reach it: withhold content with
+  `AuthFunc` or `Authorize`.
 
 ## v1.55.0
 
