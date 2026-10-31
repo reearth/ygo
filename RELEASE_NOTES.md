@@ -1,3 +1,22 @@
+## v1.54.1
+
+**Who is affected: code that subscribes to both `OnAfterTransaction` and
+`OnUpdate` on one document, or that writes to the document from an
+`OnAfterTransaction` callback.**
+
+ygo called `OnUpdate` before `OnAfterTransaction`. Yjs emits
+`afterTransaction` first, so code ported from Yjs that reads state set in
+`afterTransaction` from its `update` handler saw it one transaction late. Now
+a committed transaction calls per-type observers, deep observers,
+`OnAfterTransaction`, `OnUpdate`, then `OnSubdocs`, as Yjs does.
+
+A transaction started inside an `OnAfterTransaction` callback now runs to the
+end, and emits its update, before the outer transaction's update. A
+transaction started inside an observer already did this. Yjs queues such a
+transaction until the outer one is done. Peers and stored update logs still
+converge, because a receiver keeps an update until the update it depends on
+arrives. No API or wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

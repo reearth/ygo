@@ -557,11 +557,12 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 				fn(txn)
 			}
 		}
-		for _, fn := range onUpdateSnap {
-			fn(updateBytes, txn.Origin)
-		}
+		// Yjs emits afterTransaction before update (cleanupTransactions).
 		for _, fn := range onAfterTxnSnap {
 			fn(txn)
+		}
+		for _, fn := range onUpdateSnap {
+			fn(updateBytes, txn.Origin)
 		}
 		if hasSubdocs {
 			for _, fn := range onSubdocsSnap {
@@ -811,7 +812,9 @@ func (d *Doc) OnUpdate(fn func(update []byte, origin any)) func() {
 // OnAfterTransaction registers a callback that fires after every committed
 // transaction, receiving the full Transaction object. This provides richer
 // change metadata than OnUpdate (beforeState, afterState, deleteSet, Local
-// flag) and is the hook used by UndoManager. Returns an unsubscribe function.
+// flag) and is the hook used by UndoManager. It fires after the type and deep
+// observers and before OnUpdate, as Yjs emits afterTransaction before update.
+// Returns an unsubscribe function.
 func (d *Doc) OnAfterTransaction(fn func(*Transaction)) func() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
