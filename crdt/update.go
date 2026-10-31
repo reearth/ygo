@@ -645,7 +645,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	applying := false
 	defer func() {
 		if r := recover(); r != nil {
-			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+			retErr = integrationPanicErr(r)
 		}
 		// An apply that fails before it began to integrate must tell no observer.
 		txn.refused = retErr != nil && !applying
@@ -713,15 +713,17 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 
 // drainAfterApply drains the pending queue last in every apply that began to
 // integrate, so one that fails partway drains on what it kept, as a peer
-// applying its update does; a drain panic is its error only when err is nil.
+// applying its update does; a drain error is its error only when err is nil.
 func drainAfterApply(txn *Transaction, err error) (retErr error) {
 	retErr = err
 	defer func() {
 		if r := recover(); r != nil && retErr == nil {
-			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+			retErr = integrationPanicErr(r)
 		}
 	}()
-	drainPending(txn)
+	if drainErr := drainPending(txn); retErr == nil {
+		retErr = drainErr
+	}
 	return retErr
 }
 
@@ -893,11 +895,11 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 // drainPending runs the doc-level pending drain. It first retries any
 // previously-parked delete-set entries (pendingDs), then loops over
 // store.pending as long as progress is being made, integrating items and
-// re-parking those still blocked. A panic-safety closure re-parks any
-// unprocessed items back into store.pending before re-raising, so
-// drainAfterApply can convert the panic to an error.
+// re-parking those still blocked. A parked item whose integration panics is
+// dropped, since retrying it would panic on every later drain, and the drain
+// goes on; the panic is returned as an error.
 // Also retries pendingDs after each successful integration pass.
-func drainPending(txn *Transaction) {
+func drainPending(txn *Transaction) error {
 	// pendingDs may be drainable even if pending items aren't — integrated
 	// items from this update might be targets of previously-parked deletes.
 	if len(txn.doc.store.pendingDs.clients) > 0 {
@@ -914,26 +916,13 @@ func drainPending(txn *Transaction) {
 	// Matches yrs' apply_update retry gate and Yjs JS's readUpdateV2
 	// recursion, but executed inline so everything integrated during
 	// this call surfaces in a single OnUpdate notification.
+	var dropped error
 	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
 		items := txn.doc.store.pending.items
 		txn.doc.store.pending = nil
 
-		// Process items with panic-safety: if tryIntegrate panics, re-park
-		// every item not yet integrated so a subsequent ApplyUpdate can retry
-		// them. drainAfterApply then converts the panic to an error for the
-		// caller.
 		done := make([]bool, len(items))
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					if restore, missing := unresolvedPending(txn.doc.store, items, done); len(restore) > 0 {
-						txn.doc.store.pending = &pendingUpdate{items: restore, missing: missing}
-					}
-					panic(r) // re-raise for outer recover
-				}
-			}()
-			integratePending(txn, items, done)
-		}()
+		integratePending(txn, items, done, &dropped)
 		stillPending, stillMissing := unresolvedPending(txn.doc.store, items, done)
 		progressed := len(stillPending) < len(items)
 
@@ -950,6 +939,12 @@ func drainPending(txn *Transaction) {
 			break
 		}
 	}
+	return dropped
+}
+
+// integrationPanicErr is the error an apply returns for a panic it recovered.
+func integrationPanicErr(r any) error {
+	return fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
 }
 
 // unresolvedPending returns the items not marked done, in queue order, with

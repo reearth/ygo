@@ -630,7 +630,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	applying := false
 	defer func() {
 		if r := recover(); r != nil {
-			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+			retErr = integrationPanicErr(r)
 		}
 		// An apply that fails before it began to integrate must tell no observer.
 		txn.refused = retErr != nil && !applying

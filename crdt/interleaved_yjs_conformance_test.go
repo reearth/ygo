@@ -251,7 +251,7 @@ func TestUnit_DrainPending_NewestFirstBoundWork(t *testing.T) {
 	work.lengths = 0
 	doc.Transact(func(txn *Transaction) {
 		require.True(t, tryIntegrate(txn, first))
-		drainPending(txn)
+		require.NoError(t, drainPending(txn))
 	})
 	require.Zero(t, doc.PendingStats().Items)
 	require.Equal(t, uint64(n/people), doc.StateVector().Clock(1))

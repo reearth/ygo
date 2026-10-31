@@ -123,8 +123,8 @@ func TestUnit_PartlyAppliedUpdate_LandedHoldsTheDrain(t *testing.T) {
 }
 
 // A drain that panics keeps a partial apply's first error, becomes a whole
-// apply's error, and parks the queue again in both.
-func TestUnit_PartlyAppliedUpdate_DrainPanicKeepsTheQueue(t *testing.T) {
+// apply's error, and drops the struct that panicked in both.
+func TestUnit_PartlyAppliedUpdate_DrainPanicDropsTheStructThatPanicked(t *testing.T) {
 	for _, c := range partlyAppliedCases(t) {
 		t.Run(c.name, func(t *testing.T) {
 			for _, partial := range []bool{true, false} {
@@ -140,16 +140,17 @@ func TestUnit_PartlyAppliedUpdate_DrainPanicKeepsTheQueue(t *testing.T) {
 				if err := c.apply(room, update); err == nil || !strings.Contains(err.Error(), want) {
 					t.Fatalf("partial %v: apply returned %v, want %q", partial, err, want)
 				}
-				if got := room.PendingStats().Items; got != 1 {
-					t.Fatalf("partial %v: pending %d after the drain panicked, want \"b\" parked again", partial, got)
+				if got := room.PendingStats().Items; got != 0 {
+					t.Fatalf("partial %v: pending %d after the drain panicked, want \"b\" dropped", partial, got)
 				}
 			}
 		})
 	}
 }
 
-// A drain that panics parks its queue again with the clocks each item waits
-// on, so the items drain once those clocks arrive, in V1 and V2.
+// A drain that panics drops the struct that panicked and parks the rest again
+// with the clocks each waits on, so they drain once those clocks arrive, in V1
+// and V2.
 func TestUnit_DrainPanic_ParksTheQueueWithItsClocks(t *testing.T) {
 	writer := func(client ClientID, name string) [][]byte {
 		w := New(WithClientID(client))
@@ -189,8 +190,8 @@ func TestUnit_DrainPanic_ParksTheQueueWithItsClocks(t *testing.T) {
 			if err := apply(room, t20[0]); err != nil {
 				t.Fatal(err)
 			}
-			if got, want := room.GetText("t").ToString()+room.GetText("u").ToString(), "abab"; got != want || room.PendingStats().Items != 0 {
-				t.Fatalf("text %q pending %d, want %q with nothing parked", got, room.PendingStats().Items, want)
+			if got, want := room.GetText("t").ToString()+room.GetText("u").ToString(), "aab"; got != want || room.PendingStats().Items != 0 {
+				t.Fatalf("text %q pending %d, want %q (13:1 dropped) with nothing parked", got, room.PendingStats().Items, want)
 			}
 		})
 	}
