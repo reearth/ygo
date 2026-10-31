@@ -850,12 +850,16 @@ func (r *Relay) Publish(ctx context.Context, out cluster.Outbound) error {
 // The RPC uses the relay's bound start context (the one passed to Start, in
 // practice Server.relayCtx) so a slow/unreachable Redis cannot pin this
 // goroutine indefinitely — Server.Shutdown cancels the ctx and the SUBSCRIBE
-// returns promptly. Note that the websocket provider calls RoomActivated
-// off-lock and post-ready (see getOrCreateRoom, #182/#133): s.rmu is NOT held
-// here, so a Redis stall does not block the server's room-create path for
-// any OTHER room — but it does still block the creating goroutine's own
-// return from getOrCreateRoom for THIS room, which is what the cancelable
-// context guards against.
+// returns. The websocket provider makes no new RoomActivated or
+// RoomDeactivated call once Shutdown has begun. A stalled RPC that a
+// connection started before then can hold Shutdown's join of its connections
+// until the RPC returns or Shutdown's own ctx expires; the cancel comes after
+// that join. Note that the websocket provider calls RoomActivated off-lock and
+// post-ready (see getOrCreateRoom, #182/#133): s.rmu is NOT held here, so a
+// Redis stall does not block the server's room-create path for any OTHER room
+// — but it does still block the creating goroutine's own return from
+// getOrCreateRoom for THIS room, which is what the cancelable context guards
+// against.
 func (r *Relay) RoomActivated(room string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -899,7 +903,8 @@ func (r *Relay) RoomActivated(room string) {
 // the room's delivery worker. See the RoomActivated godoc for idempotency /
 // reference-counting / locking semantics. The UNSUBSCRIBE RPC is cancelable
 // via the relay's bound start context for the same reason: a stalled Redis
-// must not pin the websocket provider's room-teardown path.
+// must not pin the websocket provider's room-teardown path (see the
+// RoomActivated godoc for how this meets Server.Shutdown).
 //
 // stopWorker is called last, still under r.mu (consistent with the
 // established r.mu → workersMu order: RoomActivated already nests workersMu

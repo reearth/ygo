@@ -44,6 +44,17 @@ changes.
   before its SyncStep1, no longer receives the snapshot either, but updates
   broadcast before the rejection can still reach it: withhold content with
   `AuthFunc` or `Authorize`.
+- **`Shutdown` waits for the connections it serves.** A hook that ran on a
+  connection, or that its teardown fires, could still run after `Shutdown`
+  returned `nil`, so the usual `srv.Shutdown(ctx); return` could exit the
+  process with a hook half done. `Shutdown` now waits, bounded by `ctx`, until
+  every `ServeHTTP` call in progress has returned. **A hook that does not
+  return now holds `Shutdown` until `ctx` expires**, and `Shutdown` then
+  returns `ctx.Err()` where it returned `nil` before. Pass a `ctx` with a
+  deadline, and stop accepting connections before you call `Shutdown`. Once
+  `Shutdown` has begun, the server no longer calls a relay's `RoomActivated` or
+  `RoomDeactivated`, so a room still active then gets no `RoomDeactivated`:
+  release per-room relay state in `Close`.
 
 ## v1.55.0
 

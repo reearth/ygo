@@ -56,6 +56,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that sends a Hocuspocus token `OnTokenAuth` rejects before its SyncStep1 no
   longer gets the snapshot either, but updates broadcast before the rejection
   can still reach it: withhold content with `AuthFunc` or `Authorize`.
+- **`provider/websocket`: `Shutdown` waits for the connections it serves.**
+  Its doc said it waits for the peers' goroutines to exit, but it closed each
+  connection and waited only for the persistence workers, stranded writes and
+  relay workers. A hook on a connection's read loop (`OnTokenAuth`,
+  `OnPeerUpdate`) or in its teardown (`OnLastPeer`, `OnUnloadDocument`) could
+  still run after `Shutdown` returned `nil`. `Shutdown` now also waits, bounded
+  by its `ctx`, until every `ServeHTTP` call in progress has returned, its
+  teardown included. A hook that does not return holds `Shutdown` until `ctx`
+  expires, and `Shutdown` then returns `ctx.Err()`. A hook that calls
+  `Shutdown` must pass a `ctx` that expires, because `Shutdown` waits for that
+  hook's own connection. Once `Shutdown` has begun, the server makes no relay
+  `RoomActivated` or `RoomDeactivated` call, because a relay may wait on the
+  relay context, which `Shutdown` cancels only after this wait.
 
 ## [1.55.0] — 2026-10-31
 
