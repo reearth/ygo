@@ -853,7 +853,7 @@ type Server struct {
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{} // closed by Shutdown
 
-	// strandedInFlight counts committing goroutines that are anywhere inside
+	// stranded counts committing goroutines that are anywhere inside
 	// loadRoom's doc.OnUpdate observer — EVERY commit, not only the ones that
 	// end up on the retirement branch and perform the adapter write themselves
 	// (#229). Shutdown waits for it to reach zero so it does not return while
@@ -876,17 +876,11 @@ type Server struct {
 	// Shutdown burns its whole deadline and returns context.DeadlineExceeded
 	// with no wedged adapter anywhere. Callers who need Shutdown to return early
 	// must stop their writers, not only their connections.
-	//
-	// strandedZero is a broadcast latch, replaced-and-closed on each 1→0
-	// transition (see strandedBroadcast). A close rather than a token hand-off
-	// because Shutdown may legitimately be called concurrently — shutdownOnce
-	// implies as much — and a cap-1 wake token would be consumed by one caller,
-	// parking the others until their contexts expired. A plain sync.WaitGroup is
-	// unusable here for a different reason: producers appear at arbitrary times,
-	// so Add would race Wait.
-	strandedInFlight atomic.Int64
-	strandedZeroMu   sync.Mutex
-	strandedZero     chan struct{}
+	stranded inFlight
+
+	// serving counts ServeHTTP calls in progress, teardown included; Shutdown
+	// joins it.
+	serving inFlight
 
 	// AuthFunc, if non-nil, is called before upgrading each incoming WebSocket
 	// connection. Return false to reject the connection; the server responds
@@ -1411,10 +1405,11 @@ func (s *Server) newPeerLimiter() *rate.Limiter {
 // NewServer returns a new Server with an empty room store and no persistence.
 func NewServer() *Server {
 	s := &Server{
-		rooms:        make(map[string]*room),
-		shutdownCh:   make(chan struct{}),
-		sweeperDone:  make(chan struct{}),
-		strandedZero: make(chan struct{}),
+		rooms:       make(map[string]*room),
+		shutdownCh:  make(chan struct{}),
+		sweeperDone: make(chan struct{}),
+		stranded:    newInFlight(),
+		serving:     newInFlight(),
 	}
 	s.upgrader = gws.Upgrader{CheckOrigin: s.checkOrigin}
 	return s
@@ -1423,6 +1418,17 @@ func NewServer() *Server {
 // Shutdown closes all active peer connections and waits for their goroutines
 // to exit or for ctx to expire. Call this during server shutdown to prevent
 // goroutine leaks and ensure in-flight operations complete cleanly.
+//
+// It waits for every ServeHTTP call in progress to return, so no hook that
+// ServeHTTP calls (Authorize or AuthFunc, OnLoadDocument, OnFirstPeer,
+// OnTokenAuth, OnPeerUpdate, OnStateless, OnLastPeer, OnUnloadDocument) is
+// still running when it returns nil. A ServeHTTP call that begins after that
+// wait is not covered, so stop accepting connections first. A hook that never
+// returns holds Shutdown until ctx expires, and Shutdown then returns
+// ctx.Err(). So does a relay RoomActivated or RoomDeactivated call that a
+// connection started before Shutdown began and that waits on the relay
+// context, which Shutdown cancels only after this wait. A hook that calls
+// Shutdown waits for its own connection, so it must pass a ctx that expires.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
 
@@ -1498,6 +1504,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// Join the connections. The count also covers a connection in teardown,
+	// which is no longer in r.peers. Once Shutdown has begun, teardown and room
+	// creation skip the relay calls, which may wait on the relay context that
+	// Shutdown cancels below (see teardownRelayRoom). A call a connection
+	// started before can still hold this join until it returns or ctx expires.
+	s.serving.wait(ctx)
+
 	// Wait for all persistence goroutines to drain in-flight writes.
 	// Disconnect handlers (triggered by the connection closes above) signal
 	// persistence goroutines to stop as rooms become empty.
@@ -1532,8 +1545,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Three limits, all real:
 	//
 	//   - A commit that begins after the counter reads zero is not covered, and
-	//     cannot be: peer read loops and any holder of a *crdt.Doc are producers
-	//     the server has no way to join.
+	//     cannot be: any holder of a *crdt.Doc is a producer the server has no
+	//     way to join. (The connection join above covers peer read loops that
+	//     began before it saw zero.)
 	//   - Neither is a room this function never enumerated. The snapshot above
 	//     is taken once and skips rooms still mid-load, and ServeHTTP has no
 	//     shutdownCh gate, so a connection accepted while Shutdown runs can
@@ -1544,10 +1558,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	//     (see docs/PERSISTENCE.md). Pre-existing; recorded here because the
 	//     join above would otherwise read as covering it.
 	//   - Conversely the counter covers EVERY commit, not only the stranded
-	//     ones (that breadth is required — see Server.strandedInFlight), so a
+	//     ones (that breadth is required — see Server.stranded), so a
 	//     sustained writer can hold this wait open until ctx expires even
 	//     though nothing is stuck.
-	s.waitStranded(ctx)
+	s.stranded.wait(ctx)
 
 	// Wind down outbound relay delivery (#202), in three ordered steps. The
 	// peers are gone and the persistence drain is over, so nothing can feed
@@ -1585,6 +1599,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.waitRelayWorkers(ctx)
 
 	return ctx.Err()
+}
+
+// shuttingDown reports whether Shutdown has begun. False on a zero-value
+// Server, whose shutdownCh is nil.
+func (s *Server) shuttingDown() bool {
+	select {
+	case <-s.shutdownCh:
+		return true
+	default:
+		return false
+	}
 }
 
 // waitRelayWorkers blocks until every lane worker has returned or ctx
@@ -1669,9 +1694,10 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, bool,
 		// This goroutine owns the load. It runs with s.rmu released; other
 		// callers (same or different room) never block on it via s.rmu.
 		s.loadRoom(ctx, r, name)
-		if r.loadErr == nil && s.relay != nil {
+		if r.loadErr == nil && s.relay != nil && !s.shuttingDown() {
 			// Off-lock and post-ready: a re-entrant Sink.Inject from RoomActivated
 			// finds the published room and waits on the already-closed ready.
+			// Skipped once Shutdown has begun: see teardownRelayRoom.
 			s.relay.RoomActivated(name)
 		}
 	} else {
@@ -1859,9 +1885,9 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 			// decides whether it must write. Registering only inside the
 			// retirement branches would leave a gap in which Shutdown observes
 			// zero and returns while this goroutine is already committed to a
-			// write it has not started (see Server.strandedInFlight).
-			s.strandedEnter()
-			defer s.strandedLeave()
+			// write it has not started (see Server.stranded).
+			s.stranded.enter()
+			defer s.stranded.leave()
 
 			select {
 			case r.persistCh <- update:
@@ -1951,6 +1977,9 @@ func (s *Server) failRoomLoad(r *room, name string, loadErr error) {
 // the cancel on. Any other cause, or an unsendable code, closes the socket
 // without a close frame, as before.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.serving.enter() // Shutdown joins every connection, its teardown included
+	defer s.serving.leave()
+
 	// Authorize (issue #59) takes precedence over AuthFunc when both are set: it
 	// both accepts/rejects and reports per-connection config (read-only). AuthFunc
 	// grants read-write. Rejecting either way is a 401 before the upgrade.

@@ -1,3 +1,36 @@
+## v1.54.1
+
+**Who is affected: every `provider/websocket` server that calls `Shutdown`.**
+
+`Shutdown` closed each connection and waited for the persistence workers,
+stranded writes and relay workers, but not for the connections themselves. A
+hook that was running on a connection (`OnTokenAuth`, `OnPeerUpdate`), or that
+its teardown fires (`OnLastPeer`, `OnUnloadDocument`), could still run after
+`Shutdown` returned `nil`. With no persistence adapter, `Shutdown` waited for
+no connection at all. The usual `srv.Shutdown(ctx); return` shape could then
+exit the process with a hook half done.
+
+`Shutdown` now waits until every `ServeHTTP` call in progress has returned,
+its teardown included, as its doc already said. That covers every hook that
+`ServeHTTP` calls, from `Authorize` and `OnLoadDocument` to `OnLastPeer` and
+`OnUnloadDocument`. `ctx` bounds the wait, as it bounds the other waits in
+`Shutdown`. **A hook that does not return now holds `Shutdown` until `ctx`
+expires**, and `Shutdown` then returns `ctx.Err()` where it returned `nil`
+before. With `context.Background()` such a hook holds `Shutdown` forever, so
+pass a `ctx` with a deadline, or bound the waits in your hooks. A hook that
+calls `Shutdown` itself must pass a `ctx` that expires, because `Shutdown`
+waits for that hook's own connection. Stop accepting connections before you
+call `Shutdown`: a connection that starts after the wait is not covered.
+
+**Relays.** Once `Shutdown` has begun, the server no longer calls a relay's
+`RoomActivated` or `RoomDeactivated`, so a room still active then gets no
+`RoomDeactivated`. Release per-room relay state in `Close`. A `cluster/redis`
+relay passes the relay context to both calls and can wait on it while it
+redials an unreachable Redis, and `Shutdown` cancels that context only after
+it has waited for the connections. A stalled call that a connection started
+before `Shutdown` began can still hold `Shutdown` until the call returns or
+`ctx` expires. No API or wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully
