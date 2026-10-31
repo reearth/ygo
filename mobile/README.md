@@ -279,7 +279,7 @@ same as every other call in this package.
   restart. `token`, if non-empty, is sent as ygo's Hocuspocus in-band auth
   token — see [`docs/CLIENT.md`](../docs/CLIENT.md#auth-token-is-not-a-confidentiality-gate)
   for what it does and does **not** protect (it is not a confidentiality
-  gate: the server serves a room's full content before it has read the
+  gate: a server can serve a room's full content before it checks the
   token). `NewSyncClient` does not touch the network.
 - **`Doc() *Doc`** — the document this `SyncClient` hydrates, edits, and
   keeps in sync. Usable immediately, before `Connect` is ever called, and

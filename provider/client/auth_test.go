@@ -40,19 +40,15 @@ import (
 // with the correct Options.Token completes the handshake and syncs, exactly
 // like a client with no Token at all — the auth exchange rides alongside the
 // handshake, it does not replace or block it (see provider/websocket's
-// OnTokenAuth doc: "the initial sync is served before any PermissionDenied",
-// i.e. ygo's own server never gates the handshake on auth in the first
-// place).
+// OnTokenAuth doc: "it is NOT a document-confidentiality gate").
 func TestClient_Auth_CorrectTokenSyncs(t *testing.T) {
 	// authDone establishes a happens-before edge between the server's
 	// OnTokenAuth goroutine writing gotRoom/gotToken and this test's
 	// goroutine reading them below. Synced() closing is NOT enough on its
-	// own: ygo's own server pushes SyncStep1/Step2 (what Synced() actually
-	// waits on) independently of — and, per its own doc, before — anything
-	// to do with auth, so a client can legitimately reach StateSynced before
-	// OnTokenAuth has even been invoked. Racing that read against the
-	// hook's write (rather than synchronizing on it) is exactly what
-	// `-race` catches without this channel.
+	// own: the test reads them on another goroutine than the server's, and
+	// only this channel orders that read after the hook's writes. Racing
+	// that read against the hook's write (rather than synchronizing on it)
+	// is exactly what `-race` catches without this channel.
 	authDone := make(chan struct{})
 	var gotRoom, gotToken string
 	srv, ts := startServer(t, func(s *ygws.Server) {

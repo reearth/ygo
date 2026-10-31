@@ -247,16 +247,10 @@ func dialWSBench(b *testing.B, ts *httptest.Server, room string) *gws.Conn {
 	return conn
 }
 
+// drainHandshakeBench joins conn with an empty doc (see drainWS).
 func drainHandshakeBench(b *testing.B, conn *gws.Conn) {
 	b.Helper()
-	for i := 0; i < 3; i++ {
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		_, _, err := conn.ReadMessage()
-		_ = conn.SetReadDeadline(time.Time{})
-		if err != nil {
-			b.Fatalf("drain handshake frame %d: %v", i, err)
-		}
-	}
+	drainWS(b, conn, crdt.New())
 }
 
 func sendV1UpdateBench(b *testing.B, conn *gws.Conn, update []byte) {
