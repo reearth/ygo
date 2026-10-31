@@ -386,7 +386,7 @@ func TestUnit_WalkGroups_MatchesTheSeparateWalks(t *testing.T) {
 	updates, v2 := walkCorpus(t, rng)
 	read, unordered := 0, 0
 	for i, update := range updates {
-		if ordered, _, _, ok := scanGroupClients(update, nil, encoding.Decoder{}, nil); !v2[i] && ok && !ordered {
+		if ordered, _, _, err := scanGroupClients(update, nil, encoding.Decoder{}, nil); !v2[i] && err == nil && !ordered {
 			unordered++
 		}
 		if !checkWalkGroups(t, update, v2[i]) {

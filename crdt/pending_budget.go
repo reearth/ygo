@@ -89,9 +89,6 @@ func (b *pendingBudget) check(count int) error {
 			result.pending += bounded.permanent
 		}
 		if err != nil {
-			if err == ErrInvalidUpdate {
-				return err
-			}
 			return wrapUpdateErr(err)
 		}
 		if result.pending <= b.remaining {
@@ -467,6 +464,11 @@ func scanPendingGroups(s *pendingScanner, known StateVector, remaining int, clie
 		knownClock := known.Clock(client)
 		for j := uint64(0); j < n && s.err == nil; j++ {
 			length, skip, deps, numDeps := s.item()
+			if s.err != nil {
+				// A struct the scan cannot read refuses the update for that
+				// reason, before any count of it.
+				break
+			}
 			end := clock + length
 			if end < clock {
 				return result, ErrInvalidUpdate
@@ -863,7 +865,7 @@ func (s *pendingScanner) content(tag byte) uint64 {
 		s.uint()
 		s.uint()
 	default:
-		s.err = ErrInvalidUpdate
+		s.err = tagError(tag, s.v2 != nil)
 	}
 	return 1
 }

@@ -80,7 +80,7 @@ func DecodeSnapshot(data []byte) (*Snapshot, error) {
 	// Guard against a crafted count that would force a huge map allocation
 	// before the (then-failing) reads — same protection as DecodeStateVectorV1.
 	if n > uint64(dec.Remaining()/2) || n > maxV2Items {
-		return nil, wrapUpdateErr(ErrInvalidUpdate)
+		return nil, ErrInvalidUpdate
 	}
 	sv := make(StateVector, n)
 	for i := uint64(0); i < n; i++ {

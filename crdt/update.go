@@ -1179,7 +1179,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentMove(target, int(targetLen)), nil
 
 	default:
-		return nil, fmt.Errorf("unknown content tag: %d", tag)
+		return nil, unknownTagErr(false, tag)
 	}
 }
 
@@ -1304,9 +1304,11 @@ func clientsSorted[T any](m map[ClientID]T) []ClientID {
 	return out
 }
 
+// wrapUpdateErr names err as an invalid update once: an error that already is
+// one is returned as it is.
 func wrapUpdateErr(err error) error {
-	if err == nil {
-		return nil
+	if err == nil || errors.Is(err, ErrInvalidUpdate) {
+		return err
 	}
 	return fmt.Errorf("%w: %v", ErrInvalidUpdate, err)
 }

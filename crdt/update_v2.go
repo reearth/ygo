@@ -1143,7 +1143,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentMove(target, int(targetLen)), nil
 
 	default:
-		return nil, fmt.Errorf("unknown V2 content tag: %d", tag)
+		return nil, unknownTagErr(true, tag)
 	}
 }
 

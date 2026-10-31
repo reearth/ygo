@@ -514,7 +514,7 @@ func TestUnit_ApplyUpdate_DeletingMoreThanTheCapOfItsOwnStructsApplies(t *testin
 // A malformed multi-group update must keep its error text, so the parked-delete
 // check adds no wrapping.
 func TestUnit_ApplyUpdate_AMalformedMultiGroupUpdateKeepsItsErrorText(t *testing.T) {
-	want := wrapUpdateErr(ErrInvalidUpdate).Error()
+	want := ErrInvalidUpdate.Error() + ": encoding: unexpected end of input"
 	merged, err := MergeUpdatesV1(textState(5, "abc"), textState(6, "def"))
 	if err != nil {
 		t.Fatal(err)
