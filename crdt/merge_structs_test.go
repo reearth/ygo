@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -361,4 +362,55 @@ func TestUnit_MergeTxnStructs_GCAbsorbKeepsLinks(t *testing.T) {
 	require.NotNil(t, x)
 	require.NotNil(t, x.Left)
 	assert.Same(t, doc.store.Find(x.Left.ID), x.Left, "x.Left must be a struct in the store")
+}
+
+// deleteRestTime times one transaction that deletes n array values, each
+// next to values deleted earlier, so all 2n structs merge into one.
+func deleteRestTime(t testing.TB, n int) time.Duration {
+	doc := New(WithClientID(1))
+	a := doc.GetArray("a")
+	vals := make([]any, 2*n)
+	for i := range vals {
+		vals[i] = i
+	}
+	doc.Transact(func(txn *Transaction) { a.Insert(txn, 0, vals) })
+	doc.Transact(func(txn *Transaction) {
+		for i := 2*n - 1; i >= 0; i -= 2 {
+			a.Delete(txn, i, 1)
+		}
+	})
+	start := time.Now()
+	doc.Transact(func(txn *Transaction) { a.Delete(txn, 0, n) })
+	elapsed := time.Since(start)
+	require.Len(t, doc.store.clients[1], 1)
+	return elapsed
+}
+
+// Many deleted ranges in one long mergeable run must not each walk the run.
+func TestPerf_MergeManyRangesIsLinear(t *testing.T) {
+	// Instrumented builds distort the ratio; the benchmark below tracks this.
+	if testing.Short() || raceEnabled || testing.CoverMode() != "" {
+		t.Skip("timing test")
+	}
+	const small, large = 2000, 16000 // 8×: linear ≈ 8×, quadratic ≈ 64×
+	// Interleaved, so CPU load during the run hits both sizes alike.
+	var s, l time.Duration
+	for range 4 {
+		s += deleteRestTime(t, small)
+		l += deleteRestTime(t, large)
+	}
+	t.Logf("%v → %v", s, l)
+	require.Less(t, l, 24*s+20*time.Millisecond, "deleting many ranges of one run grows superlinearly")
+}
+
+func BenchmarkMergeManyRanges(b *testing.B) {
+	for _, n := range []int{2000, 16000} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			var d time.Duration
+			for i := 0; i < b.N; i++ {
+				d += deleteRestTime(b, n)
+			}
+			b.ReportMetric(float64(d.Nanoseconds())/float64(b.N), "delete-ns/op")
+		})
+	}
 }
