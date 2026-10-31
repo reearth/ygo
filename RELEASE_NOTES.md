@@ -1,3 +1,14 @@
+## v1.55.1
+
+**Who is affected: anyone who uses `UndoManager` and compares or stores
+encoded state. The document content does not change.**
+
+When an undo deleted an item that earlier undos had restored more than once as
+part of a longer copy, every copy on the way was split at that item. The split
+parts never merged again, so the document held more structs than Yjs and
+encoded to other V1 and V2 bytes. Undo now splits only the last copy, as Yjs
+does. No API or wire format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
