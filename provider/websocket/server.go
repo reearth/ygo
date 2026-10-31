@@ -988,10 +988,11 @@ type Server struct {
 	// When nil, tag-2 frames are silently ignored (unchanged legacy behavior).
 	//
 	// OnTokenAuth complements the HTTP-boundary AuthFunc/Authorize; it does not
-	// replace them. IMPORTANT: it is NOT a document-confidentiality gate — the
-	// initial sync is served before any PermissionDenied, so deployments that
-	// must withhold document contents from unauthenticated clients must reject
-	// them at the boundary via AuthFunc/Authorize.
+	// replace them. IMPORTANT: it is NOT a document-confidentiality gate — a
+	// SyncStep1 that arrives before the Auth message is answered with the
+	// room's state, so deployments that must withhold document contents from
+	// unauthenticated clients must reject them at the boundary via
+	// AuthFunc/Authorize.
 	OnTokenAuth func(room, token string) (ConnectionConfig, error)
 
 	// OnLoadDocument, if non-nil, is called once per room immediately
@@ -2152,15 +2153,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// 1. Send sync step-1 — request the peer's state vector.
+	// The room's state goes only in answer to the peer's own step-1, so a
+	// joiner receives it once.
 	p.sendSync(ygsync.EncodeSyncStep1(rm.doc))
-
-	// 2. Send sync step-2 — give the peer everything the server already has.
-	fullUpdate := crdt.EncodeStateAsUpdateV1(rm.doc, nil)
-	step2 := encodeSyncStep2Msg(fullUpdate)
-	p.sendSync(step2)
-
-	// 3. Send the current awareness state of all active peers.
 	p.sendAwareness(rm.awareness.EncodeUpdate(nil))
 
 	// Read loop — exits when the connection is closed (by peer, by context

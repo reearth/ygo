@@ -247,8 +247,13 @@ func dialWSBench(b *testing.B, ts *httptest.Server, room string) *gws.Conn {
 	return conn
 }
 
+// drainHandshakeBench sends an empty SyncStep1 and reads the three frames that
+// follow (sync step-1 and awareness on connect, then the sync step-2 reply).
 func drainHandshakeBench(b *testing.B, conn *gws.Conn) {
 	b.Helper()
+	if err := conn.WriteMessage(gws.BinaryMessage, syncStep1Frame(crdt.New())); err != nil {
+		b.Fatalf("send sync step 1: %v", err)
+	}
 	for i := 0; i < 3; i++ {
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		_, _, err := conn.ReadMessage()

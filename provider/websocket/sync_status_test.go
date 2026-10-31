@@ -24,6 +24,7 @@ import (
 
 const (
 	tagSync       = uint64(0)
+	tagAuth       = uint64(2)
 	tagSyncReply  = uint64(4)
 	tagSyncStatus = uint64(8)
 	tagPing       = uint64(9)
@@ -78,10 +79,12 @@ func hpRead(conn *gws.Conn, room string, deadline time.Duration) (uint64, []byte
 	return tag, dec.RemainingBytes(), nil
 }
 
-// hpDrainHandshake reads the three frames the server sends on connect
-// (SyncStep1, SyncStep2, awareness) and applies the sync ones to doc.
+// hpDrainHandshake sends doc's SyncStep1 as a provider does, then reads the
+// three frames that follow (SyncStep1 and awareness on connect, then the
+// SyncStep2 reply) and applies the sync ones to doc.
 func hpDrainHandshake(t *testing.T, conn *gws.Conn, room string, doc *crdt.Doc) {
 	t.Helper()
+	hpSend(t, conn, room, tagSync, ygsync.EncodeSyncStep1(doc))
 	for range 3 {
 		tag, body, err := hpRead(conn, room, 2*time.Second)
 		require.NoError(t, err)

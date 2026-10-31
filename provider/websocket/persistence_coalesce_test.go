@@ -490,12 +490,13 @@ func dialWS(t *testing.T, ts *httptest.Server, room string) *gws.Conn {
 	return conn
 }
 
-// drainWS reads the three handshake frames the server always sends on connect
-// (sync step-1, sync step-2, awareness) and applies any sync frames into doc.
-// A fixed read count is used because gorilla's reader is permanently broken by a
-// deadline expiry; the server contract is exactly three frames.
+// drainWS sends doc's SyncStep1 as a provider does, then reads the three
+// frames that follow (sync step-1 and awareness on connect, then the sync
+// step-2 reply) and applies any sync frames into doc. A fixed read count is
+// used because gorilla's reader is permanently broken by a deadline expiry.
 func drainWS(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
 	t.Helper()
+	require.NoError(t, conn.WriteMessage(gws.BinaryMessage, syncStep1Frame(doc)))
 	for i := 0; i < 3; i++ {
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, data, err := conn.ReadMessage()
@@ -510,6 +511,14 @@ func drainWS(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
 			}
 		}
 	}
+}
+
+// syncStep1Frame returns the msgSync frame carrying doc's SyncStep1.
+func syncStep1Frame(doc *crdt.Doc) []byte {
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(msgSync)
+		enc.WriteRaw(ygsync.EncodeSyncStep1(doc))
+	})
 }
 
 // sendV1Update frames a full V1 update as an outer msgSync + inner MsgUpdate

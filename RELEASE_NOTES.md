@@ -1,3 +1,19 @@
+## v1.54.1
+
+**Who is affected: every `provider/websocket` server, and any client of one
+that does not send SyncStep1.**
+
+A joining peer downloaded the room's full state twice: once in a SyncStep2
+the server sent on connect, and again in its answer to the peer's SyncStep1.
+The server now sends the state once, in that answer, as the y-websocket and
+Hocuspocus servers do. A join of a 100,000-character text now carries 100,021
+bytes of SyncStep2 instead of 200,042. `y-websocket`, `@hocuspocus/provider`
+and ygo's `provider/client` all send SyncStep1 on connect and need no change.
+A custom client that waits for the server's state without sending SyncStep1
+now receives none, and must send SyncStep1 as these providers do. A client
+whose Hocuspocus token `OnTokenAuth` rejects, and that sends the token before
+its SyncStep1, now receives no document state. No API or wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

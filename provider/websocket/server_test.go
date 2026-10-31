@@ -122,12 +122,14 @@ func readOne(t *testing.T, conn *gws.Conn, deadline time.Duration) (outerType ui
 	return
 }
 
-// drainHandshake reads the three messages the server always sends on connect
-// (step-1, step-2, awareness) and applies any sync messages to doc.
+// drainHandshake sends doc's SyncStep1 as a provider does, then reads the
+// three messages that follow (step-1 and awareness on connect, then the
+// step-2 reply) and applies any sync messages to doc.
 // Gorilla's bufio.Reader is permanently broken if a deadline expires, so we
 // read a known count instead of draining by timeout.
 func drainHandshake(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
 	t.Helper()
+	sendSync(t, conn, ygsync.EncodeSyncStep1(doc))
 	for i := 0; i < 3; i++ {
 		outerType, payload := readOne(t, conn, 2*time.Second)
 		if outerType == 0 { // msgSync
@@ -163,7 +165,7 @@ func TestUnit_NewServer_GetDoc_ReturnsNilForUnknownRoom(t *testing.T) {
 	assert.Nil(t, srv.GetDoc("no-such-room"))
 }
 
-func TestUnit_ServerHandshake_SendsStep1AndStep2ThenAwareness(t *testing.T) {
+func TestUnit_ServerHandshake_SendsStep1ThenAwareness(t *testing.T) {
 	ts := httptest.NewServer(ygws.NewServer())
 	defer ts.Close()
 
@@ -177,17 +179,9 @@ func TestUnit_ServerHandshake_SendsStep1AndStep2ThenAwareness(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(ygsync.MsgSyncStep1), syncType)
 
-	// Message 2: msgSync + step-2
-	outerType, payload = readOne(t, conn, 2*time.Second)
-	assert.Equal(t, uint64(0), outerType, "second msg should be msgSync")
-	dec = encoding.NewDecoder(payload)
-	syncType, err = dec.ReadVarUint()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(ygsync.MsgSyncStep2), syncType)
-
-	// Message 3: msgAwareness
+	// Message 2: msgAwareness
 	outerType, _ = readOne(t, conn, 2*time.Second)
-	assert.Equal(t, uint64(1), outerType, "third msg should be msgAwareness")
+	assert.Equal(t, uint64(1), outerType, "second msg should be msgAwareness")
 }
 
 func TestUnit_GetDoc_PopulatedAfterFirstConnection(t *testing.T) {
@@ -422,6 +416,7 @@ func TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow(t *testing.T) {
 	require.NoError(t, err)
 	defer fastConn.Close()
 	fastDoc := crdt.New(crdt.WithClientID(1))
+	sendSync(t, fastConn, ygsync.EncodeSyncStep1(fastDoc))
 	_ = fastConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	for i := 0; i < 3; i++ {
 		if _, _, e := fastConn.ReadMessage(); e != nil {
@@ -444,7 +439,9 @@ func TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow(t *testing.T) {
 	require.NoError(t, err)
 	defer slowConn.Close()
 
-	// Drain slow peer's 3-message handshake to free up writeCh capacity.
+	// Drain slow peer's 3-message handshake (its step-1 is answered) to free up
+	// writeCh capacity.
+	sendSync(t, slowConn, ygsync.EncodeSyncStep1(crdt.New()))
 	_ = slowConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	for i := 0; i < 3; i++ {
 		if _, _, e := slowConn.ReadMessage(); e != nil {
@@ -516,6 +513,7 @@ func TestServer_SlowPeer_ResyncPolicy_StaysConnectedAndConverges(t *testing.T) {
 	require.NoError(t, err)
 	defer fastConn.Close()
 	fastDoc := crdt.New(crdt.WithClientID(1))
+	sendSync(t, fastConn, ygsync.EncodeSyncStep1(fastDoc))
 	_ = fastConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	for i := 0; i < 3; i++ {
 		if _, _, e := fastConn.ReadMessage(); e != nil {
@@ -537,6 +535,7 @@ func TestServer_SlowPeer_ResyncPolicy_StaysConnectedAndConverges(t *testing.T) {
 	require.NoError(t, err)
 	defer slowConn.Close()
 	slowDoc := crdt.New(crdt.WithClientID(2))
+	sendSync(t, slowConn, ygsync.EncodeSyncStep1(slowDoc))
 	_ = slowConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	for i := 0; i < 3; i++ {
 		if _, data, e := slowConn.ReadMessage(); e == nil {
@@ -785,9 +784,9 @@ func TestServer_HandshakeTimeout_ClosesIdleConnection(t *testing.T) {
 	require.NoError(t, err)
 	defer c.Close()
 
-	// Drain the three server-initiated handshake messages (step1, step2, awareness)
+	// Drain the two server-initiated handshake messages (step1, awareness)
 	// so they don't interfere with the idle-connection detection.
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 2; i++ {
 		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, _, err := c.ReadMessage()
 		require.NoError(t, err, "handshake message %d should arrive cleanly", i+1)

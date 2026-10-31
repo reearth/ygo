@@ -253,8 +253,12 @@ func dialWS(t *testing.T, ts *httptest.Server, room string) *gws.Conn {
 	return conn
 }
 
+// drainWS sends doc's SyncStep1 and reads the three frames that follow (sync
+// step-1 and awareness on connect, then the sync step-2 reply), applying the
+// sync ones to doc.
 func drainWS(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
 	t.Helper()
+	require.NoError(t, conn.WriteMessage(gws.BinaryMessage, syncStep1Frame(doc)))
 	for i := 0; i < 3; i++ {
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, data, err := conn.ReadMessage()
@@ -267,6 +271,14 @@ func drainWS(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
 			_, _ = ygsync.ApplySyncMessage(doc, dec.RemainingBytes(), nil)
 		}
 	}
+}
+
+// syncStep1Frame returns the msgSync frame carrying doc's SyncStep1.
+func syncStep1Frame(doc *crdt.Doc) []byte {
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(0) // msgSync
+		enc.WriteRaw(ygsync.EncodeSyncStep1(doc))
+	})
 }
 
 func sendV1Update(t *testing.T, conn *gws.Conn, update []byte) {

@@ -40,8 +40,9 @@ func dialWSBench(b *testing.B, ts *httptest.Server, room string) *gws.Conn {
 	return conn
 }
 
-// drainHandshakeBench reads and discards the three handshake frames the
-// server always sends on connect (sync step-1, sync step-2, awareness).
+// drainHandshakeBench sends an empty SyncStep1 and reads and discards the
+// three frames that follow (sync step-1 and awareness on connect, then the
+// sync step-2 reply).
 // Adapted from drainWS: this benchmark only cares that clients are fully
 // joined before timing starts, not the frame contents, so unlike drainWS it
 // does not decode/apply sync frames into a local doc.
@@ -51,6 +52,9 @@ func dialWSBench(b *testing.B, ts *httptest.Server, room string) *gws.Conn {
 // b.Fatalf here would leak the socket (never recorded anywhere for cleanup)
 // on a mid-setup failure, e.g. a tight fd ulimit at N=500.
 func drainHandshakeBench(conn *gws.Conn) error {
+	if err := conn.WriteMessage(gws.BinaryMessage, syncStep1Frame(crdt.New())); err != nil {
+		return fmt.Errorf("send sync step 1: %w", err)
+	}
 	for i := 0; i < 3; i++ {
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		_, _, err := conn.ReadMessage()

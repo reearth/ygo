@@ -97,11 +97,10 @@ func (s *countingCompactStore) Compact(ctx context.Context, room string) error {
 //
 // The assertion compares the final row count against the TOTAL number of
 // StoreUpdate calls ever made, rather than against a fixed post-compaction
-// row count: ygo's own server unconditionally pushes a SyncStep2 on connect
-// AND replies to this client's own SyncStep1 with a second one (see
-// Options.Token's doc), so every connection's handshake alone accounts for
-// a couple of stored (empty, harmless, but real) rows before a single local
-// edit happens — and once one compaction has fired and reset the counter,
+// row count: ygo's own server answers this client's SyncStep1 with a
+// SyncStep2 on every connection, so each handshake alone can account for
+// stored (empty, harmless, but real) rows before a single local edit
+// happens — and once one compaction has fired and reset the counter,
 // writes accumulate again from zero, so the exact row count left at any
 // given moment depends on how many edits landed AFTER the last threshold
 // crossing, not just on KeepVersions. "Fewer rows than writes ever made" is

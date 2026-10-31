@@ -88,22 +88,20 @@ type Options struct {
 	//
 	// # NOT a confidentiality gate
 	//
-	// A wrong Token does not stop the room's content from reaching this
-	// Client first. ygo's own server pushes SyncStep1 + a full SyncStep2 +
-	// Awareness the moment a connection is accepted, before it has read
-	// anything the client sent — Token included (see
-	// provider/websocket.Server's OnTokenAuth doc, verbatim: "the initial
-	// sync is served before any PermissionDenied, so deployments that must
-	// withhold document contents from unauthenticated clients must reject
-	// them at the boundary via AuthFunc/Authorize"). Concretely: this
-	// Client's Doc can be fully populated with the room's real content, and
-	// Synced() can already be closed, before — or even without ever —
-	// learning that Token was rejected; see Synced's own doc for the
-	// consequence that has for a caller. If withholding document content
-	// from an unauthenticated caller matters for a deployment, Token is not
-	// what does that; reject the connection at the HTTP boundary instead,
-	// with provider/websocket.Server's AuthFunc or Authorize, before the
-	// upgrade ever completes.
+	// A wrong Token is not what keeps the room's content from a client.
+	// ygo's own server answers a SyncStep1 that reaches it before the Token
+	// with the room's state (see provider/websocket.Server's OnTokenAuth
+	// doc, verbatim: "it is NOT a document-confidentiality gate"), and a
+	// server that checks the token after it answers SyncStep1 serves this
+	// Client too. Against such a server, this Client's Doc can be fully
+	// populated with the room's real content, and Synced() can already be
+	// closed, before — or even without ever — learning that Token was
+	// rejected; see Synced's own doc for the consequence that has for a
+	// caller. If withholding document content from an unauthenticated caller
+	// matters for a deployment, Token is not what does that; reject the
+	// connection at the HTTP boundary instead, with
+	// provider/websocket.Server's AuthFunc or Authorize, before the upgrade
+	// ever completes.
 	Token string
 
 	// Header carries additional HTTP headers on the WebSocket upgrade
@@ -228,10 +226,10 @@ const (
 	// server's state as of connect time.
 	//
 	// This is NOT the same claim as "and Options.Token, if set, was
-	// accepted." ygo's server serves a room's full content unconditionally,
-	// before it has even read a client's Token (see Options.Token's own doc,
-	// "NOT a confidentiality gate"), so StateSynced can fire — and Synced()
-	// can already be closed — on a connection whose token is later rejected.
+	// accepted." A server can serve a room's full state before it has
+	// checked the client's Token (see Options.Token's own doc, "NOT a
+	// confidentiality gate"), so StateSynced can fire — and Synced() can
+	// already be closed — on a connection whose token is later rejected.
 	// Do not treat this state, or a closed Synced() channel, as proof of a
 	// successful auth exchange; a rejection surfaces separately, either as
 	// this Client's next StateDisconnected{Err: ErrAuthRejected} or as
@@ -993,14 +991,14 @@ func (c *Client) hydrate() error {
 // # This channel closing is not proof Options.Token was accepted
 //
 // If Options.Token is set, do not treat a closed Synced() as "and therefore
-// authenticated". ygo's server serves a room's full SyncStep1/SyncStep2/
-// Awareness state unconditionally, before it has read the client's Token at
-// all (see Options.Token's "NOT a confidentiality gate" doc) — so this
-// channel can close, with the Doc already carrying the room's real content,
-// on a connection whose token is rejected moments later. A caller that needs
-// to know the token was actually accepted has to watch for the ABSENCE of a
-// subsequent StateDisconnected{Err: ErrAuthRejected} (via OnStatus) or for
-// Connect returning without ErrAuthRejected — Synced() alone does not carry
+// authenticated". A server can serve a room's full state before it has
+// checked the client's Token (see Options.Token's "NOT a confidentiality
+// gate" doc) — so this channel can close, with the Doc already carrying the
+// room's real content, on a connection whose token is rejected moments
+// later. A caller that needs to know the token was actually accepted has to
+// watch for the ABSENCE of a subsequent StateDisconnected{Err: ErrAuthRejected}
+// (via OnStatus) or for Connect returning without ErrAuthRejected — Synced()
+// alone does not carry
 // that information, by design (it answers "does the Doc have the server's
 // state", not "was this connection authorized"). A deployment that needs to
 // withhold content pending authorization should reject the connection at the

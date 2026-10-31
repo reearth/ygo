@@ -72,10 +72,13 @@ func dialConnErr(ts *httptest.Server, room string, h http.Header) (*gws.Conn, er
 }
 
 // drainConnErr is the error-returning equivalent of drainWS (see dialConnErr
-// for why): it reads the three handshake frames the server always sends on
-// connect and applies any sync frames into doc, reporting failure via the
-// returned error rather than require/assert.
+// for why): it sends doc's SyncStep1, reads the three frames that follow and
+// applies any sync frames into doc, reporting failure via the returned error
+// rather than require/assert.
 func drainConnErr(conn *gws.Conn, doc *crdt.Doc) error {
+	if err := conn.WriteMessage(gws.BinaryMessage, syncStep1Frame(doc)); err != nil {
+		return fmt.Errorf("send sync step 1: %w", err)
+	}
 	for i := 0; i < 3; i++ {
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, data, err := conn.ReadMessage()
