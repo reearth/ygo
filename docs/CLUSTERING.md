@@ -110,8 +110,10 @@ http.Handle("/yjs/{room}", srv)
 - calls `relay.Start(ctx, srv)` with a context cancelled on `Server.Shutdown`;
 - wires `doc.OnUpdate` + `awareness.OnChange` for every room as it becomes
   resident (and calls `RoomActivated`), and unwires them on eviction (calling
-  `RoomDeactivated`). `Server.Shutdown` cancels the relay context and calls
-  `relay.Close()`.
+  `RoomDeactivated`). Once `Server.Shutdown` has begun, the server makes no
+  `RoomActivated` or `RoomDeactivated` call. `Server.Shutdown` cancels the
+  relay context at its end; it does not call `relay.Close()`, which the caller
+  owns.
 
 When a remote change arrives, the relay calls `srv.Inject(ctx, Inbound)`:
 

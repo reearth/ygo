@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-31
+
+### Fixed
+
+- **`provider/websocket`: `Shutdown` waits for the connections it serves.**
+  Its doc said it waits for the peers' goroutines to exit, but it closed each
+  connection and waited only for the persistence workers, stranded writes and
+  relay workers. A hook on a connection's read loop (`OnTokenAuth`,
+  `OnPeerUpdate`) or in its teardown (`OnLastPeer`, `OnUnloadDocument`) could
+  still run after `Shutdown` returned `nil`, and with no persistence adapter
+  `Shutdown` waited for no connection at all. `Shutdown` now also waits, bounded
+  by its `ctx`, until every `ServeHTTP` call in progress has returned, its
+  teardown included, and so for every hook `ServeHTTP` calls. A hook that does
+  not return holds `Shutdown` until `ctx` expires, and `Shutdown` then returns
+  `ctx.Err()`. A hook that calls `Shutdown` must pass a `ctx` that expires,
+  because `Shutdown` waits for that hook's own connection. Once `Shutdown` has
+  begun, the server makes no relay `RoomActivated` or `RoomDeactivated` call,
+  because a relay may wait on the relay context, which `Shutdown` cancels only
+  after this wait. A stalled call that a connection started before `Shutdown`
+  began can still hold `Shutdown` until the call returns or `ctx` expires.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

@@ -724,7 +724,12 @@ func (s *Server) teardownRelayRoom(r *room, name string) {
 	// doc explains why a name-only lookup here would be unsafe across the
 	// evict-then-reconnect window.
 	s.stopRelayLane(name, relayLane)
-	s.relay.RoomDeactivated(name)
+	// Skipped once Shutdown has begun: Shutdown joins the connections before it
+	// cancels the relay context, which a relay call may wait on (cluster/redis's
+	// can, while it redials). getOrCreateRoom skips RoomActivated the same way.
+	if !s.shuttingDown() {
+		s.relay.RoomDeactivated(name)
+	}
 }
 
 // Inject applies a remote change delivered by the relay. It satisfies
