@@ -108,7 +108,7 @@ http.Handle("/yjs/{room}", srv)
 - must be called **once**, before serving connections (a second call returns
   `ErrRelayAlreadyAttached`);
 - calls `relay.Start(ctx, srv)` with a context cancelled on `Server.Shutdown`;
-- wires `doc.OnUpdate` + `awareness.OnChange` for every room as it becomes
+- wires `doc.OnUpdate` + `awareness.OnUpdate` for every room as it becomes
   resident (and calls `RoomActivated`), and unwires them on eviction (calling
   `RoomDeactivated`). `Server.Shutdown` cancels the relay context and calls
   `relay.Close()`.
@@ -118,7 +118,8 @@ When a remote change arrives, the relay calls `srv.Inject(ctx, Inbound)`:
 - `KindSync` → applied to the room's doc with the relay sentinel origin, then
   rebroadcast to local peers via `BroadcastUpdate`.
 - `KindAwareness` → merged into the room's `awareness.Awareness` with the
-  sentinel origin, then fanned out to local peers.
+  sentinel origin, then fanned out to local peers (only the entries it applied,
+  when a cap refused some).
 
 `Inject` auto-creates the room if it is not yet resident, so a node with no
 local peers for a room still materialises the converged state (a peer that later
@@ -134,10 +135,11 @@ holds the room each ID the others admit, so two bounds apply, at two points.
 
 **Per connection (on by default).** `Server.MaxAwarenessClientsPerConn` caps how
 many awareness client IDs one websocket connection may hold live in its room
-at once, so a flood of live presence is stopped at the connection that sends
-it and never reaches the room or the relay. A frame that would exceed the cap is dropped whole (debug
-logged), not applied and not broadcast. This protects single-node deployments
-too.
+at once. Each entry of a frame is judged as the room applies it, under the
+awareness lock, against the outcome it really has: an entry that would take the
+connection past the cap is refused (debug logged) and reaches neither the room,
+the room's other peers nor the relay, while the rest of the frame applies. This
+protects single-node deployments too.
 
 - `0` (the default) selects 64, a negative value disables the gate, and a
   positive value is used as given. This inverts the `0 = unlimited` convention
@@ -152,9 +154,13 @@ too.
   over its lifetime. A removal frees the slot immediately — it has to, or a
   long-lived connection whose clients come and go would wedge — so a
   connection that introduces and retires IDs in turn leaves a tombstone
-  behind each time. Tombstones are what `MaxAwarenessClientsPerRoom` counts
-  and what `AwarenessExpiry` reclaims; set both if untrusted peers can reach
-  this server, since neither is on by default.
+  behind each time. `MaxAwarenessClientsPerRoom` bounds tombstones with live
+  entries, and a new live client at that cap reclaims the oldest tombstone
+  rather than being refused, so churn cannot lock live clients out;
+  `AwarenessExpiry` reclaims tombstones over time. Set both if untrusted peers
+  can reach this server, since neither is on by default.
+- Peers cannot claim client ID `0`, the room's own awareness client, which no
+  removal from the wire could retire.
 - A positive value is also the ceiling on the IDs one connection is tracked
   as owning, and so on the slice its disconnect builds. Disable the gate
   with a negative value rather than a very large positive one: a negative
@@ -169,18 +175,20 @@ of a room's presence budget for local clients by refusing relayed presence for
 a client ID that is not currently live (new, or removed and returning) once the
 room holds this many live entries. `0` (the default)
 disables it and relayed presence shares the whole room budget, as before. A
-positive value is clamped to `MaxAwarenessClientsPerRoom` when that is bounded,
-and is honoured when it is not. The relay applies a `KindAwareness` payload
-through `Awareness.ApplyUpdateForeign`; a refused entry is skipped silently, not
-returned as an error, so `Inject` does not report a routine refusal to the relay
-as a delivery failure. A client that is live keeps updating, and can be removed,
+value at or above a bounded `MaxAwarenessClientsPerRoom` has no effect; with an
+unbounded room cap it is honoured. The relay applies a `KindAwareness` payload
+through `Awareness.ApplyUpdateWith` with `ApplyOptions.Foreign` set; a refused
+entry is skipped, not returned as an error, so `Inject` does not report a
+routine refusal to the relay as a delivery failure, and local peers are sent
+only the entries that applied. A client that is live keeps updating, and can be removed,
 after the sub-cap is reached; one that left and returns is refused like a new
 one. `Awareness.SetMaxForeignClients` sets
 the same bound on a standalone `Awareness`.
 
 Size it as a **large fraction of `MaxAwarenessClientsPerRoom`**. Reserving
-roughly 1/8 of the cap for local clients is a reasonable starting point, and
-setting it as a fraction of the room cap is what makes that reservation hold.
+roughly 1/8 of the cap for local clients is a reasonable starting point. The
+reservation holds against relayed churn too: tombstones count toward the room
+cap, but a local client arriving at it reclaims the oldest one.
 
 - In an N-node cluster, relayed presence is legitimately about (N-1)/N of a
   room's users, so the reservation you want is the *small* side. A sub-cap
@@ -193,8 +201,7 @@ setting it as a fraction of the room cap is what makes that reservation hold.
   alone. Once local clients fill the room, relayed presence is shut out sooner
   than a true per-origin quota would shut it out.
 - Unlike `MaxAwarenessClientsPerRoom`, it counts live entries only, not
-  removal tombstones. Tombstones are reclaimed only while `AwarenessExpiry` is
-  set, so counting them would let churn fill the sub-cap for good.
+  removal tombstones, so churn cannot fill the sub-cap for good.
 
 ---
 
@@ -211,11 +218,13 @@ Node A publishes ─→ Node B injects ─→ B's local observer publishes it ba
 ygo breaks this with an **origin sentinel**, the same pointer-identity trick
 `Server.Apply` uses for its own writes:
 
-1. `AttachRelay` allocates a private sentinel value (`new(struct{})`) per server.
+1. `AttachRelay` allocates a private sentinel value per server, of a non-zero-size
+   type: Go may give every pointer to a zero-size value the same address, which
+   would make all servers' sentinels compare equal.
 2. When the relay injects a remote change, it applies it with that sentinel as
    the `origin` (`crdt.ApplyUpdateV1(doc, data, sentinel)` /
-   `aw.ApplyUpdateForeign(data, sentinel)`).
-3. The per-room `doc.OnUpdate` / `awareness.OnChange` observers that drive
+   `aw.ApplyUpdateWith(data, sentinel, awareness.ApplyOptions{Foreign: true})`).
+3. The per-room `doc.OnUpdate` / `awareness.OnUpdate` observers that drive
    `Publish` compare the change's origin against the sentinel **by pointer
    identity** and **drop matches** — a relay-injected change is never
    re-published.

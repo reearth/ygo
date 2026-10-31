@@ -788,12 +788,15 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
-		if err := rm.awareness.ApplyUpdateForeign(in.Data, s.relaySentinel); err != nil {
+		res, err := rm.awareness.ApplyUpdateWith(in.Data, s.relaySentinel, awareness.ApplyOptions{Foreign: true})
+		if err != nil {
 			return err
 		}
 		// Fan the awareness update out to local peers (the OnUpdate-driven relay
 		// observer dropped it as a sentinel echo, so peers won't otherwise see it).
-		s.broadcastAwarenessToPeers(rm, in.Data)
+		if out := awarenessFanout(rm.awareness, in.Data, res); out != nil {
+			s.broadcastAwarenessToPeers(rm, out)
+		}
 		return nil
 
 	default:

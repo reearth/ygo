@@ -89,8 +89,9 @@ func TestPurgeTombstones_FreesCapForNewClients(t *testing.T) {
 	makeTombstone(t, a, 1, time.Hour)
 	makeTombstone(t, a, 2, time.Hour)
 
-	// Cap is full of tombstones — a previously-unseen client is refused.
-	applyEntry(t, a, 3, "hi")
+	// Cap is full of tombstones — a previously-unseen client's null is refused
+	// (live state would reclaim a tombstone's slot instead).
+	applyEntry(t, a, 3, "null")
 	if _, ok := a.states[3]; ok {
 		t.Fatal("precondition: new client 3 should be refused while cap is full")
 	}

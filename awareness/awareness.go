@@ -155,8 +155,8 @@ type Awareness struct {
 	activeBytes int64 // sum of wireBytes values
 	maxBytes    int64 // 0 = unlimited (default; backward compatible)
 	maxClients  int   // 0 = unlimited (default; backward compatible)
-	// maxForeignClients bounds live entries admitted via ApplyUpdateForeign;
-	// 0 = no sub-cap.
+	// maxForeignClients bounds live entries admitted from relayed presence
+	// (ApplyOptions.Foreign); 0 = no sub-cap.
 	maxForeignClients int
 	// removedAt records when each REMOTE client became a null-state tombstone,
 	// so PurgeTombstones can reclaim ones older than a grace period. The local
@@ -164,6 +164,16 @@ type Awareness struct {
 	// entry exists iff states[id] is a remote tombstone; it is cleared when the
 	// client reactivates and deleted when the tombstone is purged.
 	removedAt map[uint64]time.Time
+	// tombQ lists tombstones oldest first, so the client cap can reclaim the
+	// oldest in O(1). An entry whose removedAt has since changed is stale: it is
+	// skipped on read and compacted away on write.
+	tombQ []tombRef
+}
+
+// tombRef is one tombQ entry: the client and the removedAt it was queued at.
+type tombRef struct {
+	id uint64
+	at time.Time
 }
 
 // New creates an Awareness instance for the given client.
@@ -199,11 +209,15 @@ func (a *Awareness) SetMaxBytes(n int64) {
 
 // SetMaxClients caps the number of distinct client entries this Awareness will
 // track — live presence plus retained removal tombstones. Once the cap is
-// reached, ApplyUpdate refuses previously-unseen client IDs; clients already
-// tracked can still update and be removed. This bounds memory against a peer
-// that invents unbounded client IDs to exhaust the room — including null-state
-// entries, which are NOT subject to the byte cap (see SetMaxBytes) and so would
-// otherwise grow the states map without limit.
+// reached, a previously-unseen client asserting state takes the slot of the
+// oldest remote tombstone and is refused only when there is none, while an
+// unseen client's null is refused; clients already tracked can still update
+// and be removed. This bounds memory against a peer that invents unbounded
+// client IDs to exhaust the room — including null-state entries, which are NOT
+// subject to the byte cap (see SetMaxBytes) and so would otherwise grow the
+// states map without limit — without letting removal churn lock live clients
+// out. A reclaimed tombstone's clock is forgotten early, with the trade-off
+// PurgeTombstones describes.
 //
 // A value of 0 (the default) disables the cap. Local state set via
 // SetLocalState is exempt — the local client is always allowed. Suggested
@@ -217,11 +231,12 @@ func (a *Awareness) SetMaxClients(n int) {
 	a.mu.Unlock()
 }
 
-// SetMaxForeignClients bounds the live remote entries that ApplyUpdateForeign
-// will admit, so relayed presence cannot crowd out local clients under
-// SetMaxClients. Once reached, ApplyUpdateForeign refuses client IDs that are
-// not currently live, whether new or removed and returning; live clients still
-// update and can be removed. It does not restrict ApplyUpdate.
+// SetMaxForeignClients bounds the live remote entries that relayed presence
+// (ApplyUpdateWith with ApplyOptions.Foreign) may hold, so it cannot crowd out
+// local clients under SetMaxClients. Once reached, relayed entries for client
+// IDs that are not currently live are refused, whether new or removed and
+// returning; live clients still update and can be removed. It does not
+// restrict other updates.
 //
 // n is a threshold on ALL live entries, not a quota for relayed ones: entries
 // admitted through ApplyUpdate count toward it too, so local presence filling
@@ -376,17 +391,6 @@ func (a *Awareness) GetStates() map[uint64]ClientState {
 		}
 	}
 	return out
-}
-
-// ClientView reports what awareness currently holds for clientID: its clock,
-// whether it is known at all (a removal tombstone counts), and whether its
-// state is live. The three are read under one lock, so they agree with each
-// other.
-func (a *Awareness) ClientView(clientID uint64) (clock uint64, known, live bool) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	cs, ok := a.states[clientID]
-	return cs.Clock, ok, ok && cs.State != nil
 }
 
 // Meta returns the clock and last-updated time for a known client, including
@@ -556,17 +560,47 @@ func (a *Awareness) EncodeUpdate(clientIDs []uint64) []byte {
 // Returns ErrTooManyClients if the update claims more than maxAwarenessClients
 // entries, or ErrStateTooLarge if any single state JSON exceeds maxAwarenessStateBytes.
 func (a *Awareness) ApplyUpdate(update []byte, origin any) error {
-	return a.applyUpdate(update, origin, false)
+	return a.applyUpdate(update, origin, ApplyOptions{}, nil)
 }
 
-// ApplyUpdateForeign is ApplyUpdate for presence relayed from another node.
-// Entries that would push the live remote count past SetMaxForeignClients are
-// skipped without error; it is otherwise identical to ApplyUpdate.
-func (a *Awareness) ApplyUpdateForeign(update []byte, origin any) error {
-	return a.applyUpdate(update, origin, true)
+// AdmitEntry describes an update entry that ApplyUpdateWith is about to apply.
+type AdmitEntry struct {
+	ClientID uint64
+	// WasLive and Live report whether the client holds state before and after
+	// the entry.
+	WasLive, Live bool
 }
 
-func (a *Awareness) applyUpdate(update []byte, origin any, foreign bool) error {
+// ApplyOptions adjusts how ApplyUpdateWith applies an update.
+type ApplyOptions struct {
+	// Foreign marks presence relayed from another node, subject to
+	// SetMaxForeignClients.
+	Foreign bool
+	// Admit, when set, vets each entry about to be applied, after the clock
+	// gate and the caps; returning false refuses the entry. It runs with the
+	// Awareness lock held, so it sees the outcome the entry will really have,
+	// and must not call Awareness methods. isLive reports whether a client is
+	// live at that point and is valid only during the call.
+	Admit func(e AdmitEntry, isLive func(clientID uint64) bool) bool
+}
+
+// ApplyResult reports what ApplyUpdateWith did.
+type ApplyResult struct {
+	// Applied lists the clients the update added, updated or removed; an ID
+	// the update names more than once may repeat.
+	Applied []uint64
+	// Refused reports whether a cap or Admit refused any entry.
+	Refused bool
+}
+
+// ApplyUpdateWith is ApplyUpdate with options, reporting what it applied.
+func (a *Awareness) ApplyUpdateWith(update []byte, origin any, opts ApplyOptions) (ApplyResult, error) {
+	var res ApplyResult
+	err := a.applyUpdate(update, origin, opts, &res)
+	return res, err
+}
+
+func (a *Awareness) applyUpdate(update []byte, origin any, opts ApplyOptions, res *ApplyResult) error {
 	dec := encoding.NewDecoder(update)
 
 	numClients, err := dec.ReadVarUint()
@@ -610,6 +644,11 @@ func (a *Awareness) applyUpdate(update []byte, origin any, foreign bool) error {
 
 	a.mu.Lock()
 	var added, updated, changedUpdated, removed []uint64
+	refused := false
+	isLive := func(id uint64) bool {
+		cs, ok := a.states[id]
+		return ok && cs.State != nil
+	}
 
 	for _, e := range entries {
 		current, exists := a.states[e.clientID]
@@ -660,23 +699,31 @@ func (a *Awareness) applyUpdate(update []byte, origin any, foreign bool) error {
 		// is exempt — it is set by trusted embedder code, not adversarial wire
 		// input — so it does not count toward the cap and is never rejected here
 		// (the self-state branch above already handles a null for our own ID).
+		// At the cap, live state outranks a tombstone: an entry asserting state
+		// reclaims the oldest one, once the checks below have admitted it.
+		reclaim := false
 		if !exists && a.maxClients > 0 {
 			remote := len(a.states)
 			if _, hasLocal := a.states[a.clientID]; hasLocal {
 				remote-- // exclude the exempt local entry from the cap
 			}
 			if remote >= a.maxClients {
-				continue
+				if isNullEntry || len(a.removedAt) == 0 {
+					refused = true
+					continue
+				}
+				reclaim = true
 			}
 		}
 		// Gate on "not currently live", not "never seen", so a tombstone cannot
 		// be revived past the cap. The local client is exempt.
-		if foreign && a.maxForeignClients > 0 && (!exists || current.State == nil) && e.clientID != a.clientID {
+		if opts.Foreign && a.maxForeignClients > 0 && (!exists || current.State == nil) && e.clientID != a.clientID {
 			live := len(a.meta)
 			if _, hasLocal := a.meta[a.clientID]; hasLocal {
 				live--
 			}
 			if live >= a.maxForeignClients {
+				refused = true
 				continue
 			}
 		}
@@ -723,6 +770,19 @@ func (a *Awareness) applyUpdate(update []byte, origin any, foreign bool) error {
 			}
 		}
 
+		// A tombstone is reclaimed only for an entry that ends up live.
+		if reclaim && isNull {
+			refused = true
+			continue
+		}
+		if opts.Admit != nil && !opts.Admit(AdmitEntry{ClientID: e.clientID, WasLive: wasActive, Live: !isNull}, isLive) {
+			refused = true
+			continue
+		}
+		if reclaim {
+			a.reclaimOldestTombstone()
+		}
+
 		if isNull {
 			// Store nil state with incoming clock to prevent stale re-application.
 			a.states[e.clientID] = ClientState{Clock: e.clock, State: nil}
@@ -732,7 +792,7 @@ func (a *Awareness) applyUpdate(update []byte, origin any, foreign bool) error {
 			// persist (it is never counted here). A non-null remote update for our
 			// own clientID that gets nulled by a resource cap must not add us.
 			if e.clientID != a.clientID {
-				a.removedAt[e.clientID] = time.Now()
+				a.markTombstone(e.clientID, time.Now())
 			}
 			// Release any wire-bytes the previous active state held for this client.
 			if oldSize > 0 {
@@ -783,6 +843,14 @@ func (a *Awareness) applyUpdate(update []byte, origin any, foreign bool) error {
 	updObs := a.copyUpdateObservers()
 	a.mu.Unlock()
 
+	if res != nil {
+		res.Refused = refused
+		if n := len(added) + len(updated) + len(removed); n > 0 {
+			res.Applied = make([]uint64, 0, n)
+			res.Applied = append(append(append(res.Applied, added...), updated...), removed...)
+		}
+	}
+
 	if len(added) > 0 || len(changedUpdated) > 0 || len(removed) > 0 {
 		fireObservers(obs, ChangeEvent{Added: added, Updated: changedUpdated, Removed: removed, Origin: origin})
 	}
@@ -791,6 +859,50 @@ func (a *Awareness) applyUpdate(update []byte, origin any, foreign bool) error {
 	}
 
 	return nil
+}
+
+// markTombstone records that remote client id became a tombstone at at.
+// Callers hold a.mu.
+func (a *Awareness) markTombstone(id uint64, at time.Time) {
+	a.removedAt[id] = at
+	// Compact once stale entries outnumber live ones, so the queue stays
+	// within a constant factor of the tombstone count.
+	if len(a.tombQ) >= 2*len(a.removedAt)+16 {
+		kept := a.tombQ[:0]
+		for _, t := range a.tombQ {
+			if cur, ok := a.removedAt[t.id]; ok && cur.Equal(t.at) {
+				kept = append(kept, t)
+			}
+		}
+		clear(a.tombQ[len(kept):])
+		a.tombQ = kept
+	}
+	a.tombQ = append(a.tombQ, tombRef{id: id, at: at})
+}
+
+// reclaimOldestTombstone forgets the oldest remote tombstone, freeing its slot
+// under SetMaxClients. Callers hold a.mu and have checked one exists.
+func (a *Awareness) reclaimOldestTombstone() {
+	for len(a.tombQ) > 0 {
+		t := a.tombQ[0]
+		a.tombQ = a.tombQ[1:]
+		if cur, ok := a.removedAt[t.id]; ok && cur.Equal(t.at) {
+			a.forgetTombstone(t.id)
+			return
+		}
+	}
+	for id := range a.removedAt { // unreachable while tombQ is kept in step
+		a.forgetTombstone(id)
+		return
+	}
+}
+
+// forgetTombstone deletes remote tombstone id outright. Callers hold a.mu.
+func (a *Awareness) forgetTombstone(id uint64) {
+	delete(a.states, id)
+	delete(a.removedAt, id)
+	delete(a.meta, id)      // defensive: tombstones carry no meta entry
+	delete(a.wireBytes, id) // defensive: released when the tombstone formed
 }
 
 // ApplyUpdateContext is the context-aware variant of ApplyUpdate.
@@ -896,7 +1008,7 @@ func (a *Awareness) RemoveExpired(timeout time.Duration) {
 			if cs, ok := a.states[id]; ok {
 				a.states[id] = ClientState{Clock: cs.Clock, State: nil}
 			}
-			a.removedAt[id] = now
+			a.markTombstone(id, now)
 			delete(a.meta, id)
 			// Release any wire-bytes the expired client held (#48 vector B).
 			if size, ok := a.wireBytes[id]; ok {
@@ -953,10 +1065,7 @@ func (a *Awareness) PurgeTombstones(grace time.Duration) int {
 		if now.Sub(t) < grace {
 			continue
 		}
-		delete(a.states, id)
-		delete(a.removedAt, id)
-		delete(a.meta, id)      // defensive: tombstones carry no meta entry
-		delete(a.wireBytes, id) // defensive: released when the tombstone formed
+		a.forgetTombstone(id)
 		purged++
 	}
 	return purged

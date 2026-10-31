@@ -2,12 +2,12 @@ package awareness
 
 import "testing"
 
-// applyForeignEntry applies a single-client frame through ApplyUpdateForeign
+// applyForeignEntry applies a single-client frame through ApplyUpdateWith with Foreign set
 // and fails the test on error.
 func applyForeignEntry(t *testing.T, a *Awareness, clientID uint64, stateJSON string) {
 	t.Helper()
-	if err := a.ApplyUpdateForeign(encodeOneEntry(t, clientID, stateJSON), nil); err != nil {
-		t.Fatalf("ApplyUpdateForeign(client %d, %q): %v", clientID, stateJSON, err)
+	if err := applyForeign(a, encodeOneEntry(t, clientID, stateJSON), nil); err != nil {
+		t.Fatalf("applyForeign(client %d, %q): %v", clientID, stateJSON, err)
 	}
 }
 
@@ -52,8 +52,8 @@ func TestApplyUpdateForeign_TrackedForeignClientKeepsUpdating(t *testing.T) {
 	b := New(1)
 	b.SetLocalState(map[string]any{"v": "hi"})
 	b.SetLocalState(map[string]any{"v": "again"})
-	if err := a.ApplyUpdateForeign(b.EncodeUpdate([]uint64{1}), nil); err != nil {
-		t.Fatalf("ApplyUpdateForeign: %v", err)
+	if err := applyForeign(a, b.EncodeUpdate([]uint64{1}), nil); err != nil {
+		t.Fatalf("applyForeign: %v", err)
 	}
 
 	states := a.GetStates()
@@ -107,8 +107,8 @@ func TestApplyUpdateForeign_TombstoneRevivalRespectsSubCap(t *testing.T) {
 		b.SetLocalState(map[string]any{"v": "a"})
 		b.SetLocalState(nil)
 		b.SetLocalState(map[string]any{"v": "back"})
-		if err := a.ApplyUpdateForeign(b.EncodeUpdate([]uint64{id}), nil); err != nil {
-			t.Fatalf("ApplyUpdateForeign(client %d): %v", id, err)
+		if err := applyForeign(a, b.EncodeUpdate([]uint64{id}), nil); err != nil {
+			t.Fatalf("applyForeign(client %d): %v", id, err)
 		}
 	}
 	if got := len(a.GetStates()); got != 3 {
@@ -140,8 +140,8 @@ func TestApplyUpdateForeign_LocalClientIDExempt(t *testing.T) {
 	b.SetLocalState(map[string]any{"v": "a"})
 	b.SetLocalState(map[string]any{"v": "b"})
 	b.SetLocalState(map[string]any{"v": "c"})
-	if err := a.ApplyUpdateForeign(b.EncodeUpdate([]uint64{7}), nil); err != nil {
-		t.Fatalf("ApplyUpdateForeign: %v", err)
+	if err := applyForeign(a, b.EncodeUpdate([]uint64{7}), nil); err != nil {
+		t.Fatalf("applyForeign: %v", err)
 	}
 	if got := a.GetStates()[7].State["v"]; got != "c" {
 		t.Fatalf("local client state = %v, want %q", got, "c")
@@ -161,8 +161,8 @@ func TestApplyUpdateForeign_LocalTombstoneExempt(t *testing.T) {
 	for _, v := range []string{"a", "b", "c", "d"} {
 		b.SetLocalState(map[string]any{"v": v})
 	}
-	if err := a.ApplyUpdateForeign(b.EncodeUpdate([]uint64{7}), nil); err != nil {
-		t.Fatalf("ApplyUpdateForeign: %v", err)
+	if err := applyForeign(a, b.EncodeUpdate([]uint64{7}), nil); err != nil {
+		t.Fatalf("applyForeign: %v", err)
 	}
 	if got := a.GetStates()[7].State["v"]; got != "d" {
 		t.Fatalf("local client state = %v, want %q", got, "d")

@@ -2,7 +2,6 @@ package websocket
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -109,18 +108,16 @@ func (p *peer) handleMessage(data []byte) {
 				"room", p.roomName, "err", err)
 			return
 		}
-		if err := p.trackAwarenessClients(awBytes); err != nil {
-			p.server.log().Debug("discarded awareness frame at the admission gate",
-				"room", p.roomName, "reason", err)
-			return
-		}
-		if err := p.room.awareness.ApplyUpdate(awBytes, p); err != nil {
+		res, err := p.applyAwareness(awBytes)
+		if err != nil {
 			// Drop invalid awareness updates; do not broadcast.
 			p.server.log().Debug("discarded unappliable awareness update",
 				"room", p.roomName, "err", err)
 			return
 		}
-		p.broadcastAwareness(awBytes)
+		if out := awarenessFanout(p.room.awareness, awBytes, res); out != nil {
+			p.broadcastAwareness(out)
+		}
 
 	case msgAuth:
 		p.handleAuth(dec)
@@ -463,214 +460,83 @@ func (p *peer) sendCloseFrame() {
 	_ = p.conn.Close()
 }
 
-// awarenessEntry is one decoded entry of an awareness frame: the client it
-// speaks for, the clock it speaks at, and whether it retires that client
-// rather than asserting state.
-type awarenessEntry struct {
-	clientID uint64
-	clock    uint64
-	removal  bool
-}
-
-// Reasons an awareness frame is refused before it reaches the room. The first
-// three are frames Awareness.ApplyUpdate would refuse wholesale; the gate must
-// refuse exactly those too, or it would release slots for removals the room
-// never applies.
-var (
-	errAwarenessTruncated     = errors.New("truncated awareness frame")
-	errAwarenessTooManyClient = errors.New("awareness frame exceeds the maximum client count")
-	errAwarenessStateTooLarge = errors.New("awareness client state exceeds the maximum size")
-	errAwarenessConnCap       = errors.New("connection exceeds its awareness client cap")
-)
-
-// decodeAwarenessEntries reads a frame's entries in wire order. It mirrors
-// Awareness.applyUpdate's decode — same reads, same limits, same null test —
-// so the gate judges exactly the entries the apply would see. On error the
-// entries read before that point are still returned, since the ungated path
-// tracks them as it always has.
-func decodeAwarenessEntries(payload []byte) (entries []awarenessEntry, err error) {
-	dec := encoding.NewDecoder(payload)
-	n, err := dec.ReadVarUint()
-	if err != nil {
-		return nil, errAwarenessTruncated
-	}
-	if n > maxAwarenessEntriesPerFrame {
-		return nil, errAwarenessTooManyClient
-	}
-	// n is peer-supplied; each entry needs at least three bytes on the wire,
-	// so the payload bounds the real count and a tiny frame claiming 100,000
-	// entries cannot force the allocation.
-	entries = make([]awarenessEntry, 0, min(n, uint64(len(payload)/3)))
-	for i := uint64(0); i < n; i++ {
-		clientID, err := dec.ReadVarUint()
-		if err != nil {
-			return entries, errAwarenessTruncated
-		}
-		clock, err := dec.ReadVarUint()
-		if err != nil {
-			return entries, errAwarenessTruncated
-		}
-		state, err := dec.ReadVarBytes()
-		if err != nil {
-			return entries, errAwarenessTruncated
-		}
-		if len(state) > maxAwarenessStateBytesPerEntry {
-			return entries, errAwarenessStateTooLarge
-		}
-		entries = append(entries, awarenessEntry{
-			clientID: clientID,
-			clock:    clock,
-			removal:  len(state) == 0 || string(state) == "null",
-		})
-	}
-	return entries, nil
-}
-
-// trackAwarenessClients records which awareness clientIDs this peer owns, so
-// they can be removed when it disconnects, and reports whether the frame may
-// be applied — nil to apply it, otherwise why it is refused. An ID counts
-// against Server.MaxAwarenessClientsPerConn while this peer asserts state the
-// room did not already hold live for it; a frame that would push the peer past
-// that cap is rejected whole, so a presence flood is contained at the
-// connection that sends it.
-func (p *peer) trackAwarenessClients(payload []byte) error {
-	entries, err := decodeAwarenessEntries(payload)
+// applyAwareness applies an awareness frame from this peer, recording which
+// client IDs it owns so they can be removed when it disconnects. Each entry is
+// judged against Server.MaxAwarenessClientsPerConn as the room applies it,
+// under the awareness lock, so the verdict uses the outcome the entry really
+// has. An entry asserting state for a client that is not live, on behalf of a
+// connection that does not already own it, is an introduction: it takes a
+// slot, and is refused when none is free. A client that stops being live
+// releases its slot.
+func (p *peer) applyAwareness(payload []byte) (awareness.ApplyResult, error) {
 	limit := p.server.maxAwarenessClientsPerConn()
-	if limit < 0 {
-		// Gate disabled: track every ID claimed, up to the ceiling that bounds
-		// the removal slice handleDisconnect builds (N-H4).
+	localID := p.room.awareness.ClientID()
+	pruned := false
+	admit := func(e awareness.AdmitEntry, isLive func(uint64) bool) bool {
 		p.cidMu.Lock()
 		defer p.cidMu.Unlock()
-		for _, e := range entries {
-			if len(p.clientIDs) < maxAwarenessClientsPerPeer {
-				p.clientIDs[e.clientID] = struct{}{}
+		_, owned := p.clientIDs[e.ClientID]
+		if limit < 0 {
+			// Gate disabled: track every ID applied, up to the ceiling that
+			// bounds the removal slice handleDisconnect builds.
+			if !owned && len(p.clientIDs) < maxAwarenessClientsPerPeer {
+				p.clientIDs[e.ClientID] = struct{}{}
 			}
+			return true
 		}
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !p.admitAwarenessEntries(entries, limit) {
-		return errAwarenessConnCap
-	}
-	return nil
-}
-
-// ownershipUndo holds the pre-frame ownership of each ID a frame's walk
-// changed, so a rejected frame can be undone exactly whatever order it touched
-// them in.
-type ownershipUndo map[uint64]bool
-
-// record notes id's ownership the first time the walk changes it.
-func (u *ownershipUndo) record(id uint64, owned bool) {
-	if *u == nil {
-		*u = make(ownershipUndo, 4)
-	}
-	if _, seen := (*u)[id]; !seen {
-		(*u)[id] = owned
-	}
-}
-
-// restore puts every recorded ID back the way the frame found it.
-func (u ownershipUndo) restore(set map[uint64]struct{}) {
-	for id, owned := range u {
-		if owned {
-			set[id] = struct{}{}
-		} else {
-			delete(set, id)
+		switch {
+		case !e.Live:
+			delete(p.clientIDs, e.ClientID)
+		case e.ClientID == localID:
+			// The room's own client cannot be removed from the wire, so a
+			// peer claiming it would leave presence nobody can retire.
+			return false
+		case e.WasLive || owned:
+			// Updating a live client, or re-asserting one this connection
+			// already answers for, introduces nothing.
+		default:
+			if len(p.clientIDs) >= limit && !pruned {
+				// Owned clients can stop being live without this connection's
+				// say (expiry, another peer's null); drop those before refusing.
+				// Within one frame only its own entries change liveness, and
+				// they release their slots above, so once per frame suffices.
+				pruned = true
+				for id := range p.clientIDs {
+					if !isLive(id) {
+						delete(p.clientIDs, id)
+					}
+				}
+			}
+			if len(p.clientIDs) >= limit {
+				return false
+			}
+			p.clientIDs[e.ClientID] = struct{}{}
 		}
-	}
-}
-
-// roomView is what the room shows for one client ID, advanced entry by entry
-// as the walk models what the frame will do to it.
-type roomView struct {
-	known bool
-	clock uint64
-	live  bool
-}
-
-// honours reports whether Awareness.applyUpdate will take this entry, mirroring
-// its clock gate: a strictly-older entry is discarded, and one at the same
-// clock counts only when it retires a live client. A null for the awareness's
-// own client is never honoured — the applier protects its local state instead
-// of removing it.
-func (v roomView) honours(e awarenessEntry, localID uint64) bool {
-	if e.removal && e.clientID == localID {
-		return false
-	}
-	if !v.known || e.clock > v.clock {
 		return true
 	}
-	return e.clock == v.clock && e.removal && v.live
+	return p.room.awareness.ApplyUpdateWith(payload, p, awareness.ApplyOptions{Admit: admit})
 }
 
-// admitAwarenessEntries applies a decoded frame to this peer's owned-ID set and
-// reports whether the frame fits its budget. The whole frame is judged before
-// the verdict, so a removal early in it frees a slot for an introduction later
-// in it, and a rejected frame leaves the set as it found it.
-//
-// An entry the applier will discard changes neither the room nor the budget,
-// so the walk skips it — with one deliberate exception for removals, below.
-// That matters for removals above all: a slot freed for a null the applier
-// throws away would leave the ID live in the room and owned by nobody, which
-// is the whole cap bypassed one stale null at a time.
-//
-// The room is read before cidMu is taken: ClientView takes the awareness lock,
-// and the two must never nest.
-func (p *peer) admitAwarenessEntries(entries []awarenessEntry, limit int) bool {
-	localID := p.room.awareness.ClientID()
-	view := make(map[uint64]roomView, len(entries))
-	for _, e := range entries {
-		if _, done := view[e.clientID]; done {
-			continue
-		}
-		clock, known, live := p.room.awareness.ClientView(e.clientID)
-		view[e.clientID] = roomView{known: known, clock: clock, live: live}
+// awarenessFanout returns what to forward of an applied awareness frame: the
+// frame itself, or, when a cap refused part of it, the room's state for only
+// the clients it applied, so refused presence reaches no one. Nil means there
+// is nothing to forward.
+func awarenessFanout(aw *awareness.Awareness, frame []byte, res awareness.ApplyResult) []byte {
+	if !res.Refused {
+		return frame
 	}
-
-	p.cidMu.Lock()
-	defer p.cidMu.Unlock()
-	var undo ownershipUndo
-	for _, e := range entries {
-		v := view[e.clientID]
-		honoured := v.honours(e, localID)
-		_, owned := p.clientIDs[e.clientID]
-		switch {
-		case e.removal:
-			// A slot is also released for an ID that is not live, even when the
-			// applier discards the null: holding one for a dead client can never
-			// leak presence, and re-asserting it is charged afresh. Expiry
-			// tombstones at the unchanged clock, so a client's own null for an
-			// expired ID is exactly that case.
-			if !honoured && v.live {
-				continue
-			}
-			if owned {
-				undo.record(e.clientID, true)
-				delete(p.clientIDs, e.clientID)
-			}
-		case !honoured:
-			continue
-		case owned || v.live:
-			// Re-asserting a client the peer already speaks for, or one the room
-			// already holds, introduces nothing.
-		case len(p.clientIDs) >= limit:
-			undo.restore(p.clientIDs)
-			return false
-		default:
-			undo.record(e.clientID, false)
-			p.clientIDs[e.clientID] = struct{}{}
-		}
-		// Later entries see what this one leaves behind, so a frame cannot
-		// retire an ID and then re-assert it for free, nor retire one it has
-		// just asserted at a newer clock.
-		if honoured {
-			view[e.clientID] = roomView{known: true, clock: e.clock, live: !e.removal}
+	if len(res.Applied) == 0 {
+		return nil
+	}
+	seen := make(map[uint64]struct{}, len(res.Applied))
+	ids := make([]uint64, 0, len(res.Applied))
+	for _, id := range res.Applied {
+		if _, dup := seen[id]; !dup {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
 		}
 	}
-	return true
+	return aw.EncodeUpdate(ids)
 }
 
 // handleDisconnect removes the peer from the room and broadcasts awareness

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -114,8 +115,9 @@ func waitProcessed(t *testing.T, s *Server, conn *gws.Conn, id, clock uint64) {
 	}, 2*time.Second, 5*time.Millisecond, "connection never processed the ordering frame")
 }
 
-// A frame introducing more client IDs than the connection may is rejected whole.
-func TestConnAwarenessCap_RejectsFloodFrame(t *testing.T) {
+// A frame introducing more client IDs than the connection may lands only up to
+// the cap; the introductions past it are refused.
+func TestConnAwarenessCap_RefusesIntroductionsPastTheCap(t *testing.T) {
 	s, ts := newConnCapServer(t, 4)
 	conn := dialRoomInternal(t, ts, "room")
 
@@ -125,18 +127,14 @@ func TestConnAwarenessCap_RejectsFloodFrame(t *testing.T) {
 	}
 	sendAwFrame(t, conn, awFrame(flood...))
 
-	// A later frame the gate admits orders the assertion below.
-	const sentinel = 9000
-	sendAwFrame(t, conn, awFrame(liveEntry(sentinel, 1)))
-	waitForLiveID(t, s, sentinel)
-
+	waitProcessed(t, s, conn, 1, 9)
 	ids := roomAwarenessIDs(t, s, "room")
 	for id := uint64(1); id <= 10; id++ {
-		require.False(t, ids[id], "flooded client %d reached the room", id)
+		require.Equal(t, id <= 4, ids[id], "client %d", id)
 	}
 }
 
-// One connection's rejected flood does not spend another connection's budget.
+// One connection's flood does not spend another connection's budget.
 func TestConnAwarenessCap_SecondConnectionUnaffected(t *testing.T) {
 	s, ts := newConnCapServer(t, 4)
 	flooder := dialRoomInternal(t, ts, "room")
@@ -146,10 +144,7 @@ func TestConnAwarenessCap_SecondConnectionUnaffected(t *testing.T) {
 		flood = append(flood, liveEntry(id, 1))
 	}
 	sendAwFrame(t, flooder, awFrame(flood...))
-
-	const sentinel = 9000
-	sendAwFrame(t, flooder, awFrame(liveEntry(sentinel, 1)))
-	waitForLiveID(t, s, sentinel)
+	waitProcessed(t, s, flooder, 1, 9)
 
 	// The second connection gets its own full budget, not what the flooder left.
 	second := dialRoomInternal(t, ts, "room")
@@ -249,6 +244,22 @@ func TestConnAwarenessCap_RemovalAndIntroductionInOneFrame(t *testing.T) {
 	require.False(t, roomAwarenessIDs(t, s, "room")[idA], "removed client is still live")
 }
 
+// A removal frees its slot at once, even after a refusal earlier in the frame.
+func TestConnAwarenessCap_RemovalAfterARefusalInOneFrameFreesASlot(t *testing.T) {
+	s, ts := newConnCapServer(t, 1)
+	conn := dialRoomInternal(t, ts, "room")
+
+	const idA, idB, idC = 101, 102, 103
+	sendAwFrame(t, conn, awFrame(liveEntry(idA, 1)))
+	waitForLiveID(t, s, idA)
+	sendAwFrame(t, conn, awFrame(liveEntry(idC, 1), nullEntry(idA, 2), liveEntry(idB, 1)))
+
+	waitForLiveID(t, s, idB)
+	ids := roomAwarenessIDs(t, s, "room")
+	require.False(t, ids[idA], "removed client is still live")
+	require.False(t, ids[idC], "the introduction past the cap was admitted")
+}
+
 // Retiring an ID and re-asserting it inside one frame is a re-introduction, so
 // it keeps costing a slot: the room's liveness at the start of the frame does
 // not excuse an assertion the frame's own removal came before.
@@ -285,21 +296,18 @@ func TestConnAwarenessCap_StaleRemovalDoesNotFreeASlot(t *testing.T) {
 }
 
 // The same shape within one frame: the null is stale against the clock the
-// frame itself just asserted, so the introduction after it has no slot and the
-// whole frame is refused.
+// frame itself just asserted, so the introduction after it has no slot.
 func TestConnAwarenessCap_StaleRemovalInOneFrameDoesNotFreeASlot(t *testing.T) {
 	s, ts := newConnCapServer(t, 1)
 	conn := dialRoomInternal(t, ts, "room")
 
-	const idA, idB, idC = 101, 102, 103
+	const idA, idB = 101, 102
 	sendAwFrame(t, conn, awFrame(liveEntry(idA, 10), nullEntry(idA, 7), liveEntry(idB, 1)))
 
-	sendAwFrame(t, conn, awFrame(liveEntry(idC, 1)))
-	waitForLiveID(t, s, idC)
-
+	waitProcessed(t, s, conn, idA, 11)
 	ids := roomAwarenessIDs(t, s, "room")
-	require.False(t, ids[idA], "rejected frame reached the room")
-	require.False(t, ids[idB], "rejected frame reached the room")
+	require.True(t, ids[idA], "the stale removal took effect after all")
+	require.False(t, ids[idB], "a discarded removal freed a slot")
 }
 
 // A removal the applier honours still frees the slot, even after a stale one
@@ -360,44 +368,36 @@ func TestConnAwarenessCap_ExpiredClientFreesItsSlot(t *testing.T) {
 	waitForLiveID(t, s, idB)
 }
 
-// The room's own awareness client (ID 0) cannot be retired from the wire: the
-// applier protects its local state instead of removing it, so the gate frees no
-// slot for that null either.
-func TestConnAwarenessCap_RemovalOfTheRoomsOwnClientFreesNoSlot(t *testing.T) {
+// The room's own awareness client (ID 0) cannot be retired from the wire, so a
+// peer may not claim it: that presence would outlive every removal.
+func TestConnAwarenessCap_RoomsOwnClientCannotBeClaimed(t *testing.T) {
 	s, ts := newConnCapServer(t, 1)
 	conn := dialRoomInternal(t, ts, "room")
 
 	const localID, idB = 0, 102
-	sendAwFrame(t, conn, awFrame(liveEntry(localID, 1)))
-	waitForLiveID(t, s, localID)
-	sendAwFrame(t, conn, awFrame(nullEntry(localID, 2)))
-	sendAwFrame(t, conn, awFrame(liveEntry(idB, 1)))
+	sendAwFrame(t, conn, awFrame(liveEntry(localID, 1), liveEntry(idB, 1)))
 
-	waitProcessed(t, s, conn, localID, 9)
-	ids := roomAwarenessIDs(t, s, "room")
-	require.True(t, ids[localID], "the room's own client was removed from the wire")
-	require.False(t, ids[idB], "a null the applier ignores freed a slot")
+	waitForLiveID(t, s, idB)
+	require.False(t, roomAwarenessIDs(t, s, "room")[localID], "a peer claimed the room's own client")
 }
 
-// A rejected frame leaves the budget exactly as it found it, however it shuffled
-// ownership before hitting the cap.
-func TestConnAwarenessCap_RejectedFrameLeavesNoResidue(t *testing.T) {
+// A refusal is confined to the entry past the cap: the frame's other entries,
+// including ownership shuffles before it, all apply.
+func TestConnAwarenessCap_RefusalIsConfinedToItsEntry(t *testing.T) {
 	s, ts := newConnCapServer(t, 1)
 	conn := dialRoomInternal(t, ts, "room")
 
-	// Introduce X, retire it, then introduce Y and Z: the second introduction
-	// hits the cap and the whole frame is rejected.
-	const idX, idY, idZ, idW = 101, 102, 103, 104
+	// Introduce X, retire it, then introduce Y and Z: Y takes X's slot and Z
+	// has none.
+	const idX, idY, idZ = 101, 102, 103
 	sendAwFrame(t, conn, awFrame(
 		liveEntry(idX, 1), nullEntry(idX, 2), liveEntry(idY, 1), liveEntry(idZ, 1)))
 
-	sendAwFrame(t, conn, awFrame(liveEntry(idW, 1)))
-	waitForLiveID(t, s, idW)
-
+	waitProcessed(t, s, conn, idY, 9)
 	ids := roomAwarenessIDs(t, s, "room")
-	for _, id := range []uint64{idX, idY, idZ} {
-		require.False(t, ids[id], "rejected frame put client %d in the room", id)
-	}
+	require.False(t, ids[idX], "the retired client is still live")
+	require.True(t, ids[idY], "the introduction within the cap was refused")
+	require.False(t, ids[idZ], "the introduction past the cap was admitted")
 }
 
 // A frame carrying an oversized state fails at the applier wholesale, so the
@@ -428,38 +428,64 @@ func TestConnAwarenessCap_OversizedStateFrameFreesNoSlot(t *testing.T) {
 	require.False(t, ids[idD], "a frame the applier refuses freed a slot")
 }
 
-// The gate's frame limits must stay exactly the applier's, so no frame can pass
-// the gate and then fail the apply wholesale. The applier itself is the oracle:
-// if the awareness package moves a ceiling, this fails.
-func TestConnAwarenessCap_FrameLimitsMatchTheApplier(t *testing.T) {
-	bigState := func(n int) string { return `"` + strings.Repeat("x", n-2) + `"` }
-	manyEntries := func(n int) []awEntry {
-		out := make([]awEntry, 0, n)
-		for i := 0; i < n; i++ {
-			out = append(out, liveEntry(uint64(i+1), 1))
-		}
-		return out
-	}
+// The expiry purge can forget a tombstone at any moment. An assertion for that
+// client, however stale its clock, is then an introduction and must be charged:
+// the verdict and the apply see the room under one lock.
+func TestConnAwarenessCap_PurgeCannotOpenTheGate(t *testing.T) {
+	s := NewServer()
+	s.MaxAwarenessClientsPerConn = 4
+	s.AwarenessExpiry = 40 * time.Millisecond
+	ts := httptest.NewServer(s)
+	t.Cleanup(ts.Close)
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
 
-	cases := []struct {
-		name    string
-		payload []byte
-		refused bool
-	}{
-		{"state at the limit", awFrame(awEntry{1, 1, bigState(maxAwarenessStateBytesPerEntry)}), false},
-		{"state past the limit", awFrame(awEntry{1, 1, bigState(maxAwarenessStateBytesPerEntry + 1)}), true},
-		{"entries at the limit", awFrame(manyEntries(maxAwarenessEntriesPerFrame)...), false},
-		{"entries past the limit", awFrame(manyEntries(maxAwarenessEntriesPerFrame + 1)...), true},
+	rm, _, err := s.getOrCreateRoom(context.Background(), "room")
+	require.NoError(t, err)
+	defer s.releaseInflight(rm)
+	var maxLive atomic.Int64
+	rm.awareness.OnChange(func(awareness.ChangeEvent) {
+		if n := int64(len(rm.awareness.GetStates())); n > maxLive.Load() {
+			maxLive.Store(n)
+		}
+	})
+
+	conn := dialRoomInternal(t, ts, "room")
+	const n = 5000
+	nulls := make([]awEntry, 0, n)
+	stale := make([]awEntry, 0, n)
+	for id := uint64(1_000_000); id < 1_000_000+n; id++ {
+		nulls = append(nulls, nullEntry(id, 10))
+		stale = append(stale, liveEntry(id, 1))
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			applyErr := awareness.New(0).ApplyUpdate(c.payload, nil)
-			_, gateErr := decodeAwarenessEntries(c.payload)
-			require.Equal(t, c.refused, applyErr != nil, "applier disagrees with the case")
-			require.Equal(t, applyErr != nil, gateErr != nil,
-				"gate and applier disagree: apply=%v gate=%v", applyErr, gateErr)
-		})
+	nullFrame, staleFrame := awFrame(nulls...), awFrame(stale...)
+
+	// Tombstone every ID, then keep asserting them at a lower clock across
+	// several purge cycles.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && maxLive.Load() <= 4 {
+		sendAwFrame(t, conn, nullFrame)
+		end := time.Now().Add(120 * time.Millisecond)
+		for time.Now().Before(end) {
+			sendAwFrame(t, conn, staleFrame)
+		}
 	}
+	require.LessOrEqual(t, maxLive.Load(), int64(4), "the purge let a connection past its cap")
+}
+
+// Introductions the cap refuses are not forwarded to the room's other peers.
+func TestConnAwarenessCap_RefusedIntroductionsReachNoPeer(t *testing.T) {
+	_, ts := newConnCapServer(t, 2)
+	observer := dialRoomInternal(t, ts, "room")
+	drainHandshakeFrames(t, observer)
+	conn := dialRoomInternal(t, ts, "room")
+
+	flood := make([]awEntry, 0, 10)
+	for id := uint64(1); id <= 10; id++ {
+		flood = append(flood, liveEntry(id, 1))
+	}
+	sendAwFrame(t, conn, awFrame(flood...))
+
+	require.Equal(t, map[uint64]bool{1: true, 2: true}, readAwarenessIDs(t, observer))
 }
 
 // The gate is on by default: an unset cap is 64, not unlimited and not zero.
