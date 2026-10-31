@@ -260,10 +260,11 @@ func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
 	assert.Equal(t, "abc", watcherDoc.GetText("t").ToString())
 }
 
-// The broadcast for a partly applied update carries only what that update
-// landed, not the room's parked structs or its delete set.
+// The broadcast for a partly applied update carries what that update left in
+// the room, its parked structs included, not the room's earlier parked
+// structs or its delete set.
 func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing.T) {
-	_, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 200 })
+	srv, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 200 })
 	editor := crdt.New(crdt.WithClientID(7))
 	conn := hpDial(t, ts, "room", false, editor)
 	watcherDoc := crdt.New(crdt.WithClientID(9))
@@ -305,7 +306,8 @@ func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing
 	got := watcherSyncBytes(t, watcher, watcherDoc)
 	assert.Equal(t, "abc"+strings.Repeat("x", 100), watcherDoc.GetText("t").ToString(),
 		"the watcher gets the text that landed")
-	assert.Less(t, got, 64, "the broadcast carries what landed, not the parked entries or the delete set")
+	assert.Equal(t, srv.GetDoc("room").PendingStats(), watcherDoc.PendingStats(), "the watcher parks the five entries too")
+	assert.Less(t, got, 128, "the broadcast carries what this update left, not the 40 earlier parked entries or the delete set")
 }
 
 // watcherSyncBytes reads conn's frames up to the Pong of a Ping it sends,

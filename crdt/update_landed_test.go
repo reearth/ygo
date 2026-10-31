@@ -81,15 +81,18 @@ func TestUnit_ApplyUpdateV1Landed(t *testing.T) {
 
 	ids, err := ContentIDsFromUpdateV1(landed)
 	require.NoError(t, err)
-	assert.Equal(t, []ClientID{7}, ids.Inserts.Clients(), "only structs this apply integrated")
-	assert.Equal(t, []IDRange{{Clock: 0, Len: 4}}, ids.Inserts.Ranges(7), `"abc" and w.a`)
+	assert.Equal(t, []ClientID{7}, ids.Inserts.Clients(), "only structs this apply integrated or parked")
+	assert.Equal(t, []IDRange{{Clock: 0, Len: 9}}, ids.Inserts.Ranges(7), `"abc", w.a and the five parked entries`)
 	assert.Equal(t, []ClientID{3}, ids.Deletes.Clients(), "only the deletion this apply made")
 	assert.Equal(t, []IDRange{{Clock: 100, Len: 1}}, ids.Deletes.Ranges(3), "the overwritten w.a")
 
-	// A peer that held what the room held before ends where the room did.
+	// A peer that held what the room held before ends where the room did,
+	// parked entries included.
 	peer := newRoom()
 	require.NoError(t, ApplyUpdateV1(peer, landed, nil))
 	assert.Equal(t, room.GetText("t").ToString(), peer.GetText("t").ToString())
+	assert.Equal(t, EncodeStateAsUpdateV1(room, nil), EncodeStateAsUpdateV1(peer, nil))
+	assert.Equal(t, room.PendingStats(), peer.PendingStats())
 
 	t.Run("an update that does not decode, and one that applies, land nil", func(t *testing.T) {
 		landed, err := ApplyUpdateV1Landed(newRoom(), EncodeStateAsUpdateV1(editor, nil)[:0], nil)

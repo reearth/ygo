@@ -69,6 +69,16 @@ type Transaction struct {
 	// refused marks a remote apply that failed before integrating, so the
 	// commit fires nothing.
 	refused bool
+	// parkedItems are the structs this transaction parked in the store's
+	// pending queue, waiting for something the document lacks. A failed
+	// apply's landed update carries them (encodeTxnV1Locked), as the update it
+	// was handed does.
+	parkedItems []*Item
+}
+
+// noteParkedItem records item, which this transaction parked.
+func (t *Transaction) noteParkedItem(item *Item) {
+	t.parkedItems = append(t.parkedItems, item)
 }
 
 // Ctx returns the context associated with this transaction. Transactions

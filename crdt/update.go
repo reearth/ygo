@@ -2,10 +2,13 @@ package crdt
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
@@ -60,8 +63,9 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 }
 
 // ApplyUpdateV1Landed is ApplyUpdateV1 that, when the apply fails partway, also
-// returns landed, a V1 update of exactly what this call integrated (nil if
-// nothing), for a caller that must forward it.
+// returns landed, a V1 update of exactly what this call left in doc (nil if
+// nothing): what it integrated and the structs it parked, for a caller that
+// must forward it, so a peer parks what doc parks.
 func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, err error) {
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
@@ -72,11 +76,13 @@ func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, er
 	return landed, err
 }
 
-// encodeTxnV1Locked encodes the structs txn has added to the store so far and
-// the deletions it has made, or returns nil when there are none. Each client's
-// new structs are found by binary search from txn.beforeState, so the cost is
-// proportional to the clients in the store plus what txn added. Called with
-// the document lock held.
+// encodeTxnV1Locked encodes the structs txn has added to the store so far, the
+// deletions it has made and the structs it parked, or returns nil when there
+// are none. Each client's new structs are found by binary search from
+// txn.beforeState, so the cost is proportional to the clients in the store
+// plus what txn added and parked. A client's parked structs follow its added
+// ones, whole, past a skip where the store has a gap, so a reader parks each
+// as the store did. Called with the document lock held.
 func encodeTxnV1Locked(txn *Transaction) []byte {
 	store := txn.doc.store
 	perClient := make(map[ClientID][]*Item)
@@ -89,11 +95,78 @@ func encodeTxnV1Locked(txn *Transaction) []byte {
 			perClient[client] = items[i:]
 		}
 	}
+	parked := make(map[ClientID][]*Item)
+	if len(txn.parkedItems) > 0 && store.pending != nil {
+		// Only the structs still parked: one that a drain integrated before a
+		// later failure is already among the added structs.
+		pending := make(map[*Item]struct{}, len(store.pending.items))
+		for _, it := range store.pending.items {
+			pending[it] = struct{}{}
+		}
+		for _, it := range txn.parkedItems {
+			if _, ok := pending[it]; ok {
+				parked[it.ID.Client] = append(parked[it.ID.Client], it)
+			}
+		}
+	}
+	sv, svCopied := txn.beforeState, false
 	ds := cloneDeleteSet(txn.deleteSet)
+	for client, items := range parked {
+		slices.SortFunc(items, func(a, b *Item) int { return cmp.Compare(a.ID.Clock, b.ID.Clock) })
+		// Clip so the append copies rather than writing past the store's slice.
+		perClient[client] = append(slices.Clip(perClient[client]), items...)
+		if first := items[0].ID.Clock; first < sv.Clock(client) {
+			// A parked struct that starts below what the reader holds is sent
+			// whole, as the store parked it, not cut at the reader's clock.
+			if !svCopied {
+				sv, svCopied = maps.Clone(txn.beforeState), true
+			}
+			sv[client] = first
+		}
+		// The V2 decoder records a GC struct's range as deleted before the
+		// struct integrates; a parked one has deleted nothing yet, and its
+		// struct carries the range. Below the store's clock a parked struct
+		// overlaps integrated items, whose deletions are real.
+		if _, ok := ds.clients[client]; ok {
+			if ranges := withoutParked(ds.clients[client], items, store.NextClock(client)); len(ranges) > 0 {
+				ds.clients[client] = ranges
+			} else {
+				delete(ds.clients, client)
+			}
+		}
+	}
 	if len(perClient) == 0 && len(ds.clients) == 0 {
 		return nil
 	}
-	return encodeStructStoreV1(perClient, ds, txn.beforeState, store)
+	return encodeStructStoreV1(perClient, ds, sv, store)
+}
+
+// withoutParked is the sorted, disjoint ranges less the clocks at or above
+// from that the clock-ordered, disjoint parked structs cover, in one pass over
+// both.
+func withoutParked(ranges []DeleteRange, parked []*Item, from uint64) []DeleteRange {
+	var out []DeleteRange
+	j := 0
+	for _, r := range ranges {
+		start, end := r.Clock, r.Clock+r.Len
+		for j < len(parked) && parked[j].ID.Clock+uint64(parked[j].Content.Len()) <= start {
+			j++
+		}
+		for k := j; k < len(parked) && parked[k].ID.Clock < end; k++ {
+			pStart, pEnd := max(parked[k].ID.Clock, from), parked[k].ID.Clock+uint64(parked[k].Content.Len())
+			if pStart >= pEnd || pStart >= end {
+				continue
+			}
+			if pStart > start {
+				out = append(out, DeleteRange{Clock: start, Len: pStart - start})
+			}
+			start = max(start, pEnd)
+		}
+		if start < end {
+			out = append(out, DeleteRange{Clock: start, Len: end - start})
+		}
+	}
+	return out
 }
 
 // EncodeStateAsUpdateV2 encodes the document state using the Yjs V2
