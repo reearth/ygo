@@ -361,9 +361,9 @@ func TestUnit_PendingBudget_SupersededKeepsClientOrder(t *testing.T) {
 		if version == 2 {
 			d, derr := newV2Decoder(update)
 			require.NoError(t, derr)
-			_, err = scanPendingGroupsV2(d, StateVector{}, 0, &r, b.superseded, 0)
+			_, err = scanPendingGroupsV2(d, StateVector{}, 0, &r, b.superseded, 0, nil)
 		} else {
-			_, err = scanPendingGroupsV1(update, StateVector{}, 0, &r, b.superseded, 0)
+			_, err = scanPendingGroupsV1(update, StateVector{}, 0, &r, b.superseded, 0, nil)
 		}
 		require.NoError(t, err)
 		require.True(t, r.ordered, "V%d", version)

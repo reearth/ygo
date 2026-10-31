@@ -28,6 +28,9 @@ type pendingBudget struct {
 	// structs, when not zero, bounds the update's structs so the first pass can
 	// stop early.
 	structs int
+	// parked is the store's pending queue: a blocked struct whose clocks it
+	// already holds parks nothing (pending_cover.go) and is not counted.
+	parked *pendingUpdate
 	// deleteSetBytes is the rest of the update past its structs once walked is
 	// set, which implies groupsKnown.
 	deleteSetBytes []byte
@@ -42,7 +45,7 @@ func newPendingBudget(doc *Doc, initial StateVector, update []byte, v2 bool) pen
 		// not below none, so an update that parks nothing still applies.
 		remaining = max(remaining-len(doc.store.pending.items), 0)
 	}
-	return pendingBudget{initial: initial, update: update, remaining: remaining, v2: v2}
+	return pendingBudget{initial: initial, update: update, remaining: remaining, v2: v2, parked: doc.store.pending}
 }
 
 // setSuperseded records the groups the decoder drops, so preflight counts
@@ -70,6 +73,7 @@ func (b *pendingBudget) scanner() *pendingScanner {
 	if !b.v2 {
 		s := newPendingScanner(b.update, false)
 		s.lenient = true
+		s.parked = b.parked
 		return s
 	}
 	// Column cursors copy by value; the immutable columns and string pool are
@@ -77,7 +81,7 @@ func (b *pendingBudget) scanner() *pendingScanner {
 	v2 := *b.v2Start
 	rest := b.v2Rest
 	v2.restDec = &rest
-	return &pendingScanner{v2: &v2, rest: &rest, lenient: true}
+	return &pendingScanner{v2: &v2, rest: &rest, lenient: true, parked: b.parked}
 }
 
 // check refuses the update when its structs would park more items than the room
@@ -105,7 +109,7 @@ func (b *pendingBudget) check() error {
 			if b.v2 {
 				result, err = b.firstPassV2(known, &clients)
 			} else {
-				result, err = scanPendingGroupsV1(b.update, known, b.remaining, &clients, b.superseded, b.structs)
+				result, err = scanPendingGroupsV1(b.update, known, b.remaining, &clients, b.superseded, b.structs, b.parked)
 			}
 		} else {
 			var clientRange *pendingClientRange
@@ -154,7 +158,7 @@ func (b *pendingBudget) check() error {
 		for i := range groups {
 			g := &groups[i]
 			for !g.done {
-				if g.end > known.Clock(g.client) {
+				if g.end > known.Clock(g.client) && !b.parked.holds(g.client, g.clock, known.Clock(g.client), g.end, g.gc) {
 					pending++
 					if pending > b.remaining {
 						return ErrInvalidUpdate
@@ -486,7 +490,7 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 				return result, ErrInvalidUpdate
 			}
 			if collected {
-				collect.put(skip, length, deps[:numDeps])
+				collect.put(skip, s.gc, length, deps[:numDeps])
 			}
 			if !drop && !skip && end > knownClock {
 				if !blocked {
@@ -497,7 +501,9 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 					}
 				}
 				if permanent {
-					result.permanent++
+					if !s.parked.holds(client, clock, knownClock, end, s.gc) {
+						result.permanent++
+					}
 					if result.permanent > remaining {
 						return result, ErrInvalidUpdate
 					}
@@ -519,17 +525,19 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 					knownClock = end
 					result.progressed = true
 				} else {
-					result.pending++
-					if clients == 1 && result.pending > remaining {
-						// No other group can fill this group's first blocked head. All
-						// following uncovered non-Skip structs remain permanently pending.
-						return result, ErrInvalidUpdate
+					if !s.parked.holds(client, clock, knownClock, end, s.gc) {
+						result.pending++
+						if clients == 1 && result.pending > remaining {
+							// No other group can fill this group's first blocked head. All
+							// following uncovered non-Skip structs remain permanently pending.
+							return result, ErrInvalidUpdate
+						}
 					}
 					if !blocked {
 						result.heads++
 						if collect != nil {
-							collect.head(client, clock, end, n-j-1)
-							collect.put(false, length, deps[:numDeps])
+							collect.head(client, clock, end, n-j-1, s.gc)
+							collect.put(false, s.gc, length, deps[:numDeps])
 							collected = true
 						}
 						blocked = true
@@ -551,6 +559,12 @@ type pendingScanner struct {
 	err     error
 	frame   bool
 	lenient bool
+	// parked is the store's pending queue, whose structs a scan does not
+	// count again (pendingUpdate.holds); nil counts every blocked struct.
+	parked *pendingUpdate
+	// gc is whether the struct item last read is a GC struct, which only
+	// parked GC structs hold.
+	gc bool
 }
 
 func newPendingScanner(update []byte, v2 bool) *pendingScanner {
@@ -708,6 +722,7 @@ func (s *pendingScanner) item() (length uint64, skip bool, deps [3]ID, numDeps i
 		info, s.err = s.v2.readInfo()
 	}
 	tag := info & 0x1f
+	s.gc = tag == 0
 	if tag == 0 {
 		return s.length(), false, deps, 0
 	}

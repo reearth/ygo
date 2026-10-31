@@ -34,7 +34,7 @@ func (b *pendingBudget) firstPassV2(known StateVector, clients *pendingClientRan
 	v2 := *b.v2Start
 	rest := b.v2Rest
 	v2.restDec = &rest
-	return scanPendingGroupsV2(&v2, known, b.remaining, clients, b.superseded, b.structs)
+	return scanPendingGroupsV2(&v2, known, b.remaining, clients, b.superseded, b.structs, b.parked)
 }
 
 // mayParkPastRoom is whether the update may park more items than the room left,

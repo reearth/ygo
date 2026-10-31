@@ -111,7 +111,7 @@ This guarantees identical final state on all replicas regardless of message arri
 
 ### Pending-structs queue
 
-When an update references an item whose dependency hasn't arrived yet — a same-client clock gap or a cross-update Origin reference — the item is parked in a per-doc pending queue rather than silently orphaned. The queue drains automatically on each subsequent `ApplyUpdate` when the missing predecessors arrive. This mirrors Yjs JS's `pendingStructs` and yrs's `Store.pending`. See the v1.2.0 CHANGELOG entry for the design.
+When an update references an item whose dependency hasn't arrived yet — a same-client clock gap or a cross-update Origin reference — the item is parked in a per-doc pending queue rather than silently orphaned. The queue drains automatically on each subsequent `ApplyUpdate` when the missing predecessors arrive. A struct that arrives again while the queue holds it, as a reconnecting peer re-sends what it has not seen acknowledged, is not parked again: the queue holds each clock once, as Yjs's merged `pendingStructs` does. This mirrors Yjs JS's `pendingStructs` and yrs's `Store.pending`. See the v1.2.0 CHANGELOG entry for the design.
 
 The same machinery handles delete-set entries that target not-yet-integrated items (`pendingDs`). State-vector computation is unaffected — pending items don't appear in `StateVector()` until they're integrated, so peers correctly retry the missing dependencies.
 

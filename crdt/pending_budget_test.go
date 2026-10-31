@@ -106,8 +106,14 @@ func TestUnit_PendingBudget_CompleteAndRetry(t *testing.T) {
 			defer retry.Destroy()
 			require.NoError(t, apply(retry, missing, nil))
 			require.Equal(t, 3, retry.PendingStats().Items)
-			// The budget includes pending items from earlier messages.
-			require.ErrorIs(t, apply(retry, missing, nil), ErrInvalidUpdate)
+			// The same update again parks nothing new, so the full budget
+			// does not refuse it (Yjs holds each pending clock once).
+			require.NoError(t, apply(retry, missing, nil))
+			require.Equal(t, 3, retry.PendingStats().Items)
+			// The budget includes pending items from earlier messages: an
+			// update that would park a fourth item is refused.
+			longer, _ := pendingBudgetUpdate(version, 4, "missing")
+			require.ErrorIs(t, apply(retry, longer, nil), ErrInvalidUpdate)
 			require.Equal(t, 3, retry.PendingStats().Items)
 			require.NoError(t, apply(retry, parent, nil))
 			require.Zero(t, retry.PendingStats().Items)

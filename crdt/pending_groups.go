@@ -16,17 +16,25 @@ type pendingCollector struct {
 	fill        bool
 }
 
-func (c *pendingCollector) head(client ClientID, clock, end, remaining uint64) {
+// head records a blocked group; gc marks its first blocked struct a GC
+// struct.
+func (c *pendingCollector) head(client ClientID, clock, end, remaining uint64, gc bool) {
 	c.heads++
 	if c.fill {
-		c.groups = append(c.groups, pendingGroup{client: client, clock: clock, end: end, at: uint32(len(c.sum)), remaining: uint32(remaining)})
+		c.groups = append(c.groups, pendingGroup{client: client, clock: clock, end: end, at: uint32(len(c.sum)), remaining: uint32(remaining), gc: gc})
 	}
 }
 
-// A summary entry is a flag byte (skip bit, dependency count), the struct
-// length, then each dependency's client and clock.
-func (c *pendingCollector) put(skip bool, length uint64, deps []ID) {
+// summaryGC is the flag bit of a summary entry whose struct is a GC struct.
+const summaryGC = 1 << 3
+
+// A summary entry is a flag byte (skip bit, dependency count, GC bit), the
+// struct length, then each dependency's client and clock.
+func (c *pendingCollector) put(skip, gc bool, length uint64, deps []ID) {
 	flag := byte(len(deps)) << 1
+	if gc {
+		flag |= summaryGC
+	}
 	if skip {
 		flag = 1
 		deps = nil
@@ -55,13 +63,13 @@ func uvarintLen(v uint64) int {
 	return n
 }
 
-func pendingEntry(sum []byte, at uint32) (skip bool, length uint64, deps [3]ID, numDeps int, next uint32) {
+func pendingEntry(sum []byte, at uint32) (skip, gc bool, length uint64, deps [3]ID, numDeps int, next uint32) {
 	p := int(at)
 	flag := sum[p]
 	p++
 	length, n := binary.Uvarint(sum[p:])
 	p += n
-	numDeps = int(flag >> 1)
+	numDeps = int(flag>>1) & 3
 	for i := 0; i < numDeps; i++ {
 		client, n := binary.Uvarint(sum[p:])
 		p += n
@@ -69,7 +77,7 @@ func pendingEntry(sum []byte, at uint32) (skip bool, length uint64, deps [3]ID, 
 		p += n
 		deps[i] = ID{Client: ClientID(client), Clock: clock}
 	}
-	return flag&1 != 0, length, deps, numDeps, uint32(p)
+	return flag&1 != 0, flag&summaryGC != 0, length, deps, numDeps, uint32(p)
 }
 
 // A group holds its current blocked struct. Surviving groups are unique per
@@ -82,13 +90,15 @@ type pendingGroup struct {
 	at, remaining            uint32
 	child, sibling, watchers int32
 	done                     bool
+	gc                       bool // the current blocked struct is a GC struct
 }
 
 func (g *pendingGroup) next(sum []byte) {
 	for g.remaining > 0 {
-		_, _, _, _, next := pendingEntry(sum, g.at)
+		_, _, _, _, _, next := pendingEntry(sum, g.at)
 		g.at = next
-		skip, length, _, _, _ := pendingEntry(sum, g.at)
+		skip, gc, length, _, _, _ := pendingEntry(sum, g.at)
+		g.gc = gc
 		g.clock, g.end = g.end, g.end+length
 		g.remaining--
 		if !skip {
@@ -99,7 +109,7 @@ func (g *pendingGroup) next(sum []byte) {
 }
 
 func (g *pendingGroup) missing(sum []byte, known StateVector) (ID, bool) {
-	_, _, deps, numDeps, _ := pendingEntry(sum, g.at)
+	_, _, _, deps, numDeps, _ := pendingEntry(sum, g.at)
 	for _, dep := range deps[:numDeps] {
 		if dep.Clock >= known.Clock(dep.Client) {
 			return dep, true

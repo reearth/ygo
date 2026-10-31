@@ -105,7 +105,8 @@ const defaultMaxPendingItems = 100_000
 // WithMaxPendingItems caps parked items and, separately, parked delete ranges
 // (default 100,000 when n <= 0), refusing with ErrInvalidUpdate, before any
 // change, an update that would park past either, so a peer cannot grow them
-// without bound.
+// without bound. A struct sent again parks without the clocks the queue already
+// holds at its start and end, and one the queue holds whole does not count.
 func WithMaxPendingItems(n int) DocOption {
 	return func(d *Doc) { d.maxPendingItems = n }
 }

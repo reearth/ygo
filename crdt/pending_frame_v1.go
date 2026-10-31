@@ -14,6 +14,9 @@ type v1Frame struct {
 	p   int
 	// err is why the frame went bad, as the decoder names it, or nil.
 	err error
+	// gc is whether the struct item last read is a GC struct, which only
+	// parked GC structs hold.
+	gc bool
 }
 
 // fail stops the frame for err. It keeps scanReason's value, never err, so a
@@ -94,6 +97,7 @@ func (f *v1Frame) any() {
 func (f *v1Frame) item() (length uint64, skip bool, deps [3]ID, numDeps int) {
 	info := f.byte()
 	tag := info & 0x1f
+	f.gc = tag == 0
 	if tag == 0 {
 		return f.uint(), false, deps, 0
 	}
@@ -190,8 +194,9 @@ func (f *v1Frame) frameJSON() uint64 {
 }
 
 // scanPendingGroupsV1 is the pending budget's first pass over a V1 update,
-// stopping once the unread structs cannot change its answer.
-func scanPendingGroupsV1(update []byte, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int) (pendingPass, error) {
+// stopping once the unread structs cannot change its answer, and not counting
+// a struct parked holds.
+func scanPendingGroupsV1(update []byte, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int, parked *pendingUpdate) (pendingPass, error) {
 	var result pendingPass
 	read := 0
 	f := v1Frame{buf: update}
@@ -252,7 +257,7 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 				if ready {
 					knownClock = end
 					result.progressed = true
-				} else {
+				} else if !parked.holds(client, clock, knownClock, end, f.gc) {
 					result.pending++
 					if clients == 1 && result.pending > remaining {
 						return result, ErrInvalidUpdate

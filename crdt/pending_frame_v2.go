@@ -11,6 +11,9 @@ type v2Frame struct {
 	d    *v2Decoder
 	keys int
 	err  error
+	// gc is whether the struct item last read is a GC struct, which only
+	// parked GC structs hold.
+	gc bool
 }
 
 func (f *v2Frame) uint() uint64 {
@@ -99,6 +102,7 @@ func (f *v2Frame) key() {
 func (f *v2Frame) item() (length uint64, skip bool, deps [3]ID, numDeps int) {
 	info := byteInRun(&f.d.infoDec, f)
 	tag := info & 0x1f
+	f.gc = tag == 0
 	if tag == 0 {
 		return uintInRun(&f.d.lenDec, f), false, deps, 0
 	}
@@ -184,7 +188,7 @@ func (f *v2Frame) fail(err error) {
 }
 
 // scanPendingGroupsV2 is scanPendingGroupsV1 for a V2 update.
-func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int) (pendingPass, error) {
+func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int, parked *pendingUpdate) (pendingPass, error) {
 	var result pendingPass
 	read := 0
 	f := v2Frame{d: d}
@@ -245,7 +249,7 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 				if ready {
 					knownClock = end
 					result.progressed = true
-				} else {
+				} else if !parked.holds(client, clock, knownClock, end, f.gc) {
 					result.pending++
 					if clients == 1 && result.pending > remaining {
 						return result, ErrInvalidUpdate
