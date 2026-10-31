@@ -89,6 +89,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   map, so it changed from one run to the next. An applied update changes its
   types in the order its structs integrate, then in the order of its
   deletions, as in Yjs.
+- **`crdt`: a text whose own observer panics no longer starts the remote
+  format cleanup.** After a remote change, ygo deletes the format markers that
+  the change left redundant. A formatted text was cleaned even when its own
+  observer panicked, and a panic in any type observer could skip the cleanup
+  for every text. Now the decision waits for the type observers even when one
+  panics, and leaves out each text whose own observer panicked, as in Yjs. Any
+  other changed text with formatting still starts the cleanup.
 
 ### Performance
 

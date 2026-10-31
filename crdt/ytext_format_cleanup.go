@@ -14,8 +14,9 @@ import (
 var cleanupTestHook func()
 
 // needsFormattingCleanup reports whether a committed remote transaction
-// changed a text with cleanFormatting set, which is when Yjs's YText observer
-// sets _needFormattingCleanup; a root placeholder has no such observer.
+// changed a text with cleanFormatting set that is not in cleanupSkipped,
+// which is when Yjs's YText observer sets _needFormattingCleanup; a root
+// placeholder has no such observer.
 func needsFormattingCleanup(txn *Transaction) bool {
 	if txn.Local {
 		return false
@@ -24,11 +25,19 @@ func needsFormattingCleanup(txn *Transaction) bool {
 		if _, raw := t.owner.(*rawType); raw {
 			continue
 		}
-		if t.cleanFormatting && (t.item == nil || !t.item.Deleted) {
+		if _, skipped := txn.cleanupSkipped[t]; t.cleanFormatting && !skipped {
 			return true
 		}
 	}
 	return false
+}
+
+// skipCleanup leaves t out of txn's format cleanup decision.
+func (txn *Transaction) skipCleanup(t *abstractType) {
+	if txn.cleanupSkipped == nil {
+		txn.cleanupSkipped = make(map[*abstractType]struct{}, 1)
+	}
+	txn.cleanupSkipped[t] = struct{}{}
 }
 
 // changedText reports whether txn changed a text, which an observer could
@@ -43,12 +52,34 @@ func changedText(txn *Transaction) bool {
 	return false
 }
 
+// cleanupDecision is whether a remote transaction gets its format cleanup.
+type cleanupDecision uint8
+
+const (
+	cleanupNone cleanupDecision = iota
+	// cleanupRun runs the cleanup once the transaction's observers have fired.
+	cleanupRun
+	// cleanupAfterTypeObservers decides once the type observers have run.
+	cleanupAfterTypeObservers
+)
+
+// decideFormattingCleanup decides whether the remote transaction txn gets its
+// format cleanup, once its type observers have run.
+func (d *Doc) decideFormattingCleanup(txn *Transaction) {
+	d.mu.Lock()
+	txn.cleanup = cleanupNone
+	if needsFormattingCleanup(txn) {
+		txn.cleanup = cleanupRun
+	}
+	d.mu.Unlock()
+}
+
 // afterRemoteObservers finishes a remote transaction once its observers have
 // fired: it runs the format cleanup and fires the cleanup's observers. A
 // panicking cleanup still emits what it deleted, then re-panics.
 func (d *Doc) afterRemoteObservers(remote *Transaction) {
 	defer func() { remote.deletedFormats = nil }()
-	if !remote.formatCleanup {
+	if remote.cleanup != cleanupRun {
 		return
 	}
 	var phase2 func([]byte)
@@ -76,21 +107,17 @@ func (d *Doc) afterRemoteObservers(remote *Transaction) {
 // whether afterRemoteObservers must run its format cleanup, and if so records
 // what the cleanup needs before the GC. Yjs cleans up the format markers a
 // remote change left redundant after the change's observers, in a follow-up
-// local transaction; a type observer may give a text its first marker, so
-// with type observers to fire the decision waits for them. Caller must hold
-// d.mu, after buildPhase2.
+// local transaction; a type observer may give a text its first marker, or
+// panic, so with type observers to fire the decision waits for them. Caller
+// must hold d.mu, after buildPhase2.
 func (d *Doc) prepareRemoteCleanup(txn *Transaction) bool {
 	if txn.Local {
 		return false
 	}
-	if needsFormattingCleanup(txn) {
-		txn.formatCleanup = true
-	} else if txn.typeObserved && changedText(txn) {
-		txn.afterTypeObservers = func() {
-			d.mu.Lock()
-			txn.formatCleanup = needsFormattingCleanup(txn)
-			d.mu.Unlock()
-		}
+	if txn.typeObserved && changedText(txn) {
+		txn.cleanup = cleanupAfterTypeObservers
+	} else if needsFormattingCleanup(txn) {
+		txn.cleanup = cleanupRun
 	} else {
 		return false
 	}

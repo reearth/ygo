@@ -502,8 +502,10 @@ func buildPhase2(d *Doc, txn *Transaction) func(update []byte) {
 	firedDeep := make(map[*abstractType]struct{})
 	var deepSnap []deepEntry
 	for _, t := range changed {
-		// Yjs calls no observer for a type that is deleted when the transaction ends.
+		// Yjs calls no observer for a type that is deleted when the
+		// transaction ends, so such a text cannot start the format cleanup.
 		if t.item != nil && t.item.Deleted {
+			txn.skipCleanup(t)
 			continue
 		}
 		if t.owner != nil {
@@ -585,12 +587,13 @@ func buildPhase2(d *Doc, txn *Transaction) func(update []byte) {
 		defer callAll(deepSnap, func(de deepEntry) {
 			callAll(de.fns, func(fn func(*Transaction)) { fn(txn) })
 		})
-		callAll(fireFns, func(fn func()) { fn() })
-		// Not deferred, so a panicking type observer skips the transaction-wide
-		// format cleanup decision, as a throwing text observer skips its own in Yjs.
-		if txn.afterTypeObservers != nil {
-			txn.afterTypeObservers()
+		// Deferred, so the format cleanup is decided even when a type observer
+		// panics; a text whose own observer panicked takes no part, as in Yjs.
+		// Read when the closure runs: prepareRemoteCleanup sets it afterwards.
+		if txn.cleanup == cleanupAfterTypeObservers {
+			defer d.decideFormattingCleanup(txn)
 		}
+		callAll(fireFns, func(fn func()) { fn() })
 	}
 }
 

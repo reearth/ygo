@@ -67,6 +67,13 @@
   type, then `ObserveDeep` callbacks fire for each changed type and its
   ancestors in that order, as in Yjs. For an applied update, the order is the
   order its structs integrate, then the order of its deletions.
+- **A text whose own observer panics does not start the format cleanup.**
+  After a remote change, ygo deletes the format markers the change left
+  redundant, in a separate transaction with a nil origin. It still did so for
+  a text whose observer panicked, and a panic in any type observer before the
+  decision skipped the cleanup for every text. Now each text decides for
+  itself, as in Yjs. Where markers stay, text inserted there later can take
+  their formatting, as it does in Yjs.
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
 - **Faster full-state encodes and snapshots after deletions.** The delete set

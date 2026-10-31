@@ -61,13 +61,15 @@ type Transaction struct {
 	// TransactContext. Exposed via the Ctx() method so fn can poll for
 	// cancellation.
 	ctx context.Context
-	// formatCleanup marks a remote transaction whose format cleanup runs
-	// once its observers have fired; afterTypeObservers, when set, decides
-	// it after the type observers (typeObserved: there are some), where
-	// Yjs does.
-	formatCleanup      bool
-	typeObserved       bool
-	afterTypeObservers func()
+	// cleanup is a remote transaction's format cleanup decision, which
+	// afterRemoteObservers reads once the observers have fired;
+	// cleanupAfterTypeObservers defers it until the type observers
+	// (typeObserved: there are some) have run, where Yjs makes it.
+	// cleanupSkipped holds the changed types that take no part in it: those
+	// deleted at commit, and texts whose own observers panicked.
+	cleanup        cleanupDecision
+	typeObserved   bool
+	cleanupSkipped map[*abstractType]struct{}
 	// landed, when set, receives ApplyUpdateV1Landed's update of what this
 	// failed apply integrated, encoded after the GC as OnUpdate's update is.
 	landed *[]byte
