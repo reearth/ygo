@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-10-31
+
+### Fixed
+
+- **`crdt`: an undo that follows restored copies splits only the last one, as
+  Yjs does.** When an undo deleted an item that earlier undos had restored more
+  than once as part of a longer copy, every copy on the way was split at that
+  item. The split parts keep their link to the next copy, so they never merged
+  again, and the document held more structs than Yjs, with other V1 and V2
+  bytes. Undo now carries the offset along the copies and splits only the last
+  one. The content was already the same as in Yjs.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

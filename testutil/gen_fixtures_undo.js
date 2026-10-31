@@ -12,11 +12,11 @@
  *
  * Fixture kind — "author" (see gen_fixtures_prelim.js): a scripted sequence of
  * edits and undo/redo calls executed by Yjs with a PINNED clientID. The Go test
- * replays the identical sequence and must produce byte-identical V1 bytes, so
- * the redone container AND its re-inserted children land at the same clocks
- * with the same origins as in Yjs. Fixtures with a second peer are jsonOnly:
- * only the JSON can match, since ygo orders clients, merges structs and
- * encodes collected children differently.
+ * replays the identical sequence and must produce byte-identical V1 and V2
+ * bytes, so the redone container AND its re-inserted children land at the same
+ * clocks with the same origins as in Yjs. Fixtures with a second peer are
+ * jsonOnly: only the JSON can match, since ygo orders clients, merges structs
+ * and encodes collected children differently.
  */
 const Y = require('yjs')
 const fs = require('fs')
@@ -60,6 +60,7 @@ function authored(name, description, root, kind, build) {
     expectedJSON: JSON.stringify(type.toJSON()),
   }
   if (jsonOnly) f.jsonOnly = true
+  else f.updateV2 = toHex(Y.encodeStateAsUpdateV2(doc))
   return f
 }
 
@@ -67,6 +68,28 @@ const setText = (m) => {
   const t = new Y.Text()
   t.insert(0, 'Hello')
   m.set('t', t)
+}
+
+// undoThroughRestoredCopies restores the elements of a nested array `copies`
+// times as one copy each, then undoes the insert of its last two elements.
+function undoThroughRestoredCopies(doc, arr, um, copies) {
+  arr.insert(0, [new Y.Array()])
+  um.stopCapturing()
+  arr.get(0).insert(0, [88, 78])
+  um.stopCapturing()
+  arr.get(0).insert(2, [45, 97])
+  um.stopCapturing()
+  doc.transact(() => {
+    arr.delete(0, 1)
+    arr.insert(0, [25, 50, 51])
+  })
+  um.stopCapturing()
+  um.undo()
+  for (let i = 1; i < copies; i++) {
+    arr.delete(0, 1)
+    um.undo()
+  }
+  um.undo()
 }
 
 const fixtures = [
@@ -344,6 +367,18 @@ const fixtures = [
       ra.insert(0, ['z'])
       sync(r, doc)
     }
+  ),
+  authored(
+    'undo_follows_restored_copies_splitting_only_the_last',
+    'Undoing an insert follows its restored copies and splits only the last one, so the copy in between stays one struct.',
+    'a', 'array',
+    (doc, arr, um) => undoThroughRestoredCopies(doc, arr, um, 2)
+  ),
+  authored(
+    'undo_follows_three_restored_copies',
+    'The offset into the restored copies is carried over every hop of a longer chain.',
+    'a', 'array',
+    (doc, arr, um) => undoThroughRestoredCopies(doc, arr, um, 3)
   ),
 ]
 
