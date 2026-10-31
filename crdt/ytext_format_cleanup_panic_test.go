@@ -37,14 +37,9 @@ func liveItems(t *testing.T, txt *YText) []string {
 	return out
 }
 
-// TestUnit_YText_FormatCleanup_PanickingTextObserver checks the remote format
-// cleanup against Yjs 13.6.32 when a text observer panics. Texts t1 and t2
-// start as "abc"; B bolds index 2 of each formatted text, A deletes "abc"
-// from each deleted text, and A's update reaches B. A text whose own observer
-// panics does not start the cleanup, as a throwing observer skips
-// YText._callObserver's _needFormattingCleanup; any other changed formatted
-// text still starts it, and the cleanup then covers every text. A later
-// insert from A at index 0 is bold where B kept the markers, as in Yjs.
+// TestUnit_YText_FormatCleanup_PanickingTextObserver checks that a text whose
+// own observer panics does not start the remote format cleanup and another
+// changed formatted text still does, as in Yjs 13.6.32.
 func TestUnit_YText_FormatCleanup_PanickingTextObserver(t *testing.T) {
 	marked := []string{"bold=true", "bold=null"}
 	cleaned := []string{"bold=null"}
