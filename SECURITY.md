@@ -33,6 +33,7 @@ You can expect an acknowledgement within **48 hours** and a resolution timeline 
   - `ReadAny` recursion: max 100 levels deep (`maxAnyDepth`)
   - Per-document pending-items queue: max 100 000 parked items by default (`defaultMaxPendingItems`; configurable via `crdt.WithMaxPendingItems` or `Server.MaxPendingItems`). Items whose `Origin`/`OriginRight` references a clock not yet integrated are parked in this queue and retried when the dependency arrives — the cap prevents a crafted update full of far-future-clock items from growing the queue without bound. Updates that would exceed the cap return `ErrInvalidUpdate`. (Added in v1.8.0; see #46.)
   - WebSocket idle connections: peers that complete the handshake but don't send a first message are disconnected after `Server.HandshakeTimeout` (default 30s). Without this, an attacker could exhaust goroutines and per-connection buffers via slow-loris-style idle connections. (Added in v1.8.0; see #47.)
+  - WebSocket write queue: each peer holds at most `Server.PeerWriteQueueSize` frames (default 512) waiting to be written. That bounds frames, not bytes: a peer that sends SyncStep1 and never reads holds a full-state answer in each slot. `Server.PeerWriteQueueBytes` (default 0, no bound) also bounds the bytes: once a peer's waiting frames reach it, the next frame closes the peer.
 ### ClientID semantics
 
 `crdt.ClientID` is a 32-bit value generated via `crypto/rand` and used to

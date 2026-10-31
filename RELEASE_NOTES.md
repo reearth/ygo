@@ -1,3 +1,39 @@
+## v1.55.0
+
+**Who is affected: anyone running a `provider/websocket` server reachable by
+clients it does not control.**
+
+A peer's write queue is bounded in frames (`PeerWriteQueueSize`, 512 by
+default), not in bytes, so one connection can make the server hold 512 times
+the largest frame its room produces. Every SyncStep1 a peer sends is answered
+with the room's full state on that peer's own queue, and a peer that never
+reads keeps the answers queued: on a 4 MiB document, 100 SyncStep1 messages
+of 4 bytes each grew a server's heap by about 420 MB, and the connection
+stayed open.
+
+The new `Server.PeerWriteQueueBytes` bounds those bytes:
+
+```go
+srv := ygws.NewServer()
+srv.PeerWriteQueueBytes = 64 << 20 // 64 MiB waiting per peer
+```
+
+When the frames waiting for a peer reach the budget, the next frame is not
+queued and the peer is closed as for a full queue. This holds on every enqueue
+path and whatever `SlowPeerPolicy` is set, because a peer over its budget
+drains only if it reads. The close is logged at Warn as
+`peer queued bytes over budget`.
+
+Set the budget above the largest room state the server holds. A frame that
+arrives while the budget or more waits closes even a peer that reads, and a
+peer that joins a room receives the room's state at least once. The handshake
+is not counted, and the frame that crosses the budget is queued whatever its
+size, so one peer holds at most the budget plus one frame, besides its
+handshake and the frame being written.
+
+Zero, the default, or a negative value means no byte budget: nothing changes
+for a server that does not set it.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.0] — 2026-10-30
+
+### Added
+
+- **`provider/websocket`: `Server.PeerWriteQueueBytes`, a per-peer bound on the
+  bytes waiting in a peer's write queue.** `PeerWriteQueueSize`
+  bounds that queue in frames only, so one connection can make the server hold
+  512 times the largest frame its room produces. A peer that sends SyncStep1
+  and never reads is answered the room's full state each time: on a 4 MiB
+  document, 100 such messages of 4 bytes each grew a server's heap by about
+  420 MB, and the connection stayed open.
+
+  With the budget set, when the frames waiting for a peer reach it, the next
+  frame is not queued and the peer is closed as for a full queue. This holds
+  on every enqueue path (a room broadcast, the SyncStep2 answering a
+  SyncStep1, awareness, an `Apply` or `Inject` delivery) and whatever
+  `SlowPeerPolicy` is set, because a peer over its budget drains only if it
+  reads. The close is logged at Warn as `peer queued bytes over budget`.
+
+  The frame that crosses the budget is queued whatever its size, and the
+  handshake is not counted, so one peer holds at most the budget plus one
+  frame, besides its handshake and the frame being written. A frame that
+  arrives while the budget or more waits closes even a peer that reads, so
+  set the budget above the largest room state. Zero, the default, or a
+  negative value means no byte budget.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added
