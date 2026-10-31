@@ -1,3 +1,15 @@
+## v1.54.1
+
+**Who is affected: anyone who encodes a document against a state vector or
+registers `Doc.OnUpdate`, which includes every `provider/websocket` server.**
+
+`EncodeStateAsUpdateV1` and `EncodeStateAsUpdateV2` with a state vector, and
+the update each transaction hands to `OnUpdate` observers, now find the
+structs past the state vector by binary search over each client's structs, as
+Yjs does. They read every item of the document before. The encoded bytes do
+not change. The delete set these updates carry is still built from every item,
+as Yjs `encodeStateAsUpdate` builds it. No API or wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

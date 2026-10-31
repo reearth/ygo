@@ -349,12 +349,11 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 	var groups []clientGroup
 	for client, items := range doc.store.clients {
 		svClock := sv.Clock(client)
-		var relevant []*Item
-		for _, item := range items {
-			if item.ID.Clock+uint64(item.Content.Len()) > svClock {
-				relevant = append(relevant, item)
-			}
-		}
+		// A client's items are clock-sorted and disjoint, so the ones the peer
+		// lacks are a suffix, found by binary search as Yjs writeStructs does.
+		relevant := items[sort.Search(len(items), func(i int) bool {
+			return items[i].ID.Clock+uint64(items[i].Content.Len()) > svClock
+		}):]
 		if len(relevant) > 0 {
 			groups = append(groups, clientGroup{client, relevant, svClock})
 		}
