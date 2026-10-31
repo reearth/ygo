@@ -1,6 +1,9 @@
 package crdt
 
-import "unicode/utf8"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // Content is the payload carried by an Item.
 // Every concrete content type must implement this interface.
@@ -97,6 +100,10 @@ func (c *ContentDeleted) Splice(offset int) Content {
 type ContentString struct {
 	Str      string
 	utf16Len int
+	// grow holds Str's bytes with room to append, so a run that merges one
+	// transaction at a time costs amortised linear time. It is used only while
+	// its contents are exactly Str.
+	grow *strings.Builder
 }
 
 func NewContentString(s string) *ContentString {
@@ -117,6 +124,18 @@ func (c *ContentString) Splice(offset int) Content {
 	c.Str = left
 	c.utf16Len = offset
 	return &ContentString{Str: right, utf16Len: rightLen}
+}
+
+// append adds r's text to the end of c.
+func (c *ContentString) append(r *ContentString) {
+	if c.grow == nil || c.grow.String() != c.Str {
+		c.grow = &strings.Builder{}
+		c.grow.Grow(len(c.Str) + len(r.Str))
+		c.grow.WriteString(c.Str)
+	}
+	c.grow.WriteString(r.Str)
+	c.Str = c.grow.String()
+	c.utf16Len += r.utf16Len
 }
 
 // ContentBinary holds raw bytes (e.g. binary file attachments).

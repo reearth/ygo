@@ -437,10 +437,9 @@ func (txt *YText) Delete(txn *Transaction, index, length int) {
 //   - A closer `{key: nil}` is redundant when no live opener for the same
 //     key precedes it within scope.
 //
-// The outer walk is bounded: we stop after seeing one live countable item
-// past the deletion, which is enough to cover markers whose scope was
-// changed by this delete. Markers further away are unaffected by this
-// specific deletion.
+// The outer walk stops at the first live countable item after the deletion,
+// where Yjs's cleanupFormattingGap stops: markers past it keep their scope.
+// The redundancy rules above are ygo's own, not cleanupFormattingGap's.
 func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *Item) {
 	var node *Item
 	if startAnchor == nil {
@@ -452,7 +451,6 @@ func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *
 	} else {
 		node = startAnchor.Right
 	}
-	seenLivePast := false
 	for node != nil {
 		next := node.Right
 		if node.Deleted {
@@ -510,12 +508,7 @@ func (txt *YText) cleanupDanglingFormatsInRegion(txn *Transaction, startAnchor *
 			continue
 		}
 		if node.Content.IsCountable() {
-			if seenLivePast {
-				// We've seen one live countable past the deletion; markers
-				// further on couldn't have been affected by this delete.
-				break
-			}
-			seenLivePast = true
+			break
 		}
 		node = next
 	}

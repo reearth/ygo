@@ -255,6 +255,8 @@ GC is on by default and is configured at construction — `crdt.New(crdt.WithGC(
 
 **Automatic.** With GC enabled, each transaction frees the content of the items it deleted, at commit, after observer deltas have been computed and before the document lock is released — so no goroutine ever observes a partially collected state. Auto-GC is **suspended while any `UndoManager` is registered**: undoing a deletion re-inserts a copy of the deleted item's content, which requires that content still to be present. Yjs solves this with a per-item keep flag; ygo takes the conservative position of disabling automatic collection entirely for the lifetime of the undo manager.
 
+**Struct merge.** After that, with or without GC, each transaction merges the structs it deleted or added with their same-client neighbours wherever the pair encodes as one struct, as Yjs's transaction cleanup does. A run typed or deleted one transaction at a time therefore stays one struct in memory and on the wire, as in Yjs.
+
 **Manual — tombstone reclamation.** `crdt.RunGC(doc)` is the explicit entry point, and remains available when auto-GC is suspended. It does two passes: it replaces deleted item content with lightweight `ContentDeleted` tombstones, then **merges adjacent tombstones from the same client into single nodes**, compacting the linked list so future origin lookups traverse fewer items. Both the structural position information CRDT correctness depends on and the tombstone lengths survive; only the content is discarded. `RunGC` is a no-op when GC is disabled.
 
 Reclamation is destructive with respect to history: after `RunGC`, `RestoreDocument` can no longer reconstruct states that predate the collected deletions. Take any snapshots you need first.

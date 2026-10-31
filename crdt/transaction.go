@@ -2,8 +2,8 @@ package crdt
 
 import (
 	"context"
+	"slices"
 	"sort"
-	"strings"
 )
 
 // Transaction batches a set of insertions and deletions into a single atomic
@@ -19,13 +19,13 @@ type Transaction struct {
 	// changed tracks which types (and which map keys within them) were modified.
 	changed map[*abstractType]map[string]struct{}
 	// newItems collects ContentString items integrated during this transaction.
-	// Used by squashRuns to merge adjacent same-client runs after observers fire.
+	// Used by squashRuns to merge same-client runs before the transaction's
+	// update is encoded.
 	newItems []*Item
 	// mergeStructs collects right-halves produced by splitItem during this
-	// transaction. tryMergeWithLefts walks the slice at commit and re-merges
-	// each entry with its left neighbour when the split turned out to be
-	// transient (no item was inserted between them). Mirrors Yjs JS's
-	// `_mergeStructs` and powers gap #78 H2.
+	// transaction. mergeTxnStructs tries to merge each with its neighbours at
+	// commit, so a split that turned out to be transient (no item was inserted
+	// between the halves) is reversed. Mirrors Yjs JS's `_mergeStructs`.
 	mergeStructs []*Item
 	// rearbitrate queues, per parent, move targets whose winning ContentMove
 	// was tombstoned; rearbitrateMoves resolves them in one pass at commit.
@@ -141,26 +141,16 @@ func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
 // squashRuns merges adjacent ContentString items that were both created in this
 // transaction and form a contiguous clock run from the same client.
 //
-// Safety: only items with ID.Clock >= beforeState.Clock(client) are eligible,
-// ensuring pre-existing items (which snapshot clock boundaries reference) are
-// never modified.
+// It runs before the transaction's update is encoded, so the update carries
+// each new text run as one struct; mergeTxnStructs runs after the encode and
+// also merges a new run into the item it continues. Only items with ID.Clock
+// >= beforeState.Clock(client) are eligible, so the encode still starts at an
+// item boundary.
 //
-// A merged item is encoded as one struct carrying the left item's Origin and
-// OriginRight, so two items are merged only when that struct still places
-// every character where it was: the right item's Origin is the last character
-// of the run and both items share an OriginRight. These are Yjs's
-// Item.mergeWith conditions. Merging items with different right origins makes
-// every later encoding move the right item's characters on decode, and makes
-// a later insert whose origin is inside the run split it with the wrong
-// right origin.
+// Two items merge under Item.mergeable, Yjs's Item.mergeWith conditions: the
+// merged struct must still place every character where it was.
 //
-// squashRuns runs for remote applies too, so a peer's per-keystroke history
-// loads as one item per run, as Yjs's transaction cleanup does.
-//
-// Performance: uses a two-pointer (run) approach with strings.Builder so that
-// string concatenation is O(total_run_length) rather than O(n²), and tracks
-// the expected next-clock without calling left.Content.Len() on the growing
-// merged string. Store compaction is a single O(n) filter pass per client.
+// Store compaction is a single O(n) filter pass per client.
 func squashRuns(txn *Transaction) {
 	if len(txn.newItems) == 0 {
 		return
@@ -201,71 +191,21 @@ func squashRuns(txn *Transaction) {
 				continue
 			}
 
-			// Walk j forward to find all items that can be squashed into left.
-			// expectedClock tracks the clock boundary at the right edge of the
-			// current merged item, updated with each absorbed right item's
-			// original Len() — avoiding a call to left.Content.Len() (which is
-			// O(string length) and would make the loop O(n²)).
-			expectedClock := left.ID.Clock + uint64(left.Content.Len())
-			var sb strings.Builder
-			sb.WriteString(left.Content.(*ContentString).Str)
-
 			j := i + 1
-			for j < len(items) {
+			for ; j < len(items); j++ {
 				right := items[j]
-				if right.Deleted || right.ID.Clock < beforeClock {
+				// Only store neighbours merge: right's clock must follow left's.
+				if right.ID.Clock != left.ID.Clock+uint64(left.Content.Len()) || !left.mergeable(right) {
 					break
 				}
-				if expectedClock != right.ID.Clock {
-					break
-				}
-				if left.Right != right {
-					break
-				}
-				// right must continue the run: inserted directly after the
-				// run's last character, toward the same right origin.
-				if right.Origin == nil || right.Origin.Client != client || right.Origin.Clock != expectedClock-1 {
-					break
-				}
-				if !originIDEquals(left.OriginRight, right.OriginRight) {
-					break
-				}
-				// right is directly adjacent and clock-contiguous: absorb it.
-				rightLen := uint64(right.Content.Len()) // O(1) for single-char items
-				expectedClock = right.ID.Clock + rightLen
-
-				// Rewire linked list: splice right out.
-				left.Right = right.Right
-				if right.Right != nil {
-					right.Right.Left = left
-				}
-
-				// Collect right's string into the builder.
-				sb.WriteString(right.Content.(*ContentString).Str)
-
+				left.absorb(right)
 				// Schedule for store removal (appended in clock order).
 				if removedByClient == nil {
 					removedByClient = make(map[ClientID][]*Item, 1)
 				}
 				removedByClient[client] = append(removedByClient[client], right)
-
-				j++
 			}
-
 			if j > i+1 {
-				// At least one item was absorbed: commit the merged string and
-				// invalidate the position cache once for the whole run.
-				cs := left.Content.(*ContentString)
-				cs.Str = sb.String()
-				cs.utf16Len = utf16Len(cs.Str)
-				// A run squash absorbs the right items into left and splices them
-				// out of the linked list; a marker still pointing at an absorbed
-				// (now off-list) item would walk from a dangling node. Rendered
-				// positions are unchanged, but relocating each marker is Task 5's
-				// mergeWith concern — here we clear all markers (always safe).
-				if left.Parent != nil {
-					left.Parent.clearMarkers()
-				}
 				// Compact items slice: skip over all absorbed entries.
 				items = append(items[:i+1], items[j:]...)
 			}
@@ -332,144 +272,158 @@ func (t *Transaction) addSubdocRemoved(d *Doc) {
 	t.subdocsRemoved[d] = struct{}{}
 }
 
-// tryMergeWithLefts walks every right-half produced by splitItem during this
-// transaction and re-merges it with its left neighbour when the split turned
-// out to be unnecessary (#78 H2). A split is unnecessary when, by the time the
-// transaction commits, no item has been inserted between the two halves and
-// no other invariant (move arbitration, parent, ParentSub, deleted state,
-// origin pointers) blocks reunification.
+// cleanupTxnLocked finishes txn as Yjs cleanupTransactions does once its
+// observer deltas are built: it collects the content txn deleted and then
+// merges structs with mergeTxnStructs, which runs even when the GC does not.
+// Caller must hold d.mu.
 //
-// Re-merging shortens the linked list, which compounds with squashRuns (new
-// runs) and gcTxnDeleteSet (deleted runs after auto-GC) to keep documents from
-// fragmenting over long edit sessions. Mirrors Yjs JS's `tryToMergeWithLeft`.
-//
-// Caller must hold doc.mu.
-func tryMergeWithLefts(txn *Transaction) {
-	if len(txn.mergeStructs) == 0 {
-		return
+// The GC is skipped while an UndoManager is attached: undoing a deletion
+// re-inserts a copy of the deleted item's content (applyStackItem → redoItem),
+// which needs that content. Yjs keeps such items with a per-item keep flag;
+// ygo suspends the transaction GC for the undo manager's lifetime instead.
+// RunGC remains available as the explicit manual entry point.
+func cleanupTxnLocked(d *Doc, txn *Transaction) {
+	if d.gc && d.undoManagerCount == 0 {
+		gcTxnDeleteSet(d, txn)
 	}
+	mergeTxnStructs(txn)
+}
+
+// mergeTxnStructs merges structs at the end of txn as Yjs cleanupTransactions
+// does once the transaction's deleted content is collected: each struct in
+// txn's delete set, each struct txn added and each split half it recorded
+// merges with the structs on its left while each pair encodes as one struct.
+// The merge also reaches a struct of an earlier transaction, so a run typed
+// or deleted one transaction at a time stays one struct.
+func mergeTxnStructs(txn *Transaction) {
+	for client := range txn.deleteSet.clients {
+		mergeClientStructs(txn, client)
+	}
+	for client, clock := range txn.afterState {
+		if _, done := txn.deleteSet.clients[client]; !done && txn.beforeState.Clock(client) != clock {
+			mergeClientStructs(txn, client)
+		}
+	}
+	forHalfClients(txn, func(client ClientID) {
+		_, deleted := txn.deleteSet.clients[client]
+		if !deleted && txn.beforeState.Clock(client) == txn.afterState.Clock(client) {
+			mergeClientStructs(txn, client)
+		}
+	})
+}
+
+// mergeSplitHalves merges each split half txn recorded back into its left
+// half. It runs before the transaction's update is encoded, so the update
+// carries a transient split as one struct; mergeTxnStructs merges the rest
+// later.
+func mergeSplitHalves(txn *Transaction) {
 	store := txn.doc.store
-	for _, item := range txn.mergeStructs {
-		tryMergeWithLeft(item, store)
+	for _, half := range txn.mergeStructs {
+		structs := store.clients[half.ID.Client]
+		pos := findStructIndex(structs, half.ID.Clock)
+		if pos < 1 || structs[pos] != half {
+			continue
+		}
+		if left := structs[pos-1]; left.mergeable(half) {
+			left.absorb(half)
+			store.clients[half.ID.Client] = slices.Delete(structs, pos, pos+1)
+		}
 	}
 }
 
-// tryMergeWithLeft attempts to absorb item into item.Left. Returns true when
-// the merge succeeded. Conditions, all required:
-//   - both items share the same client, parent, ParentSub, MovedBy, and Deleted state
-//   - left.Right == item (still directly adjacent in the linked list)
-//   - clocks are contiguous: left.ID.Clock + left.Content.Len() == item.ID.Clock
-//   - item.Origin points to the last clock of left (Yjs origin invariant)
-//   - both items share an OriginRight (Yjs right-origin invariant)
-//   - content types match and support merging (ContentString, ContentAny,
-//     ContentJSON, ContentDeleted)
+// forHalfClients calls fn once for each client that has a split half in txn.
+func forHalfClients(txn *Transaction, fn func(ClientID)) {
+	var done map[ClientID]struct{}
+	for _, half := range txn.mergeStructs {
+		client := half.ID.Client
+		if _, ok := done[client]; ok {
+			continue
+		}
+		if done == nil {
+			done = make(map[ClientID]struct{}, 1)
+		}
+		done[client] = struct{}{}
+		fn(client)
+	}
+}
+
+// mergeSpan is a range of indices, lo to hi inclusive, into a client's
+// structs: index p names the pair of structs p-1 and p.
+type mergeSpan struct{ lo, hi int }
+
+// mergeClientStructs merges the pairs of client's structs that Yjs's
+// cleanupTransactions tries for txn: tryMergeDeleteSet for txn's deleted
+// ranges, then tryToMergeWithLefts for the structs txn added and for each
+// split half txn recorded.
 //
-// On success: left's content is extended in place, the linked list is spliced
-// past item, and item is removed from the store.
-func tryMergeWithLeft(item *Item, store *StructStore) bool {
-	left := item.Left
-	if left == nil {
-		return false
+// Whether two neighbours merge does not depend on the merges around them, and
+// every change that makes two neighbours mergeable (adding, deleting or
+// splitting a struct) puts the pair in a span. So no mergeable pair is left
+// from earlier transactions, and one forward pass gives Yjs's result and moves
+// the client's structs once. The exception is a change of a struct's MovedBy,
+// an ygo extension Yjs does not have: a pair it makes mergeable stays apart
+// until a later transaction tries it.
+func mergeClientStructs(txn *Transaction, client ClientID) {
+	store := txn.doc.store
+	structs := store.clients[client]
+	n := len(structs)
+	if n < 2 {
+		return
 	}
-	if left.ID.Client != item.ID.Client {
-		return false
-	}
-	if left.Right != item {
-		return false
-	}
-	if left.ID.Clock+uint64(left.Content.Len()) != item.ID.Clock {
-		return false
-	}
-	if left.Deleted != item.Deleted {
-		return false
-	}
-	if !parentSubEqual(left.ParentSub, item.ParentSub) {
-		return false
-	}
-	if left.Parent != item.Parent {
-		return false
-	}
-	if left.MovedBy != item.MovedBy {
-		return false
-	}
-	// A merge would drop the right half's redone link (Yjs mergeWith parity).
-	if left.redone != nil || item.redone != nil {
-		return false
-	}
-	// item.Origin must reference the last clock of left for the split to be
-	// reversible. (splitItem always sets Origin this way; foreign updates may
-	// set Origin differently, in which case we leave the items split.)
-	if item.Origin == nil {
-		return false
-	}
-	expectedLast := left.ID.Clock + uint64(left.Content.Len()) - 1
-	if item.Origin.Client != left.ID.Client || item.Origin.Clock != expectedLast {
-		return false
-	}
-	// The merged item keeps left's OriginRight. splitItem copies it to the
-	// right half, so a split being reversed always matches; the check keeps
-	// this merge to Yjs's Item.mergeWith conditions.
-	if !originIDEquals(left.OriginRight, item.OriginRight) {
-		return false
-	}
-
-	// Content-type match + in-place extension.
-	switch lc := left.Content.(type) {
-	case *ContentString:
-		rc, ok := item.Content.(*ContentString)
-		if !ok {
-			return false
-		}
-		lc.Str += rc.Str
-		lc.utf16Len += rc.utf16Len
-	case *ContentAny:
-		rc, ok := item.Content.(*ContentAny)
-		if !ok {
-			return false
-		}
-		lc.Vals = append(lc.Vals, rc.Vals...)
-	case *ContentJSON:
-		rc, ok := item.Content.(*ContentJSON)
-		if !ok {
-			return false
-		}
-		lc.Vals = append(lc.Vals, rc.Vals...)
-	case *ContentDeleted:
-		rc, ok := item.Content.(*ContentDeleted)
-		if !ok {
-			return false
-		}
-		lc.length += rc.length
-	default:
-		// ContentEmbed, ContentType, ContentFormat, ContentBinary, ContentDoc,
-		// and ContentMove are single-value or not splittable — never appear
-		// in mergeStructs in mergeable form.
-		return false
-	}
-
-	// Splice item out of the linked list; a key entry moves to the merged item.
-	if item.ParentSub != nil && item.Parent != nil && item.Parent.itemMap[*item.ParentSub] == item {
-		item.Parent.itemMap[*item.ParentSub] = left
-	}
-	left.Right = item.Right
-	if item.Right != nil {
-		item.Right.Left = left
-	}
-	// item is absorbed into left and removed from the list. A marker still
-	// pointing at item would be left dangling; rendered positions don't change,
-	// but marker relocation on merge is Task 5's mergeWith concern, so clear all
-	// markers here (always safe).
-	if left.Parent != nil {
-		left.Parent.clearMarkers()
-	}
-
-	// Remove item from the store's per-client slice.
-	storeItems := store.clients[item.ID.Client]
-	for i, it := range storeItems {
-		if it == item {
-			store.clients[item.ID.Client] = append(storeItems[:i], storeItems[i+1:]...)
-			break
+	ranges := txn.deleteSet.clients[client]
+	spans := make([]mergeSpan, 0, len(ranges)+1)
+	for _, r := range ranges {
+		// From the struct after the range down to the range's first struct.
+		lo := max(sort.Search(n, func(i int) bool { return structs[i].ID.Clock >= r.Clock }), 1)
+		if hi := min(n-1, findStructIndex(structs, r.Clock+r.Len-1)+1); lo <= hi {
+			spans = append(spans, mergeSpan{lo, hi})
 		}
 	}
-	return true
+	if before := txn.beforeState.Clock(client); before != txn.afterState.Clock(client) {
+		// The added structs, the first of them with the struct before it.
+		spans = append(spans, mergeSpan{max(findStructIndex(structs, before), 1), n - 1})
+	}
+	for _, half := range txn.mergeStructs {
+		if half.ID.Client == client {
+			// The half with the struct before it and the struct after it.
+			pos := findStructIndex(structs, half.ID.Clock)
+			spans = append(spans, mergeSpan{max(pos, 1), min(pos+1, n-1)})
+		}
+	}
+	if len(spans) == 0 {
+		return
+	}
+	// A merge carries on to the left while the pairs there merge.
+	for i := range spans {
+		for spans[i].lo > 1 && structs[spans[i].lo-1].mergeable(structs[spans[i].lo]) {
+			spans[i].lo--
+		}
+	}
+	slices.SortFunc(spans, func(a, b mergeSpan) int { return a.lo - b.lo })
+	w, next := 0, 0 // structs[:w] is done; structs[next:] is not yet visited
+	for i := 0; i < len(spans); {
+		lo, hi := spans[i].lo, spans[i].hi
+		for i++; i < len(spans) && spans[i].lo <= hi+1; i++ {
+			hi = max(hi, spans[i].hi)
+		}
+		if w != next {
+			copy(structs[w:], structs[next:lo])
+		}
+		w += lo - next
+		for r := lo; r <= hi; r++ {
+			if structs[w-1].mergeable(structs[r]) {
+				structs[w-1].absorb(structs[r])
+			} else {
+				structs[w] = structs[r]
+				w++
+			}
+		}
+		next = hi + 1
+	}
+	if w == next {
+		return
+	}
+	w += copy(structs[w:], structs[next:])
+	clear(structs[w:])
+	store.clients[client] = structs[:w]
 }

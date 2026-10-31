@@ -445,11 +445,10 @@ func BenchmarkConcurrentSamePositionInsert(b *testing.B) {
 // inserting one character at a time at a random position, each in its own
 // transaction. Two things matter about this shape:
 //
-//   - One transaction per character means squashRuns (transaction.go) — which
-//     only merges items created within the SAME transaction — never collapses
-//     them back together, so the linked list stays genuinely fragmented into
-//     target separate Items. That is what makes a cold linear walk from
-//     t.start expensive.
+//   - No insert continues the previous one (fragmenter), so the
+//     transaction-end merge never joins two of them, and the linked list stays
+//     genuinely fragmented into target separate Items. That is what makes a
+//     cold linear walk from t.start expensive.
 //   - Every item has length exactly 1, so a later Insert at any position
 //     always lands ON an item boundary (leftNeighbourAt's offset is always
 //     == len) and never INSIDE the middle of a multi-character item. That
@@ -466,9 +465,9 @@ func BenchmarkConcurrentSamePositionInsert(b *testing.B) {
 func buildFragmentedTextDoc(target int, seed int64) (*Doc, *YText) {
 	doc := newTestDoc(1)
 	txt := doc.GetText("text")
-	rng := rand.New(rand.NewSource(seed))
+	nextPos := fragmenter(rand.New(rand.NewSource(seed)))
 	for i := 0; i < target; i++ {
-		pos := rng.Intn(txt.Len() + 1)
+		pos := nextPos(txt.Len() + 1)
 		doc.Transact(func(txn *Transaction) {
 			txt.Insert(txn, pos, "a", nil)
 		})
@@ -482,14 +481,29 @@ func buildFragmentedTextDoc(target int, seed int64) (*Doc, *YText) {
 func buildFragmentedArrayDoc(target int, seed int64) (*Doc, *YArray) {
 	doc := newTestDoc(1)
 	arr := doc.GetArray("arr")
-	rng := rand.New(rand.NewSource(seed))
+	nextPos := fragmenter(rand.New(rand.NewSource(seed)))
 	for i := 0; i < target; i++ {
-		pos := rng.Intn(arr.Len() + 1)
+		pos := nextPos(arr.Len() + 1)
 		doc.Transact(func(txn *Transaction) {
 			arr.Insert(txn, pos, []any{i})
 		})
 	}
 	return doc, arr
+}
+
+// fragmenter returns a source of random insert positions below n. An insert
+// directly after the previous one would continue that item and merge with it
+// at transaction end, so it goes before the previous one instead.
+func fragmenter(rng *rand.Rand) func(n int) int {
+	last := -2
+	return func(n int) int {
+		pos := rng.Intn(n)
+		if pos == last+1 {
+			pos = last
+		}
+		last = pos
+		return pos
+	}
 }
 
 // benchInsertRandom measures inserting a single character at a

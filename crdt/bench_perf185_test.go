@@ -19,31 +19,20 @@ import (
 // them per character, which cost two encode+apply round trips per character and
 // was O(n^2) — 4k characters took 60ms, making large sizes untestable.
 //
-// Two independent properties keep it fragmented, and it is worth being precise
-// about which does what, because a future edit could remove one while believing
-// the other is doing the work:
-//
-//   - Each insert is its own transaction, so squashRuns — which only collapses
-//     a same-client run created within ONE transaction — never sees a run to
-//     collapse. Verified: 500 SEQUENTIAL end-inserts, one per transaction, still
-//     produce 500 distinct items.
-//   - Positions are random, so items are not contiguous in the linked list even
-//     when they do share a transaction. Verified: 500 random-position inserts in
-//     a SINGLE transaction also stay distinct.
-//
-// Note that randomness alone does not guarantee non-contiguity — two draws can
-// land adjacent — so the per-transaction property is the load-bearing one; the
-// random positions additionally split the seed item, which is why the item count
-// is n+4 rather than n+1.
+// An insert directly after the previous one would continue its item and merge
+// with it at transaction end, as in Yjs, so the fixture places inserts with
+// fragmenter and every inserted character stays its own item. The random
+// positions additionally split the seed item, which is why the item count is
+// n+4 rather than n+1.
 //
 // The RNG is seeded so the shape is identical across runs and machines.
 func newFragmentedDoc(n int) (*Doc, *YText) {
 	doc := newTestDoc(1)
 	txt := doc.GetText("t")
 	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "seed", nil) })
-	rng := rand.New(rand.NewSource(42))
+	nextPos := fragmenter(rand.New(rand.NewSource(42)))
 	for i := 0; i < n; i++ {
-		pos := rng.Intn(txt.Len())
+		pos := nextPos(txt.Len())
 		doc.Transact(func(txn *Transaction) { txt.Insert(txn, pos, "x", nil) })
 	}
 	return doc, txt
