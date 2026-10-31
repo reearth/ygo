@@ -55,6 +55,10 @@ import (
 // subdocument is embedded again. Create a second Doc with the same guid instead.
 var ErrSubdocAlreadyIntegrated = errors.New("ygo/crdt: subdocument already integrated; create a second instance with the same guid")
 
+// ErrRootTypeMismatch is raised when a named root is accessed as a different
+// shared type than the one already stored in the document.
+var ErrRootTypeMismatch = errors.New("crdt: root type mismatch")
+
 // DocOption configures a Doc at creation time.
 type DocOption func(*Doc)
 
@@ -353,7 +357,7 @@ func (d *Doc) upgradeRawType(raw *rawType, dst sharedType, name string) {
 // root accessor with a different type must not replace the root and discard
 // its contents.
 func panicRootTypeMismatch(name string, existing sharedType, requested string) {
-	panic(fmt.Sprintf("crdt: root %q has type %T; cannot access it as %s", name, existing, requested))
+	panic(fmt.Errorf("%w: root %q has type %T; cannot access it as %s", ErrRootTypeMismatch, name, existing, requested))
 }
 
 // getArrayLocked is the lock-free body of GetArray. Callers must hold d.mu —

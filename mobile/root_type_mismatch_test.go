@@ -1,6 +1,7 @@
 package mobile
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -92,7 +93,10 @@ func TestUnit_Mobile_RootTypeMismatchReturnsErrors(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected root type mismatch error")
 			}
-			if !strings.Contains(err.Error(), `crdt: root "root" has type`) || !strings.Contains(err.Error(), "cannot access it as") {
+			if !errors.Is(err, crdt.ErrRootTypeMismatch) {
+				t.Fatalf("error %v does not wrap crdt.ErrRootTypeMismatch", err)
+			}
+			if !strings.Contains(err.Error(), `root "root" has type`) || !strings.Contains(err.Error(), "cannot access it as") {
 				t.Fatalf("unexpected mismatch error: %v", err)
 			}
 			tt.verify(t, doc)

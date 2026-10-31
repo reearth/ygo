@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -25,8 +26,12 @@ func TestRootTypeMismatchPanicsWithoutReplacingExistingRoot(t *testing.T) {
 
 			func() {
 				defer func() {
-					if recovered := recover(); recovered == nil {
+					recovered := recover()
+					if recovered == nil {
 						t.Fatal("accessing a map root as a different type should panic")
+					}
+					if err, ok := recovered.(error); !ok || !errors.Is(err, ErrRootTypeMismatch) {
+						t.Fatalf("panic = %v, want ErrRootTypeMismatch", recovered)
 					}
 				}()
 				test.access(doc)
@@ -35,6 +40,38 @@ func TestRootTypeMismatchPanicsWithoutReplacingExistingRoot(t *testing.T) {
 			if got, ok := doc.GetMap("root").Get("key"); !ok || got != "value" {
 				t.Fatalf("existing map root was changed: got (%v, %v), want (value, true)", got, ok)
 			}
+		})
+	}
+}
+
+func TestRootTypeMismatchPanicsForEveryRootKind(t *testing.T) {
+	tests := []struct {
+		name       string
+		createRoot func(*Doc)
+		access     func(*Doc)
+	}{
+		{
+			name:       "text as map",
+			createRoot: func(doc *Doc) { doc.GetText("root") },
+			access:     func(doc *Doc) { doc.GetMap("root") },
+		},
+		{
+			name:       "xml fragment as text",
+			createRoot: func(doc *Doc) { doc.GetXmlFragment("root") },
+			access:     func(doc *Doc) { doc.GetText("root") },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := New()
+			tt.createRoot(doc)
+			defer func() {
+				recovered := recover()
+				if err, ok := recovered.(error); !ok || !errors.Is(err, ErrRootTypeMismatch) {
+					t.Fatalf("panic = %v, want ErrRootTypeMismatch", recovered)
+				}
+			}()
+			tt.access(doc)
 		})
 	}
 }
