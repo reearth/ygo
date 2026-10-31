@@ -370,12 +370,12 @@ func (u *UndoManager) applyStackItem(item *StackItem, others []DeleteSet) *Stack
 	u.doc.Transact(func(txn *Transaction) {
 		// Step 1: delete items that were inserted by the captured transaction(s).
 		// An inserted item whose deletion was later undone lives on as its redone
-		// copy, which is what must be deleted (Yjs followRedone).
+		// copy, which is what must be deleted (Yjs followRedone, here redoneCopy).
 		var toDelete []*Item
 		u.iterateItems(txn, item.insertions, func(it *Item) { toDelete = append(toDelete, it) })
 		performed := false
 		for _, it := range toDelete {
-			it = u.followRedone(txn, it)
+			it = u.redoneCopy(txn, it)
 			if it != nil && !it.Deleted && u.itemInScope(it) {
 				it.delete(txn)
 				performed = true
@@ -732,13 +732,32 @@ func deletedByStacks(stacks []DeleteSet, id ID) bool {
 	return false
 }
 
-// followRedone returns the end of item's redone chain (item itself when
-// it was never redone).
+// followRedone returns the end of item's redone chain (item itself when it
+// was never redone), splitting at each hop as the traces in Yjs redoItem do;
+// the port of Yjs followRedone is redoneCopy.
 func (u *UndoManager) followRedone(txn *Transaction, item *Item) *Item {
 	for item != nil && item.redone != nil {
 		item = u.doc.store.getItemCleanStart(txn, *item.redone)
 	}
 	return item
+}
+
+// redoneCopy returns the struct holding item's content at the end of its
+// redone chain (item itself when never redone), carrying the offset and
+// splitting only that last struct as Yjs followRedone and popStackItem do,
+// since a split half keeps its redone link and never merges back.
+func (u *UndoManager) redoneCopy(txn *Transaction, item *Item) *Item {
+	var diff uint64
+	for item != nil && item.redone != nil {
+		id := ID{Client: item.redone.Client, Clock: item.redone.Clock + diff}
+		if item = u.doc.store.Find(id); item != nil {
+			diff = id.Clock - item.ID.Clock
+		}
+	}
+	if item == nil || diff == 0 {
+		return item
+	}
+	return u.doc.store.getItemCleanStart(txn, ID{Client: item.ID.Client, Clock: item.ID.Clock + diff})
 }
 
 // iterateItems calls fn for every store item inside ds, splitting items at

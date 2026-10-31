@@ -1001,6 +1001,41 @@ func BenchmarkUndoManager_UndoMapClear(b *testing.B) {
 	}
 }
 
+// BenchmarkUndoManager_UndoInsertsThroughRedoneCopies undoes 1k one-element
+// inserts whose elements two earlier undos restored as one run each, so every
+// undo follows a redone chain into the middle of both copies.
+func BenchmarkUndoManager_UndoInsertsThroughRedoneCopies(b *testing.B) {
+	const n = 1_000
+	for range b.N {
+		b.StopTimer()
+		doc := New(WithClientID(1))
+		a := doc.GetArray("a")
+		um := NewUndoManager(doc, []SharedType{a})
+		step := func(fn func(*Transaction)) {
+			doc.Transact(fn)
+			um.StopCapturing()
+		}
+		step(func(txn *Transaction) { a.InsertType(txn, 0, NewArrayPrelim()) })
+		nested := a.Get(0).(*YArray)
+		for i := range n {
+			step(func(txn *Transaction) { nested.Insert(txn, i, []any{i}) })
+		}
+		for range 2 {
+			step(func(txn *Transaction) {
+				a.Delete(txn, 0, 1)
+				a.Insert(txn, 0, []any{-1})
+			})
+			um.Undo()
+		}
+		b.StartTimer()
+		for range n {
+			if !um.Undo() {
+				b.Fatal("nothing undone")
+			}
+		}
+	}
+}
+
 // buildScatteredFormattedText builds a text of n one-character items inserted
 // at seeded-random positions, so no two merge and a walk over it is O(n).
 func buildScatteredFormattedText(n int) (*Doc, *YText) {

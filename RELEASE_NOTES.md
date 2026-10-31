@@ -1,3 +1,12 @@
+## v1.55.1
+
+- **An undo that follows restored copies splits only the last one, as Yjs
+  does.** When an undo deleted an item that earlier undos had restored more
+  than once as part of a longer copy, every copy on the way was split at that
+  item. The split parts never merged again, so the document held more structs
+  than Yjs and encoded to other V1 and V2 bytes. The content was already the
+  same. Only code that compares or stores encoded state sees the change.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
