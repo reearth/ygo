@@ -5,6 +5,9 @@
 - **Faster full-state encodes and snapshots after deletions.** The delete set
   that `EncodeStateAsUpdateV1`, `EncodeStateAsUpdateV2`, `CaptureSnapshot` and
   `DeleteSetFromDoc` write is built in one pass. The bytes are unchanged.
+- **Faster encodes against a state vector.** `EncodeStateAsUpdateV1`,
+  `EncodeStateAsUpdateV2` and the update each transaction hands to `OnUpdate`
+  no longer visit every item the peer already has. The bytes are unchanged.
 
 ## v1.55.0
 

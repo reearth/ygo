@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass.** Each client's ranges are built in clock order and stored once, as
   Yjs's `createDeleteSetFromStructStore` does, in place of one map write per
   deleted item and a sort per client. The bytes do not change.
+- **`crdt`: encoding against a state vector skips the items the peer has by
+  binary search.** `EncodeStateAsUpdateV1`, `EncodeStateAsUpdateV2` and each
+  transaction's `OnUpdate` encode called `Content.Len` on every item of every
+  client and copied the matches; a client's items past the state vector are a
+  suffix of its clock-sorted items, now found with `sort.Search`, as Yjs's
+  `writeStructs` does. The bytes do not change.
 
 ## [1.55.0] — 2026-10-31
 
