@@ -983,16 +983,28 @@ type Server struct {
 
 	// OnTokenAuth, if non-nil, validates the token from a Hocuspocus in-band
 	// Auth message (tag 2). A nil error accepts the connection and replies
-	// Authenticated (scope from the returned ConnectionConfig.ReadOnly); a
-	// non-nil error replies PermissionDenied(err) and closes with WS 4401.
-	// When nil, tag-2 frames are silently ignored (unchanged legacy behavior).
+	// Authenticated (scope from the returned ConnectionConfig.ReadOnly, which
+	// replaces the one Authorize gave the connection); a non-nil error replies
+	// PermissionDenied(err) and closes with WS 4401. When OnTokenAuth and
+	// OnTokenAuthContext are both nil, tag-2 frames are silently ignored
+	// (unchanged legacy behavior).
 	//
 	// OnTokenAuth complements the HTTP-boundary AuthFunc/Authorize; it does not
 	// replace them. IMPORTANT: it is NOT a document-confidentiality gate — the
 	// initial sync is served before any PermissionDenied, so deployments that
 	// must withhold document contents from unauthenticated clients must reject
-	// them at the boundary via AuthFunc/Authorize.
+	// them at the boundary via AuthFunc/Authorize. When OnTokenAuthContext is
+	// set, it is called instead and OnTokenAuth is ignored.
 	OnTokenAuth func(room, token string) (ConnectionConfig, error)
+
+	// OnTokenAuthContext is OnTokenAuth with the context of the request
+	// ServeHTTP served the connection on (r.Context(), with the values the
+	// embedder put on it), so the hook knows which connection sent the token:
+	// two connections to one room can send the same token. It has OnTokenAuth's
+	// contract, and takes precedence over it when both are set. The hook runs
+	// on the connection's read loop, so neither a client disconnect nor
+	// Shutdown cancels ctx while it runs: bound any wait in the hook.
+	OnTokenAuthContext func(ctx context.Context, room, token string) (ConnectionConfig, error)
 
 	// OnLoadDocument, if non-nil, is called once per room immediately
 	// after the document has been bootstrapped from the PersistenceAdapter
@@ -2069,6 +2081,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		limiter:           s.newPeerLimiter(),
 		readOnly:          readOnly,
 		hocuspocusFraming: s.HocuspocusFraming,
+		ctx:               r.Context(),
 	}
 
 	// Verify the room is still in the server map before adding the peer.
