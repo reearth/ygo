@@ -75,6 +75,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are now dropped without a log, the writer's failed write after a close the
   server made is logged at Debug, and no full-state resync is built for the
   peer.
+- **`provider/websocket`: the last peer's leave no longer evicts a room an
+  `Apply` is inside.** With the default `RoomIdleTimeout == 0`, the room was
+  evicted as soon as its last peer left, also while an `Apply` callback, a
+  relay `Inject` or a join was inside it, so the callback's later writes went
+  to a document the server no longer held. The room now stays resident until
+  a later last-peer leave or `CloseRoom` evicts it, and `OnUnloadDocument`
+  fires then, not with `OnLastPeer`.
 
 ## [1.55.0] — 2026-10-31
 

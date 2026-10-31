@@ -877,6 +877,32 @@ func TestUnit_CloseRoom_WithPersistence_DrainsBeforeReturn(t *testing.T) {
 	require.NotNil(t, stored)
 }
 
+// TestUnit_LastPeerLeave_ApplyInFlight_KeepsRoom checks that the last peer's
+// leave does not evict a room an Apply is inside, with the default eager evict.
+func TestUnit_LastPeerLeave_ApplyInFlight_KeepsRoom(t *testing.T) {
+	srv := ygws.NewServer()
+	left := make(chan struct{})
+	srv.OnLastPeer = func(context.Context, string) { close(left) }
+	httpSrv := httptest.NewServer(srv)
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	drainHandshake(t, conn, crdt.New())
+
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "before", "1") })
+		require.NoError(t, conn.Close())
+		recv(t, left, "the last peer to leave") // OnLastPeer fires after the eviction decision
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "after", "2") })
+	}))
+
+	doc := srv.GetDoc("room")
+	require.NotNil(t, doc, "the room an Apply was writing must still be resident")
+	got, ok := doc.GetMap("m").Get("after")
+	require.True(t, ok, "the mutation made after the last peer left was lost")
+	assert.Equal(t, "2", got)
+}
+
 // TestUnit_Apply_RelaysToOtherNodes is the regression test for the
 // zerobase-collision bug: Server.Apply's own origin sentinel
 // (`origin := new(struct{})` in Apply) and AttachRelay's echo-guard sentinel

@@ -646,8 +646,7 @@ func (p *peer) handleDisconnect() {
 		// a flush failure still leaves the room alive exactly as before
 		// (evict stays false), matching pre-#183 behaviour, and does NOT stamp
 		// idleSince — an unflushed room isn't safely idle. RoomIdleTimeout==0
-		// takes the exact pre-#183 branch (evict = stillEmpty && flushOK), so
-		// behaviour for existing callers is byte-identical.
+		// evicts when stillEmpty && flushOK and no caller is inside the room.
 		stillEmpty := false
 		evict := false
 		if empty {
@@ -658,7 +657,8 @@ func (p *peer) handleDisconnect() {
 			if stillEmpty && flushOK {
 				if idleTimeout > 0 {
 					rm.idleSince = time.Now()
-				} else {
+				} else if rm.inflight == 0 {
+					// A caller inside the room would lose its later writes, so the room stays resident.
 					evict = true
 				}
 			}
