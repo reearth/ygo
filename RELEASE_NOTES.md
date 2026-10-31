@@ -1,3 +1,15 @@
+## v1.55.0
+
+**Who is affected: nobody, unless you choose to be.** Servers that set only
+`OnTokenAuth` see no change.
+
+`OnTokenAuth` receives the room and the token, and nothing that says which
+connection sent it, so a server could not give two connections that send the
+same token different answers. The new `Server.OnTokenAuthContext` hook takes
+the connection's request context as well: put a value on it before
+`ServeHTTP` (for example with `r.WithContext`) and read it in the hook. When
+both hooks are set, only `OnTokenAuthContext` is called.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully

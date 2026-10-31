@@ -983,16 +983,32 @@ type Server struct {
 
 	// OnTokenAuth, if non-nil, validates the token from a Hocuspocus in-band
 	// Auth message (tag 2). A nil error accepts the connection and replies
-	// Authenticated (scope from the returned ConnectionConfig.ReadOnly); a
-	// non-nil error replies PermissionDenied(err) and closes with WS 4401.
-	// When nil, tag-2 frames are silently ignored (unchanged legacy behavior).
+	// Authenticated (scope from the returned ConnectionConfig.ReadOnly, which
+	// replaces the one Authorize gave the connection); a non-nil error replies
+	// PermissionDenied(err) and closes with WS 4401. When OnTokenAuth and
+	// OnTokenAuthContext are both nil, tag-2 frames are silently ignored
+	// (unchanged legacy behavior).
 	//
 	// OnTokenAuth complements the HTTP-boundary AuthFunc/Authorize; it does not
 	// replace them. IMPORTANT: it is NOT a document-confidentiality gate — the
 	// initial sync is served before any PermissionDenied, so deployments that
 	// must withhold document contents from unauthenticated clients must reject
-	// them at the boundary via AuthFunc/Authorize.
+	// them at the boundary via AuthFunc/Authorize. When OnTokenAuthContext is
+	// set, it is called instead and OnTokenAuth is ignored.
 	OnTokenAuth func(room, token string) (ConnectionConfig, error)
+
+	// OnTokenAuthContext is OnTokenAuth with the context of the request
+	// ServeHTTP served the connection on (r.Context(), with the values the
+	// embedder put on it). Nothing on ctx names the connection unless the
+	// embedder puts it there: to tell apart two connections to one room that
+	// send the same token, put a connection key on r.Context() before
+	// ServeHTTP, and keep any per-connection state under that key. It has
+	// OnTokenAuth's contract, and takes precedence over it when both are set.
+	// The hook runs on the connection's read loop, before ServeHTTP returns.
+	// Neither a client disconnect nor Shutdown cancels ctx while it runs, only
+	// a cancel the embedder put on r.Context() does: bound any wait in the
+	// hook.
+	OnTokenAuthContext func(ctx context.Context, room, token string) (ConnectionConfig, error)
 
 	// OnLoadDocument, if non-nil, is called once per room immediately
 	// after the document has been bootstrapped from the PersistenceAdapter
@@ -2069,6 +2085,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		limiter:           s.newPeerLimiter(),
 		readOnly:          readOnly,
 		hocuspocusFraming: s.HocuspocusFraming,
+		ctx:               r.Context(),
 	}
 
 	// Verify the room is still in the server map before adding the peer.
@@ -2131,9 +2148,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = ws.Close() // close errors during teardown are expected; not logged
 	}()
 
-	// Close the WebSocket when the HTTP request context is cancelled
-	// (e.g. graceful server shutdown via Shutdown, or client disconnect
-	// detected by the HTTP layer). This unblocks the read loop below.
+	// Close the WebSocket when the embedder cancels the request context, or on
+	// Shutdown (shutdownCh). This unblocks the read loop below. net/http does
+	// not cancel the context of a hijacked connection before ServeHTTP returns.
 	ctx := r.Context()
 	go func() {
 		select {

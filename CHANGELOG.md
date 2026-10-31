@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.0] — 2026-10-31
+
+### Added
+
+- **`provider/websocket`: `Server.OnTokenAuthContext`, `OnTokenAuth` with the
+  connection's request context.** The hook receives the `r.Context()` that
+  `ServeHTTP` served the connection on, with the values the embedder put on
+  it, so it can tell apart two connections to one room that send the same
+  token. It is called in place of `OnTokenAuth` when both are set;
+  `OnTokenAuth` alone behaves as before.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

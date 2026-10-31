@@ -40,6 +40,9 @@ type peer struct {
 	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
 	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
+	// ctx is the request context ServeHTTP served this connection on, which
+	// Server.OnTokenAuthContext receives.
+	ctx context.Context
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -326,12 +329,17 @@ func (p *peer) discardMalformedSync(err error) {
 }
 
 // handleAuth processes a Hocuspocus in-band Auth (tag 2) sub-message. No-op
-// when Server.OnTokenAuth is nil (backward compatible with the legacy
-// silent-ignore behavior).
+// when Server.OnTokenAuth and Server.OnTokenAuthContext are both nil
+// (backward compatible with the legacy silent-ignore behavior).
 func (p *peer) handleAuth(dec *encoding.Decoder) {
-	hook := p.server.OnTokenAuth
+	hookName, hook := "OnTokenAuthContext", p.server.OnTokenAuthContext
 	if hook == nil {
-		return
+		legacy := p.server.OnTokenAuth
+		if legacy == nil {
+			return
+		}
+		hookName = "OnTokenAuth"
+		hook = func(_ context.Context, room, token string) (ConnectionConfig, error) { return legacy(room, token) }
 	}
 	subType, err := dec.ReadVarUint()
 	if err != nil || subType != authTypeToken {
@@ -343,7 +351,7 @@ func (p *peer) handleAuth(dec *encoding.Decoder) {
 		return
 	}
 
-	cfg, authErr := p.safeTokenAuth(hook, token)
+	cfg, authErr := p.safeTokenAuth(hookName, hook, token)
 	if authErr != nil {
 		p.write(encodeAuthMessage(authTypePermissionDenied, authErr.Error()))
 		// Full error text goes in the PermissionDenied data frame above; the
@@ -361,16 +369,16 @@ func (p *peer) handleAuth(dec *encoding.Decoder) {
 	p.write(encodeAuthMessage(authTypeAuthenticated, scope))
 }
 
-// safeTokenAuth calls the hook, converting a panic into a denial.
-func (p *peer) safeTokenAuth(hook func(string, string) (ConnectionConfig, error), token string) (cfg ConnectionConfig, err error) {
+// safeTokenAuth calls hook, converting a panic into a denial.
+func (p *peer) safeTokenAuth(hookName string, hook func(context.Context, string, string) (ConnectionConfig, error), token string) (cfg ConnectionConfig, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			p.server.log().Warn("OnTokenAuth panicked; denying", "room", p.roomName, "panic", r)
+			p.server.log().Warn(hookName+" panicked; denying", "room", p.roomName, "panic", r)
 			cfg = ConnectionConfig{}
 			err = fmt.Errorf("authentication error")
 		}
 	}()
-	return hook(p.roomName, token)
+	return hook(p.ctx, p.roomName, token)
 }
 
 // encodeAuthMessage builds a tag-2 auth reply: VarUint(msgAuth) VarUint(sub)
