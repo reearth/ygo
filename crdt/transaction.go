@@ -74,11 +74,22 @@ type Transaction struct {
 	// apply's landed update carries them (encodeTxnV1Locked), as the update it
 	// was handed does.
 	parkedItems []*Item
+	// parkedDeletes are the delete ranges this transaction parked, waiting for
+	// the structs they delete; a failed apply's landed update carries them too.
+	parkedDeletes DeleteSet
 }
 
 // noteParkedItem records item, which this transaction parked.
 func (t *Transaction) noteParkedItem(item *Item) {
 	t.parkedItems = append(t.parkedItems, item)
+}
+
+// noteParkedDeletes records ds, which this transaction parked.
+func (t *Transaction) noteParkedDeletes(ds DeleteSet) {
+	if t.parkedDeletes.clients == nil {
+		t.parkedDeletes = newDeleteSet()
+	}
+	t.parkedDeletes.Merge(ds)
 }
 
 // Ctx returns the context associated with this transaction. Transactions

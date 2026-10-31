@@ -64,8 +64,8 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 
 // ApplyUpdateV1Landed is ApplyUpdateV1 that, when the apply fails partway, also
 // returns landed, a V1 update of exactly what this call left in doc (nil if
-// nothing): what it integrated and the structs it parked, for a caller that
-// must forward it, so a peer parks what doc parks.
+// nothing): what it integrated and the structs and deletions it parked, for a
+// caller that must forward it, so a peer parks what doc parks.
 func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, err error) {
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
@@ -77,10 +77,10 @@ func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, er
 }
 
 // encodeTxnV1Locked encodes the structs txn has added to the store so far, the
-// deletions it has made and the structs it parked, or returns nil when there
-// are none. Each client's new structs are found by binary search from
-// txn.beforeState, so the cost is proportional to the clients in the store
-// plus what txn added and parked. A client's parked structs follow its added
+// deletions it has made and the structs and deletions it parked, or returns nil
+// when there are none. Each client's new structs are found by binary search
+// from txn.beforeState, so the cost is proportional to the clients in the
+// store plus what txn added and parked. A client's parked structs follow its added
 // ones, whole, past a skip where the store has a gap, so a reader parks each
 // as the store did. Called with the document lock held.
 func encodeTxnV1Locked(txn *Transaction) []byte {
@@ -123,6 +123,11 @@ func encodeTxnV1Locked(txn *Transaction) []byte {
 			}
 			sv[client] = first
 		}
+	}
+	// The delete ranges this apply parked travel too: a drain that fails
+	// after the delete set parked them leaves them parked in doc.
+	if txn.parkedDeletes.clients != nil {
+		ds.Merge(txn.parkedDeletes)
 	}
 	if len(perClient) == 0 && len(ds.clients) == 0 {
 		return nil

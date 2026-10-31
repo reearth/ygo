@@ -157,6 +157,7 @@ func applyDecodedDeleteSet(txn *Transaction, ds DeleteSet, err error) error {
 	}
 	if len(unresolvable.clients) > 0 {
 		txn.doc.store.parkDeletes(unresolvable)
+		txn.noteParkedDeletes(unresolvable)
 	}
 	return nil
 }
