@@ -42,6 +42,7 @@ type peer struct {
 	// was full under SlowPeerResync. runWriter clears it and sends a full-state
 	// resync once the queue drains, so the peer converges without a reconnect.
 	needsResync       bool
+	queueClosed       bool          // set under wmu when the frame cap or byte budget closes the peer; later frames are dropped unlogged
 	closeCode         int           // #104: WS close code queued via enqueueClose (0 = none)
 	closeReason       string        // #104: WS close reason accompanying closeCode
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
@@ -876,7 +877,7 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 		// wmu before attempting the channel send. handleDisconnect sets closed
 		// under wmu before closing writeCh, so this is race-free.
 		other.wmu.Lock()
-		if other.closed {
+		if other.closed || other.queueClosed {
 			other.wmu.Unlock()
 			continue
 		}
@@ -895,7 +896,7 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 				p.server.log().Warn("peer write queue full; closing slow peer",
 					"room", other.roomName,
 					"queueSize", cap(other.writeCh))
-				other.closeConn()
+				other.closeQueueLocked()
 			}
 		}
 		other.wmu.Unlock()
@@ -918,7 +919,7 @@ func (p *peer) write(data []byte) {
 // writeLocked is write with wmu held, leaving handshake frames outside the
 // byte budget.
 func (p *peer) writeLocked(data []byte, handshake bool) {
-	if p.closed {
+	if p.closed || p.queueClosed {
 		return
 	}
 	if full := p.enqueueLocked(data, "direct send", handshake); full {
@@ -928,7 +929,7 @@ func (p *peer) writeLocked(data []byte, handshake bool) {
 		p.server.log().Warn("peer write queue full during direct send; closing peer",
 			"room", p.roomName,
 			"queueSize", cap(p.writeCh))
-		p.closeConn()
+		p.closeQueueLocked()
 	}
 }
 
@@ -937,6 +938,13 @@ func (p *peer) writeLocked(data []byte, handshake bool) {
 func (p *peer) closeConn() {
 	p.inputClosed.Store(true)
 	_ = p.conn.Close()
+}
+
+// closeQueueLocked closes a peer whose write queue overflowed, with wmu held,
+// and marks it so that the overflow is logged once.
+func (p *peer) closeQueueLocked() {
+	p.queueClosed = true
+	p.closeConn()
 }
 
 // runWriter is the dedicated per-peer broadcast writer, serialising writeCh
@@ -1006,7 +1014,13 @@ func (p *peer) writeToConn(data []byte) bool {
 		return false
 	}
 	if err := p.conn.WriteMessage(gws.BinaryMessage, data); err != nil {
-		p.server.log().Warn("write to peer failed; closing", "room", p.roomName, "err", err)
+		// A write that fails after the server closed the connection is expected.
+		lg := p.server.log()
+		logf := lg.Warn
+		if p.inputClosed.Load() {
+			logf = lg.Debug
+		}
+		logf("write to peer failed; closing", "room", p.roomName, "err", err)
 		p.closeConn()
 		return false
 	}
@@ -1026,8 +1040,8 @@ func (p *peer) maybeResync() bool {
 	p.wmu.Lock()
 	// Wait until the backlog has fully drained so the resync is not immediately
 	// followed by now-stale queued deltas.
-	if p.closed || !p.needsResync || len(p.writeCh) > 0 {
-		notClosed := !p.closed
+	if p.closed || p.queueClosed || !p.needsResync || len(p.writeCh) > 0 {
+		notClosed := !p.closed && !p.queueClosed
 		p.wmu.Unlock()
 		return notClosed
 	}

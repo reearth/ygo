@@ -12,7 +12,7 @@ func (p *peer) enqueueLocked(data []byte, path string, handshake bool) (full boo
 			"budgetBytes", p.writeBudget,
 			"frameBytes", len(data),
 			"queueSize", cap(p.writeCh))
-		p.closeConn()
+		p.closeQueueLocked()
 		return false
 	}
 	select {

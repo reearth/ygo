@@ -55,6 +55,9 @@ changes.
   `Shutdown` has begun, the server no longer calls a relay's `RoomActivated` or
   `RoomDeactivated`, so a room still active then gets no `RoomDeactivated`:
   release per-room relay state in `Close`.
+- **A queue close is logged once.** A peer closed for a full write queue or
+  for its byte budget logged a Warn for each frame that reached it before its
+  teardown. It now logs one.
 
 ## v1.55.0
 

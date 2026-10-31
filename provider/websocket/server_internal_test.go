@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/awareness"
+	"github.com/reearth/ygo/crdt"
 )
 
 // captureDebugLogger returns a logger writing Debug-level (and above) text logs
@@ -191,6 +192,67 @@ func TestPeer_Write_FullQueueDisconnectsPeer(t *testing.T) {
 
 	assert.True(t, p.inputClosed.Load(), "the read loop must drop what the closed peer already sent")
 	assert.Contains(t, buf.String(), "queue full during direct send")
+}
+
+func TestUnit_Peer_QueueCloseWarnsOnce(t *testing.T) {
+	// The frames that reach a peer between its queue close and its teardown
+	// are dropped without another Warn and without being queued.
+	direct := func(target *peer) { target.write([]byte{0x01}) }
+	broadcast := func(target *peer) {
+		(&peer{server: target.server, room: target.room}).broadcast([]byte{0x01}, false)
+	}
+	tests := []struct {
+		name     string
+		capacity int
+		budget   int64
+		send     func(target *peer)
+	}{
+		{name: "frame cap on a direct send", capacity: 1, send: direct},
+		{name: "frame cap on a broadcast", capacity: 1, send: broadcast},
+		{name: "byte budget on a direct send", capacity: 8, budget: 1, send: direct},
+		{name: "byte budget on a broadcast", capacity: 8, budget: 1, send: broadcast},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			srv := &Server{SlowPeerPolicy: SlowPeerDisconnect, Logger: captureDebugLogger(&buf)}
+			target := &peer{server: srv, roomName: "r", conn: serverConn(t),
+				writeCh: make(chan []byte, tt.capacity), writeBudget: tt.budget}
+			target.room = &room{peers: map[*peer]struct{}{target: {}}}
+			target.write([]byte{0x00}) // fills the queue, or reaches the budget
+
+			for range 3 {
+				tt.send(target)
+			}
+
+			assert.Equal(t, 1, strings.Count(buf.String(), "level=WARN"), "one Warn for the close:\n%s", buf.String())
+			assert.Len(t, target.writeCh, 1, "nothing is queued after the close")
+			assert.True(t, target.inputClosed.Load())
+		})
+	}
+}
+
+func TestUnit_Peer_WriteAfterServerCloseLogsNoWarn(t *testing.T) {
+	// The writer's failed write after the server closed the connection is
+	// expected, so the close keeps its single Warn.
+	var buf bytes.Buffer
+	p := &peer{server: &Server{Logger: captureDebugLogger(&buf)}, roomName: "r", conn: serverConn(t)}
+	p.closeConn()
+
+	assert.False(t, p.writeToConn([]byte{0x00}), "the writer stops on a failed write")
+	assert.Zero(t, strings.Count(buf.String(), "level=WARN"), "no Warn after the server's own close:\n%s", buf.String())
+	assert.Contains(t, buf.String(), "write to peer failed")
+}
+
+func TestUnit_Peer_MaybeResync_SkipsAQueueClosedPeer(t *testing.T) {
+	// On a connection that still takes writes, a queue-closed peer gets no
+	// full-state resync, and the writer stops.
+	p := &peer{server: &Server{}, roomName: "r", conn: serverConn(t), writeCh: make(chan []byte, 1),
+		room: &room{doc: crdt.New(), awareness: awareness.New(1)}, needsResync: true, queueClosed: true}
+	assert.False(t, p.maybeResync(), "the writer stops for a queue-closed peer")
+	p.wmu.Lock()
+	defer p.wmu.Unlock()
+	assert.True(t, p.needsResync, "no resync was sent")
 }
 
 func TestPeer_RunWriter_ExitsOnChannelClose(t *testing.T) {

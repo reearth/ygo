@@ -69,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hook's own connection. Once `Shutdown` has begun, the server makes no relay
   `RoomActivated` or `RoomDeactivated` call, because a relay may wait on the
   relay context, which `Shutdown` cancels only after this wait.
+- **`provider/websocket`: a peer closed for a full write queue or its byte
+  budget is logged once.** Each frame that reached the peer before its
+  teardown logged the Warn again and closed the connection again. Those frames
+  are now dropped without a log, the writer's failed write after a close the
+  server made is logged at Debug, and no full-state resync is built for the
+  peer.
 
 ## [1.55.0] — 2026-10-31
 
