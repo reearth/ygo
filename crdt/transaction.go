@@ -332,17 +332,20 @@ func mergeSplitHalves(txn *Transaction) {
 }
 
 // forHalfClients calls fn once for each client that has a split half in txn.
+// Halves usually belong to one client, so a map is made only for a second one.
 func forHalfClients(txn *Transaction, fn func(ClientID)) {
 	var done map[ClientID]struct{}
-	for _, half := range txn.mergeStructs {
+	for i, half := range txn.mergeStructs {
 		client := half.ID.Client
-		if _, ok := done[client]; ok {
-			continue
+		if i > 0 {
+			if _, ok := done[client]; ok || client == txn.mergeStructs[0].ID.Client {
+				continue
+			}
+			if done == nil {
+				done = make(map[ClientID]struct{}, 1)
+			}
+			done[client] = struct{}{}
 		}
-		if done == nil {
-			done = make(map[ClientID]struct{}, 1)
-		}
-		done[client] = struct{}{}
 		fn(client)
 	}
 }
@@ -363,10 +366,20 @@ func mergeClientStructs(txn *Transaction, client ClientID) {
 		return
 	}
 	ranges := txn.deleteSet.clients[client]
-	spans := make([]mergeSpan, 0, len(ranges)+1)
+	halves := 0
+	for _, half := range txn.mergeStructs {
+		if half.ID.Client == client {
+			halves++
+		}
+	}
+	spans := make([]mergeSpan, 0, len(ranges)+1+halves)
 	for _, r := range ranges {
 		// From the struct after the range down to the range's first struct.
-		lo := max(sort.Search(n, func(i int) bool { return structs[i].ID.Clock >= r.Clock }), 1)
+		lo := findStructIndex(structs, r.Clock)
+		if lo < 0 || structs[lo].ID.Clock < r.Clock {
+			lo++
+		}
+		lo = max(lo, 1)
 		if hi := min(n-1, findStructIndex(structs, r.Clock+r.Len-1)+1); lo <= hi {
 			spans = append(spans, mergeSpan{lo, hi})
 		}

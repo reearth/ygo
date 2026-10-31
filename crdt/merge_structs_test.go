@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -362,6 +363,47 @@ func TestUnit_MergeTxnStructs_GCAbsorbKeepsLinks(t *testing.T) {
 	require.NotNil(t, x)
 	require.NotNil(t, x.Left)
 	assert.Same(t, doc.store.Find(x.Left.ID), x.Left, "x.Left must be a struct in the store")
+}
+
+// findStructIndex guesses from evenly growing clocks first; it must give the
+// binary search's answer for any spacing and any clock.
+func TestUnit_FindStructIndex_MatchesBinarySearch(t *testing.T) {
+	tests := []struct {
+		name string
+		lens []uint64
+	}{
+		{"one struct", []uint64{3}},
+		{"even", []uint64{1, 1, 1, 1, 1, 1}},
+		{"long first", []uint64{100, 1, 1, 1}},
+		{"long last", []uint64{1, 1, 1, 100}},
+		{"long middle", []uint64{1, 50, 1, 1, 50, 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var structs []*Item
+			var clock uint64
+			for _, l := range tt.lens {
+				structs = append(structs, &Item{ID: ID{Client: 1, Clock: clock}, Content: NewContentDeleted(int(l))})
+				clock += l
+			}
+			for c := uint64(0); c <= clock+2; c++ {
+				want := sort.Search(len(structs), func(i int) bool { return structs[i].ID.Clock > c }) - 1
+				require.Equal(t, want, findStructIndex(structs, c), "clock %d", c)
+			}
+			require.Equal(t, -1, findStructIndex(nil, 0))
+		})
+	}
+}
+
+// forHalfClients visits each client with a split half once, in first-seen order.
+func TestUnit_ForHalfClients_CallsEachClientOnce(t *testing.T) {
+	txn := &Transaction{}
+	for _, c := range []ClientID{1, 2, 1, 3, 2, 3, 1} {
+		txn.mergeStructs = append(txn.mergeStructs, &Item{ID: ID{Client: c}})
+	}
+	var got []ClientID
+	forHalfClients(txn, func(c ClientID) { got = append(got, c) })
+	assert.Equal(t, []ClientID{1, 2, 3}, got)
 }
 
 // deleteRestTime times one transaction that deletes n array values, each
