@@ -478,27 +478,26 @@ func (d *Doc) GetText(name string) *YText {
 //
 // Returns nil only if there is nothing to fire (no observers of any kind).
 func buildPhase2(d *Doc, txn *Transaction) func(update []byte) {
-	// Snapshot per-type observer closures while the write lock is held.
-	// prepareFire copies each type's observer slice and builds the event struct,
-	// so concurrent Observe/Unobserve calls (which also hold the write lock)
-	// cannot race with the fire loop below (N-C1).
+	// Snapshot per-type observer closures and deep-observer chains while the
+	// write lock is held. prepareFire copies each type's observer slice and
+	// builds the event struct, so concurrent Observe/Unobserve calls (which also
+	// hold the write lock) cannot race with the fire loop below (N-C1).
 	fireFns := make([]func(), 0, len(txn.changed))
-	for t, keys := range txn.changed {
-		if t.owner != nil {
-			if fn := t.owner.prepareFire(txn, keys); fn != nil {
-				fireFns = append(fireFns, fn)
-			}
-		}
-	}
-	txn.typeObserved = len(fireFns) > 0
-
-	// Snapshot deep-observer chains.
 	type deepEntry struct {
 		fns []func(*Transaction)
 	}
 	firedDeep := make(map[*abstractType]struct{})
 	var deepSnap []deepEntry
-	for t := range txn.changed {
+	for t, keys := range txn.changed {
+		// Yjs calls no observer for a type that is deleted when the transaction ends.
+		if t.item != nil && t.item.Deleted {
+			continue
+		}
+		if t.owner != nil {
+			if fn := t.owner.prepareFire(txn, keys); fn != nil {
+				fireFns = append(fireFns, fn)
+			}
+		}
 		current := t
 		for current != nil {
 			if _, already := firedDeep[current]; already {
@@ -519,6 +518,7 @@ func buildPhase2(d *Doc, txn *Transaction) func(update []byte) {
 			}
 		}
 	}
+	txn.typeObserved = len(fireFns) > 0
 
 	// Snapshot OnUpdate and OnAfterTransaction callbacks.
 	onUpdateSnap := make([]func([]byte, any), len(d.onUpdate))
@@ -783,7 +783,8 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 //     panic: OnUpdate receives a V1 update describing the mutations that
 //     completed (and does not fire if fn panicked before mutating);
 //     per-type, deep, and OnAfterTransaction observers fire for what was
-//     recorded in txn.changed.
+//     recorded in txn.changed, except that per-type and deep observers skip a
+//     type deleted by then.
 //   - The original panic is re-raised to the caller after observers fire,
 //     unless an observer panics too (see below).
 //   - Rollback is NOT supported. The in-memory doc reflects fn's partial

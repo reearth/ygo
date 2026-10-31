@@ -72,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OnAfterTransaction`, `OnUpdate` and `OnSubdocs` observer runs, and the
   panic then reaches the caller, as Yjs runs its type and deep observers. If
   more than one panics, the last panic reaches the caller, as in Yjs.
+- **`crdt`: a write into a deleted nested type no longer calls its
+  observers.** A write into a nested type after it was deleted, or in the
+  transaction that deleted it, called that type's `Observe` and `ObserveDeep`
+  callbacks and the `ObserveDeep` callbacks of its ancestors. This happened
+  for a local write through a held handle and, with GC off, for a remote
+  write that a peer made before it saw the deletion. Deleting a type that had
+  children also called its own `Observe` and `ObserveDeep`. Yjs calls none of
+  these, and now ygo does not either. The deletion still calls the observers
+  of the type that lost the entry and the deep observers of its live
+  ancestors.
 
 ### Performance
 

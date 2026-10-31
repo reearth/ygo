@@ -54,6 +54,13 @@
   If more than one observer panics, the caller gets the last panic, as in
   Yjs. Other observers now run after an observer panics, so they must not
   expect the panicking observer's work to be complete.
+- **A write into a deleted nested type calls no observers.** It called that
+  type's observers and the deep observers of its ancestors, also for a peer's
+  write made before the peer saw the deletion (with GC off), and deleting a
+  nested type that had children called its own `Observe` and `ObserveDeep`.
+  Code that relied on these calls to see that a type was deleted must use the
+  observers of the type that lost the entry, which still fire for the
+  deletion.
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
 - **Faster full-state encodes and snapshots after deletions.** The delete set
