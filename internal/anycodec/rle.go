@@ -22,6 +22,36 @@ func NewRleByteDecoder(data []byte) RleByteDecoder {
 // Read returns the next decoded byte.
 func (d *RleByteDecoder) Read() (byte, error) { return ReadRleByte(&d.dec, &d.state, &d.count) }
 
+// ReadInRun returns the next byte when it repeats the current run, and false
+// when it needs Read, small enough to inline in a hot loop.
+func (d *RleByteDecoder) ReadInRun() (byte, bool) {
+	if d.count > 0 {
+		d.count--
+		return d.state, true
+	}
+	if d.count < 0 {
+		return d.state, true
+	}
+	return 0, false
+}
+
+// ReadRun returns the next byte and how many copies of it, from one to max, it
+// read from the same run in one step.
+func (d *RleByteDecoder) ReadRun(max int) (byte, int, error) {
+	b, err := d.Read()
+	if err != nil {
+		return 0, 0, err
+	}
+	n := 1
+	if d.count < 0 {
+		n = max
+	} else if more := min(d.count, max-1); more > 0 {
+		d.count -= more
+		n += more
+	}
+	return b, n, nil
+}
+
 // ReadRleByte shares the wire traversal with the public decoder facade.
 func ReadRleByte(dec *Decoder, state *byte, count *int) (byte, error) {
 	if *count == 0 {
@@ -64,6 +94,16 @@ func NewUintOptRleDecoder(data []byte) UintOptRleDecoder {
 // Read returns the next decoded value.
 func (d *UintOptRleDecoder) Read() (uint64, error) { return ReadUintOptRle(&d.dec, &d.state, &d.count) }
 
+// ReadInRun returns the next value when it repeats the current run, and false
+// when it needs Read, small enough to inline in a hot loop.
+func (d *UintOptRleDecoder) ReadInRun() (uint64, bool) {
+	if d.count > 0 {
+		d.count--
+		return d.state, true
+	}
+	return 0, false
+}
+
 // ReadUintOptRle shares the wire traversal with the public decoder facade.
 func ReadUintOptRle(dec *Decoder, state *uint64, count *int) (uint64, error) {
 	if *count == 0 {
@@ -105,6 +145,18 @@ func NewIntDiffOptRleDecoder(data []byte) IntDiffOptRleDecoder {
 // Read returns the next decoded value.
 func (d *IntDiffOptRleDecoder) Read() (int64, error) {
 	return ReadIntDiffOptRle(&d.dec, &d.state, &d.diff, &d.count)
+}
+
+// ReadInRun returns the next value when it continues the current run of equal
+// differences, and false when it needs Read, small enough to inline in a hot
+// loop.
+func (d *IntDiffOptRleDecoder) ReadInRun() (int64, bool) {
+	if d.count > 0 {
+		d.count--
+		d.state += d.diff
+		return d.state, true
+	}
+	return 0, false
 }
 
 // ReadIntDiffOptRle shares the wire traversal with the public decoder facade.
@@ -165,6 +217,33 @@ func (d *StringDecoder) Read() (string, error) {
 		return "", err
 	}
 	return ReadStringChunk(d.str, &d.bytePos, l), nil
+}
+
+// ReadUnits steps over the next string and returns its UTF-16 length as Read
+// decodes it, which can differ from the lengths column.
+func (d *StringDecoder) ReadUnits() (uint64, error) {
+	l, err := d.lens.Read()
+	if err != nil {
+		return 0, err
+	}
+	// The same walk as AdvanceUTF16, with ASCII taken a byte at a time.
+	units, pos, counted := int(l), d.bytePos, 0
+	for counted < units && pos < len(d.str) {
+		if d.str[pos] < utf8.RuneSelf {
+			pos++
+			counted++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(d.str[pos:])
+		if r >= 0x10000 {
+			counted += 2
+		} else {
+			counted++
+		}
+		pos += size
+	}
+	d.bytePos = pos
+	return uint64(counted), nil
 }
 
 // ReadStringChunk advances a pool cursor by UTF-16 units without copying data.

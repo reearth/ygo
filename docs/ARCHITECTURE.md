@@ -115,7 +115,7 @@ When an update references an item whose dependency hasn't arrived yet — a same
 
 The same machinery handles delete-set entries that target not-yet-integrated items (`pendingDs`). State-vector computation is unaffected — pending items don't appear in `StateVector()` until they're integrated, so peers correctly retry the missing dependencies.
 
-The queue is bounded (default 100,000 parked items; configurable via `crdt.WithMaxPendingItems` or `Server.MaxPendingItems`). Updates that would push past the cap return `ErrInvalidUpdate` — see the v1.8.0 CHANGELOG and #46 for the security rationale.
+The queue is bounded (default 100,000 parked items; configurable via `crdt.WithMaxPendingItems` or `Server.MaxPendingItems`). An update that would push past the cap returns `ErrInvalidUpdate` and leaves the document unchanged: the apply checks the whole update against the cap before it integrates any of it (`pendingBudget.checkBeforeApply`). See the v1.8.0 CHANGELOG and #46 for the security rationale.
 
 ### DeleteSet
 

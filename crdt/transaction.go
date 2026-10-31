@@ -66,6 +66,9 @@ type Transaction struct {
 	formatCleanup      bool
 	typeObserved       bool
 	afterTypeObservers func()
+	// refused marks a remote apply that failed before integrating, so the
+	// commit fires nothing.
+	refused bool
 }
 
 // Ctx returns the context associated with this transaction. Transactions

@@ -59,13 +59,9 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 	return applyErr
 }
 
-// ApplyUpdateV1Landed is ApplyUpdateV1 for a caller that must forward what
-// a failed apply left behind. ApplyUpdateV1 integrates an update item by item,
-// so one it rejects (an update that overflows the pending cap, say) can leave
-// part of itself in doc. When the apply fails, landed is a V1 update of exactly
-// what this call integrated: the structs it added to doc's store and the
-// deletions it made, not structs still parked, nor the rest of the document.
-// landed is nil when the apply succeeds or when nothing integrated.
+// ApplyUpdateV1Landed is ApplyUpdateV1 that, when the apply fails partway, also
+// returns landed, a V1 update of exactly what this call integrated (nil if
+// nothing), for a caller that must forward it.
 func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, err error) {
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
@@ -549,9 +545,15 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	// (ContentBinary, ContentEmbed, ContentFormat, ContentType, ContentDoc).
 	// A malicious update can encode such a type with a clock offset that forces
 	// a split; without recovery the server would crash instead of returning an error.
+	applying := false
 	defer func() {
 		if r := recover(); r != nil {
 			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+		}
+		// An apply that fails before it began to integrate must tell no observer.
+		txn.refused = retErr != nil && !applying
+		if applying {
+			retErr = drainAfterApply(txn, retErr)
 		}
 	}()
 
@@ -567,11 +569,27 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	if numClients > uint64(len(update)/2) || numClients > maxV2Items {
 		return ErrInvalidUpdate
 	}
+	var superseded groupSet
+	structs := 0
+	if numClients > 1 {
+		// A later malformed group must not leave earlier, superseded groups
+		// applied.
+		if superseded, structs, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
+			return wrapUpdateErr(err)
+		}
+	}
+	budget := newPendingBudget(txn.doc, sv, update, false)
+	budget.setSuperseded(superseded)
+	budget.structs = structs
+	if err := budget.checkBeforeApply(len(update)); err != nil {
+		return err
+	}
+	applying = true
 
 	// 1. Decode all items, parking any with future-clock deps or same-client gaps.
 	//    Returns the within-update pending list (items whose parent might resolve
 	//    later in this same update).
-	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, update)
+	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, superseded)
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
@@ -590,9 +608,21 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		txn.doc.store.pendingDs.Merge(unresolvableDs)
 	}
 
-	drainPending(txn)
-
 	return nil
+}
+
+// drainAfterApply drains the pending queue last in every apply that began to
+// integrate, so one that fails partway drains on what it kept, as a peer
+// applying its update does; a drain panic is its error only when err is nil.
+func drainAfterApply(txn *Transaction, err error) (retErr error) {
+	retErr = err
+	defer func() {
+		if r := recover(); r != nil && retErr == nil {
+			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+		}
+	}()
+	drainPending(txn)
+	return retErr
 }
 
 // decodeAndPark walks the V1 update's per-client struct groups, decodes each
@@ -607,19 +637,8 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 //
 // Groups that a later group for the same client supersedes are decoded and
 // dropped (yjs parity). numClients is the count parsed from the header.
-func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, update []byte) ([]*Item, error) {
+func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, superseded groupSet) ([]*Item, error) {
 	var pending []*Item
-	budget := newPendingBudget(txn.doc, sv, update, false)
-	var superseded groupSet
-	if numClients > 1 {
-		// Fail before integrating anything: a later malformed group must not
-		// leave earlier, superseded groups applied.
-		var err error
-		if superseded, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
-			return nil, err
-		}
-	}
-	budget.setSuperseded(superseded)
 
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
@@ -682,9 +701,6 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			// the cross-update pending limit.
 			if clock > existingEnd {
 				pending = append(pending, item)
-				if err := budget.check(len(pending)); err != nil {
-					return nil, err
-				}
 				clock = itemEnd
 				continue
 			}
@@ -706,9 +722,6 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			// reference to a group not yet decoded) are deferred.
 			if item.Parent == nil {
 				pending = append(pending, item)
-				if err := budget.check(len(pending)); err != nil {
-					return nil, err
-				}
 				clock = itemEnd
 				continue
 			}
@@ -725,9 +738,6 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			if offset == 0 && item.OriginRight != nil &&
 				item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
 				pending = append(pending, item)
-				if err := budget.check(len(pending)); err != nil {
-					return nil, err
-				}
 				clock = itemEnd
 				continue
 			}
@@ -783,8 +793,8 @@ func resolveWithinUpdatePending(txn *Transaction, pending []*Item) error {
 // previously-parked delete-set entries (pendingDs), then loops over
 // store.pending as long as progress is being made, integrating items and
 // re-parking those still blocked. A panic-safety closure re-parks any
-// unprocessed items back into store.pending before re-raising, so the
-// outer applyV1Txn recover (v1.1.1) can convert the panic to an error.
+// unprocessed items back into store.pending before re-raising, so
+// drainAfterApply can convert the panic to an error.
 // Also retries pendingDs after each successful integration pass.
 func drainPending(txn *Transaction) {
 	// pendingDs may be drainable even if pending items aren't — integrated
@@ -795,7 +805,7 @@ func drainPending(txn *Transaction) {
 
 	// Drain pending items whose dependencies have been satisfied by
 	// this update. Inline rather than recursive (Go's sync.Mutex is not
-	// reentrant; ApplyUpdateV1 is already under d.mu via doc.Transact).
+	// reentrant; the apply is already under d.mu via doc.Transact).
 	//
 	// Loop until no progress to handle chained dependencies:
 	//   A arriving satisfies B; B (now integrated) satisfies C; etc.
@@ -809,8 +819,8 @@ func drainPending(txn *Transaction) {
 
 		// Process items with panic-safety: if tryIntegrate panics, re-park
 		// every item not yet integrated so a subsequent ApplyUpdate can retry
-		// them. The outer applyV1Txn recover (v1.1.1) then converts the panic
-		// to an error for the caller.
+		// them. drainAfterApply then converts the panic to an error for the
+		// caller.
 		done := make([]bool, len(items))
 		func() {
 			defer func() {
@@ -1175,7 +1185,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentMove(target, int(targetLen)), nil
 
 	default:
-		return nil, fmt.Errorf("unknown content tag: %d", tag)
+		return nil, unknownTagErr(false, tag)
 	}
 }
 
@@ -1300,9 +1310,11 @@ func clientsSorted[T any](m map[ClientID]T) []ClientID {
 	return out
 }
 
+// wrapUpdateErr names err as an invalid update once: an error that already is
+// one is returned as it is.
 func wrapUpdateErr(err error) error {
-	if err == nil {
-		return nil
+	if err == nil || errors.Is(err, ErrInvalidUpdate) {
+		return err
 	}
 	return fmt.Errorf("%w: %v", ErrInvalidUpdate, err)
 }

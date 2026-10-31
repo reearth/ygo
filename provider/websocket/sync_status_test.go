@@ -216,11 +216,10 @@ func TestInteg_SyncStatus_RefusedUpdateAnsweredZeroAndSocketStays(t *testing.T) 
 	assert.Equal(t, "after", srv.GetDoc("room").GetText("t").ToString())
 }
 
-// An update the room only partly takes (it overflows MaxPendingItems after
-// some of it has integrated) must still reach the other peers for the part
-// the room now holds.
+// An update the room only partly takes must still reach the other peers for the
+// part the room now holds.
 func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
-	srv, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 3 })
+	srv, ts := hocuspocusServer(t, nil)
 	author := crdt.New(crdt.WithClientID(1))
 	root := author.GetMap("m")
 	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
@@ -230,8 +229,8 @@ func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
 	watcherDoc := crdt.New(crdt.WithClientID(9))
 	watcher := hpDial(t, ts, "room", false, watcherDoc)
 
-	// The editor's own text integrates; its entries on a map the room never
-	// received park until the cap is hit.
+	// The text integrates and the map entries park before the delete set fails
+	// to decode.
 	require.NoError(t, crdt.ApplyUpdateV1(editor, crdt.EncodeStateAsUpdateV1(author, nil), nil))
 	v, _ := editor.GetMap("m").Get("nested")
 	nested := v.(*crdt.YMap)
@@ -242,7 +241,8 @@ func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
 			nested.Set(txn, "k"+strconv.Itoa(i), i)
 		}
 	})
-	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(editor, author.StateVector())))
+	cut := crdt.EncodeStateAsUpdateV1(editor, author.StateVector())
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(cut[:len(cut)-1]))
 	syncStatuses(t, conn, "room")
 	require.Equal(t, "abc", srv.GetDoc("room").GetText("t").ToString(), "the room kept the part that integrated")
 
@@ -261,11 +261,9 @@ func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
 }
 
 // The broadcast for a partly applied update carries only what that update
-// landed, not the room's parked structs or its delete set: a room with 40
-// parked entries and 100 deletions forwards the three characters that
-// integrated and nothing more.
+// landed, not the room's parked structs or its delete set.
 func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing.T) {
-	_, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 50 })
+	_, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 200 })
 	editor := crdt.New(crdt.WithClientID(7))
 	conn := hpDial(t, ts, "room", false, editor)
 	watcherDoc := crdt.New(crdt.WithClientID(9))
@@ -285,8 +283,8 @@ func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing
 	require.Equal(t, []uint64{1, 1, 1}, syncStatuses(t, conn, "room"))
 	watcherSyncBytes(t, watcher, watcherDoc)
 
-	// "abc" integrates; eleven entries on a map the room never received
-	// overflow the ten pending slots left.
+	// "abc" integrates and five map entries park, well inside the cap, before a
+	// cut-short delete set.
 	author := crdt.New(crdt.WithClientID(1))
 	root := author.GetMap("m")
 	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
@@ -296,11 +294,12 @@ func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing
 	before = editor.StateVector() // includes the author's map, so it is not sent
 	editor.Transact(func(txn *crdt.Transaction) {
 		txt.Insert(txn, 0, "abc", nil)
-		for i := range 11 {
+		for i := range 5 {
 			nested.Set(txn, "e"+strconv.Itoa(i), i)
 		}
 	})
-	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(editor, before)))
+	cut := crdt.EncodeStateAsUpdateV1(editor, before)
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(cut[:len(cut)-1]))
 	require.Equal(t, []uint64{0}, syncStatuses(t, conn, "room"))
 
 	got := watcherSyncBytes(t, watcher, watcherDoc)

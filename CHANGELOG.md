@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Fixed
+
+- **`crdt`: the pending cap refuses an update before the update changes the
+  document.** `WithMaxPendingItems` refused an update whose items would park
+  past the cap only when the decoder reached those items. The items before
+  them had already integrated, so the document kept them, `OnUpdate` fired, and
+  the apply returned `ErrInvalidUpdate`. A `provider/websocket` room stored and
+  relayed that part and answered the sender `SyncStatus(0)`. The cap now checks
+  the whole update before the apply integrates any of it. A refused update
+  leaves the document unchanged, and no observer is told. An update that the
+  check reads and finds malformed is also refused before anything integrates,
+  and an update whose header does not read, or whose group framing does not
+  read in an update of several groups, no longer fires `OnUpdate` or
+  `OnAfterTransaction`.
+- **`crdt`: an update that fails after part of it integrated drains the
+  pending queue on that part.** An update cut short in its structs or its
+  delete set keeps the structs before the cut, but the apply returned before
+  its drain, so an item that an earlier update parked behind those structs
+  stayed parked. A peer that applied the update that `OnUpdate` handed it, or
+  the part that a `provider/websocket` room relayed, ran its own drain and
+  integrated that item. The room was then behind its peers. The apply now
+  drains after every failure once it has begun to integrate, in V1 and V2, and
+  the commit's update holds what the drain integrated. V2 applies now drain
+  through the same code as V1, so a V2 drain that panics parks the rest of the
+  queue again with the clocks it waits on, where previously those items could stay
+  parked for good.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

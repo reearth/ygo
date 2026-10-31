@@ -237,8 +237,7 @@ func TestUnit_PendingBudget_SkipsDoNotSatisfyDependencies(t *testing.T) {
 			target := New(WithMaxPendingItems(1))
 			defer target.Destroy()
 			budget := newPendingBudget(target, target.StateVector(), update, version == 2)
-			require.ErrorIs(t, budget.check(1), ErrInvalidUpdate)
-			require.False(t, budget.checked)
+			require.ErrorIs(t, budget.check(), ErrInvalidUpdate)
 			require.ErrorIs(t, apply(target, update, nil), ErrInvalidUpdate)
 			require.Zero(t, target.PendingStats().Items, "rejection must not park the update's deferred items")
 		})
@@ -298,18 +297,15 @@ func TestUnit_PendingBudget_GroupHeadsMatchFixedPoint(t *testing.T) {
 			update := encode(groups, newDeleteSet(), nil, source.store)
 			for _, cap := range []int{0, 1, 4, 100} {
 				budget := pendingBudget{initial: initial, update: update, remaining: cap, v2: version == 2}
-				want := referencePendingBudgetCheck(budget, cap)
-				got := budget.check(cap)
+				want := referencePendingBudgetCheck(budget)
+				got := budget.check()
 				require.Equal(t, want == nil, got == nil, "scenario=%d V%d cap=%d: reference=%v worklist=%v", scenario, version, cap, want, got)
 			}
 		}
 	}
 }
 
-func referencePendingBudgetCheck(b pendingBudget, count int) error {
-	if b.checked || count < b.remaining {
-		return nil
-	}
+func referencePendingBudgetCheck(b pendingBudget) error {
 	known := make(StateVector, len(b.initial))
 	for client, clock := range b.initial {
 		known[client] = clock
@@ -380,7 +376,6 @@ func referencePendingBudgetCheck(b pendingBudget, count int) error {
 			return wrapUpdateErr(s.err)
 		}
 		if pending <= b.remaining {
-			b.checked = true
 			return nil
 		}
 		if !progressed {

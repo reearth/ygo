@@ -148,8 +148,8 @@ func TestUnit_PendingBudget_ClassificationMatchesReference(t *testing.T) {
 				update := pendingGuardUpdate(source, c.groups, nil, version)
 				for rem := 0; rem <= structs+1; rem++ {
 					b := pendingBudget{initial: c.initial, update: update, v2: version == 2, remaining: rem}
-					want := referencePendingBudgetCheck(b, rem)
-					got := b.check(rem)
+					want := referencePendingBudgetCheck(b)
+					got := b.check()
 					if (want == nil) != (got == nil) {
 						t.Fatalf("rem=%d: preflight=%v, reference=%v", rem, got, want)
 					}
@@ -185,8 +185,8 @@ func TestUnit_PendingBudget_SkipEndingAtKnownClock(t *testing.T) {
 		update := pendingGuardUpdate(source, groups, map[int]uint64{1: 1}, version)
 		for rem := 0; rem <= 7; rem++ {
 			b := pendingBudget{initial: initial, update: update, v2: version == 2, remaining: rem}
-			want := referencePendingBudgetCheck(b, rem)
-			if got := b.check(rem); (want == nil) != (got == nil) {
+			want := referencePendingBudgetCheck(b)
+			if got := b.check(); (want == nil) != (got == nil) {
 				t.Fatalf("V%d rem=%d: preflight=%v, reference=%v", version, rem, got, want)
 			}
 		}
