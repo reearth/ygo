@@ -1,3 +1,29 @@
+## v1.55.1
+
+**Who is affected: servers that receive GC structs, which Yjs peers send for
+the content of a deleted nested type.**
+
+Yjs stores an item as a GC struct when the struct to its left or to its right
+is a GC struct. ygo did so only when the item had no live neighbour. With one
+live neighbour, ygo put the item in that neighbour's type: at the wrong
+position, or stored but not linked. Two Yjs clients reach this when one
+inserts into a nested type that the other deletes, and the server gets that
+part of the type from the deleter as GC structs. There ygo kept the insert as
+a deleted item where Yjs keeps a GC struct. A GC struct next to live content,
+which no Yjs client sends, made ygo show text that Yjs does not: with a GC
+right origin the document showed the item, and with a GC origin a replica
+loaded from the document's encoded state showed it while the document did
+not, with the same state vector.
+
+Such an item now becomes a GC struct once both neighbours are present, as in
+Yjs, and ygo no longer splits a GC struct, as Yjs does not. Encoders now keep
+an origin that names a GC struct, as Yjs does. They dropped it, so
+`MergeUpdatesV1/V2`, `DiffUpdateV1/V2`, the update format converters, and an
+encoded state that holds a parked item produced an update that put the item
+into the text where applying the original updates makes it a GC struct. A
+state that an earlier ygo wrote carries no such origin and loads as before.
+No API or wire format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

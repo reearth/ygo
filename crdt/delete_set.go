@@ -210,7 +210,8 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 				if item.ID.Clock >= r.Clock+r.Len {
 					break
 				}
-				// After our boundary splits, item is entirely inside the range.
+				// After our boundary splits, item is inside the range, except a GC
+				// struct, which is never split and is already deleted.
 				end := r.Clock + r.Len
 				itemEnd := item.ID.Clock + uint64(item.Content.Len())
 				if itemEnd < end {

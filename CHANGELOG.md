@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-10-31
+
+### Fixed
+
+- **`crdt`: an item whose origin or right origin is a GC struct becomes a GC
+  struct.** Yjs does this for either neighbour. ygo did it only when the item
+  had no live neighbour. With a GC right origin, ygo showed the item where
+  Yjs shows none. With a GC origin, ygo stored the item without linking it,
+  so a replica loaded from the document's encoded state showed other text
+  than the document, with the same state vector.
+  The item now becomes a GC struct once both neighbours are present, as in
+  Yjs. A GC struct is no longer split, as in Yjs.
+- **`crdt`: encoders keep an origin that names a GC struct, as Yjs does.**
+  They dropped it, so `MergeUpdatesV1/V2`, `DiffUpdateV1/V2`,
+  `UpdateV1ToV2`/`UpdateV2ToV1` and an encoded state holding a parked item
+  put the item into the text where the original updates make it a GC struct.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

@@ -102,12 +102,12 @@ func repeatedGroupsUpdate(t *testing.T, version int, malformed bool) []byte {
 		enc.WriteVarUint(9)
 		enc.WriteVarUint(0)
 		for _, it := range items {
-			encodeItem(enc, it, 0, src.store)
+			encodeItem(enc, it, 0)
 		}
 		enc.WriteVarUint(1)
 		enc.WriteVarUint(9)
 		enc.WriteVarUint(0)
-		encodeItem(enc, items[0], 0, src.store)
+		encodeItem(enc, items[0], 0)
 		if malformed {
 			enc.WriteVarUint(1)
 			enc.WriteVarUint(10)
@@ -125,12 +125,12 @@ func repeatedGroupsUpdate(t *testing.T, version int, malformed bool) []byte {
 	e2.writeClient(9)
 	e2.restEnc.WriteVarUint(0)
 	for _, it := range items {
-		encodeItemV2(e2, it, 0, src.store)
+		encodeItemV2(e2, it, 0)
 	}
 	e2.restEnc.WriteVarUint(1)
 	e2.writeClient(9)
 	e2.restEnc.WriteVarUint(0)
-	encodeItemV2(e2, items[0], 0, src.store)
+	encodeItemV2(e2, items[0], 0)
 	if malformed {
 		e2.restEnc.WriteVarUint(1)
 		e2.writeClient(10)
