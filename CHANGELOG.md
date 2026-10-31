@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.54.1] — 2026-10-30
+
+### Fixed
+
+- **`crdt`: the update `OnUpdate` observers receive carries only the
+  transaction's deletions.** It carried the whole document's delete set, so
+  every update grew with the document's deletion history. In a
+  5,000-transaction editing session a keystroke's update was 1,552 bytes and
+  the session's updates 3.96 MB, against 12 bytes and 65,811 bytes from Yjs;
+  each of those updates now equals the bytes of Yjs's `update` event.
+  `provider/websocket`'s `Server.Apply` no longer returns `ErrUpdateTooLarge`
+  for a small edit to a room with a long deletion history, and `mobile`'s
+  `Doc.Observe` drops a transaction that changed nothing on a document that
+  has deleted something, as it does on one that has not.
+
 ## [1.54.0] — 2026-10-22
 
 ### Added

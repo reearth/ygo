@@ -462,7 +462,9 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
 	if len(d.onUpdate) > 0 {
-		updateBytes = encodeV1Locked(d, txn.beforeState)
+		// Like Yjs, the update carries only this transaction's deletions,
+		// sorted and merged.
+		updateBytes = encodeV1Locked(d, txn.beforeState, cloneDeleteSet(txn.deleteSet))
 	}
 
 	// Snapshot per-type observer closures while the write lock is held.

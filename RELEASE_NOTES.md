@@ -1,3 +1,26 @@
+## v1.54.1
+
+**Who is affected: anyone who reads the updates `Doc.OnUpdate` hands out,
+which includes every `provider/websocket` server (it stores, relays and
+broadcasts them), `provider/webhook` and `mobile`'s `Doc.Observe`.**
+
+The update `OnUpdate` observers receive after a transaction carried the whole
+document's delete set, not only what the transaction deleted. Every update grew
+with the document's deletion history: in a 5,000-transaction editing session a
+keystroke's update was 1,552 bytes and the session's updates 3.96 MB, where
+Yjs sends 12 bytes and 65,811 bytes. `Server.Apply` returned
+`ErrUpdateTooLarge` for a small edit once the history passed
+`MaxUpdateBytes`, and `mobile`'s `Doc.Observe` notified the app of
+transactions that changed nothing.
+
+The update now carries only the transaction's deletions, sorted and merged,
+as Yjs writes it; in that session each update equals the bytes of Yjs's
+`update` event. A reader that keeps every update, as the persistence adapters
+do, still holds every deletion. A reader that kept only the newest update and
+relied on it to list every earlier deletion must now keep them all, or read
+the state with `EncodeStateAsUpdateV1`, which is unchanged. No API or wire
+format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully
