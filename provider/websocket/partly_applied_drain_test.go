@@ -10,25 +10,22 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 )
 
-// A peer holds what the room holds after a partly applied update drains the
-// "b" it unblocked.
+// A peer holds what the room holds after a partly applied update, cut in its
+// delete set, drains the "b" it unblocked.
 func TestInteg_PartlyAppliedUpdate_PeerGetsWhatTheRoomDrained(t *testing.T) {
 	w := crdt.New(crdt.WithClientID(13))
 	wt := w.GetText("t")
 	var ups [][]byte
 	w.OnUpdate(func(u []byte, _ any) { ups = append(ups, append([]byte(nil), u...)) })
-	for i, s := range []string{"a", "b", "c"} {
+	for i, s := range []string{"a", "b"} {
 		w.Transact(func(txn *crdt.Transaction) { wt.Insert(txn, i, s, nil) })
 	}
-	both, err := crdt.MergeUpdatesV1(ups[0], ups[2])
-	require.NoError(t, err)
 
 	for _, c := range []struct {
 		name string
 		bad  []byte
 	}{
 		{"delete set cut", ups[0][:len(ups[0])-1]},
-		{"struct cut", both[:len(both)-3]},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			srv, ts := hocuspocusServer(t, nil)

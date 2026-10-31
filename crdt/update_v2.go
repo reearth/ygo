@@ -683,8 +683,13 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		return err
 	}
 	*dec.restDec = peek
-	applying = true
 
+	// Every struct decodes before one integrates, as Yjs reads them all first,
+	// so a struct that does not decode leaves the document unchanged; a
+	// keystroke's few structs stay on the stack (see decodeStructs).
+	var buf [8]*Item
+	group := buf[:0]
+	var groupClient ClientID
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
 		numStructs, err := dec.restDec.ReadVarUint()
@@ -703,6 +708,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		if err != nil {
 			return wrapUpdateErr(err)
 		}
+		groupClient = client
 
 		existingEnd := sv.Clock(client)
 		drop := superseded.has(i)
@@ -713,41 +719,21 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				return wrapUpdateErr(err)
 			}
 
-			contentType := info & 0x1F
-
 			var item *Item
 			var contentLen int
 
-			switch contentType {
+			switch info & 0x1F {
 			case 0: // GC (garbage collected)
 				l, err := dec.readLen()
 				if err != nil {
 					return wrapUpdateErr(err)
 				}
-				// Bounded before the replaced-group check, as every struct is,
-				// so apply refuses what the merge decoders refuse.
-				itemEnd, err := structEnd(clock, uint64(l))
-				if err != nil {
-					return err
-				}
-				if drop {
-					clock = itemEnd
-					continue
-				}
 				// Decode the GC struct into the same placeholder Item the V1
 				// decoder builds (update.go decodeItem, tag 0), so it flows
 				// through the identical clock-accounting, park and offset logic
-				// below instead of short-circuiting past it. As in Yjs, a GC
-				// struct adds nothing to the transaction's delete set.
-				//
-				// Short-circuiting once left nothing occupying the range in the
-				// client's struct list, and existingEnd never advanced, so every
-				// later struct from this client looked like a
-				// same-client clock gap and was parked in the permanent pending
-				// queue — waiting for a predecessor that was already in this
-				// same update. The V1 path has always appended the placeholder,
-				// and its comment names this exact failure ("so subsequent items
-				// in the group are not falsely gapped").
+				// instead of short-circuiting past it, which left every later
+				// struct of the client falsely gapped. As in Yjs, a GC struct
+				// adds nothing to the transaction's delete set.
 				item = &Item{
 					ID:      ID{Client: client, Clock: clock},
 					Content: NewContentDeleted(l),
@@ -755,7 +741,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				}
 				contentLen = l
 
-			case 10: // Skip struct: withheld clocks; advance the cursor only (see V1 decodeAndPark)
+			case 10: // Skip struct: withheld clocks; advance the cursor only (see V1 decodeStructs)
 				l, err := dec.restDec.ReadVarUint()
 				if err != nil {
 					return wrapUpdateErr(err)
@@ -766,91 +752,37 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 				continue
 
 			default:
-				// Regular item
 				var derr error
 				item, contentLen, derr = decodeItemV2(dec, txn.doc, client, clock, info)
 				if derr != nil {
 					return wrapUpdateErr(derr)
 				}
-				if drop {
-					if clock, err = structEnd(clock, uint64(contentLen)); err != nil {
-						return err
-					}
-					continue
-				}
 			}
 
+			// Every struct is bounded, a replaced group's too, so apply refuses
+			// what the merge decoders refuse.
 			itemEnd, err := structEnd(clock, uint64(contentLen))
 			if err != nil {
 				return err
 			}
-			if itemEnd <= existingEnd {
-				clock = itemEnd
-				continue
-			}
-
-			offset := 0
-			if clock < existingEnd {
-				offset = int(existingEnd - clock)
-			}
-
-			// Several clients' structs integrate in Yjs's order once all are
-			// decoded, as in the V1 decoder. A predecessor may also be deferred
-			// until a later client group in this same message.
-			if numClients > 1 || clock > existingEnd {
-				pending = append(pending, item)
-				clock = itemEnd
-				continue
-			}
-
-			// GC placeholders have no parent — add them straight to the store
-			// without linked-list integration, and advance existingEnd so the
-			// following structs in this group are not falsely gapped. Mirrors
-			// the V1 decoder (update.go). This is the half of #231's fix that
-			// keeps the client's struct list contiguous.
-			if item.Parent == nil && item.Deleted {
-				if offset > 0 {
-					item.ID.Clock += uint64(offset)
-					item.Content = item.Content.Splice(offset)
+			switch {
+			case drop:
+			case numClients > 1:
+				// Several clients' structs integrate in Yjs's order once all
+				// are decoded, as in the V1 decoder.
+				if itemEnd > existingEnd {
+					pending = append(pending, item)
 				}
-				txn.doc.store.Append(item)
-				existingEnd = itemEnd
-				clock = itemEnd
-				continue
+			default:
+				group = append(group, item)
 			}
-
-			// Items whose parent can't be resolved yet (cross-client
-			// reference to a group not yet decoded) are deferred.
-			if item.Parent == nil {
-				pending = append(pending, item)
-				clock = itemEnd
-				continue
-			}
-
-			// Defer if the right origin references a not-yet-integrated clock:
-			// V2 decodes client groups descending, so a higher-clientID item can
-			// reach here before its lower-clientID right neighbour exists. Without
-			// this the item integrates at the wrong position (permanent
-			// divergence, review finding C-2). Mirrors the V1 guard in update.go.
-			if item.OriginRight != nil &&
-				item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
-				pending = append(pending, item)
-				clock = itemEnd
-				continue
-			}
-
-			if continuesGC(txn.doc.store, item, offset) {
-				integrateBeforeRefusal(txn, pending)
-				return wrapUpdateErr(errGCContinuation)
-			}
-
-			if offset == 0 && item.Origin != nil {
-				item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
-			}
-
-			item.integrate(txn, offset)
-			existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
 			clock = itemEnd
+		}
+	}
+	applying = true
+	if numClients == 1 {
+		if pending, err = integrateGroup(txn, group, sv.Clock(groupClient), pending); err != nil {
+			return wrapUpdateErr(err)
 		}
 	}
 

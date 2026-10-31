@@ -60,7 +60,8 @@ func truncatedEdit() (seed, edit []byte) {
 	return seed, whole[:len(whole)-1]
 }
 
-// invalidStringEdit returns an update whose first struct integrates and whose second carries non-UTF-8 bytes that only the apply rejects.
+// invalidStringEdit returns an update whose second struct carries non-UTF-8
+// bytes that only the apply rejects.
 func invalidStringEdit(t *testing.T) []byte {
 	t.Helper()
 	doc := crdt.New(crdt.WithClientID(2))
@@ -72,8 +73,10 @@ func invalidStringEdit(t *testing.T) []byte {
 	return bytes.Replace(update, []byte("xyz"), []byte{0xff, 0xfe, 0xfd}, 1)
 }
 
-// invalidMapOverwriteEdit returns a seed setting m["k"] and an update whose overwrite of "k", which deletes the seed's value, integrates before a later non-UTF-8 value fails.
-func invalidMapOverwriteEdit(t *testing.T) (seed, edit []byte) {
+// cutMapOverwriteEdit returns a seed setting m["k"] and an update whose
+// overwrite of "k", which deletes the seed's value, integrates before its cut
+// delete set fails.
+func cutMapOverwriteEdit(t *testing.T) (seed, edit []byte) {
 	t.Helper()
 	source := crdt.New(crdt.WithClientID(1))
 	sourceMap := source.GetMap("m")
@@ -85,10 +88,8 @@ func invalidMapOverwriteEdit(t *testing.T) (seed, edit []byte) {
 	sv := editor.StateVector()
 	editorMap := editor.GetMap("m")
 	editor.Transact(func(txn *crdt.Transaction) { editorMap.Set(txn, "k", "new") })
-	editor.Transact(func(txn *crdt.Transaction) { editorMap.Set(txn, "bad", "xyz") })
 	whole := crdt.EncodeStateAsUpdateV1(editor, sv)
-	require.Equal(t, 1, bytes.Count(whole, []byte("xyz")))
-	return seed, bytes.Replace(whole, []byte("xyz"), []byte{0xff, 0xfe, 0xfd}, 1)
+	return seed, whole[:len(whole)-1]
 }
 
 // mapValue returns doc's m[key], or nil when it is unset.
@@ -97,10 +98,11 @@ func mapValue(doc *crdt.Doc, key string) any {
 	return v
 }
 
-// A relay-injected update that partly integrates before failing must reach local peers as exactly its landed part, and as nothing when nothing new landed.
+// A relay-injected update that partly integrates before failing must reach
+// local peers as exactly its landed part, and as nothing when nothing landed.
 func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 	seed, truncated := truncatedEdit()
-	mapSeed, mapOverwrite := invalidMapOverwriteEdit(t)
+	mapSeed, mapOverwrite := cutMapOverwriteEdit(t)
 	textSeeded := func(d *crdt.Doc) bool { return d.GetText("t").ToString() == "hello" }
 	cases := []struct {
 		name     string
@@ -112,8 +114,9 @@ func TestInteg_Inject_PartlyAppliedUpdateReachesLocalPeers(t *testing.T) {
 		relays   bool
 	}{
 		{name: "a delete set that does not decode", seed: seed, seeded: textSeeded, update: truncated, roomText: "hello!", relays: true},
-		{name: "a later struct that does not decode", update: invalidStringEdit(t), roomText: "hello", relays: true},
-		{name: "a map overwrite before a struct that does not decode", seed: mapSeed, update: mapOverwrite,
+		// Every struct decodes before one integrates, so nothing lands.
+		{name: "a later struct that does not decode", update: invalidStringEdit(t), relays: false},
+		{name: "a map overwrite before a delete set that does not decode", seed: mapSeed, update: mapOverwrite,
 			seeded: func(d *crdt.Doc) bool { return mapValue(d, "k") == "old" }, roomK: "new", relays: true},
 		{name: "nothing integrated", update: []byte{0x01, 0x05}, relays: false},
 	}

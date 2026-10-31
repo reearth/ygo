@@ -257,6 +257,43 @@ func BenchmarkApplyUpdateV2_Bulk(b *testing.B) {
 	}
 }
 
+// BenchmarkApplyUpdateV1_Small applies a one-keystroke V1 update, a single
+// one-character struct, to a fresh document on every iteration.
+func BenchmarkApplyUpdateV1_Small(b *testing.B) {
+	src, _ := buildTextDocBulk(1)
+	benchApplyUpdate(b, EncodeStateAsUpdateV1(src, nil), ApplyUpdateV1)
+}
+
+// BenchmarkApplyUpdateV2_Small is BenchmarkApplyUpdateV1_Small in V2.
+func BenchmarkApplyUpdateV2_Small(b *testing.B) {
+	src, _ := buildTextDocBulk(1)
+	benchApplyUpdate(b, EncodeStateAsUpdateV2(src, nil), ApplyUpdateV2)
+}
+
+// BenchmarkApplyUpdateV1_Large applies a V1 update of 200,000 one-character
+// structs from one client, twice the default pending cap, to a fresh document
+// on every iteration.
+func BenchmarkApplyUpdateV1_Large(b *testing.B) {
+	src, _ := buildTextDoc(200_000)
+	benchApplyUpdate(b, EncodeStateAsUpdateV1(src, nil), ApplyUpdateV1)
+}
+
+// BenchmarkApplyUpdateV2_Large is BenchmarkApplyUpdateV1_Large in V2.
+func BenchmarkApplyUpdateV2_Large(b *testing.B) {
+	src, _ := buildTextDoc(200_000)
+	benchApplyUpdate(b, EncodeStateAsUpdateV2(src, nil), ApplyUpdateV2)
+}
+
+func benchApplyUpdate(b *testing.B, update []byte, apply func(*Doc, []byte, any) error) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := apply(newTestDoc(2), update, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkMergeUpdatesV1 encodes 10 small V1 updates (100 chars each) and
 // then merges them into a single update on each iteration.
 func BenchmarkMergeUpdatesV1(b *testing.B) {

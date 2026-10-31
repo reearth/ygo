@@ -646,16 +646,23 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	if err := checkParkedDeletes(txn.doc, &budget); err != nil {
 		return err
 	}
-	applying = true
 
-	// 1. Decode the items. A one-client update integrates as it decodes; the
-	//    structs of several clients, and anything blocked, are returned.
-	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, budget.superseded)
+	// 1. Decode every struct; the structs of several clients all wait in
+	//    pending, and a one-client update's stay in group.
+	var buf [8]*Item // a keystroke's few structs stay on the stack
+	withinUpdatePending, group, groupClient, err := decodeStructs(txn, dec, sv, numClients, budget.superseded, buf[:0])
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
+	applying = true
 
-	// 2. Integrate them in Yjs's order and park what stays blocked.
+	// 2. Integrate them, a one-client update in clock order and the rest in
+	//    Yjs's order, and park what stays blocked.
+	if numClients == 1 {
+		if withinUpdatePending, err = integrateGroup(txn, group, sv.Clock(groupClient), nil); err != nil {
+			return wrapUpdateErr(err)
+		}
+	}
 	if err := resolveWithinUpdatePending(txn, withinUpdatePending); err != nil {
 		return err
 	}
@@ -684,37 +691,33 @@ func drainAfterApply(txn *Transaction, err error) (retErr error) {
 	return retErr
 }
 
-// decodeAndPark walks the V1 update's per-client struct groups, decodes each
-// item, and either:
-//
-//	(a) skips fully-integrated items
-//	(b) returns every item of an update with several client groups, which
-//	    integrate in Yjs's order once all are decoded
-//	(c) defers items with same-client clock gaps within this update
-//	(d) integrates GC items directly via store.Append
-//	(e) integrates items whose parent is known via item.integrate
-//	(f) collects items whose parent is unresolved into the returned slice.
+// decodeStructs decodes every struct of the V1 update before the apply
+// integrates one, as Yjs reads them all first, so a struct that does not
+// decode leaves the document unchanged. The structs of an update with several
+// client groups return in pending, to integrate in Yjs's order; a one-client
+// update's return in group, appended to into, with its client.
+// Fully integrated structs are skipped.
 //
 // Groups that a later group for the same client supersedes are decoded and
 // dropped (yjs parity). numClients is the count parsed from the header.
-func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, superseded groupSet) ([]*Item, error) {
-	var pending []*Item
-
+func decodeStructs(txn *Transaction, dec *encoding.Decoder, sv StateVector, numClients uint64, superseded groupSet, into []*Item) (pending, group []*Item, groupClient ClientID, err error) {
+	group = into
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
 		numStructs, err := dec.ReadVarUint()
 		if err != nil {
-			return nil, err
+			return nil, nil, 0, err
 		}
 		totalStructs += numStructs
 		if totalStructs > maxV2Items {
-			return nil, ErrInvalidUpdate
+			return nil, nil, 0, ErrInvalidUpdate
 		}
 		start, err := readID(dec)
 		if err != nil {
-			return nil, err
+			return nil, nil, 0, err
 		}
 		client, clock := start.Client, start.Clock
+		groupClient = client
 
 		existingEnd := sv.Clock(client)
 		drop := superseded.has(i)
@@ -722,108 +725,130 @@ func decodeAndPark(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 		for j := uint64(0); j < numStructs; j++ {
 			item, err := decodeItem(dec, txn.doc, client, clock)
 			if err != nil {
-				return nil, err
+				return nil, nil, 0, err
 			}
 			// Every struct is bounded, a replaced group's too, so apply refuses
 			// what the merge decoders refuse.
-			contentLen := uint64(item.Content.Len())
-			itemEnd, err := structEnd(clock, contentLen)
+			itemEnd, err := structEnd(clock, uint64(item.Content.Len()))
 			if err != nil {
-				return nil, err
+				return nil, nil, 0, err
 			}
-			if drop {
-				clock = itemEnd
-				continue
-			}
-
 			// Skip structs (tag 10) mark clocks the sender withheld, so the
 			// receiver does NOT have them: advance the read cursor only. Items
 			// after the skip then fall into the clock-gap branch and park until
 			// the range arrives (yjs parity, #251).
-			if _, isSkip := item.Content.(*contentSkip); isSkip {
-				clock = itemEnd
-				continue
-			}
-
-			if itemEnd <= existingEnd {
-				// Already fully integrated — skip.
-				clock = itemEnd
-				continue
-			}
-
-			offset := 0
-			if clock < existingEnd {
-				// Partially integrated — integrate only the new suffix.
-				offset = int(existingEnd - clock)
-			}
-
-			// Yjs integrates several clients' structs highest client first,
-			// whatever the wire order, so they wait until all are decoded. A
-			// predecessor may also be deferred until a later client group in
-			// this same message.
-			if numClients > 1 || clock > existingEnd {
-				pending = append(pending, item)
-				clock = itemEnd
-				continue
-			}
-
-			// GC items (tag 0) have no parent — add directly to the store
-			// without linked-list integration.
-			if item.Parent == nil && item.Deleted {
-				if offset > 0 {
-					item.ID.Clock += uint64(offset)
-					item.Content = item.Content.Splice(offset)
+			_, isSkip := item.Content.(*contentSkip)
+			switch {
+			case drop || isSkip:
+			case numClients > 1:
+				// Yjs integrates several clients' structs highest client
+				// first, whatever the wire order.
+				if itemEnd > existingEnd {
+					pending = append(pending, item)
 				}
-				txn.doc.store.Append(item)
-				existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
-				clock = itemEnd
-				continue
+			default:
+				group = append(group, item)
 			}
-
-			// Items whose parent can't be resolved yet (cross-client
-			// reference to a group not yet decoded) are deferred.
-			if item.Parent == nil {
-				pending = append(pending, item)
-				clock = itemEnd
-				continue
-			}
-
-			// OriginRight referencing a not-yet-integrated clock: defer (Yjs
-			// getMissing parity). A root type's parent is resolved by name, so
-			// such an item is NOT caught by the parent==nil defer above; without
-			// this, an item whose right origin is a missing concurrent client
-			// would integrate at the wrong position — permanent divergence
-			// (review finding C-2). Deferral routes it through the within-update
-			// retry and, failing that, store.pending via itemFutureDep.
-			if item.OriginRight != nil &&
-				item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
-				pending = append(pending, item)
-				clock = itemEnd
-				continue
-			}
-
-			if continuesGC(txn.doc.store, item, offset) {
-				integrateBeforeRefusal(txn, pending)
-				return nil, errGCContinuation
-			}
-
-			// Resolve left neighbor from the Origin ID so that integrate()
-			// starts its scan from the correct position in the linked list.
-			// (Local inserts set item.Left directly; remote items only have Origin.)
-			if offset == 0 && item.Origin != nil {
-				item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
-			}
-
-			item.integrate(txn, offset)
-			existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
 			clock = itemEnd
 		}
 	}
+	return pending, group, groupClient, nil
+}
 
+// integrateGroup integrates one client's decoded structs in clock order from
+// existingEnd, the client's clock before the update, and appends to pending
+// those that must wait: past a gap, or for a parent or right origin the
+// document lacks.
+func integrateGroup(txn *Transaction, group []*Item, existingEnd uint64, pending []*Item) ([]*Item, error) {
+	for _, item := range group {
+		if item.Parent == nil {
+			resolveDecodedParent(txn.doc.store, item)
+		}
+		clock := item.ID.Clock
+		itemEnd := clock + uint64(item.Content.Len())
+		if itemEnd <= existingEnd {
+			// Already fully integrated — skip.
+			continue
+		}
+
+		offset := 0
+		if clock < existingEnd {
+			// Partially integrated — integrate only the new suffix.
+			offset = int(existingEnd - clock)
+		}
+
+		// A predecessor this update withheld waits in the pending queue.
+		if clock > existingEnd {
+			pending = append(pending, item)
+			continue
+		}
+
+		// GC items (tag 0) have no parent — add directly to the store
+		// without linked-list integration.
+		if item.Parent == nil && item.Deleted {
+			if offset > 0 {
+				item.ID.Clock += uint64(offset)
+				item.Content = item.Content.Splice(offset)
+			}
+			txn.doc.store.Append(item)
+			existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
+			continue
+		}
+
+		// Items whose parent can't be resolved yet are deferred.
+		if item.Parent == nil {
+			pending = append(pending, item)
+			continue
+		}
+
+		// OriginRight referencing a not-yet-integrated clock: defer (Yjs
+		// getMissing parity). A root type's parent is resolved by name, so
+		// such an item is NOT caught by the parent==nil defer above; without
+		// this, an item whose right origin is a missing concurrent client
+		// would integrate at the wrong position — permanent divergence
+		// (review finding C-2). Deferral routes it through the within-update
+		// retry and, failing that, store.pending via itemFutureDep.
+		if item.OriginRight != nil &&
+			item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
+			pending = append(pending, item)
+			continue
+		}
+
+		if continuesGC(txn.doc.store, item, offset) {
+			integrateBeforeRefusal(txn, pending)
+			return nil, errGCContinuation
+		}
+
+		// Resolve left neighbor from the Origin ID so that integrate()
+		// starts its scan from the correct position in the linked list.
+		// (Local inserts set item.Left directly; remote items only have Origin.)
+		if offset == 0 && item.Origin != nil {
+			item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
+		}
+
+		item.integrate(txn, offset)
+		existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
+	}
 	return pending, nil
 }
 
-// resolveWithinUpdatePending integrates the items decodeAndPark returned in
+// resolveDecodedParent sets the parent the decoder could not find because the
+// struct that names it is earlier in the same group, which has integrated since.
+func resolveDecodedParent(store *StructStore, item *Item) {
+	if item.parentID == nil {
+		if ref := parentRef(store, item); ref != nil {
+			inheritParent(item, ref)
+		}
+		return
+	}
+	if container := store.Find(*item.parentID); container != nil {
+		if ct, ok := container.Content.(*ContentType); ok {
+			item.Parent, item.parentID = ct.Type, nil
+		}
+	}
+}
+
+// resolveWithinUpdatePending integrates the items decodeStructs returned in
 // Yjs's integrateStructs order (integratePending). tryIntegrate also stores
 // genuine GC orphans without attaching them to a root, and respects
 // same-client clock gaps. Survivors are parked in store.pending within the

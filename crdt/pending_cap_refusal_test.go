@@ -369,8 +369,10 @@ func TestUnit_ApplyUpdate_UnreadableHeaderOrGroupFramingTellsNoObserver(t *testi
 	}
 }
 
-// An update that fails after some of it integrated commits that part once, so
-// that persistence and the relay get it.
+// An update that fails in its delete set, after its structs integrated,
+// commits that part once, so that persistence and the relay get it. One cut
+// inside a struct changes nothing and tells no observer, since every struct
+// decodes before one integrates.
 func TestUnit_ApplyUpdate_PartlyAppliedUpdateTellsItsObservers(t *testing.T) {
 	editor := New(WithClientID(2))
 	text, m := editor.GetText("t"), editor.GetMap("m")
@@ -384,19 +386,28 @@ func TestUnit_ApplyUpdate_PartlyAppliedUpdateTellsItsObservers(t *testing.T) {
 		name    string
 		version int
 		update  []byte
+		partial bool
 	}{
-		{"V1 cut in its delete set", 1, v1[:len(v1)-1]},
-		{"V1 cut in its second struct", 1, v1[:len(v1)-6]},
-		{"V2 cut in its delete set", 2, v2[:len(v2)-1]},
-		{"V2 cut in its second struct", 2, v2[:len(v2)-6]},
+		{"V1 cut in its delete set", 1, v1[:len(v1)-1], true},
+		{"V1 cut in its second struct", 1, v1[:len(v1)-6], false},
+		{"V2 cut in its delete set", 2, v2[:len(v2)-1], true},
+		{"V2 cut in its second struct", 2, v2[:len(v2)-6], false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			doc := New()
+			before := EncodeStateAsUpdateV1(doc, nil)
 			updates := observed(doc)
 			txns := 0
 			doc.OnAfterTransaction(func(*Transaction) { txns++ })
 			if err := applyVersion(doc, tc.version, tc.update); !errors.Is(err, ErrInvalidUpdate) {
 				t.Fatalf("err %v, want ErrInvalidUpdate", err)
+			}
+			if !tc.partial {
+				requireUnchanged(t, doc, before, "", updates)
+				if txns != 0 {
+					t.Fatalf("OnAfterTransaction fired %d times, want none", txns)
+				}
+				return
 			}
 			if got := doc.GetText("t").ToString(); got != "abc" {
 				t.Fatalf("the text is %q, want the part that integrated, %q", got, "abc")

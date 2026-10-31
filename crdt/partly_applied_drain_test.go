@@ -17,20 +17,17 @@ type partlyAppliedCase struct {
 	whole []byte // "a" uncut
 }
 
-// partlyAppliedCases cuts "a"'s delete set, and a merge of "a" and "c" inside
-// "c"'s struct, in V1 and V2.
+// partlyAppliedCases cuts "a"'s delete set, in V1 and V2. A cut inside a
+// struct refuses the update before it changes anything, since every struct
+// decodes before one integrates.
 func partlyAppliedCases(t *testing.T) []partlyAppliedCase {
 	t.Helper()
 	w := New(WithClientID(13))
 	wt := w.GetText("t")
 	var ups [][]byte
 	w.OnUpdate(func(u []byte, _ any) { ups = append(ups, append([]byte(nil), u...)) })
-	for i, s := range []string{"a", "b", "c"} {
+	for i, s := range []string{"a", "b"} {
 		w.Transact(func(txn *Transaction) { wt.Insert(txn, i, s, nil) })
-	}
-	both, err := MergeUpdatesV1(ups[0], ups[2])
-	if err != nil {
-		t.Fatal(err)
 	}
 	v2 := func(u []byte) []byte {
 		c, err := UpdateV1ToV2(u)
@@ -39,12 +36,10 @@ func partlyAppliedCases(t *testing.T) []partlyAppliedCase {
 		}
 		return c
 	}
-	a2, b2, both2 := v2(ups[0]), v2(ups[1]), v2(both)
+	a2, b2 := v2(ups[0]), v2(ups[1])
 	return []partlyAppliedCase{
 		{name: "V1 delete set cut", gap: ups[1], bad: ups[0][:len(ups[0])-1], whole: ups[0]},
-		{name: "V1 struct cut", gap: ups[1], bad: both[:len(both)-3], whole: ups[0]},
 		{name: "V2 delete set cut", v2: true, gap: b2, bad: a2[:len(a2)-1], whole: a2},
-		{name: "V2 struct cut", v2: true, gap: b2, bad: both2[:len(both2)-2], whole: a2},
 	}
 }
 
