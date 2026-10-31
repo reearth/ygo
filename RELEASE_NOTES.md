@@ -8,7 +8,8 @@ When the GC collected a deleted nested type, it kept the items under that
 type as deleted items, each with its parent and origins. Yjs turns them into
 GC structs. The GC at the end of a transaction and `RunGC` now do the same,
 and an item that arrives later in a collected type is stored as a GC struct,
-as in Yjs.
+as in Yjs. `RunGC` also merges neighbouring GC structs of one client into
+one, as Yjs does at the end of a transaction.
 
 Content does not change, but encoded state does: after such a delete, the
 state that `EncodeStateAsUpdate` returns holds GC structs where it held

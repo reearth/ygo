@@ -432,8 +432,9 @@ func gcTypeItems(root *abstractType) {
 // RunGC replaces the content of deleted items with lightweight ContentDeleted
 // tombstones, freeing memory while preserving the structural position information
 // required for CRDT correctness. The items under a deleted nested type become
-// GC structs, as in Yjs. It then merges adjacent ContentDeleted items from the
-// same client into single nodes, compacting the linked list.
+// GC structs, as in Yjs. It then merges neighbouring GC structs, and adjacent
+// ContentDeleted items, from the same client into single nodes, compacting the
+// linked list.
 //
 // This is a no-op when doc.gc is false. After RunGC runs, RestoreDocument can
 // no longer reconstruct states that predate the GC'd deletions — take snapshots
@@ -454,21 +455,30 @@ func RunGC(doc *Doc) {
 		}
 	}
 
-	// Pass 2: merge adjacent ContentDeleted items that are consecutive in
-	// both the store slice and the linked list. Merging them reduces the
-	// number of nodes future origin lookups must traverse.
+	// Pass 2: merge neighbouring GC structs, and adjacent ContentDeleted items
+	// that are consecutive in both the store slice and the linked list, into
+	// single nodes, which shortens the store and the encoded state.
 	for client, items := range doc.store.clients {
 		kept := make([]*Item, 0, len(items))
 		for _, item := range items {
-			prevCD, prevIsCDItem := func() (*ContentDeleted, bool) {
-				if len(kept) == 0 {
-					return nil, false
-				}
-				p := kept[len(kept)-1]
-				cd, ok := p.Content.(*ContentDeleted)
-				return cd, ok
-			}()
+			var prev *Item
+			var prevCD *ContentDeleted
+			if len(kept) > 0 {
+				prev = kept[len(kept)-1]
+				prevCD, _ = prev.Content.(*ContentDeleted)
+			}
 			itemCD, itemIsCD := item.Content.(*ContentDeleted)
+			if prevCD == nil || !itemIsCD {
+				kept = append(kept, item)
+				continue
+			}
+
+			// Two GC structs merge, as Yjs GC.mergeWith merges them: a client's
+			// structs in the store have contiguous clocks.
+			if prev.isGCOrphan() && item.isGCOrphan() {
+				prevCD.length += itemCD.length
+				continue
+			}
 
 			// Merge only when both are tombstones, directly adjacent in the
 			// linked list (no gap, no interleaving items), clocks are
@@ -476,14 +486,7 @@ func RunGC(doc *Doc) {
 			// tombstone still encodes item's position: item's Origin is prev's
 			// last clock and both share an OriginRight (Yjs Item.mergeWith).
 			// A live item whose origin is inside item moves on decode otherwise.
-			prev := func() *Item {
-				if len(kept) == 0 {
-					return nil
-				}
-				return kept[len(kept)-1]
-			}()
-			if prevIsCDItem && itemIsCD &&
-				gcMergeable(prev, item) &&
+			if gcMergeable(prev, item) &&
 				prev.Right == item && item.Left == prev &&
 				prev.ID.Clock+uint64(prev.Content.Len()) == item.ID.Clock &&
 				item.Origin != nil && item.Origin.Client == client && item.Origin.Clock == item.ID.Clock-1 &&

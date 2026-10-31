@@ -256,8 +256,8 @@ func TestUnit_GC_WriteIntoACollectedTypeMatchesYjs(t *testing.T) {
 }
 
 // RunGC collects the items of a nested type that another client wrote the same
-// way whichever client's items it visits first: two GC structs, which its
-// merge pass leaves apart.
+// way whichever client's items it visits first: one GC struct, as its merge
+// pass joins the two.
 func TestUnit_RunGC_NestedItemsOfAnotherClientDoNotDependOnClientOrder(t *testing.T) {
 	owner, writer := New(WithClientID(1), WithGC(false)), New(WithClientID(2))
 	om := owner.GetMap("m")
@@ -276,8 +276,43 @@ func TestUnit_RunGC_NestedItemsOfAnotherClientDoNotDependOnClientOrder(t *testin
 		require.NoError(t, ApplyUpdateV1(room, state, nil))
 		RunGC(room)
 		require.Equal(t, "1:0+1 Item 2:0+2 GC", clockKinds(room))
-		require.Len(t, room.store.clients[2], 2)
+		require.Len(t, room.store.clients[2], 1)
 	}
+}
+
+// RunGC merges the GC structs it makes from the items under a deleted nested
+// type into one, as Yjs merges them at the end of the transaction that deletes
+// the type. The state is what Yjs 13.6.32 encodes for the same edits with no
+// UndoManager, which in Yjs would keep the deleted items.
+func TestUnit_RunGC_MergesNeighbouringGCStructs(t *testing.T) {
+	doc, m := nestedRowsDoc(100)
+	NewUndoManager(doc, []SharedType{m})
+	doc.Transact(func(txn *Transaction) { m.Delete(txn, "rows") })
+	RunGC(doc)
+	require.Equal(t, "1:0+1 Item 1:1+200 GC", clockKinds(doc))
+	require.Len(t, doc.store.clients[1], 2)
+	require.Equal(t, "010201002101016d04726f77730100c80101010100c901", hex.EncodeToString(EncodeStateAsUpdateV1(doc, nil)))
+}
+
+// A GC struct keeps no redo link, as a Yjs GC struct has none, so an undo that
+// splits a merged GC struct cannot point its halves at another item. The redo
+// copy of "a" is followed by "x", which the tracked transactions never wrote.
+func TestUnit_RunGC_MergedGCStructsKeepNoRedoLink(t *testing.T) {
+	doc := New(WithClientID(1))
+	m := doc.GetMap("m")
+	um := NewUndoManager(doc, []SharedType{m}, WithTrackedOrigins("user"), WithCaptureTimeout(0))
+	var rows *YArray
+	doc.Transact(func(txn *Transaction) { rows = NewArrayPrelim(); m.Set(txn, "rows", rows); rows.Push(txn, []any{"a"}) }, "user")
+	doc.Transact(func(txn *Transaction) { rows.Push(txn, []any{"b"}) }, "user")
+	doc.Transact(func(txn *Transaction) { rows.Delete(txn, 0, 1) }, "user")
+	require.True(t, um.Undo())
+	doc.Transact(func(txn *Transaction) { m.Set(txn, "other", "x") })
+	doc.Transact(func(txn *Transaction) { m.Delete(txn, "rows") }, "user")
+	RunGC(doc)
+	um.Undo()
+	v, ok := m.Get("other")
+	require.True(t, ok)
+	require.Equal(t, "x", v)
 }
 
 // Load gets the parent document from the subdocument, not from its item,

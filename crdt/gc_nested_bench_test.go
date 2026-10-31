@@ -26,6 +26,30 @@ func BenchmarkGCTransactionNestedType(b *testing.B) {
 	}
 }
 
+// BenchmarkRunGCNestedType measures RunGC after the delete of a map entry
+// holding an array of n map rows, which the transaction GC skipped because an
+// UndoManager is attached, and reports the size of the document's V1 state
+// after it. Building the document and the delete are excluded.
+func BenchmarkRunGCNestedType(b *testing.B) {
+	for _, n := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.ReportAllocs()
+			var doc *Doc
+			for range b.N {
+				b.StopTimer()
+				var m *YMap
+				doc, m = nestedRowsDoc(n)
+				NewUndoManager(doc, []SharedType{m})
+				doc.Transact(func(txn *Transaction) { m.Delete(txn, "rows") })
+				b.StartTimer()
+				RunGC(doc)
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(len(EncodeStateAsUpdateV1(doc, nil))), "state-bytes")
+		})
+	}
+}
+
 // nestedRowsDoc returns a document whose map "m" holds, under "rows", an array
 // of n maps with one entry each.
 func nestedRowsDoc(n int) (*Doc, *YMap) {

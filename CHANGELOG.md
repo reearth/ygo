@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   maps, the encoded state after the delete goes from 133,510 to 40,023 bytes.
   Content does not change. A write through a handle to a type inside a
   collected type no longer fires the deep observers above it, as in Yjs.
+  `RunGC` also merges neighbouring GC structs of one client, as Yjs does at
+  the end of a transaction: after `RunGC`, the same delete keeps one GC
+  struct where it kept 20,000, and the state is 25 bytes.
 
 ## [1.54.0] — 2026-10-22
 

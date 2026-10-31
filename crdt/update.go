@@ -276,8 +276,8 @@ func (item *Item) isGCOrphan() bool {
 }
 
 // markGCOrphan turns item into a GC struct: deleted, length-only content, and
-// no parent or origins. Yjs makes one of an item whose parent cannot be
-// resolved and of each item under a collected nested type.
+// no parent, origins or redo link. Yjs makes one of an item whose parent cannot
+// be resolved and of each item under a collected nested type.
 // It then encodes as a GC struct, and nothing can resolve a parent through it,
 // so children that arrive later are orphaned too instead of integrating into a
 // detached type.
@@ -291,6 +291,7 @@ func (item *Item) markGCOrphan() {
 	item.parentID = nil
 	item.Origin = nil
 	item.OriginRight = nil
+	item.redone = nil
 }
 
 func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStore) {
