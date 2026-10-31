@@ -13,46 +13,6 @@ import (
 	"github.com/reearth/ygo/encoding"
 )
 
-// applyIn applies the V1 update to doc as V1, or converted to V2.
-func applyIn(t *testing.T, doc *Doc, v2 bool, update []byte) error {
-	t.Helper()
-	if !v2 {
-		return ApplyUpdateV1(doc, update, nil)
-	}
-	converted, err := UpdateV1ToV2(update)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ApplyUpdateV2(doc, converted, nil)
-}
-
-var applyFormats = []struct {
-	name string
-	v2   bool
-}{{"V1", false}, {"V2", true}}
-
-// observed counts the updates doc's OnUpdate observers are handed.
-func observed(doc *Doc) *int {
-	n := new(int)
-	doc.OnUpdate(func([]byte, any) { *n++ })
-	return n
-}
-
-// requireUnchanged requires doc to match before and text, with no update
-// observed since updates was zero.
-func requireUnchanged(t *testing.T, doc *Doc, before []byte, text string, updates *int) {
-	t.Helper()
-	if after := EncodeStateAsUpdateV1(doc, nil); string(after) != string(before) {
-		t.Fatalf("the document's state changed: %d bytes before, %d after", len(before), len(after))
-	}
-	if got := doc.GetText("t").ToString(); got != text {
-		t.Fatalf("the text changed from %q to %q", text, got)
-	}
-	if *updates != 0 {
-		t.Fatalf("the observers were handed %d updates, want none", *updates)
-	}
-}
-
 // parkingEdit is an update that inserts text and sets n keys on a map the
 // receiver lacks (author), so every entry parks.
 func parkingEdit(t *testing.T, n int) (update, author []byte) {
@@ -274,7 +234,7 @@ func TestUnit_PendingBudget_LenientCheckRefusesWhatTheValidatingCheckRefuses(t *
 				}
 				v2, rest = d, *d.restDec
 			}
-			superseded, _, err := supersededGroups(data, v2, rest)
+			superseded, _, _, err := supersededGroups(data, v2, rest)
 			if err != nil {
 				t.Fatal(err)
 			}

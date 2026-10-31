@@ -55,25 +55,28 @@ func tagError(tag byte, v2 bool) contentTagError {
 func (t contentTagError) Error() string { return unknownTagErr(t&v2TagError != 0, byte(t)).Error() }
 
 // supersededGroups marks wire groups that a later group for the same client
-// replaces, since Yjs integrates only the last, and counts the update's
-// structs.
-func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set groupSet, structs int, err error) {
-	ordered, n, total, err := scanGroupClients(update, v2, rest, nil)
+// replaces, since Yjs integrates only the last, counts the update's structs,
+// and returns the bytes past the structs, where the delete set starts.
+// Encoders sort clients, so a strictly monotonic header sequence proves
+// uniqueness without an index. v2 and rest are the update's initial V2
+// decoder state (v2 nil for V1); both are copied, never advanced.
+func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set groupSet, structs int, deleteSetBytes []byte, err error) {
+	ordered, n, total, deleteSetBytes, err := scanGroupClients(update, v2, rest, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	if ordered {
-		return nil, int(total), nil
+		return nil, int(total), deleteSetBytes, nil
 	}
 	type entry struct {
 		client ClientID
 		index  uint32
 	}
 	entries := make([]entry, 0, n)
-	if _, _, _, err := scanGroupClients(update, v2, rest, func(i uint64, client ClientID) {
+	if _, _, _, _, err := scanGroupClients(update, v2, rest, func(i uint64, client ClientID) {
 		entries = append(entries, entry{client, uint32(i)})
 	}); err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].client != entries[j].client {
@@ -89,13 +92,14 @@ func supersededGroups(update []byte, v2 *v2Decoder, rest encoding.Decoder) (set 
 			set[entries[i].index/64] |= 1 << (entries[i].index % 64)
 		}
 	}
-	return set, int(total), nil
+	return set, int(total), deleteSetBytes, nil
 }
 
 // scanGroupClients walks every group header and struct, reporting whether the
-// clients are strictly monotonic and the struct count. Its error holds no
-// reference to the decoder copies.
-func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit func(uint64, ClientID)) (ordered bool, groups, structs uint64, err error) {
+// clients are strictly monotonic and the struct count, returns the bytes past
+// the structs and calls visit, if set, per group. Its error holds no reference
+// to the decoder copies.
+func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit func(uint64, ClientID)) (ordered bool, groups, structs uint64, deleteSetBytes []byte, err error) {
 	s := pendingScanner{frame: true}
 	if v2 == nil {
 		rest = *encoding.NewDecoder(update)
@@ -108,7 +112,7 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 	}
 	n := s.uint()
 	if n > maxV2Items {
-		return false, 0, 0, ErrInvalidUpdate
+		return false, 0, 0, nil, ErrInvalidUpdate
 	}
 	ordered = true
 	var previous ClientID
@@ -118,7 +122,7 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 		items := s.uint()
 		total += items
 		if total > maxV2Items {
-			return false, 0, 0, ErrInvalidUpdate
+			return false, 0, 0, nil, ErrInvalidUpdate
 		}
 		client := s.client()
 		s.uint()
@@ -141,7 +145,7 @@ func scanGroupClients(update []byte, v2 *v2Decoder, rest encoding.Decoder, visit
 		}
 	}
 	if s.err != nil {
-		return false, 0, 0, scanReason(s.err)
+		return false, 0, 0, nil, scanReason(s.err)
 	}
-	return ordered, n, total, nil
+	return ordered, n, total, s.rest.RemainingBytes(), nil
 }

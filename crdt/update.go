@@ -569,19 +569,23 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	if numClients > uint64(len(update)/2) || numClients > maxV2Items {
 		return ErrInvalidUpdate
 	}
-	var superseded groupSet
-	structs := 0
+	// The pending cap refuses an update before the apply changes anything, for
+	// its items (checkBeforeApply) or its delete ranges (checkParkedDeletes),
+	// both reading the update through the apply's one budget.
+	budget := newPendingBudget(txn.doc, sv, update, false)
 	if numClients > 1 {
 		// A later malformed group must not leave earlier, superseded groups
-		// applied.
-		if superseded, structs, err = supersededGroups(update, nil, encoding.Decoder{}); err != nil {
+		// applied; the walk also counts the structs, bounding the cap check.
+		if err := budget.knowSuperseded(); err != nil {
 			return wrapUpdateErr(err)
 		}
+	} else {
+		budget.setSuperseded(nil)
 	}
-	budget := newPendingBudget(txn.doc, sv, update, false)
-	budget.setSuperseded(superseded)
-	budget.structs = structs
 	if err := budget.checkBeforeApply(len(update)); err != nil {
+		return err
+	}
+	if err := checkParkedDeletes(txn.doc, &budget); err != nil {
 		return err
 	}
 	applying = true
@@ -589,7 +593,7 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	// 1. Decode all items, parking any with future-clock deps or same-client gaps.
 	//    Returns the within-update pending list (items whose parent might resolve
 	//    later in this same update).
-	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, superseded)
+	withinUpdatePending, err := decodeAndPark(txn, dec, sv, numClients, budget.superseded)
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
@@ -603,9 +607,8 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	unresolvableDs := ds.applyToPartial(txn)
-	if len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
+	if unresolvableDs := ds.applyToPartial(txn); len(unresolvableDs.clients) > 0 {
+		txn.doc.store.parkDeletes(unresolvableDs)
 	}
 
 	return nil

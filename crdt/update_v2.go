@@ -641,16 +641,24 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 
 	var pending []*Item
-	var superseded groupSet
 	if numClients > 1 {
 		// Fail before integrating anything: a later malformed group must not
-		// leave earlier, superseded groups applied.
-		if superseded, budget.structs, err = supersededGroups(update, &initialV2, budget.v2Rest); err != nil {
+		// leave earlier, superseded groups applied; the walk also counts the
+		// structs, bounding the cap check.
+		if err := budget.knowSuperseded(); err != nil {
 			return wrapUpdateErr(err)
 		}
+	} else {
+		budget.setSuperseded(nil)
 	}
-	budget.setSuperseded(superseded)
+	superseded := budget.superseded
+	// The pending cap refuses an update before the apply changes anything, for
+	// its items (checkBeforeApply) or its delete ranges (checkParkedDeletes),
+	// both reading the update through the apply's one budget.
 	if err := budget.checkBeforeApply(len(update)); err != nil {
+		return err
+	}
+	if err := checkParkedDeletes(txn.doc, &budget); err != nil {
 		return err
 	}
 	*dec.restDec = peek
@@ -831,9 +839,8 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
-	unresolvableDs := ds.applyToPartial(txn)
-	if len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
+	if unresolvableDs := ds.applyToPartial(txn); len(unresolvableDs.clients) > 0 {
+		txn.doc.store.parkDeletes(unresolvableDs)
 	}
 
 	return nil

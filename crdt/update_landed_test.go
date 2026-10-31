@@ -39,7 +39,11 @@ func TestUnit_ApplyUpdateV1Landed(t *testing.T) {
 	writer.Transact(func(txn *Transaction) { wm.Set(txn, "a", 1) })
 	written := EncodeStateAsUpdateV1(writer, nil)
 	newRoom := func() *Doc {
-		room := New(WithClientID(100), WithMaxPendingItems(10))
+		// The cap leaves room for this update's delete ranges, so the
+		// pending-cap checks that run before the apply (checkBeforeApply,
+		// checkParkedDeletes) do not read its delete set: the apply reaches
+		// it and fails there, after its structs integrated or parked.
+		room := New(WithClientID(100), WithMaxPendingItems(100))
 		require.NoError(t, ApplyUpdateV1(room, written, nil))
 		require.NoError(t, ApplyUpdateV1(room, landedParking(t, 2, 4), nil))
 		require.Equal(t, 4, room.PendingStats().Items)
@@ -100,6 +104,7 @@ func TestUnit_ApplyUpdateV1Landed(t *testing.T) {
 
 	t.Run("a failure that integrates nothing lands nil", func(t *testing.T) {
 		room := newRoom()
+		room.SetMaxPendingItems(10) // 4 parked and 7 more pass it
 		landed, err := ApplyUpdateV1Landed(room, landedParking(t, 5, 7), nil)
 		require.ErrorIs(t, err, ErrInvalidUpdate)
 		assert.Nil(t, landed)

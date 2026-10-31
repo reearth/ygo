@@ -28,12 +28,19 @@ type pendingBudget struct {
 	// structs, when not zero, bounds the update's structs so the first pass can
 	// stop early.
 	structs int
+	// deleteSetBytes is the rest of the update past its structs once walked is
+	// set, which implies groupsKnown.
+	deleteSetBytes []byte
+	walked         bool
 }
 
 func newPendingBudget(doc *Doc, initial StateVector, update []byte, v2 bool) pendingBudget {
 	remaining := doc.maxPendingItemsLimit()
 	if doc.store.pending != nil {
-		remaining -= len(doc.store.pending.items)
+		// A document can hold more parked items than its cap (stored state
+		// loaded with the cap lifted, SetMaxPendingItems): its room is none,
+		// not below none, so an update that parks nothing still applies.
+		remaining = max(remaining-len(doc.store.pending.items), 0)
 	}
 	return pendingBudget{initial: initial, update: update, remaining: remaining, v2: v2}
 }
@@ -44,14 +51,15 @@ func (b *pendingBudget) setSuperseded(s groupSet) {
 	b.superseded, b.groupsKnown = s, true
 }
 
-// decodeV2 gives a V2 budget made without the apply's decoder one of its own.
+// decodeV2 gives a V2 budget made without the apply's decoder one of its own;
+// its error is unwrapped, for the caller to wrap.
 func (b *pendingBudget) decodeV2() error {
 	if !b.v2 || b.v2Start != nil {
 		return nil
 	}
 	d, err := newV2Decoder(b.update)
 	if err != nil {
-		return wrapUpdateErr(err)
+		return err
 	}
 	b.v2Start, b.v2Rest = d, *d.restDec
 	return nil
@@ -75,19 +83,11 @@ func (b *pendingBudget) scanner() *pendingScanner {
 // check refuses the update when its structs would park more items than the room
 // left.
 func (b *pendingBudget) check() error {
-	if b.remaining < 0 {
-		return ErrInvalidUpdate
-	}
 	if err := b.decodeV2(); err != nil {
-		return err
+		return wrapUpdateErr(err)
 	}
-	if !b.groupsKnown {
-		superseded, structs, err := supersededGroups(b.update, b.v2Start, b.v2Rest)
-		if err != nil {
-			return wrapUpdateErr(err)
-		}
-		b.setSuperseded(superseded)
-		b.structs = structs
+	if err := b.knowSuperseded(); err != nil {
+		return wrapUpdateErr(err)
 	}
 	known := make(StateVector, len(b.initial))
 	for client, clock := range b.initial {
@@ -165,6 +165,54 @@ func (b *pendingBudget) check() error {
 		}
 	}
 	return nil
+}
+
+// knowSuperseded records the groups the decoder drops and the update's struct
+// count, returning an unwrapped error for the caller to wrap.
+func (b *pendingBudget) knowSuperseded() error {
+	if b.groupsKnown {
+		return nil
+	}
+	return b.walkGroups()
+}
+
+// walkGroups records, in one walk of the update's structs, the groups the
+// decoder drops, the struct count and where the delete set starts, returning
+// an unwrapped error.
+func (b *pendingBudget) walkGroups() error {
+	if b.walked {
+		return nil
+	}
+	if err := b.decodeV2(); err != nil {
+		return err
+	}
+	superseded, structs, deleteSetBytes, err := supersededGroups(b.update, b.v2Start, b.v2Rest)
+	if err != nil {
+		return err
+	}
+	b.setSuperseded(superseded)
+	b.structs = structs
+	b.deleteSetBytes, b.walked = deleteSetBytes, true
+	return nil
+}
+
+// deleteSetScanner reads the delete set walkGroups found.
+func (b *pendingBudget) deleteSetScanner() *pendingScanner {
+	s := &pendingScanner{rest: encoding.NewDecoder(b.deleteSetBytes)}
+	if b.v2 {
+		s.v2 = &v2Decoder{restDec: s.rest}
+	}
+	return s
+}
+
+// deleteSetLimit bounds the update's delete set in bytes: with the apply's V2
+// decoder (v2Start), the rest cursor's bytes, the only ones decodeDeleteSetV2
+// reads; else the whole update.
+func (b *pendingBudget) deleteSetLimit() int {
+	if b.v2Start != nil {
+		return b.v2Rest.Remaining()
+	}
+	return len(b.update)
 }
 
 // Strict wire ordering proves that each client occurs in only one group.
