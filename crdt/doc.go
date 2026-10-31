@@ -563,28 +563,37 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 	}
 
 	return func() {
-		for _, fn := range fireFns {
-			fn()
+		// Deferred in reverse order, so each group still runs when an earlier
+		// one panics, as Yjs runs its type and deep observers.
+		if hasSubdocs {
+			defer callAll(onSubdocsSnap, func(fn func(SubdocsEvent)) { fn(subdocsEv) })
 		}
+		defer callAll(onAfterTxnSnap, func(fn func(*Transaction)) { fn(txn) })
+		defer callAll(onUpdateSnap, func(fn func([]byte, any)) { fn(updateBytes, txn.Origin) })
+		defer callAll(deepSnap, func(de deepEntry) {
+			callAll(de.fns, func(fn func(*Transaction)) { fn(txn) })
+		})
+		callAll(fireFns, func(fn func()) { fn() })
+		// Not deferred, so a panicking type observer skips the transaction-wide
+		// format cleanup decision, as a throwing text observer skips its own in Yjs.
 		if txn.afterTypeObservers != nil {
 			txn.afterTypeObservers()
 		}
-		for _, de := range deepSnap {
-			for _, fn := range de.fns {
-				fn(txn)
-			}
+	}
+}
+
+// callAll calls fn on each element of xs. When a call panics, it makes the
+// remaining calls before the panic goes on, as lib0's callAll does for Yjs
+// observers; a later panic replaces an earlier one, as in Yjs.
+func callAll[T any](xs []T, fn func(T)) {
+	i := 0
+	defer func() {
+		if i < len(xs) {
+			callAll(xs[i+1:], fn)
 		}
-		for _, fn := range onUpdateSnap {
-			fn(updateBytes, txn.Origin)
-		}
-		for _, fn := range onAfterTxnSnap {
-			fn(txn)
-		}
-		if hasSubdocs {
-			for _, fn := range onSubdocsSnap {
-				fn(subdocsEv)
-			}
-		}
+	}()
+	for ; i < len(xs); i++ {
+		fn(xs[i])
 	}
 }
 
@@ -764,14 +773,17 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 //     completed (non-empty if fn mutated; minimal but well-formed if fn
 //     panicked before mutating); per-type, deep, and OnAfterTransaction
 //     observers fire for what was recorded in txn.changed.
-//   - The original panic is re-raised to the caller after observers fire.
+//   - The original panic is re-raised to the caller after observers fire,
+//     unless an observer panics too (see below).
 //   - Rollback is NOT supported. The in-memory doc reflects fn's partial
 //     work. Callers who need atomicity must implement it above Transact.
 //     This matches the behavior of Yjs JS and the Rust yrs implementation;
 //     yrs explicitly directs users to UndoManager for transactional undo.
-//   - If fn panics and an observer callback also panics during the partial
-//     firing, the observer's panic reaches the caller and the original
-//     fn panic value is lost.
+//   - A panicking observer does not stop the others: every per-type, deep,
+//     OnUpdate, OnAfterTransaction and OnSubdocs observer still runs, and the
+//     panic reaches the caller afterwards. If more than one panics, or fn
+//     and an observer both panic, the last panic in firing order reaches
+//     the caller, as the last throw does in Yjs.
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 	_ = d.transactInternal(context.Background(), func(t *Transaction) error {
 		fn(t)

@@ -96,11 +96,7 @@ func (txt *YText) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 	snap := make([]textSub, len(txt.observers))
 	copy(snap, txt.observers)
 	e := YTextEvent{Target: txt, Txn: txn, Delta: delta}
-	return func() {
-		for _, s := range snap {
-			s.fn(e)
-		}
-	}
+	return func() { callAll(snap, func(s textSub) { s.fn(e) }) }
 }
 
 // computeDelta builds a Quill-compatible delta for the changes in txn.

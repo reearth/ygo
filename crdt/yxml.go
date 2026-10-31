@@ -158,11 +158,7 @@ func (f *YXmlFragment) prepareFire(txn *Transaction, keysChanged map[string]stru
 	snap := make([]xmlSub, len(f.observers))
 	copy(snap, f.observers)
 	ev := YXmlEvent{Target: f, Txn: txn, KeysChanged: keysChanged}
-	return func() {
-		for _, s := range snap {
-			s.fn(ev)
-		}
-	}
+	return func() { callAll(snap, func(s xmlSub) { s.fn(ev) }) }
 }
 
 // Len returns the number of non-deleted child nodes (attributes are excluded).
@@ -449,11 +445,7 @@ func (e *YXmlElement) prepareFire(txn *Transaction, keysChanged map[string]struc
 	snap := make([]xmlSub, len(e.elemObs))
 	copy(snap, e.elemObs)
 	ev := YXmlEvent{Target: e, Txn: txn, KeysChanged: keysChanged}
-	return func() {
-		for _, s := range snap {
-			s.fn(ev)
-		}
-	}
+	return func() { callAll(snap, func(s xmlSub) { s.fn(ev) }) }
 }
 
 // InsertElement inserts a YXmlElement at child position index.
