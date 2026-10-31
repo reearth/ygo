@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.0] — 2026-11-01
+
+### Added
+
+- **`crdt`: `Doc.SetMaxPendingItems(n)`** sets the pending cap after
+  construction, so stored state over a cap can load first.
+
+### Fixed
+
+- **`crdt`: an update that would park past `WithMaxPendingItems` is refused
+  before it changes anything.** The cap was checked while the apply
+  integrated, so a refused update could leave part of itself in the document
+  and tell its observers. The whole update is now checked first. For an
+  update cut short, the refusal names the decoder's reason. An apply that
+  fails after it began to integrate drains the pending queue on what it
+  kept.
+- **`crdt`: parked delete ranges are capped and refused before any change.**
+  `WithMaxPendingItems` also bounds, separately, the delete ranges waiting for
+  structs the document lacks, and a client's parked ranges are retried only
+  once its structs move past the lowest of them.
+- **`crdt`: a re-sent pending struct parks once, as in Yjs.** A struct whose
+  clocks the pending queue already holds parks without them, and the pending
+  cap does not count it again.
+- **`crdt`: clocks past 2^53-1, and struct, origin and parent clients past
+  2^55-1, are refused.** Both decoders and the merge decoders refuse them, so
+  `EncodeStateAsUpdateV2` cannot meet a struct it cannot write, and encoding
+  parked state keeps every part that merges.
+- **`crdt`: `ApplyUpdateV1Landed` carries the structs and delete ranges a
+  failed apply parked.** A peer that applies the update it returns parks what
+  the document parks.
+- **`provider/websocket`: `Server.Inject` relays to local peers what a partly
+  applied update left in the room** before it returns the apply's error.
+- **`crdt`: a parked struct that panics in the drain is dropped, not the
+  structs after it.** The apply returns the panic as its error.
+- **`crdt`: an item that continues its client's GC struct is refused, as in
+  Yjs.**
+- **`crdt`: the deletions read before a cut in the delete set stay applied,
+  as in Yjs, whatever the pending cap,** and the delete-set decoders no longer
+  cap the client and range counts.
+- **`crdt`: an item that arrives with deleted content is deleted when it
+  integrates, as in Yjs,** and a V2 GC struct adds nothing to the
+  transaction's delete set.
+- **`crdt`: `EncodeStateVectorFromUpdate` and `EncodeStateVectorFromUpdateV2`
+  return the state vector Yjs returns,** and a V1 subdocument whose guid is
+  not UTF-8 is an error rather than a panic.
+- **`crdt`: an update's structs integrate in Yjs's order,** and the
+  integration stops at the first refused struct, as Yjs stops.
+- **`crdt`: every struct of an update decodes before one integrates,** so a
+  struct that does not decode leaves the document unchanged.
+- **`crdt`: `WithClientID` panics for a client ID past 2^55-1,** the largest
+  a V2 update can carry.
+- **`crdt`: a type ref above 6 is refused before any change,** as Yjs
+  refuses it.
+- **`crdt`: `YArray.Insert` and `YArray.Push` with no values make no item,**
+  as in Yjs. They made an item of length zero, which the full state of the
+  document then carried.
+- **`crdt`: an item or GC struct of length zero is refused before any
+  change.** Yjs never writes one. When Yjs applies a zero-length map item, it
+  deletes the key's value and breaks that document's later encoding. The
+  apply also refuses an update from an older ygo that holds one. The merge
+  and conversion functions drop such a struct, and the bundled persistence
+  adapters merge a room's records on load, so a state that ygo 1.55.0 or
+  earlier stored with one still loads.
+- **`crdt`: a delete set read from an update allocates in proportion to its
+  bytes.** A counting first pass lets the decoders size the map, the order
+  list and each client's ranges once, from counts that the bytes bound. The
+  apply no longer copies the ranges it only reads. In tests with seven
+  crafted delete sets of about 1 MiB, 1.55.0 allocated up to 137.3 times
+  their bytes. 1.56.0 allocates at most 17.2 times at the default cap, and
+  30.3 times with the cap lifted, where the document keeps its own copy.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added
