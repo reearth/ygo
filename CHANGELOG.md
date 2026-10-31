@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the V1 and V2 delete-set encoders sorted with `sort.Slice`, which
   allocates three times per call; they now use `slices.SortFunc`. The output
   is unchanged.
+- **`crdt`: the delete set of a full-state encode or snapshot is built in one
+  pass.** Each client's ranges are built in clock order and stored once, as
+  Yjs's `createDeleteSetFromStructStore` does, in place of one map write per
+  deleted item and a sort per client. The bytes do not change.
 
 ## [1.55.0] — 2026-10-31
 

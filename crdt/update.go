@@ -509,17 +509,26 @@ func typeClassOf(ct *ContentType) (byte, string) {
 	}
 }
 
+// A client's items are sorted by clock and do not overlap, so extending the
+// last range with each adjacent deleted item gives sorted, compacted ranges
+// in one pass, as Yjs's createDeleteSetFromStructStore does.
 func buildDeleteSet(store *StructStore) DeleteSet {
 	ds := newDeleteSet()
-	for _, items := range store.clients {
+	for client, items := range store.clients {
+		var ranges []DeleteRange
 		for _, item := range items {
-			if item.Deleted {
-				ds.add(item.ID, item.Content.Len())
+			if !item.Deleted {
+				continue
+			}
+			if last := len(ranges) - 1; last >= 0 && ranges[last].Clock+ranges[last].Len == item.ID.Clock {
+				ranges[last].Len += uint64(item.Content.Len())
+			} else {
+				ranges = append(ranges, DeleteRange{Clock: item.ID.Clock, Len: uint64(item.Content.Len())})
 			}
 		}
-	}
-	for client := range ds.clients {
-		ds.sortAndCompact(client)
+		if len(ranges) > 0 {
+			ds.clients[client] = ranges
+		}
 	}
 	return ds
 }

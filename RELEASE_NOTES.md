@@ -2,6 +2,9 @@
 
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
+- **Faster full-state encodes and snapshots after deletions.** The delete set
+  that `EncodeStateAsUpdateV1`, `EncodeStateAsUpdateV2`, `CaptureSnapshot` and
+  `DeleteSetFromDoc` write is built in one pass. The bytes are unchanged.
 
 ## v1.55.0
 
