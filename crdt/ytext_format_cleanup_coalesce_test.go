@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,7 +175,9 @@ func TestUnit_YText_FormatCleanup_CoalescedMatchesPerItem(t *testing.T) {
 		u := EncodeStateAsUpdateV1(a, sv)
 		state := EncodeStateAsUpdateV1(b, nil)
 
-		run := func(cleanup func(remote, txn *Transaction)) (*Doc, DeleteSet) {
+		// gc runs the cleanup from the record after the GC, as a commit does;
+		// the reference reads the deleted content before it.
+		run := func(cleanup func(remote, txn *Transaction), gc bool) (*Doc, DeleteSet) {
 			d := newTestDoc(3)
 			d.GetText("t")
 			require.NoError(t, ApplyUpdateV1(d, state, nil))
@@ -182,6 +185,10 @@ func TestUnit_YText_FormatCleanup_CoalescedMatchesPerItem(t *testing.T) {
 			d.Transact(func(remote *Transaction) {
 				require.NoError(t, applyV1Txn(remote, u))
 				remote.afterState = d.store.StateVector()
+				recordDeletedFormats(remote)
+				if gc {
+					gcTxnDeleteSet(d, remote)
+				}
 				txn := &Transaction{doc: d, Local: true, deleteSet: newOrderedDeleteSet(),
 					changed: map[*abstractType]map[string]struct{}{}, ctx: context.Background()}
 				cleanup(remote, txn)
@@ -189,10 +196,37 @@ func TestUnit_YText_FormatCleanup_CoalescedMatchesPerItem(t *testing.T) {
 			})
 			return d, ds
 		}
-		got, gotDS := run(cleanupYTextAfterTransaction)
-		want, wantDS := run(refCleanupYTextAfterTransaction)
+		got, gotDS := run(cleanupYTextAfterTransaction, true)
+		want, wantDS := run(refCleanupYTextAfterTransaction, false)
 		require.Equal(t, wantDS.orderedClients(), gotDS.orderedClients(), "seed %d", seed)
 		require.Equal(t, wantDS.clients, gotDS.clients, "seed %d", seed)
 		require.Equal(t, EncodeStateAsUpdateV1(want, nil), EncodeStateAsUpdateV1(got, nil), "seed %d", seed)
 	}
+}
+
+// A remote delete of a long text run and a format marker costs one check per
+// struct, not per character: deleting 1,000,000 characters stays far below
+// what one map lookup per character takes.
+func TestPerf_FormatCleanupLongDeletedRunIsPerStruct(t *testing.T) {
+	if testing.Short() || raceEnabled || testing.CoverMode() != "" {
+		t.Skip("timing test")
+	}
+	apply := func(n int) time.Duration {
+		a := newTestDoc(1)
+		at := a.GetText("t")
+		a.Transact(func(txn *Transaction) { at.Insert(txn, 0, strings.Repeat("x", n), nil) })
+		a.Transact(func(txn *Transaction) { at.Insert(txn, n, "y", Attributes{"bold": true}) })
+		b := newTestDoc(2)
+		b.GetText("t")
+		require.NoError(t, ApplyUpdateV1(b, EncodeStateAsUpdateV1(a, nil), nil))
+		sv := a.StateVector()
+		a.Transact(func(txn *Transaction) { at.Delete(txn, 0, n+1) })
+		u := EncodeStateAsUpdateV1(a, sv)
+		start := time.Now()
+		require.NoError(t, ApplyUpdateV1(b, u, nil))
+		return time.Since(start)
+	}
+	small, large := apply(1_000), apply(1_000_000) // 1000x the characters, same structs
+	t.Logf("%v -> %v", small, large)
+	require.Less(t, large, 50*small+5*time.Millisecond, "the cleanup cost grows with the deleted characters")
 }

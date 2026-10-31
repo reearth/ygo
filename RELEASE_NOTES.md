@@ -28,6 +28,16 @@
   already held all of it; an update the room parks still goes to them.
   `Server.Apply` returns `ErrNoChanges` when `fn`'s transactions change
   nothing.
+- **The update is encoded after the transaction's GC.** Content that one
+  transaction both inserted and deleted went out in full, where Yjs sends a
+  `ContentDeleted` tombstone; relays sent it to peers and persistence stored
+  it. Such updates are now smaller, for local transactions and remote
+  applies. Yjs also merges some adjacent deleted structs into one before it
+  encodes, and ygo does not yet, so such an update can still differ from
+  Yjs's bytes. The update `ApplyUpdateV1Landed` returns for a failed apply
+  is encoded at the same point. Peers on either version
+  converge, and updates an earlier version stored load as before. With GC
+  off, or with an `UndoManager` attached, the bytes do not change.
 - **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
   are unchanged.
 - **Faster full-state encodes and snapshots after deletions.** The delete set

@@ -78,10 +78,14 @@ func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, er
 // peer that holds the same document needs none of it. It decides under the
 // lock the apply holds, so a concurrent apply cannot change the answer.
 func ApplyUpdateV1Held(doc *Doc, update []byte, origin any) (landed []byte, held bool, err error) {
+	var failed *[]byte
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
 		if err = applyV1Txn(txn, update); err != nil {
-			landed = encodeTxnV1Locked(txn)
+			// Encoded at commit, after the GC, as OnUpdate's update is. Only a
+			// failed apply allocates the slot, so a successful one stays free.
+			failed = new([]byte)
+			txn.landed = failed
 		} else if !txn.changesDoc() {
 			// An apply that changed nothing either held all of update or parked part of it.
 			if structs, ds, decodeErr := decodeStructsV1(New(), update); decodeErr == nil {
@@ -89,6 +93,9 @@ func ApplyUpdateV1Held(doc *Doc, update []byte, origin any) (landed []byte, held
 			}
 		}
 	}, origin)
+	if failed != nil {
+		landed = *failed
+	}
 	return landed, held, err
 }
 

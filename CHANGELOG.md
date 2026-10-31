@@ -46,6 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   update it parks still goes out), and `Server.Apply` returns `ErrNoChanges`
   when `fn`'s transactions change nothing. `mobile` drops its filter for the
   empty update.
+- **`crdt`: `OnUpdate` receives the update encoded after the transaction's
+  GC, as in Yjs.** ygo encoded the update before its GC, so content that one
+  transaction both inserted and deleted went out in full where Yjs sends a
+  `ContentDeleted` tombstone. A transaction that inserts "abc" and deletes
+  "b" now sends the same 24 bytes as Yjs, not 25. This holds for local
+  transactions and remote applies, also when the remote change is to a text
+  that an observer watches or that has format markers: that change is now
+  collected at commit too, and its format cleanup reads what it needs from
+  before the GC. With GC off, or with an `UndoManager` attached, the update
+  does not change. The update `ApplyUpdateV1Landed` returns for a failed
+  apply is now encoded at commit too, after the GC and the end-of-transaction
+  merges, so it holds the same structs as the `OnUpdate` update.
 
 ### Performance
 

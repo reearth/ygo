@@ -10,9 +10,21 @@ import (
 // operation. Observers fire once per transaction, not once per operation,
 // which keeps event handler overhead proportional to transactions not edits.
 type Transaction struct {
-	doc         *Doc
-	Origin      any  // user-supplied tag forwarded to update observers
-	Local       bool // true when the change originated on this peer; false while applying a remote update
+	doc    *Doc
+	Origin any  // user-supplied tag forwarded to update observers
+	Local  bool // true when the change originated on this peer; false while applying a remote update
+	// done is set (under d.mu, just before the commit releases it) once this
+	// transaction has committed. The transaction-scoped root accessors check
+	// it and fail loudly instead of silently mutating d.share without the
+	// lock: the realistic misuses — an OnAfterTransaction observer (which
+	// receives the *Transaction after unlock) or code retaining the txn past
+	// its callback — run on the same goroutine that committed, so program
+	// order guarantees they observe done == true. A transaction smuggled to
+	// another goroutine while still live is unaffected (that is already
+	// undefined for every txn method); for one used cross-goroutine after
+	// commit the check is best-effort. It sits beside Local so the two share
+	// a word.
+	done        bool
 	deleteSet   DeleteSet
 	beforeState StateVector
 	afterState  StateVector
@@ -43,17 +55,6 @@ type Transaction struct {
 	subdocsAdded   map[*Doc]struct{}
 	subdocsRemoved map[*Doc]struct{}
 	subdocsLoaded  map[*Doc]struct{}
-	// done is set (under d.mu, just before the commit releases it) once this
-	// transaction has committed. The transaction-scoped root accessors check
-	// it and fail loudly instead of silently mutating d.share without the
-	// lock: the realistic misuses — an OnAfterTransaction observer (which
-	// receives the *Transaction after unlock) or code retaining the txn past
-	// its callback — run on the same goroutine that committed, so program
-	// order guarantees they observe done == true. A transaction smuggled to
-	// another goroutine while still live is unaffected (that is already
-	// undefined for every txn method); for one used cross-goroutine after
-	// commit the check is best-effort.
-	done bool
 	// ctx is the context associated with this transaction. Set to
 	// context.Background() by Transact and to the caller's ctx by
 	// TransactContext. Exposed via the Ctx() method so fn can poll for
@@ -66,6 +67,13 @@ type Transaction struct {
 	formatCleanup      bool
 	typeObserved       bool
 	afterTypeObservers func()
+	// landed, when set, receives ApplyUpdateV1Landed's update of what this
+	// failed apply integrated, encoded after the GC as OnUpdate's update is.
+	landed *[]byte
+	// deletedFormats holds, per client and sorted, the clocks of the format
+	// markers this remote transaction deleted, recorded for the format
+	// cleanup before the GC.
+	deletedFormats map[ClientID][]uint64
 }
 
 // changesDoc reports whether t deleted something or added structs, the
