@@ -1,7 +1,6 @@
 package mobile
 
 import (
-	"bytes"
 	"encoding/json"
 	"sort"
 	"sync"
@@ -10,7 +9,8 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
-// DocObserver receives a notification after each committed transaction.
+// DocObserver receives a notification after each committed transaction that
+// changes the Doc.
 // updateV1 is the incremental V1 update; local is true when the change
 // originated from a mobile mutator on this Doc (vs a remote ApplyUpdate), so an
 // app that also syncs to a server can avoid echo loops. OnChange runs on a
@@ -59,19 +59,6 @@ func closedSubscription() *Subscription {
 	return s
 }
 
-// emptyUpdateV1 is the canonical V1 update for a transaction that changed
-// nothing. Precomputed so the Doc bridge can drop no-op notifications.
-var emptyUpdateV1 = func() []byte {
-	d := crdt.New()
-	var captured []byte
-	unsub := d.OnUpdate(func(u []byte, _ any) { captured = u })
-	d.Transact(func(*crdt.Transaction) {}) // no-op still fires OnUpdate when a sub is present
-	unsub()
-	return captured
-}()
-
-func isEmptyUpdateV1(u []byte) bool { return len(u) == 0 || bytes.Equal(u, emptyUpdateV1) }
-
 // docPending is the coalescing mailbox for one Doc subscription. Under the
 // normal path the queue stays length ≤1 (each new update merges into the tail);
 // it only grows on the unreachable MergeUpdatesV1-error path, where a new update
@@ -84,10 +71,10 @@ type docPending struct {
 	stopped bool
 }
 
-// Observe registers obs to be notified after each committed transaction on this
-// Doc. Notifications are delivered on a dedicated background goroutine, in
-// commit order, with no locks held. The returned Subscription detaches the
-// observer when Closed. If the Doc is already Closed, a non-nil
+// Observe registers obs to be notified after each committed transaction that
+// changes this Doc. Notifications are delivered on a dedicated background
+// goroutine, in commit order, with no locks held. The returned Subscription
+// detaches the observer when Closed. If the Doc is already Closed, a non-nil
 // already-closed Subscription is returned (its Close is a no-op).
 func (m *Doc) Observe(obs DocObserver) *Subscription {
 	m.mu.RLock()
@@ -99,12 +86,9 @@ func (m *Doc) Observe(obs DocObserver) *Subscription {
 	p.cond = sync.NewCond(&p.mu)
 
 	// Bridge callback: runs under the committing goroutine's lock. It must be
-	// cheap — it only drops empty updates, computes local, and enqueues under
-	// p.mu. It never takes m.mu, never calls the observer, never blocks.
+	// cheap — it only computes local and enqueues under p.mu. It never takes
+	// m.mu, never calls the observer, never blocks.
 	unsub := m.d.OnUpdate(func(update []byte, origin any) {
-		if isEmptyUpdateV1(update) {
-			return
-		}
 		local := origin == mobileLocalOrigin
 		p.mu.Lock()
 		if p.stopped {

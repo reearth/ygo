@@ -638,6 +638,12 @@ type room struct {
 	awareness *awareness.Awareness
 	peers     map[*peer]struct{}
 
+	// updates counts the calls of the document's OnUpdate observers, so an
+	// apply can tell whether it fired an update (see applyUpdate). It is nil
+	// when nothing else observes the document, because an observer makes each
+	// transaction encode its update. Set before ready closes.
+	updates *atomic.Uint64
+
 	// ready is closed exactly once, by the goroutine that created the room, when
 	// the off-lock load (LoadDoc + decode + OnLoadDocument) has finished — whether
 	// it succeeded or failed. It is the barrier that lets room load run OFF the
@@ -748,6 +754,28 @@ type room struct {
 	// where a lone creator's pre-registration failure reaps a room a
 	// concurrent joiner is still in the process of joining.
 	inflight int
+}
+
+// applyUpdate applies the V1 update to the room's document with origin, as
+// crdt.ApplyUpdateV1Landed does, and reports held when the room already held
+// all of update, so that its peers need none of it. An update the room parks
+// is not held. Callers read held only when err is nil.
+func (r *room) applyUpdate(update []byte, origin any) (landed []byte, held bool, err error) {
+	if r.updates == nil {
+		// No count tells whether the apply fires an update, so look before
+		// it: an apply never takes away what the document holds.
+		held, _ = crdt.DocContainsUpdateV1(r.doc, update)
+		landed, err = crdt.ApplyUpdateV1Landed(r.doc, update, origin)
+		return landed, held, err
+	}
+	fired := r.updates.Load()
+	landed, err = crdt.ApplyUpdateV1Landed(r.doc, update, origin)
+	// Only an apply that fired no update can be held. Another transaction's
+	// update in between only makes the check below not run.
+	if r.updates.Load() == fired {
+		held, _ = crdt.DocContainsUpdateV1(r.doc, update)
+	}
+	return landed, held, err
 }
 
 // clearIdle marks the room as non-idle. Used by the immediate-mutation callers
@@ -1823,6 +1851,10 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 		return
 	}
 
+	if s.persistence != nil || s.relay != nil {
+		r.updates = new(atomic.Uint64)
+		r.doc.OnUpdate(func([]byte, any) { r.updates.Add(1) })
+	}
 	if s.persistence != nil {
 		// Serialise persistence writes through a buffered channel so that a
 		// slow storage backend does not block the Transact caller (N-H7) and

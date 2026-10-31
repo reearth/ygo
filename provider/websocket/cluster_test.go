@@ -53,7 +53,7 @@ func (r *recordingRelay) counts() (sync, aware int) {
 }
 
 // sendUpdate frames a V1 update as an outer msgSync + MsgUpdate and sends it.
-func sendUpdate(t *testing.T, conn *gws.Conn, update []byte) {
+func sendUpdate(t testing.TB, conn *gws.Conn, update []byte) {
 	t.Helper()
 	enc := encoding.NewEncoder()
 	enc.WriteVarUint(ygsync.MsgUpdate)

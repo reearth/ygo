@@ -68,6 +68,20 @@ type Transaction struct {
 	afterTypeObservers func()
 }
 
+// changesDoc reports whether t deleted something or added structs, the
+// condition under which Yjs emits a transaction's update.
+func (t *Transaction) changesDoc() bool {
+	if len(t.deleteSet.clients) > 0 {
+		return true
+	}
+	for client, clock := range t.afterState {
+		if t.beforeState.Clock(client) != clock {
+			return true
+		}
+	}
+	return false
+}
+
 // Ctx returns the context associated with this transaction. Transactions
 // started via Transact return context.Background(); transactions started
 // via TransactContext return the caller's ctx. fn can poll Ctx().Err()

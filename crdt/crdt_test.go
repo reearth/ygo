@@ -408,22 +408,24 @@ func TestUnit_Doc_Transact_ObserverFiresOnce(t *testing.T) {
 
 func TestUnit_Doc_Transact_OriginForwarded(t *testing.T) {
 	doc := newTestDoc(1)
+	m := doc.GetMap("m")
 	var gotOrigin any
 	doc.OnUpdate(func(_ []byte, origin any) { gotOrigin = origin })
 
-	doc.Transact(func(_ *Transaction) {}, "my-origin")
+	doc.Transact(func(txn *Transaction) { m.Set(txn, "k", 1) }, "my-origin")
 
 	assert.Equal(t, "my-origin", gotOrigin)
 }
 
 func TestUnit_Doc_Transact_Unsubscribe(t *testing.T) {
 	doc := newTestDoc(1)
+	m := doc.GetMap("m")
 	calls := 0
 	unsub := doc.OnUpdate(func(_ []byte, _ any) { calls++ })
 
-	doc.Transact(func(_ *Transaction) {})
+	doc.Transact(func(txn *Transaction) { m.Set(txn, "k", 1) })
 	unsub()
-	doc.Transact(func(_ *Transaction) {})
+	doc.Transact(func(txn *Transaction) { m.Set(txn, "k", 2) })
 
 	assert.Equal(t, 1, calls, "observer must not fire after unsubscribe")
 }
@@ -934,34 +936,6 @@ func TestTransact_PanicFiresOnAfterTransaction(t *testing.T) {
 
 	require.NotNil(t, txnSeen, "OnAfterTransaction should fire on panic")
 	assert.NotEmpty(t, txnSeen.changed, "txn.changed must reflect the partial mutation")
-}
-
-func TestTransact_PanicWithNoMutationsFiresOnUpdateWithMinimalPayload(t *testing.T) {
-	// When fn panics before any mutation, OnUpdate still fires (consistent
-	// with the normal-path behavior of a no-op Transact). The payload is a
-	// well-formed but minimal V1 update — not nil — so subscribers should
-	// not treat "nil update" as a sentinel for "no changes". We verify
-	// round-trip application succeeds against a fresh doc without error.
-	doc := New()
-
-	var received [][]byte
-	doc.OnUpdate(func(update []byte, _ any) {
-		received = append(received, update)
-	})
-
-	func() {
-		defer func() { _ = recover() }()
-		doc.Transact(func(txn *Transaction) {
-			panic("immediate")
-		})
-	}()
-
-	require.Len(t, received, 1, "OnUpdate fires once per transaction, even on immediate-panic no-op")
-	require.NotNil(t, received[0])
-
-	// The payload applies cleanly to a fresh replica.
-	replica := New()
-	require.NoError(t, ApplyUpdateV1(replica, received[0], nil))
 }
 
 func TestTransact_PanicReraises(t *testing.T) {
