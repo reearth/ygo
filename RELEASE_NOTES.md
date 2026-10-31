@@ -1,3 +1,24 @@
+## v1.54.1
+
+**Who is affected: anyone who applies updates from peers they do not fully
+trust, which includes every `provider/websocket` server.**
+
+A crafted update could give a document a clock past 2^53-1 or a client past
+2^55-1, which no Yjs peer can create. Then `EncodeStateAsUpdateV2` could
+panic, and after some such updates (a skip past 2^56, a negative V2 origin
+clock) the document's encoded state left out every parked struct and
+deletion, so a copy loaded from it, a new peer or a reload from storage,
+lost other peers' parked edits. The apply and merge decoders now refuse
+such updates with `ErrInvalidUpdate`, and the encoded state leaves out only
+a parked part that does not merge.
+
+**Upgrade note:** a document saved by an earlier release after it accepted
+such an update is now refused whole when it loads. So is a document made
+with `WithClientID` past 2^55-1, whose V2 encoding already panicked. Where
+the stored log keeps such an update as an entry of its own, apply the
+entries one at a time and skip those that return `ErrInvalidUpdate`; a
+compacted state that holds it does not load.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully
