@@ -1,3 +1,13 @@
+## v1.54.1
+
+**Who is affected: anyone who encodes or applies updates that delete content.
+Nothing to change.**
+
+Delete sets are now sorted with `slices.SortFunc` instead of `sort.Slice`,
+which allocated on every call. The sort runs once for each client when a
+delete set is decoded, built from the document, merged or encoded. No API or
+wire format changes.
+
 ## v1.54.0
 
 **Who is affected: anyone who applies updates from peers they do not fully
