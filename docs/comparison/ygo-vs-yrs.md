@@ -215,7 +215,7 @@ The B4 trace (182,315 character insertions + 77,463 deletions from a real LaTeX 
 
 **⚠️ Hardware caveat:** Yjs JS numbers are on Intel i5-8400 (2018 server-class), ygo numbers are on M4 Max (2024 high-end laptop). Direct time comparisons are misleading. The important signal is the ratio.
 
-**V1 document size note:** The 3.4 MB V1 size above is from v1.0.4, when ygo kept one item per insertion and wrote each one to the V1 stream. Yjs merges neighbouring structs of one client at the end of each transaction. Since v1.54.1 ygo does the same, and `BenchmarkB4_Size` reports 387,121 V1 bytes and 226,480 V2 bytes. That benchmark applies only the trace's inserts, under a random client ID, so its bytes are not comparable with the Yjs row. With the same operations and client ID, ygo and Yjs write the same bytes for this trace.
+**V1 document size note:** The 3.4 MB V1 size above is from v1.0.4, when ygo kept one item per insertion and wrote each one to the V1 stream. Yjs merges neighbouring structs of one client at the end of each transaction. Since v1.54.1 ygo does the same, and `BenchmarkB4_Size` reports about 387 KB V1 and 226 KB V2. That benchmark applies only the trace's inserts, under a random client ID, so its bytes are not comparable with the Yjs row. With the same operations and client ID, ygo and Yjs write the same bytes for this trace.
 
 **Language-level expectations:** yrs will outperform ygo on raw CPU benchmarks due to Rust's zero-cost abstractions, no GC pauses, and yrs's use of arena-friendly allocation patterns (smallvec, smallstr for short strings). These advantages are inherent to the language choice and not actionable at the ygo level.
 

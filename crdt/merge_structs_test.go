@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -214,6 +215,49 @@ func TestUnit_UndoManager_LeftTraceInsideCopiedRun(t *testing.T) {
 	got, err := a.ToJSON()
 	require.NoError(t, err)
 	assert.JSONEq(t, `[0,[60,30]]`, string(got))
+}
+
+// Undo restores the map value Yjs restores once two deleted values of k0
+// (clocks 3 and 4) merge into one struct, as in Yjs. The steps and the map
+// after each one are those of Yjs 13.6.32; the last undo brings back
+// {"k0":61}.
+func TestUnit_UndoManager_MapUndoAfterMergedDeletes(t *testing.T) {
+	doc := New(WithClientID(1))
+	m := doc.GetMap("m")
+	um := NewUndoManager(doc, []SharedType{m}, WithCaptureTimeout(time.Hour))
+	set := func(key string, v int) func() {
+		return func() { doc.Transact(func(txn *Transaction) { m.Set(txn, key, v) }) }
+	}
+	multi := func(set, del string, v int) func() {
+		return func() {
+			doc.Transact(func(txn *Transaction) { m.Set(txn, set, v); m.Delete(txn, del) })
+		}
+	}
+	undo := func() { require.True(t, um.Undo()) }
+	steps := []struct {
+		do   func()
+		want string
+	}{
+		{set("k0", 61), `{"k0":61}`},
+		{um.StopCapturing, `{"k0":61}`},
+		{multi("k1", "k0", 94), `{"k1":94}`},
+		{um.StopCapturing, `{"k1":94}`},
+		{multi("k0", "k3", 97), `{"k0":97,"k1":94}`},
+		{undo, `{"k1":94}`},
+		{func() { require.True(t, um.Redo()) }, `{"k0":97,"k1":94}`},
+		{undo, `{"k1":94}`},
+		{set("k0", 102), `{"k0":102,"k1":94}`},
+		{func() { doc.Transact(func(txn *Transaction) { m.Delete(txn, "k0") }) }, `{"k1":94}`},
+		{multi("k2", "k1", 105), `{"k2":105}`},
+		{undo, `{"k1":94}`},
+		{undo, `{"k0":61}`},
+	}
+	for i, s := range steps {
+		s.do()
+		got, err := m.ToJSON()
+		require.NoError(t, err)
+		require.JSONEq(t, s.want, string(got), "after step %d", i)
+	}
 }
 
 // A split that a transaction makes and undoes reaches its update as one
