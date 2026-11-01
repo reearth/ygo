@@ -3,6 +3,7 @@ package crdt
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
@@ -716,6 +717,11 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 
 		existingEnd := sv.Clock(client)
 		drop := superseded.has(i)
+		if numClients == 1 {
+			// Reserve the list up front instead of regrowing it each time it fills,
+			// with the requested capacity bounded by the input length for a false count.
+			group = slices.Grow(group, int(min(numStructs, uint64(len(update)))))
+		}
 
 		for j := uint64(0); j < numStructs; j++ {
 			info, err := dec.readInfo()

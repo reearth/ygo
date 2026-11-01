@@ -747,6 +747,11 @@ func decodeStructs(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 
 		existingEnd := sv.Clock(client)
 		drop := superseded.has(i)
+		if numClients == 1 {
+			// Reserve the list up front instead of regrowing it each time it fills,
+			// bounded by the bytes left since a V1 struct takes at least two.
+			group = slices.Grow(group, int(min(numStructs, uint64(dec.Remaining()/2))))
+		}
 
 		for j := uint64(0); j < numStructs; j++ {
 			item, err := decodeItem(dec, txn.doc, client, clock)
