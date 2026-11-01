@@ -445,10 +445,10 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 		enc.WriteVarString(ct.Key)
 		enc.WriteVarString(fmtValToJSON(ct.Val))
 	case *ContentType:
-		tc, nodeName := typeClassOf(ct)
+		tc, name := typeClassOf(ct)
 		enc.WriteUint8(tc)
-		if tc == 3 { // YXmlElement
-			enc.WriteVarString(nodeName)
+		if typeRefHasName(tc) {
+			enc.WriteVarString(name)
 		}
 	case *ContentAny:
 		vals := ct.Vals[offset:]
@@ -485,12 +485,18 @@ func typeClassOf(ct *ContentType) (byte, string) {
 		return 3, v.NodeName
 	case *YXmlFragment:
 		return 4, ""
+	case *yxmlHook:
+		return 5, v.hookName
 	case *YXmlText:
 		return 6, ""
 	default:
 		return 0, ""
 	}
 }
+
+// typeRefHasName reports whether a type ref is followed by a name: the node
+// name of a YXmlElement or the hook name of a YXmlHook.
+func typeRefHasName(ref byte) bool { return ref == 3 || ref == 5 }
 
 func buildDeleteSet(store *StructStore) DeleteSet {
 	ds := newDeleteSet()
@@ -1205,18 +1211,14 @@ func decodeTypeContent(dec *encoding.Decoder, doc *Doc, typeClass byte) (*abstra
 		frag.owner = frag
 		return &frag.abstractType, nil
 
-	case 5: // YXmlHook — ygo has no hook type, but Yjs writes a hookName
-		// string after the ref. We MUST consume it (mirroring decodeTypeContentV2)
-		// or the rest of the update stream desyncs. Degrade to a rawType
-		// placeholder. (#wire-conformance)
-		if _, err := dec.ReadVarString(); err != nil {
+	case 5: // YXmlHook
+		hookName, err := dec.ReadVarString()
+		if err != nil {
 			return nil, err
 		}
-		r := &rawType{}
-		r.doc = doc
-		r.itemMap = make(map[string]*Item)
-		r.owner = r
-		return &r.abstractType, nil
+		h := newYXmlHook(hookName)
+		h.doc = doc
+		return &h.abstractType, nil
 
 	case 6: // YXmlText
 		xt := NewYXmlText()

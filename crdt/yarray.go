@@ -363,7 +363,7 @@ func (a *YArray) Get(index int) any {
 	}
 	switch c := valItem.Content.(type) {
 	case *ContentType:
-		return c.Type.owner
+		return readOwner(c.Type.owner)
 	}
 	return nil
 }

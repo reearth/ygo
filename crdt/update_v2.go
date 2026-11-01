@@ -263,6 +263,11 @@ func (d *v2Decoder) readString() (string, error) {
 
 func (d *v2Decoder) readTypeRef() (byte, error) {
 	v, err := d.typeRefDec.Read()
+	if v > math.MaxUint8 {
+		// A ref past a byte names no type; truncating it could alias a known
+		// ref, such as 261 to the hook's 5, and read a name it does not have.
+		return math.MaxUint8, err
+	}
 	return byte(v), err
 }
 
@@ -514,10 +519,10 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 		enc.writeKey(ct.Key)
 		enc.restEnc.WriteAny(ct.Val)
 	case *ContentType:
-		tc, nodeName := typeClassOf(ct)
+		tc, name := typeClassOf(ct)
 		enc.writeTypeRef(tc)
-		if tc == 3 { // YXmlElement
-			enc.writeKey(nodeName)
+		if typeRefHasName(tc) {
+			enc.writeKey(name)
 		}
 	case *ContentAny:
 		vals := ct.Vals[offset:]
@@ -1163,15 +1168,14 @@ func decodeTypeContentV2(dec *v2Decoder, doc *Doc, typeRef byte) (*abstractType,
 		frag.owner = frag
 		return &frag.abstractType, nil
 
-	case 5: // YXmlHook — reads hook name via readKey (discard)
-		if _, err := dec.readKey(); err != nil {
+	case 5: // YXmlHook — reads hook name via readKey
+		hookName, err := dec.readKey()
+		if err != nil {
 			return nil, err
 		}
-		r := &rawType{}
-		r.doc = doc
-		r.itemMap = make(map[string]*Item)
-		r.owner = r
-		return &r.abstractType, nil
+		h := newYXmlHook(hookName)
+		h.doc = doc
+		return &h.abstractType, nil
 
 	case 6: // YXmlText
 		xt := NewYXmlText()

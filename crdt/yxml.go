@@ -6,7 +6,7 @@ import (
 )
 
 // xmlNode is implemented by all XML node types (*YXmlFragment, *YXmlElement,
-// *YXmlText). It is used internally to walk and serialise XML trees.
+// *YXmlText and a Yjs YXmlHook). It is used internally to walk and serialise XML trees.
 //
 // toXMLLocked is the lock-free counterpart to ToXML, used by toJSONValue
 // (#75) when serialisation is happening from a context that already holds
@@ -113,6 +113,8 @@ func renderXML(root xmlNode, locked bool) string {
 					close: "</" + node.NodeName + ">",
 				})
 				stack = appendXMLChildren(stack, &node.YXmlFragment)
+			case *yxmlHook:
+				output.WriteString(hookXML)
 			case *YXmlText:
 				if locked {
 					output.WriteString(xmlEscapeText(node.toStringLocked()))
@@ -711,6 +713,38 @@ func NewYXmlText() *YXmlText {
 	t.itemMap = make(map[string]*Item)
 	t.owner = t
 	return t
+}
+
+// yxmlHook is a Yjs Y.XmlHook, a map with a hook name, kept so that it
+// encodes back as Yjs wrote it.
+type yxmlHook struct {
+	YMap
+	hookName string
+}
+
+func newYXmlHook(hookName string) *yxmlHook {
+	h := &yxmlHook{hookName: hookName}
+	h.itemMap = make(map[string]*Item)
+	h.owner = h
+	return h
+}
+
+// hookXML is how Yjs renders a hook in XML: YXmlHook has no toString, so JavaScript prints its default object string.
+const hookXML = "[object Object]"
+
+func (h *yxmlHook) baseXMLType() *abstractType { return &h.abstractType }
+
+// ToXML returns what Yjs toString gives for a hook.
+func (h *yxmlHook) ToXML() string { return hookXML }
+
+func (h *yxmlHook) toXMLLocked() string { return hookXML }
+
+// readOwner returns the value readers expose for a nested type; a YXmlHook reads as its map, as Yjs YXmlHook extends YMap.
+func readOwner(owner any) any {
+	if h, ok := owner.(*yxmlHook); ok {
+		return &h.YMap
+	}
+	return owner
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

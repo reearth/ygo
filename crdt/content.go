@@ -281,6 +281,8 @@ func (t *abstractType) emptyCopy() *abstractType {
 		f := &YXmlFragment{}
 		f.owner = f
 		at = &f.abstractType
+	case *yxmlHook:
+		at = &newYXmlHook(v.hookName).abstractType
 	case *YXmlText:
 		at = &NewYXmlText().abstractType
 	default:

@@ -51,6 +51,19 @@ loads as before. Every peer
 that can process updates with a GC neighbour must upgrade to get the same
 materialized state.
 
+ygo decoded a Yjs `Y.XmlHook` (type ref 5) to an untyped placeholder and
+dropped its hook name. Every update ygo encoded from the document wrote the
+hook as an empty `YArray`: the state a server sends to a late joiner, the
+`OnUpdate` output it stores, `MergeUpdates` and `DiffUpdate` results. A Yjs
+client that loaded that state got an empty array without the hook's entries.
+ygo now keeps the hook and its name and writes them back byte for byte as Yjs
+does. `ToJSON`, `Entries`, `ToSlice` and observer values, which gave `null`
+for a hook, now give its entries as an object, as Yjs `toJSON` does.
+`YXmlFragment.Children()` now includes a hook, so its indexes match `Len()`,
+and `ToXML` renders the hook as `[object Object]`, as Yjs `toString` does.
+`YMap.Get` and `YArray.Get` return a hook as a `*YMap`. State that an older
+ygo already stored keeps the hook as an empty `YArray`.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

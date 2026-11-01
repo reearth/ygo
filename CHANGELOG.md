@@ -45,6 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   struct where it kept 20,000, and the state is 25 bytes. Both GC passes
   take the contents of the structs they collect from blocks, so collecting n
   items makes O(log n + n/128) allocations instead of n.
+- **`crdt`: a Yjs `Y.XmlHook` keeps its type and hook name, and reads as Yjs
+  reads it.** ygo decoded a hook (type ref 5) to an untyped placeholder and
+  dropped its name, so every update it encoded from the document
+  (`EncodeStateAsUpdateV1`/`V2`, the `OnUpdate` output, `MergeUpdates`,
+  `DiffUpdate`, `UpdateV1ToV2`/`V2ToV1`, an undone delete) wrote the hook as an
+  empty `YArray` (type ref 0). ygo now keeps the hook and writes it back as Yjs
+  does. `ToJSON`, `Entries`, `ToSlice` and observer values give its entries as
+  an object, as Yjs `toJSON` does. `YXmlFragment.Children()` includes a hook,
+  so its indexes match `Len()`, and `ToXML` renders it as `[object Object]`,
+  as Yjs `toString` does. `YMap.Get` and `YArray.Get` return a hook as a
+  `*YMap`. State that an older ygo already stored keeps the hook as a
+  `YArray`.
 
 ## [1.55.0] — 2026-10-31
 
