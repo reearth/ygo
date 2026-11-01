@@ -6,6 +6,12 @@
   item. The split parts never merged again, so the document held more structs
   than Yjs and encoded to other V1 and V2 bytes. The content was already the
   same. Only code that compares or stores encoded state sees the change.
+- **An undo restores a run of nested items only up to where Yjs splits it.**
+  When an undo restored a run of items and tracing a neighbour's restored
+  copy reached into that run, Yjs restores only the part before that point.
+  ygo restored the whole run, so after that undo the document held different
+  content from a Yjs peer after the same undo. Undo now copies the content
+  after the traces, as Yjs does.
 - **`Undo` and `Redo` no longer copy the undo and redo stacks.** Each call
   copied the deletions of every item on both stacks, so it took time in
   proportion to the history, and undoing 32,000 separate edits one by one

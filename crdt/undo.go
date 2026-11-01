@@ -462,7 +462,8 @@ func (u *UndoManager) applyStackItem(item *StackItem) *StackItem {
 // nested type is placed into the type's redone copy, redoing the container
 // first when it is in redoSet. Mirrors Yjs redoItem.
 // rest are items following item that Yjs holds merged with it; their content
-// is appended to the copy. Returns the new item, or nil if it cannot be placed.
+// is appended to the copy, up to where a neighbour trace splits the run.
+// Returns the new item, or nil if it cannot be placed.
 func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *redoPass) *Item {
 	if item.redone != nil {
 		return u.doc.store.getItemCleanStart(txn, *item.redone)
@@ -487,8 +488,8 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 		parent = ct.Type
 	}
 
-	content := item.Content.Copy()
-	if cm, ok := content.(*ContentMove); ok && cm.Target != nil {
+	var content Content
+	if cm, ok := item.Content.(*ContentMove); ok && cm.Target != nil {
 		// A restored move targets its target's restored copy, redoing that first
 		// when this undo restores it too.
 		if t := u.doc.store.Find(*cm.Target); t != nil {
@@ -503,6 +504,7 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 	}
 
 	var left, right *Item
+	var w walk // the neighbour traces' current walk, ended by cutRun below
 	if item.ParentSub == nil {
 		// Sequence element: position between the original left neighbour and the
 		// item itself, following redone pointers across neighbours that now belong
@@ -514,7 +516,7 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 				if lt.redone == nil {
 					lt = nil
 				} else {
-					lt = u.doc.store.Find(*lt.redone)
+					lt = p.trace(txn, &w, lt)
 				}
 			}
 			if lt != nil && lt.Parent == parent {
@@ -530,7 +532,7 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 				if rt.redone == nil {
 					rt = nil
 				} else {
-					rt = u.doc.store.Find(*rt.redone)
+					rt = p.trace(txn, &w, rt)
 				}
 			}
 			if rt != nil && rt.Parent == parent {
@@ -560,6 +562,11 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 		left = existing
 	}
 
+	rest = p.cutRun(txn, &w, item, rest)
+	// Copy after the split, which shortens the split item's content in place.
+	if content == nil {
+		content = item.Content.Copy()
+	}
 	origin, originRight := neighbourOrigins(left, right)
 	content = appendContents(content, rest)
 	ni := &Item{
@@ -592,6 +599,113 @@ type redoPass struct {
 	set        map[*Item]struct{} // items this undo restores
 	insertions DeleteSet          // the stack item's insertions
 	moves      map[*abstractType]map[*Item][]*Item
+	landings   map[ID]landing // where traces split items still to restore
+}
+
+// walk is one redoItem call's trace hops from list neighbours that are parts
+// of one Yjs struct, which Yjs traces once, from its start: into is the item
+// the first hop landed in, last the item the latest hop landed in, and at the
+// lowest clock the hops landed on.
+type walk struct {
+	from, into, last *Item
+	at               uint64
+}
+
+// landing records where neighbour traces landed in one item: at its start,
+// or at the lowest clock inside it (0 when none).
+type landing struct {
+	start  bool
+	inside uint64
+}
+
+// trace follows from's redone link one hop and returns the item it lands in,
+// reusing the previous landing when it holds it; it records a landing in an
+// item this undo has yet to restore because Yjs getItemCleanStart splits the
+// struct there, which ygo can only approximate.
+func (p *redoPass) trace(txn *Transaction, w *walk, from *Item) *Item {
+	id := *from.redone
+	t := w.last
+	if t == nil || t.ID.Client != id.Client || id.Clock < t.ID.Clock || id.Clock > t.lastID().Clock {
+		t = txn.doc.store.Find(id)
+	}
+	if w.from != nil && (sameStruct(from, w.from) || sameStruct(w.from, from)) {
+		w.from, w.last, w.at = from, t, min(w.at, id.Clock)
+		return t
+	}
+	p.endWalk(txn, w)
+	if t != nil {
+		*w = walk{from: from, into: t, last: t, at: id.Clock}
+	}
+	return t
+}
+
+// sameStruct reports whether l, a left neighbour of r, and r are parts of one
+// Yjs struct that one copy restored, skipping the collected children a peer
+// sent into a deleted container, since they join ygo's list but not Yjs's.
+func sameStruct(l, r *Item) bool {
+	left := r.Left
+	for left != nil && left != l && isCollectedInDeletedParent(left) {
+		left = left.Left
+	}
+	if left != l || l.redone == nil || l.ID.Client != r.ID.Client || l.redone.Client != r.redone.Client {
+		return false
+	}
+	n := uint64(l.Content.Len())
+	return l.ID.Clock+n == r.ID.Clock && l.redone.Clock+n == r.redone.Clock
+}
+
+// endWalk records w's landing when it is in an item this undo has yet to
+// restore, and starts w anew.
+func (p *redoPass) endWalk(txn *Transaction, w *walk) {
+	if w.from == nil {
+		return
+	}
+	into, at := w.into, w.at
+	*w = walk{}
+	if at < into.ID.Clock {
+		into = txn.doc.store.Find(ID{Client: into.ID.Client, Clock: at})
+	}
+	if !p.pending(into) {
+		return
+	}
+	if p.landings == nil {
+		p.landings = make(map[ID]landing)
+	}
+	l := p.landings[into.ID]
+	if at == into.ID.Clock {
+		l.start = true
+	} else if l.inside == 0 || at < l.inside {
+		l.inside = at
+	}
+	p.landings[into.ID] = l
+}
+
+// cutRun returns the part of rest to restore with item, since Yjs holds item
+// and rest as one struct and restores only the part before a trace's split.
+func (p *redoPass) cutRun(txn *Transaction, w *walk, item *Item, rest []*Item) []*Item {
+	p.endWalk(txn, w)
+	if l := p.landings[item.ID]; l.inside != 0 {
+		txn.doc.store.getItemCleanStart(txn, ID{Client: item.ID.Client, Clock: l.inside})
+		return nil
+	}
+	for i, r := range rest {
+		l, ok := p.landings[r.ID]
+		if !ok {
+			continue
+		}
+		if l.start {
+			return rest[:i]
+		}
+		txn.doc.store.getItemCleanStart(txn, ID{Client: r.ID.Client, Clock: l.inside})
+		return rest[:i+1]
+	}
+	return rest
+}
+
+// pending reports whether this undo restores it and has not done so yet.
+func (p *redoPass) pending(it *Item) bool {
+	_, ok := p.set[it]
+	return ok && it.redone == nil
 }
 
 // movesOf returns the live moves of target in its parent, lowest priority
@@ -727,6 +841,14 @@ func collectedWithParent(r *Item) bool {
 		}
 	}
 	return true
+}
+
+// isCollectedInDeletedParent reports whether it is a content-less tombstone
+// inside a deleted container, which Yjs receives as a GC struct outside
+// any list.
+func isCollectedInDeletedParent(it *Item) bool {
+	_, gced := it.Content.(*ContentDeleted)
+	return gced && it.Parent.item != nil && it.Parent.item.Deleted
 }
 
 // deletedByStacks reports whether any undo or redo stack item's deletions

@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again, and the document held more structs than Yjs, with other V1 and V2
   bytes. Undo now carries the offset along the copies and splits only the last
   one. The content was already the same as in Yjs.
+- **`crdt`: undo copies a restored run's content after tracing its neighbours,
+  as Yjs does.** When an undo traced a neighbour's restored copy into a run
+  that the same undo restores, Yjs splits the run there and restores only the
+  part before the split. ygo copied the content before the traces, so it
+  restored the whole run: different content from Yjs after that undo, and
+  other V1 and V2 bytes. A trace that passes through an earlier copy still
+  restores the whole run. An undo after a redo of the same run also leaves
+  the copy in between as one struct, where Yjs splits it, until ygo merges
+  every neighbour at the end of a transaction, as Yjs does.
 
 ### Performance
 

@@ -175,3 +175,39 @@ func BenchmarkConflict_B2_TwoUsers(b *testing.B) { benchConflict(b, 2, 500) }
 // insert at the same position, then converge. Measured (this machine,
 // -benchtime=1x -benchmem): ~413ms/iter, ~596MB/iter, ~274k allocs/iter.
 func BenchmarkConflict_B3_ManyUsers(b *testing.B) { benchConflict(b, 10, 150) }
+
+// BenchmarkUndoManager_UndoTracesRestoredRun undoes the delete of a nested
+// array holding "x" and 4,000 elements that one earlier undo restored as one
+// copy; "x" is restored first, so its neighbour walk makes 4,000 hops into
+// the copy.
+func BenchmarkUndoManager_UndoTracesRestoredRun(b *testing.B) {
+	const n = 4_000
+	vals := make([]any, n)
+	for i := range vals {
+		vals[i] = i
+	}
+	for range b.N {
+		b.StopTimer()
+		doc := New(WithClientID(1), WithGC(false))
+		arr := doc.GetArray("a")
+		um := NewUndoManager(doc, []SharedType{arr})
+		doc.Transact(func(txn *Transaction) { arr.InsertType(txn, 0, NewArrayPrelim()) })
+		nested := arr.Get(0).(*YArray)
+		doc.Transact(func(txn *Transaction) {
+			for _, v := range vals {
+				nested.Push(txn, []any{v})
+			}
+			nested.Push(txn, []any{"x"})
+		})
+		um.StopCapturing()
+		doc.Transact(func(txn *Transaction) { nested.Delete(txn, 0, n) })
+		um.StopCapturing()
+		um.Undo()
+		doc.Transact(func(txn *Transaction) { arr.Delete(txn, 0, 1) })
+		um.StopCapturing()
+		b.StartTimer()
+		if !um.Undo() {
+			b.Fatal("nothing undone")
+		}
+	}
+}
