@@ -193,7 +193,8 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 	s := txn.doc.store
 	// The cover is built before the park adds to it, from the queue as it was.
 	held := s.pending != nil && len(s.pending.items) > 0
-	if held {
+	tailAppend := held && s.pending.tailAppends(pending)
+	if held && !tailAppend {
 		s.pending.coverOf()
 	}
 	var buf [4]*Item // a keystroke's parked structs need no allocation
@@ -208,7 +209,7 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 		txn.parkedItems = slices.Grow(txn.parkedItems, len(pending))
 	}
 	for _, item := range pending {
-		if held {
+		if held && !tailAppend {
 			if item = unparked(s, item, s.NextClock(item.ID.Client)); item == nil {
 				continue
 			}
@@ -217,11 +218,12 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			return ErrInvalidUpdate
 		}
 		if s.pending == nil {
-			s.pending = &pendingUpdate{missing: make(StateVector)}
+			s.pending = &pendingUpdate{missing: make(StateVector), tailClient: item.ID.Client, tailValid: true}
 		}
 		s.pending.items = append(s.pending.items, item)
+		s.pending.noteTail(item)
 		txn.noteParkedItem(item)
-		if held {
+		if held && (!tailAppend || s.pending.cover != nil) {
 			// Only a queue that held structs has a cover to keep.
 			parked = append(parked, item)
 		}

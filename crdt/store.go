@@ -52,6 +52,12 @@ type pendingUpdate struct {
 	// by add (pending_cover.go). A writer that replaces or cuts back items
 	// builds a new pendingUpdate, or sets cover to nil.
 	cover *pendingCover
+	// tail is the single client's clock past every parked struct, when tail
+	// is valid and no struct of another client parked; it lets a tail append
+	// skip building cover.
+	tailClient ClientID
+	tail       uint64
+	tailValid  bool
 }
 
 func newStructStore() *StructStore {

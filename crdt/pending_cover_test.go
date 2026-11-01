@@ -506,3 +506,39 @@ func TestUnit_PendingQueue_AResentStructSpanningTheParkedTailIsSliced(t *testing
 		require.Equal(t, EncodeStateAsUpdateV1(writer, nil), EncodeStateAsUpdateV1(room, nil), "v2=%v", v2)
 	}
 }
+
+// A queue of one client's structs takes the next tail struct without building
+// its cover, and a resend of a parked clock builds the cover and parks once.
+func TestUnit_PendingQueue_ATailAppendNeedsNoCover(t *testing.T) {
+	keystrokes, _, _, _ := parkedTail(t, 5)
+	room := New(WithClientID(1), WithMaxPendingItems(math.MaxInt))
+	for _, u := range keystrokes[:4] {
+		require.NoError(t, ApplyUpdateV1(room, u, nil))
+	}
+	require.Equal(t, 4, room.PendingStats().Items)
+	require.Nil(t, room.store.pending.cover, "the queue starts with no cover")
+	require.True(t, room.store.pending.tailValid)
+
+	require.NoError(t, ApplyUpdateV1(room, keystrokes[4], nil))
+	require.Equal(t, 5, room.PendingStats().Items)
+	require.Nil(t, room.store.pending.cover, "a tail append builds no cover")
+	require.Equal(t, uint64(5), room.store.pending.tail)
+
+	require.NoError(t, ApplyUpdateV1(room, keystrokes[2], nil))
+	require.Equal(t, 5, room.PendingStats().Items, "the resent clock parks once")
+	require.NotNil(t, room.store.pending.cover, "a resend checks the cover")
+}
+
+// A tail append keeps a cover already built, so a later resend sees its clocks.
+func TestUnit_PendingQueue_ATailAppendKeepsABuiltCover(t *testing.T) {
+	keystrokes, _, _, _ := parkedTail(t, 4)
+	room := New(WithClientID(1), WithMaxPendingItems(math.MaxInt))
+	for _, u := range keystrokes[:3] {
+		require.NoError(t, ApplyUpdateV1(room, u, nil))
+	}
+	room.store.pending.coverOf()
+	require.NoError(t, ApplyUpdateV1(room, keystrokes[3], nil))
+	require.Equal(t, []clockSpan{{0, 4}}, room.store.pending.cover.spans[2])
+	require.NoError(t, ApplyUpdateV1(room, keystrokes[3], nil))
+	require.Equal(t, 4, room.PendingStats().Items)
+}

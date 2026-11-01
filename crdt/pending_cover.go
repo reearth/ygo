@@ -99,6 +99,34 @@ func coalesce(list []clockSpan) []clockSpan {
 // client, since insertion stops being cheaper there.
 const coverInsertWork = 1 << 19
 
+// tailAppends reports whether every item starts past every clock the queue's
+// only client holds, so none overlaps a parked struct and cover is not needed.
+func (p *pendingUpdate) tailAppends(items []*Item) bool {
+	if !p.tailValid {
+		return false
+	}
+	tail := p.tail
+	for _, it := range items {
+		if isGCStruct(it) || it.ID.Client != p.tailClient || it.ID.Clock < tail {
+			return false
+		}
+		tail = it.ID.Clock + uint64(it.Content.Len())
+	}
+	return true
+}
+
+// noteTail records item's end while one client owns every parked struct.
+func (p *pendingUpdate) noteTail(item *Item) {
+	if !p.tailValid {
+		return
+	}
+	if item.ID.Client != p.tailClient {
+		p.tailValid = false
+		return
+	}
+	p.tail = max(p.tail, item.ID.Clock+uint64(item.Content.Len()))
+}
+
 // addCover adds the clocks of items just parked in p to p's cover, if any.
 func (p *pendingUpdate) addCover(items []*Item) {
 	if p.cover == nil {
