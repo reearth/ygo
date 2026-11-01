@@ -140,7 +140,8 @@ func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 			clients = append(clients, c)
 		}
 	}
-	sort.Slice(clients, func(i, j int) bool { return clients[i] < clients[j] })
+	// Yjs writes clients in descending order.
+	sort.Slice(clients, func(i, j int) bool { return clients[i] > clients[j] })
 
 	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
 		// First pass per client: build the emit sequence (skips for gaps +

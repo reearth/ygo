@@ -172,8 +172,9 @@ type Doc struct {
 	// to each observer subscription, enabling correct out-of-order unsubscribe.
 	subIDGen uint64
 
-	// onUpdate observers fire after each committed transaction with the encoded
-	// incremental V1 update bytes and the transaction origin.
+	// onUpdate observers fire after each committed transaction that adds or
+	// deletes something, with the encoded incremental V1 update bytes and the
+	// transaction origin.
 	onUpdate []updateSub
 
 	// onAfterTxn observers fire after each committed transaction with the full
@@ -472,37 +473,46 @@ func (d *Doc) GetText(name string) *YText {
 // and returns a closure that fires all observers in the correct order.
 // The closure must be invoked OUTSIDE d.mu — observers may re-enter Doc
 // methods that acquire d.mu, which would deadlock under the lock.
+// The closure takes the update collectAndEncodeLocked returned; OnUpdate
+// observers run only when it is not nil.
 //
 // Returns nil only if there is nothing to fire (no observers of any kind).
-func buildPhase2(d *Doc, txn *Transaction) func() {
-	// Encode the incremental update and snapshot observer slices while still
-	// holding the lock so we get a consistent view.
-	var updateBytes []byte
-	if len(d.onUpdate) > 0 {
-		updateBytes = encodeV1Locked(d, txn.beforeState)
+func buildPhase2(d *Doc, txn *Transaction) func(update []byte) {
+	// Snapshot per-type observer closures and deep-observer chains while the
+	// write lock is held. prepareFire copies each type's observer slice and
+	// builds the event struct, so concurrent Observe/Unobserve calls (which also
+	// hold the write lock) cannot race with the fire loop below (N-C1). Walking
+	// up from each changed type in order gives Yjs's changedParentTypes order.
+	// The changed types in the order the transaction first changed each one,
+	// which its entries hold. A transaction that changed up to eight types
+	// orders them in this call's own buffer.
+	var orderBuf [8]*abstractType
+	changed := orderBuf[:0]
+	if len(txn.changed) > len(orderBuf) {
+		changed = make([]*abstractType, 0, len(txn.changed))
 	}
-
-	// Snapshot per-type observer closures while the write lock is held.
-	// prepareFire copies each type's observer slice and builds the event struct,
-	// so concurrent Observe/Unobserve calls (which also hold the write lock)
-	// cannot race with the fire loop below (N-C1).
-	fireFns := make([]func(), 0, len(txn.changed))
-	for t, keys := range txn.changed {
-		if t.owner != nil {
-			if fn := t.owner.prepareFire(txn, keys); fn != nil {
-				fireFns = append(fireFns, fn)
-			}
-		}
+	changed = changed[:len(txn.changed)]
+	for t, c := range txn.changed {
+		changed[c.order] = t
 	}
-	txn.typeObserved = len(fireFns) > 0
-
-	// Snapshot deep-observer chains.
+	fireFns := make([]func(), 0, len(changed))
 	type deepEntry struct {
 		fns []func(*Transaction)
 	}
 	firedDeep := make(map[*abstractType]struct{})
 	var deepSnap []deepEntry
-	for t := range txn.changed {
+	for _, t := range changed {
+		// Yjs calls no observer for a type that is deleted when the
+		// transaction ends, so such a text cannot start the format cleanup.
+		if t.item != nil && t.item.Deleted {
+			txn.skipCleanup(t)
+			continue
+		}
+		if t.owner != nil {
+			if fn := t.owner.prepareFire(txn, txn.changed[t].keys); fn != nil {
+				fireFns = append(fireFns, fn)
+			}
+		}
 		current := t
 		for current != nil {
 			if _, already := firedDeep[current]; already {
@@ -523,8 +533,9 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 			}
 		}
 	}
+	txn.typeObserved = len(fireFns) > 0
 
-	// Snapshot OnUpdate callbacks.
+	// Snapshot OnUpdate and OnAfterTransaction callbacks.
 	onUpdateSnap := make([]func([]byte, any), len(d.onUpdate))
 	for i, s := range d.onUpdate {
 		onUpdateSnap[i] = s.fn
@@ -562,30 +573,96 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 		return nil
 	}
 
-	return func() {
-		for _, fn := range fireFns {
-			fn()
-		}
-		if txn.afterTypeObservers != nil {
-			txn.afterTypeObservers()
-		}
-		for _, de := range deepSnap {
-			for _, fn := range de.fns {
-				fn(txn)
-			}
-		}
-		for _, fn := range onUpdateSnap {
-			fn(updateBytes, txn.Origin)
-		}
-		for _, fn := range onAfterTxnSnap {
-			fn(txn)
-		}
+	return func(update []byte) {
+		// Deferred in reverse of Yjs's order (type and deep observers,
+		// afterTransaction, update, subdocs), so each group still runs when an
+		// earlier one panics, as Yjs runs its type and deep observers.
 		if hasSubdocs {
-			for _, fn := range onSubdocsSnap {
-				fn(subdocsEv)
-			}
+			defer callAll(onSubdocsSnap, func(fn func(SubdocsEvent)) { fn(subdocsEv) })
 		}
+		if update != nil {
+			defer callAll(onUpdateSnap, func(fn func([]byte, any)) { fn(update, txn.Origin) })
+		}
+		defer callAll(onAfterTxnSnap, func(fn func(*Transaction)) { fn(txn) })
+		defer callAll(deepSnap, func(de deepEntry) {
+			callAll(de.fns, func(fn func(*Transaction)) { fn(txn) })
+		})
+		// Deferred, so the format cleanup is decided even when a type observer
+		// panics; a text whose own observer panicked takes no part, as in Yjs.
+		// Read when the closure runs: prepareRemoteCleanup sets it afterwards.
+		if txn.cleanup == cleanupAfterTypeObservers {
+			defer d.decideFormattingCleanup(txn)
+		}
+		callAll(fireFns, func(fn func()) { fn() })
 	}
+}
+
+// callAll calls fn on each element of xs. When a call panics, it makes the
+// remaining calls before the panic goes on, as lib0's callAll does for Yjs
+// observers; a later panic replaces an earlier one, as in Yjs.
+func callAll[T any](xs []T, fn func(T)) {
+	i := 0
+	defer func() {
+		if i < len(xs) {
+			callAll(xs[i+1:], fn)
+		}
+	}()
+	for ; i < len(xs); i++ {
+		fn(xs[i])
+	}
+}
+
+// collectAndEncodeLocked runs txn's GC and then encodes txn's update for the
+// OnUpdate observers, as Yjs cleanupTransactions encodes the update after
+// tryGcDeleteSet, so content txn both inserted and deleted is sent as
+// ContentDeleted. As in Yjs, the update carries only txn's deletions, sorted
+// and merged, and a transaction that adds and deletes nothing has none.
+// Caller must hold d.mu.
+//
+// When an UndoManager is attached we skip auto-GC: undoing a deletion
+// re-inserts a COPY of the deleted item's content (applyStackItem →
+// redoItem), which only works if that original content is still present.
+// Yjs handles this with a per-item keep flag; we take the conservative
+// position of disabling auto-GC entirely while any UndoManager is
+// registered. RunGC remains available as the explicit manual entry point.
+func collectAndEncodeLocked(d *Doc, txn *Transaction) (update []byte) {
+	if d.gc && d.undoManagerCount == 0 {
+		gcTxnDeleteSet(d, txn)
+	}
+	if len(d.onUpdate) > 0 && txn.changesDoc() {
+		update = encodeV1Locked(d, txn.beforeState, cloneDeleteSet(txn.deleteSet))
+	}
+	if txn.landed != nil {
+		*txn.landed = encodeTxnV1Locked(txn)
+	}
+	return update
+}
+
+// commitLocked finishes txn under d.mu: it builds the observer phase, decides
+// a remote transaction's format cleanup, and then runs the GC and the encode,
+// so no goroutine sees a partly collected state and the observer events see
+// the content the GC removes. While a panic unwinds (panicking), a second
+// panic here is dropped; one in the GC or the encode also drops the observer
+// phase, whose update would be missing.
+func commitLocked(d *Doc, txn *Transaction, panicking bool) (phase2 func([]byte), update []byte, cleanup bool) {
+	func() {
+		if panicking {
+			defer func() { _ = recover() }()
+		}
+		phase2 = buildPhase2(d, txn)
+	}()
+	cleanup = !panicking && d.prepareRemoteCleanup(txn)
+	func() {
+		if panicking {
+			defer func() {
+				if recover() != nil {
+					phase2 = nil
+				}
+			}()
+		}
+		update = collectAndEncodeLocked(d, txn)
+	}()
+	return phase2, update, cleanup
 }
 
 // transactInternal is the shared transaction entry point that Transact,
@@ -621,7 +698,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		// added 1 alloc per txn even when no ContentString was inserted, which
 		// hurt array/map-only workloads more than it helped text workloads
 		// (the squashRuns target).
-		changed: make(map[*abstractType]map[string]struct{}, 4),
+		changed: make(map[*abstractType]changedType, 4),
 		ctx:     ctx,
 	}
 
@@ -637,48 +714,7 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			}()
 		}
 
-		var phase2 func()
-		if r != nil {
-			func() {
-				defer func() { _ = recover() }()
-				phase2 = buildPhase2(d, txn)
-			}()
-		} else {
-			phase2 = buildPhase2(d, txn)
-		}
-
-		// Yjs cleans up the format markers a remote change left redundant
-		// after the change's observers, in a follow-up local transaction,
-		// and GCs the change only then. A type observer may give a text its
-		// first marker, so with type observers to fire the gate waits.
-		deferGC := false
-		if r == nil && !txn.Local {
-			if needsFormattingCleanup(txn) {
-				txn.formatCleanup, deferGC = true, true
-			} else if txn.typeObserved && changedText(txn) {
-				txn.afterTypeObservers = func() {
-					d.mu.Lock()
-					txn.formatCleanup = needsFormattingCleanup(txn)
-					d.mu.Unlock()
-				}
-				deferGC = true
-			}
-		}
-
-		// #78 H1 — Auto-GC at transaction commit. Runs AFTER buildPhase2 so
-		// the observer Deltas have already been computed against the original
-		// content; runs BEFORE Unlock so other goroutines never see partially-
-		// GC'd state. No-op when doc.gc is false.
-		//
-		// When an UndoManager is attached we skip auto-GC: undoing a deletion
-		// re-inserts a COPY of the deleted item's content (applyStackItem →
-		// redoItem), which only works if that original content is still present.
-		// Yjs handles this with a per-item keep flag; we take the conservative
-		// position of disabling auto-GC entirely while any UndoManager is
-		// registered. RunGC remains available as the explicit manual entry point.
-		if d.gc && d.undoManagerCount == 0 && !deferGC {
-			gcTxnDeleteSet(d, txn)
-		}
+		phase2, update, cleanup := commitLocked(d, txn, r != nil)
 
 		// Mark the transaction committed BEFORE releasing the lock so the
 		// txn-scoped accessors fail loudly from observers (which receive the
@@ -687,12 +723,12 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		txn.done = true
 		d.mu.Unlock()
 
-		if deferGC {
+		if cleanup {
 			// Runs even if an observer panics, as Yjs runs the cleanup.
 			defer d.afterRemoteObservers(txn)
 		}
 		if phase2 != nil {
-			phase2()
+			phase2(update)
 		}
 
 		if r != nil {
@@ -761,17 +797,21 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 //   - If fn panics (or any Phase 1 work panics), d.mu is released via defer.
 //   - Observers fire with whatever partial state was committed before the
 //     panic: OnUpdate receives a V1 update describing the mutations that
-//     completed (non-empty if fn mutated; minimal but well-formed if fn
-//     panicked before mutating); per-type, deep, and OnAfterTransaction
-//     observers fire for what was recorded in txn.changed.
-//   - The original panic is re-raised to the caller after observers fire.
+//     completed (and does not fire if fn panicked before mutating);
+//     per-type, deep, and OnAfterTransaction observers fire for what was
+//     recorded in txn.changed, except that per-type and deep observers skip a
+//     type deleted by then.
+//   - The original panic is re-raised to the caller after observers fire,
+//     unless an observer panics too (see below).
 //   - Rollback is NOT supported. The in-memory doc reflects fn's partial
 //     work. Callers who need atomicity must implement it above Transact.
 //     This matches the behavior of Yjs JS and the Rust yrs implementation;
 //     yrs explicitly directs users to UndoManager for transactional undo.
-//   - If fn panics and an observer callback also panics during the partial
-//     firing, the observer's panic reaches the caller and the original
-//     fn panic value is lost.
+//   - A panicking observer does not stop the others: every per-type, deep,
+//     OnUpdate, OnAfterTransaction and OnSubdocs observer still runs, and the
+//     panic reaches the caller afterwards. If more than one panics, or fn
+//     and an observer both panic, the last panic in firing order reaches
+//     the caller, as the last throw does in Yjs.
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 	_ = d.transactInternal(context.Background(), func(t *Transaction) error {
 		fn(t)
@@ -796,9 +836,14 @@ func (d *Doc) TransactE(fn func(*Transaction) error, origin ...any) error {
 	return d.transactInternal(context.Background(), fn, origin...)
 }
 
-// OnUpdate registers a callback that fires after every committed transaction.
-// The callback receives the incremental V1 update bytes for that transaction
-// and the origin value passed to Transact. Returns an unsubscribe function.
+// OnUpdate registers a callback that fires after every committed transaction
+// that adds or deletes something, as the Yjs update event does: an apply of
+// an update the document already holds, or a transaction that changes
+// nothing, does not call it. The callback receives the incremental V1 update
+// bytes for that transaction and the origin value passed to Transact.
+// Returns an unsubscribe function.
+// With GC on, the update is encoded after the transaction's GC, as in Yjs, so
+// content the transaction both inserted and deleted is sent as a tombstone.
 //
 // Callbacks that compare the origin (an echo guard, a per-user filter) do so
 // with Go ==, so the caution on Transact's doc applies: pointer origin
@@ -828,7 +873,9 @@ func (d *Doc) OnUpdate(fn func(update []byte, origin any)) func() {
 // OnAfterTransaction registers a callback that fires after every committed
 // transaction, receiving the full Transaction object. This provides richer
 // change metadata than OnUpdate (beforeState, afterState, deleteSet, Local
-// flag) and is the hook used by UndoManager. Returns an unsubscribe function.
+// flag) and is the hook used by UndoManager. It fires after the type and deep
+// observers and before OnUpdate, as Yjs emits afterTransaction before update.
+// Returns an unsubscribe function.
 func (d *Doc) OnAfterTransaction(fn func(*Transaction)) func() {
 	d.mu.Lock()
 	defer d.mu.Unlock()

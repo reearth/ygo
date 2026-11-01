@@ -105,6 +105,38 @@ func BenchmarkYText_Delete(b *testing.B) {
 	}
 }
 
+// BenchmarkYText_DeleteFormatted builds a 1000-character text in which every
+// third five-character word is bold and every fifth italic, then deletes it
+// one character at a time at random positions, so some deletions leave format
+// markers to clean up.
+func BenchmarkYText_DeleteFormatted(b *testing.B) {
+	b.ReportAllocs()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		doc := newTestDoc(1)
+		txt := doc.GetText("text")
+		doc.Transact(func(txn *Transaction) {
+			txt.Insert(txn, 0, strings.Repeat("abcde", 200), nil)
+			for w := 0; w < 200; w += 3 {
+				txt.Format(txn, w*5, 5, Attributes{"bold": true})
+			}
+			for w := 0; w < 200; w += 5 {
+				txt.Format(txn, w*5, 5, Attributes{"italic": true})
+			}
+		})
+		rng := rand.New(rand.NewSource(1))
+		b.StartTimer()
+
+		for txt.Len() > 0 {
+			doc.Transact(func(txn *Transaction) {
+				txt.Delete(txn, rng.Intn(txt.Len()), 1)
+			})
+		}
+	}
+}
+
 // BenchmarkEncodeStateAsUpdateV1 encodes a document that holds ~1000 YText
 // characters into a V1 binary update.
 func BenchmarkEncodeStateAsUpdateV1(b *testing.B) {
@@ -970,6 +1002,82 @@ func benchObservedTxn(b *testing.B, withObserver bool) {
 
 func BenchmarkObservedTxn_Apply(b *testing.B)         { benchObservedTxn(b, true) }
 func BenchmarkObservedTxn_ApplyBaseline(b *testing.B) { benchObservedTxn(b, false) }
+
+// BenchmarkObservedTxn_EveryObserverKind measures a single-character append
+// with two type observers, a deep observer, an OnUpdate and an
+// OnAfterTransaction observer. A fresh document every 256 appends keeps the
+// time per append independent of b.N.
+func BenchmarkObservedTxn_EveryObserverKind(b *testing.B) {
+	var doc *Doc
+	var txt *YText
+	fresh := func() {
+		doc = newTestDoc(1)
+		txt = doc.GetText("t")
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "seed", nil) })
+		txt.Observe(func(YTextEvent) {})
+		txt.Observe(func(YTextEvent) {})
+		txt.ObserveDeep(func(*Transaction) {})
+		doc.OnUpdate(func([]byte, any) {})
+		doc.OnAfterTransaction(func(*Transaction) {})
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if i%256 == 0 {
+			b.StopTimer()
+			fresh()
+			b.StartTimer()
+		}
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, txt.Len(), "x", nil) })
+	}
+}
+
+// BenchmarkObservedTxn_RemoteFormatted measures applying a one-character
+// remote insert to a formatted text, with and without a type observer, which
+// is where the remote format cleanup is decided. A fresh pair of documents
+// every 256 updates keeps the time per update independent of b.N.
+func BenchmarkObservedTxn_RemoteFormatted(b *testing.B) {
+	for _, observed := range []bool{false, true} {
+		b.Run(fmt.Sprintf("observed=%t", observed), func(b *testing.B) {
+			const batch = 256
+			var peer *Doc
+			updates := make([][]byte, 0, batch)
+			fresh := func() {
+				src := newTestDoc(1)
+				txt := src.GetText("t")
+				src.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "seed", Attributes{"bold": true}) })
+				peer = newTestDoc(2)
+				ptxt := peer.GetText("t") // a typed root, not a placeholder, so it gets the cleanup
+				if observed {
+					ptxt.Observe(func(YTextEvent) {})
+				}
+				if err := ApplyUpdateV1(peer, EncodeStateAsUpdateV1(src, nil), nil); err != nil {
+					b.Fatal(err)
+				}
+				updates = updates[:0]
+				for range batch {
+					sv := src.StateVector()
+					src.Transact(func(txn *Transaction) { txt.Insert(txn, txt.Len(), "x", nil) })
+					updates = append(updates, EncodeStateAsUpdateV1(src, sv))
+				}
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				if i%batch == 0 {
+					b.StopTimer()
+					fresh()
+					b.StartTimer()
+				}
+				if err := ApplyUpdateV1(peer, updates[i%batch], nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
 
 // BenchmarkUndoManager_UndoMapClear undoes the deletion of every key of a
 // 10k-key map, restoring each entry.

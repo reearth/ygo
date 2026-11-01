@@ -2,10 +2,12 @@ package crdt
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
@@ -43,7 +45,7 @@ var ErrInvalidUpdate = errors.New("crdt: invalid update")
 func EncodeStateAsUpdateV1(doc *Doc, sv StateVector) []byte {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
-	return withParked(doc, sv, encodeV1Locked(doc, sv), encodeStructStoreV1, MergeUpdatesV1)
+	return withParked(doc, sv, encodeV1Locked(doc, sv, buildDeleteSet(doc.store)), encodeStructStoreV1, MergeUpdatesV1)
 }
 
 // ApplyUpdateV1 decodes and integrates a V1 binary update into doc.
@@ -67,13 +69,34 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 // deletions it made, not structs still parked, nor the rest of the document.
 // landed is nil when the apply succeeds or when nothing integrated.
 func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, err error) {
+	landed, _, err = ApplyUpdateV1Held(doc, update, origin)
+	return landed, err
+}
+
+// ApplyUpdateV1Held is ApplyUpdateV1Landed that also reports whether doc
+// already held all of update, so the apply changed and parked nothing and a
+// peer that holds the same document needs none of it. It decides under the
+// lock the apply holds, so a concurrent apply cannot change the answer.
+func ApplyUpdateV1Held(doc *Doc, update []byte, origin any) (landed []byte, held bool, err error) {
+	var failed *[]byte
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
 		if err = applyV1Txn(txn, update); err != nil {
-			landed = encodeTxnV1Locked(txn)
+			// Encoded at commit, after the GC, as OnUpdate's update is. Only a
+			// failed apply allocates the slot, so a successful one stays free.
+			failed = new([]byte)
+			txn.landed = failed
+		} else if !txn.changesDoc() {
+			// An apply that changed nothing either held all of update or parked part of it.
+			if structs, ds, decodeErr := decodeStructsV1(New(), update); decodeErr == nil {
+				held = storeContains(txn.doc.store, structs, ds)
+			}
 		}
 	}, origin)
-	return landed, err
+	if failed != nil {
+		landed = *failed
+	}
+	return landed, held, err
 }
 
 // encodeTxnV1Locked encodes the structs txn has added to the store so far and
@@ -221,7 +244,9 @@ func DecodeStateVectorV1(data []byte) (StateVector, error) {
 
 // ── V1 encoding ───────────────────────────────────────────────────────────────
 
-func encodeV1Locked(doc *Doc, sv StateVector) []byte {
+// encodeV1Locked encodes the structs of doc newer than sv, and ds, as a V1
+// update. Called with the document lock held.
+func encodeV1Locked(doc *Doc, sv StateVector, ds DeleteSet) []byte {
 	type clientGroup struct {
 		client     ClientID
 		items      []*Item
@@ -231,19 +256,17 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 	var groups []clientGroup
 	for client, items := range doc.store.clients {
 		svClock := sv.Clock(client)
-		var relevant []*Item
-		for _, item := range items {
-			if item.ID.Clock+uint64(item.Content.Len()) > svClock {
-				relevant = append(relevant, item)
-			}
-		}
+		// A client's items are clock-sorted and disjoint, so the ones the peer
+		// lacks are a suffix, found by binary search as Yjs writeStructs does.
+		relevant := items[sort.Search(len(items), func(i int) bool {
+			return items[i].ID.Clock+uint64(items[i].Content.Len()) > svClock
+		}):]
 		if len(relevant) > 0 {
 			groups = append(groups, clientGroup{client, relevant, svClock})
 		}
 	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i].client < groups[j].client })
-
-	deleteSet := buildDeleteSet(doc.store)
+	// Yjs writes clients in descending order.
+	sort.Slice(groups, func(i, j int) bool { return groups[i].client > groups[j].client })
 
 	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
 		enc.WriteVarUint(uint64(len(groups)))
@@ -259,7 +282,7 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 				encodeItem(enc, item, offset, doc.store)
 			}
 		}
-		encodeDeleteSet(enc, deleteSet)
+		encodeDeleteSet(enc, ds)
 	})
 }
 
@@ -507,17 +530,26 @@ func typeClassOf(ct *ContentType) (byte, string) {
 	}
 }
 
+// A client's items are sorted by clock and do not overlap, so extending the
+// last range with each adjacent deleted item gives sorted, compacted ranges
+// in one pass, as Yjs's createDeleteSetFromStructStore does.
 func buildDeleteSet(store *StructStore) DeleteSet {
 	ds := newDeleteSet()
-	for _, items := range store.clients {
+	for client, items := range store.clients {
+		var ranges []DeleteRange
 		for _, item := range items {
-			if item.Deleted {
-				ds.add(item.ID, item.Content.Len())
+			if !item.Deleted {
+				continue
+			}
+			if last := len(ranges) - 1; last >= 0 && ranges[last].Clock+ranges[last].Len == item.ID.Clock {
+				ranges[last].Len += uint64(item.Content.Len())
+			} else {
+				ranges = append(ranges, DeleteRange{Clock: item.ID.Clock, Len: uint64(item.Content.Len())})
 			}
 		}
-	}
-	for client := range ds.clients {
-		ds.sortAndCompact(client)
+		if len(ranges) > 0 {
+			ds.clients[client] = ranges
+		}
 	}
 	return ds
 }
@@ -529,7 +561,7 @@ func encodeDeleteSet(enc *encoding.Encoder, ds DeleteSet) {
 	}
 	// Yjs writes delete set clients in descending order, and applies a delete
 	// set in its encoded order.
-	sort.Slice(clients, func(i, j int) bool { return clients[i] > clients[j] })
+	slices.SortFunc(clients, func(a, b ClientID) int { return cmp.Compare(b, a) })
 	enc.WriteVarUint(uint64(len(clients)))
 	for _, c := range clients {
 		ranges := ds.clients[c]
@@ -955,9 +987,9 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 			}
 			parentItem := doc.store.Find(ID{Client: ClientID(pc), Clock: pk})
 			if parentItem == nil {
-				// Container not integrated yet. EncodeStateAsUpdate sorts groups
-				// ascending by client, so a lower-clientID item written into a
-				// higher-clientID peer's nested type decodes before its parent.
+				// Container not integrated yet. EncodeStateAsUpdate writes groups
+				// descending by client, so a higher-clientID item written into a
+				// lower-clientID peer's nested type decodes before its parent.
 				// Defer instead of hard-failing (Yjs pendingStructs parity,
 				// review finding C-3): record the parent ID and let integration
 				// resolve it once the container arrives.
@@ -1291,12 +1323,14 @@ func decodeDeleteSet(dec *encoding.Decoder) (DeleteSet, error) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// clientsSorted returns m's clients in descending order, the order Yjs writes
+// a state vector in.
 func clientsSorted[T any](m map[ClientID]T) []ClientID {
 	out := make([]ClientID, 0, len(m))
 	for c := range m {
 		out = append(out, c)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	sort.Slice(out, func(i, j int) bool { return out[i] > out[j] })
 	return out
 }
 

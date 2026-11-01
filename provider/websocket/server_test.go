@@ -90,7 +90,7 @@ func wsURL(srv *httptest.Server, room string) string {
 }
 
 // dial opens a WebSocket connection to the test server.
-func dial(t *testing.T, srv *httptest.Server, room string) *gws.Conn {
+func dial(t testing.TB, srv *httptest.Server, room string) *gws.Conn {
 	t.Helper()
 	conn, _, err := gws.DefaultDialer.Dial(wsURL(srv, room), nil)
 	require.NoError(t, err)
@@ -102,7 +102,7 @@ func dial(t *testing.T, srv *httptest.Server, room string) *gws.Conn {
 // Returns the outer type and decoded payload.
 // For sync (type 0), payload is the raw sync bytes (no length prefix).
 // For awareness (type 1), payload is the VarBytes-unwrapped awareness bytes.
-func readOne(t *testing.T, conn *gws.Conn, deadline time.Duration) (outerType uint64, payload []byte) { //nolint:unparam
+func readOne(t testing.TB, conn *gws.Conn, deadline time.Duration) (outerType uint64, payload []byte) { //nolint:unparam
 	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(deadline))
 	_, data, err := conn.ReadMessage()
@@ -126,7 +126,7 @@ func readOne(t *testing.T, conn *gws.Conn, deadline time.Duration) (outerType ui
 // (step-1, step-2, awareness) and applies any sync messages to doc.
 // Gorilla's bufio.Reader is permanently broken if a deadline expires, so we
 // read a known count instead of draining by timeout.
-func drainHandshake(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
+func drainHandshake(t testing.TB, conn *gws.Conn, doc *crdt.Doc) {
 	t.Helper()
 	for i := 0; i < 3; i++ {
 		outerType, payload := readOne(t, conn, 2*time.Second)
@@ -138,7 +138,7 @@ func drainHandshake(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
 
 // sendSync wraps payload in an outer msgSync message and sends it.
 // Sync payload is NOT VarBytes-wrapped (raw append after type byte).
-func sendSync(t *testing.T, conn *gws.Conn, syncMsg []byte) {
+func sendSync(t testing.TB, conn *gws.Conn, syncMsg []byte) {
 	t.Helper()
 	enc := encoding.NewEncoder()
 	enc.WriteVarUint(0) // msgSync

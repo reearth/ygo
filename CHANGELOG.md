@@ -5,6 +5,127 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.0] — 2026-10-31
+
+### Added
+
+- **`crdt.ApplyUpdateV1Held(doc, update, origin)`** applies a V1 update as
+  `ApplyUpdateV1Landed` does and also reports whether the document already
+  held all of it, so that the apply changed and parked nothing. It decides
+  under the lock the apply holds. `provider/websocket` uses it to send a
+  peer's update on unless the room already held it, without decoding the
+  update a second time when the apply changes the document.
+
+### Fixed
+
+- **`crdt`: V1 encoders write clients in descending order, as Yjs does.**
+  The struct groups of a V1 update and the entries of a state vector were
+  written with clients ascending, so a V1 update or state vector with more
+  than one client was not byte-identical to Yjs's. This covers
+  `EncodeStateAsUpdateV1`, the `OnUpdate` update, `MergeUpdatesV1`,
+  `DiffUpdateV1`, `UpdateV2ToV1`, `EncodeStateFromSnapshot`,
+  `EncodeStateVectorV1`, `EncodeStateVectorFromUpdate`,
+  `EncodeStateVectorFromUpdateV2` and `EncodeSnapshot`. The V2 encoders and
+  the delete-set encoders already wrote clients descending.
+- **`crdt`: the update `OnUpdate` observers receive carries only the
+  transaction's deletions.** It carried the whole document's delete set, so
+  every update grew with the document's deletion history: after 1,000
+  separate deletions, a one-character insert gave a 2,951-byte update. It now
+  gives 12 bytes, as Yjs's `update` event does.
+  `provider/websocket`'s `Server.Apply` no longer returns `ErrUpdateTooLarge`
+  for a small edit to a room with a long deletion history.
+- **`crdt`: a transaction that changes nothing no longer calls `OnUpdate`.**
+  `OnUpdate` observers ran after every transaction, with an update of no
+  structs: an update the document already held, a delete of deleted content,
+  a delete set naming clocks the document lacks (which parks), and an empty
+  `Transact`. They now run only when the transaction adds structs or deletes
+  something, as Yjs emits its `update` event. A refused apply that integrated
+  part of its update still calls them for that part. `provider/websocket`
+  therefore stores and relay-publishes no such update, does not send a peer's
+  update to the room's other peers when the room already held all of it (an
+  update it parks still goes out), and `Server.Apply` returns `ErrNoChanges`
+  when `fn`'s transactions change nothing. `mobile` drops its filter for the
+  empty update.
+- **`crdt`: `OnUpdate` receives the update encoded after the transaction's
+  GC, as in Yjs.** ygo encoded the update before its GC, so content that one
+  transaction both inserted and deleted went out in full where Yjs sends a
+  `ContentDeleted` tombstone. A transaction that inserts "abc" and deletes
+  "b" now sends the same 24 bytes as Yjs, not 25. This holds for local
+  transactions and remote applies, also when the remote change is to a text
+  that an observer watches or that has format markers: that change is now
+  collected at commit too, and its format cleanup reads what it needs from
+  before the GC. With GC off, or with an `UndoManager` attached, the update
+  does not change. The update `ApplyUpdateV1Landed` returns for a failed
+  apply is now encoded at commit too, after the GC and the end-of-transaction
+  merges, so it holds the same structs as the `OnUpdate` update.
+- **`crdt`: `OnAfterTransaction` fires before `OnUpdate`, as Yjs emits
+  `afterTransaction` before `update`.** A committed transaction now calls
+  per-type observers, deep observers, `OnAfterTransaction`, `OnUpdate`, then
+  `OnSubdocs`, for local and applied updates alike. A transaction started
+  inside an `OnAfterTransaction` callback now emits its update before the
+  outer transaction's update, as one started inside an observer already did.
+  Yjs queues such a transaction until the outer one is done.
+- **`crdt`: a panicking observer no longer stops the other observers.** When
+  an observer panicked, no observer after it ran: not the other observers of
+  the same type, not deep observers, and not `OnUpdate`, so the update of the
+  transaction was lost to relays and persistence. Now every per-type, deep,
+  `OnAfterTransaction`, `OnUpdate` and `OnSubdocs` observer runs, and the
+  panic then reaches the caller, as Yjs runs its type and deep observers. If
+  more than one panics, the last panic reaches the caller, as in Yjs.
+- **`crdt`: a write into a deleted nested type no longer calls its
+  observers.** A write into a nested type after it was deleted, or in the
+  transaction that deleted it, called that type's `Observe` and `ObserveDeep`
+  callbacks and the `ObserveDeep` callbacks of its ancestors. This happened
+  for a local write through a held handle and, with GC off, for a remote
+  write that a peer made before it saw the deletion. Deleting a type that had
+  children also called its own `Observe` and `ObserveDeep`. Yjs calls none of
+  these, and now ygo does not either. The deletion still calls the observers
+  of the type that lost the entry and the deep observers of its live
+  ancestors.
+- **`crdt`: observers of the types one transaction changed fire in a fixed
+  order, the one Yjs uses.** `Observe` callbacks fire in the order the
+  transaction first changed each type, and `ObserveDeep` callbacks in that
+  order with each type's ancestors after it. ygo took this order from a Go
+  map, so it changed from one run to the next. An applied update changes its
+  types in the order its structs integrate, then in the order of its
+  deletions, as in Yjs.
+- **`crdt`: a text whose own observer panics no longer starts the remote
+  format cleanup.** After a remote change, ygo deletes the format markers that
+  the change left redundant. A formatted text was cleaned even when its own
+  observer panicked, and a panic in any type observer could skip the cleanup
+  for every text. Now the decision waits for the type observers even when one
+  panics, and leaves out each text whose own observer panicked, as in Yjs. Any
+  other changed text with formatting still starts the cleanup.
+- **`crdt`: `YText.Delete` and an `ApplyDelta` delete clean up format markers
+  as Yjs does (#297).** After a deletion, Yjs's `deleteText` looks at the
+  markers from the deleted range to the next character. It deletes each
+  marker that a later marker of the same key overrides, and each marker that
+  sets the value the attribute had before the deleted range. `YText.Delete`
+  used a different rule: it kept some of these markers and deleted some that
+  Yjs keeps. `ApplyDelta`'s delete deleted no markers. So the same edits gave
+  a document with different markers in ygo and in Yjs, and text that a peer
+  inserted next to such a marker at the same time could get different
+  formatting. Both now use Yjs's rule. As in Yjs, the cleanup also compares an
+  object or array attribute value by identity, so a marker that restores such
+  a value matches the marker it was copied from.
+
+### Performance
+
+- **`crdt`: delete sets sort without allocating.** `DeleteSet.sortAndCompact`
+  and the V1 and V2 delete-set encoders sorted with `sort.Slice`, which
+  allocates three times per call; they now use `slices.SortFunc`. The output
+  is unchanged.
+- **`crdt`: the delete set of a full-state encode or snapshot is built in one
+  pass.** Each client's ranges are built in clock order and stored once, as
+  Yjs's `createDeleteSetFromStructStore` does, in place of one map write per
+  deleted item and a sort per client. The bytes do not change.
+- **`crdt`: encoding against a state vector skips the items the peer has by
+  binary search.** `EncodeStateAsUpdateV1`, `EncodeStateAsUpdateV2` and each
+  transaction's `OnUpdate` encode called `Content.Len` on every item of every
+  client and copied the matches; a client's items past the state vector are a
+  suffix of its clock-sorted items, now found with `sort.Search`, as Yjs's
+  `writeStructs` does. The bytes do not change.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

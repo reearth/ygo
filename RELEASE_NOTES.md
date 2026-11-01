@@ -1,3 +1,94 @@
+## v1.56.0
+
+- **New: `crdt.ApplyUpdateV1Held`.** It applies a V1 update as
+  `ApplyUpdateV1Landed` does and also reports whether the document already
+  held all of it, so a peer that holds the same document needs none of it.
+- **V1 updates and state vectors list clients as Yjs does.** With more than
+  one client, the V1 encoders now write clients in descending order, so their
+  bytes equal Yjs's. A reader of the bytes sees the same document; only code
+  that compares V1 bytes with bytes ygo wrote before sees a change.
+- **The update `OnUpdate` hands out carries only the transaction's
+  deletions.** It carried every deletion the document held, so each update
+  grew with the document's history: after 1,000 separate deletions, a
+  one-character insert gave a 2,951-byte update where Yjs sends 12. Every
+  `provider/websocket` server stores, relays and broadcasts these updates. A
+  reader that keeps every update, as the persistence adapters do, still holds
+  every deletion. A reader that kept only the newest update and relied on it
+  to list every earlier deletion must keep them all, or read the state with
+  `EncodeStateAsUpdateV1`, which still writes every deletion.
+- **`OnUpdate` runs only for a transaction that changes the document.** It
+  ran after every transaction, also for an update the document already held
+  (a client that reconnects sends again what the server did not
+  acknowledge), a delete of deleted content, or an empty `Transact`. A
+  refused apply that integrated part of its update still calls it for that
+  part, as Yjs does. If your code expected one call per transaction, use
+  `OnAfterTransaction`, which still runs for every transaction. A
+  `provider/websocket` server no longer stores or relay-publishes such an
+  update, and does not send a peer's update to the other peers when the room
+  already held all of it; an update the room parks still goes to them.
+  `Server.Apply` returns `ErrNoChanges` when `fn`'s transactions change
+  nothing.
+- **The update is encoded after the transaction's GC.** Content that one
+  transaction both inserted and deleted went out in full, where Yjs sends a
+  `ContentDeleted` tombstone; relays sent it to peers and persistence stored
+  it. Such updates are now smaller, for local transactions and remote
+  applies. Yjs also merges some adjacent deleted structs into one before it
+  encodes, and ygo does not yet, so such an update can still differ from
+  Yjs's bytes. The update `ApplyUpdateV1Landed` returns for a failed apply
+  is encoded at the same point. Peers on either version
+  converge, and updates an earlier version stored load as before. With GC
+  off, or with an `UndoManager` attached, the bytes do not change.
+- **`OnAfterTransaction` runs before `OnUpdate`.** ygo called `OnUpdate`
+  first; Yjs emits `afterTransaction` first, so code ported from Yjs that
+  reads state set in `afterTransaction` from its `update` handler saw it one
+  transaction late. A transaction started inside an `OnAfterTransaction`
+  callback now emits its update before the outer transaction's update, as one
+  started inside an observer already did; Yjs queues it until the outer one
+  is done. Peers and stored update logs still
+  converge.
+- **A panicking observer no longer stops the other observers.** The other
+  observers of the same type, the deep observers, `OnAfterTransaction`,
+  `OnUpdate` and `OnSubdocs` did not run, so a relay or a store that listens
+  on `OnUpdate` lost that transaction's update. Now every observer runs, and
+  then the panic reaches the caller of `Transact` or `ApplyUpdate` as before.
+  If more than one observer panics, the caller gets the last panic, as in
+  Yjs. Other observers now run after an observer panics, so they must not
+  expect the panicking observer's work to be complete.
+- **A write into a deleted nested type calls no observers.** It called that
+  type's observers and the deep observers of its ancestors, also for a peer's
+  write made before the peer saw the deletion (with GC off), and deleting a
+  nested type that had children called its own `Observe` and `ObserveDeep`.
+  Code that relied on these calls to see that a type was deleted must use the
+  observers of the type that lost the entry, which still fire for the
+  deletion.
+- **Observers fire in a fixed order.** The observers of the types a
+  transaction changed fired in Go map order, which changes from run to run.
+  Now `Observe` callbacks fire in the order the transaction first changed each
+  type, then `ObserveDeep` callbacks fire for each changed type and its
+  ancestors in that order, as in Yjs. For an applied update, the order is the
+  order its structs integrate, then the order of its deletions.
+- **A text whose own observer panics does not start the format cleanup.**
+  After a remote change, ygo deletes the format markers the change left
+  redundant, in a separate transaction with a nil origin. It still did so for
+  a text whose observer panicked, and a panic in any type observer before the
+  decision skipped the cleanup for every text. Now each text decides for
+  itself, as in Yjs. Where markers stay, text inserted there later can take
+  their formatting, as it does in Yjs.
+- **A local delete of formatted text cleans up format markers as Yjs does.**
+  `YText.Delete` used its own rule, which kept some markers Yjs deletes and
+  deleted some Yjs keeps, and `ApplyDelta`'s delete deleted none. The same
+  edits then gave different documents in ygo and in Yjs, and text a peer
+  inserted next to such a marker at the same time could get different
+  formatting. Both now use Yjs's `deleteText` rule.
+- **Faster delete sets.** Sorting a delete set no longer allocates. The bytes
+  are unchanged.
+- **Faster full-state encodes and snapshots after deletions.** The delete set
+  that `EncodeStateAsUpdateV1`, `EncodeStateAsUpdateV2`, `CaptureSnapshot` and
+  `DeleteSetFromDoc` write is built in one pass. The bytes are unchanged.
+- **Faster encodes against a state vector.** `EncodeStateAsUpdateV1`,
+  `EncodeStateAsUpdateV2` and the update each transaction hands to `OnUpdate`
+  no longer visit every item the peer already has. The bytes are unchanged.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
