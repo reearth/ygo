@@ -769,6 +769,9 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			if err != nil {
 				return err
 			}
+			if itemEnd == clock {
+				return wrapUpdateErr(errZeroLengthStruct)
+			}
 			switch {
 			case drop:
 			case numClients > 1:

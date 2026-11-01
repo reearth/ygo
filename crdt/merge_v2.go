@@ -55,11 +55,13 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 				if err != nil {
 					return nil, DeleteSet{}, wrapUpdateErr(err)
 				}
-				structs = append(structs, &Item{
-					ID:      ID{Client: client, Clock: clock},
-					Content: NewContentDeleted(l),
-					Deleted: true,
-				})
+				if l > 0 { // dropped at length zero, as in decodeStructsV1
+					structs = append(structs, &Item{
+						ID:      ID{Client: client, Clock: clock},
+						Content: NewContentDeleted(l),
+						Deleted: true,
+					})
+				}
 				if clock, err = structEnd(clock, uint64(l)); err != nil {
 					return nil, DeleteSet{}, err
 				}
@@ -78,7 +80,9 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 				if err != nil {
 					return nil, DeleteSet{}, wrapUpdateErr(err)
 				}
-				structs = append(structs, item)
+				if contentLen > 0 { // dropped at length zero, as in decodeStructsV1
+					structs = append(structs, item)
+				}
 				if clock, err = structEnd(clock, uint64(contentLen)); err != nil {
 					return nil, DeleteSet{}, err
 				}

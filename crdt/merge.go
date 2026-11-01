@@ -63,7 +63,9 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 			// from the struct list — advancing clock above leaves a gap that the
 			// encoder re-emits as a skip (Yjs filterSkips). Carrying them would
 			// later hand a contentSkip to encodeItem, which can't encode it.
-			if _, isSkip := item.Content.(*contentSkip); isSkip {
+			// A struct of length zero is dropped too, so a merge cleans stored
+			// state that holds one, which the apply refuses.
+			if _, isSkip := item.Content.(*contentSkip); isSkip || item.Content.Len() == 0 {
 				continue
 			}
 			structs = append(structs, item)

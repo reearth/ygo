@@ -579,6 +579,11 @@ type typeRefError uint64
 
 func (e typeRefError) Error() string { return fmt.Sprintf("unknown type ref: %d", uint64(e)) }
 
+// errZeroLengthStruct refuses an item or GC struct that spans no clock: Yjs
+// never writes one, and Yjs integrates a keyed one as the key's value with no
+// content, which loses the key and breaks its later encoding.
+var errZeroLengthStruct = errors.New("zero-length struct")
+
 func buildDeleteSet(store *StructStore) DeleteSet {
 	ds := newDeleteSet()
 	for _, items := range store.clients {
@@ -756,6 +761,9 @@ func decodeStructs(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			// after the skip then fall into the clock-gap branch and park until
 			// the range arrives (yjs parity, #251).
 			_, isSkip := item.Content.(*contentSkip)
+			if itemEnd == clock && !isSkip {
+				return nil, nil, 0, errZeroLengthStruct
+			}
 			switch {
 			case drop || isSkip:
 			case numClients > 1:

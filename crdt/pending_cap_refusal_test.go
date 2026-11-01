@@ -1,10 +1,12 @@
 package crdt
 
 import (
+	"encoding/hex"
 	"errors"
 	"maps"
 	"math"
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -416,5 +418,105 @@ func TestUnit_ApplyUpdate_PartlyAppliedUpdateTellsItsObservers(t *testing.T) {
 				t.Fatalf("the observers were handed %d updates and %d transactions, want one each", *updates, txns)
 			}
 		})
+	}
+}
+
+// randomGroup writes one client group of n structs starting at clock, mixing
+// GC structs, deleted-content items, Skips and strings of one to three clocks.
+func randomGroup(e *encoding.Encoder, rng *rand.Rand, client, clock uint64, n int) {
+	e.WriteVarUint(uint64(n))
+	e.WriteVarUint(client)
+	e.WriteVarUint(clock)
+	for range n {
+		length := 1 + rng.IntN(3)
+		switch rng.IntN(4) {
+		case 0:
+			e.WriteUint8(0)
+			e.WriteVarUint(uint64(length))
+		case 1:
+			e.WriteUint8(1)
+			e.WriteVarUint(1)
+			e.WriteVarString("t")
+			e.WriteVarUint(uint64(length))
+		case 2:
+			e.WriteUint8(10)
+			e.WriteVarUint(uint64(length))
+		default:
+			e.WriteUint8(wireString)
+			e.WriteVarUint(1)
+			e.WriteVarString("t")
+			e.WriteVarString("abc"[:length])
+		}
+	}
+}
+
+// randomBlockedUpdate is a V1 update of one or two client groups, each past a
+// gap so every struct it carries is blocked.
+func randomBlockedUpdate(rng *rand.Rand) []byte {
+	groups := 1 + rng.IntN(2)
+	return encoding.EncodeBytes(func(e *encoding.Encoder) {
+		e.WriteVarUint(uint64(groups))
+		for g := range groups {
+			randomGroup(e, rng, uint64(3+g), uint64(1+rng.IntN(8)), 1+rng.IntN(4))
+		}
+		e.WriteVarUint(0)
+	})
+}
+
+// The check before the apply counts exactly what the apply parks: an update
+// applies under a cap with exactly the room it needs, parking that many, and
+// a cap one short refuses it before any change.
+func TestUnit_PendingCap_AgreesWithWhatTheApplyParks(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 11))
+	tried := 0
+	for i := range 4000 {
+		seed, update := randomBlockedUpdate(rng), randomBlockedUpdate(rng)
+		free := New(WithClientID(1), WithMaxPendingItems(math.MaxInt))
+		if ApplyUpdateV1(free, seed, nil) != nil {
+			continue
+		}
+		seeded := free.PendingStats().Items
+		if ApplyUpdateV1(free, update, nil) != nil {
+			continue
+		}
+		grew := free.PendingStats().Items - seeded
+		if grew <= 0 || seeded+grew < 2 {
+			continue
+		}
+		tried++
+		where := "case " + strconv.Itoa(i) + " seed=" + hex.EncodeToString(seed) + " update=" + hex.EncodeToString(update)
+
+		exact := New(WithClientID(1), WithMaxPendingItems(seeded+grew))
+		if err := ApplyUpdateV1(exact, seed, nil); err != nil {
+			t.Fatalf("%s: the seed: %v", where, err)
+		}
+		if err := ApplyUpdateV1(exact, update, nil); err != nil {
+			t.Fatalf("%s: the update with exactly its room: %v", where, err)
+		}
+		if got := exact.PendingStats().Items; got != seeded+grew {
+			t.Fatalf("%s: parked %d, want %d", where, got, seeded+grew)
+		}
+
+		tight := New(WithClientID(1), WithMaxPendingItems(seeded+grew-1))
+		if err := ApplyUpdateV1(tight, seed, nil); err != nil {
+			t.Fatalf("%s: the seed: %v", where, err)
+		}
+		before, state := tight.PendingStats(), EncodeStateAsUpdateV1(tight, nil)
+		updates := observed(tight)
+		if err := ApplyUpdateV1(tight, update, nil); !errors.Is(err, ErrInvalidUpdate) {
+			t.Fatalf("%s: a cap one short: err %v, want ErrInvalidUpdate", where, err)
+		}
+		if got := tight.PendingStats(); !reflect.DeepEqual(got, before) {
+			t.Fatalf("%s: the queue went from %+v to %+v", where, before, got)
+		}
+		if string(EncodeStateAsUpdateV1(tight, nil)) != string(state) {
+			t.Fatalf("%s: the document's state changed", where)
+		}
+		if *updates != 0 {
+			t.Fatalf("%s: the observers were handed %d updates, want none", where, *updates)
+		}
+	}
+	if tried <= 1000 {
+		t.Fatalf("the generator reached %d updates that grow the queue, want more than 1,000", tried)
 	}
 }
