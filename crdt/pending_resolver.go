@@ -106,17 +106,28 @@ func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *e
 		}
 		return p
 	}
+	current := len(groups) - 1
 	find := func(client ClientID) *structRefs {
-		i, ok := slices.BinarySearchFunc(groups, client, func(g structRefs, c ClientID) int { return cmp.Compare(g.client, c) })
-		if !ok {
-			return nil
+		if current >= 0 && groups[current].client == client {
+			return &groups[current] // most lookups are for the group being drained
 		}
-		return &groups[i]
+		lo, hi := 0, len(groups)
+		for lo < hi {
+			m := int(uint(lo+hi) >> 1)
+			if groups[m].client < client {
+				lo = m + 1
+			} else {
+				hi = m
+			}
+		}
+		if lo < len(groups) && groups[lo].client == client {
+			return &groups[lo]
+		}
+		return nil
 	}
 	store := txn.doc.store
 	var stackBuf [8]int
 	stack := stackBuf[:0]
-	current := len(groups) - 1
 	for {
 		var head int
 		if n := len(stack); n > 0 {
