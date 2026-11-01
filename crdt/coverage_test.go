@@ -73,9 +73,9 @@ func TestUnit_ContentDoc_Methods(t *testing.T) {
 	cpDoc := cp.(*ContentDoc).Doc
 	// Copy creates a fresh Doc, not the same pointer
 	assert.NotEqual(t, inner, cpDoc)
-	// but with the same guid and opts
+	// but with the same wire options; collection ID is inherited on attach.
 	assert.Equal(t, "g", cpDoc.GUID())
-	assert.Equal(t, "cid", cpDoc.CollectionID())
+	assert.Empty(t, cpDoc.CollectionID())
 
 	assert.Panics(t, func() { c.Splice(0) })
 }

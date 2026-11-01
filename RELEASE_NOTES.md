@@ -64,6 +64,17 @@ and `ToXML` renders the hook as `[object Object]`, as Yjs `toString` does.
 `YMap.Get` and `YArray.Get` return a hook as a `*YMap`. State that an older
 ygo already stored keeps the hook as an empty `YArray`.
 
+A subdocument's opts are now written as Yjs `ContentDoc` writes them:
+`gc: false`, `autoLoad: true` and `meta` only when set, so a subdocument with
+GC on writes `{}`. ygo always wrote `gc` and also wrote a `collectionId` key
+that Yjs ignores, so its bytes differed whenever GC was on, autoLoad was set
+or a collection ID was set. The collection ID is no longer sent to peers; as
+in Yjs, a subdocument without one takes its parent's when it is added. A
+`collectionId` key that an earlier ygo wrote still decodes, and a `meta` value
+from Yjs is kept and written back. A subdocument that an undo restores starts
+with `ShouldLoad()` equal to `AutoLoad()` and takes its parent's collection
+ID, as in Yjs.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

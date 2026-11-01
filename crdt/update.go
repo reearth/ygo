@@ -462,7 +462,7 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 			guid = ct.Doc.GUID()
 		}
 		enc.WriteVarString(guid)
-		enc.WriteAny(subdocOpts(ct.Doc))
+		writeSubdocOpts(enc, ct.Doc)
 	case *ContentMove:
 		enc.WriteVarUint(uint64(ct.Target.Client))
 		enc.WriteVarUint(ct.Target.Clock)

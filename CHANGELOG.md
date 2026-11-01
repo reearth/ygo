@@ -57,6 +57,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as Yjs `toString` does. `YMap.Get` and `YArray.Get` return a hook as a
   `*YMap`. State that an older ygo already stored keeps the hook as a
   `YArray`.
+- **`crdt`: a subdocument's opts are written as Yjs writes them.** Yjs
+  `ContentDoc` writes `gc: false`, `autoLoad: true` and `meta` only when they
+  are set, so a subdocument with GC on writes `{}`. ygo always wrote `gc` and
+  wrote a `collectionId` key that Yjs does not read, so its bytes differed
+  whenever GC was on, autoLoad was set or a collection ID was set. ygo now
+  writes the same keys in the same order and keeps a `meta` value it decodes.
+  A `collectionId` key that an earlier ygo wrote still decodes; the collection
+  ID is no longer sent, and a subdocument without one takes its parent's when
+  it is added, as in Yjs. A subdocument that an undo restores starts with
+  `ShouldLoad()` equal to `AutoLoad()` and takes its parent's collection ID,
+  as Yjs's copy does.
 
 ## [1.55.0] — 2026-10-31
 
@@ -2277,15 +2288,15 @@ surfaced by ygo's new randomized convergence fuzzer (#70).
   cancels out, so no event fires for a net no-op.
 - **`Doc.Load()`** — signals that a subdocument's data should be synced.
   Flips `ShouldLoad()` to `true` and, for a doc already embedded in a
-  parent, emits a `Loaded` event on the parent. Idempotent. Must not be
-  called from inside a `Transact` closure — like `GetText`, it acquires a
-  document lock itself (the parent's, not the callee's).
+  parent, emits a `Loaded` event on the parent. Idempotent. On an embedded
+  subdocument it opens a transaction on the parent, so it must not be called
+  from inside the parent's `Transact` closure, like `GetText`.
 - **`crdt.WithAutoLoad(bool)`**, **`crdt.WithShouldLoad(bool)`**,
   **`crdt.WithCollectionID(string)`** — new `DocOption`s for subdocument
   configuration, plus matching accessors `Doc.AutoLoad()`, `Doc.ShouldLoad()`,
   and `Doc.CollectionID()`. A doc constructed directly defaults
   `ShouldLoad()` to `true`; a doc materialized from a decoded update starts
-  `false` (derived from `autoLoad`, matching Yjs) until `Load()` is called.
+  with `ShouldLoad()` equal to `AutoLoad()`, as in Yjs.
 - **`crdt.Example_subdocs`** — a runnable godoc example
   (`crdt/example_subdocs_test.go`) showing embed → `OnSubdocs` → `GetSubdocGUIDs`.
 - **`ContentDoc` opts round-trip on both wire formats.** A subdocument's

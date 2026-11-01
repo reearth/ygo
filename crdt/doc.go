@@ -87,7 +87,7 @@ func WithGUID(guid string) DocOption {
 func WithAutoLoad(v bool) DocOption { return func(d *Doc) { d.autoLoad = v } }
 
 // WithShouldLoad controls whether a provider should sync this doc now. Default
-// true; a decoded/remote subdocument starts false until Load().
+// true; a decoded subdocument starts with its autoLoad value, as in Yjs.
 func WithShouldLoad(v bool) DocOption { return func(d *Doc) { d.shouldLoad = v } }
 
 // WithCollectionID sets an optional subdocument collection identifier.
@@ -151,13 +151,14 @@ type Doc struct {
 	clientID ClientID
 	gc       bool
 	guid     string // guid identifies this document (for subdocument embedding). Defaults to a random uuidv4 (see New) unless set with WithGUID.
-	// linkMu guards shouldLoad, item, parent and detached. It is a leaf lock:
+	// linkMu guards shouldLoad, collectionID, item, parent and detached. It is a leaf lock:
 	// no other lock is taken while it is held, so a parent's transaction can
 	// take it, also for a document embedded in itself.
 	linkMu          sync.Mutex
 	shouldLoad      bool
 	autoLoad        bool
 	collectionID    string
+	meta            any   // subdocument meta from Yjs opts, written back unchanged
 	item            *Item // set on integrate when this Doc is embedded as a subdocument (#63)
 	parent          *Doc  // document that owns item
 	detached        bool  // true once an embedded Doc is removed or destroyed
@@ -218,9 +219,22 @@ func (d *Doc) ShouldLoad() bool {
 	return d.shouldLoad
 }
 
-// CollectionID returns the optional subdocument collection identifier.
+// CollectionID returns the optional subdocument collection identifier. A
+// subdocument without one takes its parent's when it is added, as in Yjs.
 func (d *Doc) CollectionID() string {
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
 	return d.collectionID
+}
+
+// inheritCollectionID gives d the collection ID id when d has none, as Yjs
+// cleanupTransactions does for each added subdocument.
+func (d *Doc) inheritCollectionID(id string) {
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
+	if d.collectionID == "" {
+		d.collectionID = id
+	}
 }
 
 // Load signals that this subdocument's data should be synced. On a subdocument
@@ -566,7 +580,9 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 	hasSubdocs := len(txn.subdocsAdded)+len(txn.subdocsRemoved)+len(txn.subdocsLoaded) > 0
 	var subdocsEv SubdocsEvent
 	if hasSubdocs {
+		parentCollectionID := d.CollectionID()
 		for sd := range txn.subdocsAdded {
+			sd.inheritCollectionID(parentCollectionID)
 			d.subdocs[sd.guid] = sd
 			subdocsEv.Added = append(subdocsEv.Added, sd)
 		}

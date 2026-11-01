@@ -195,7 +195,7 @@
 | **JsonPath queries** | ✅ Documented as available for state extraction | ❌ Not implemented | — | Nice-to-have; limited adoption |
 | **Doc.ClientID** | ✅ `u32` (fits JS 53-bit VarUint limit) | ✅ `uint32` (fixed in v1.0.0, was uint64) | ✅ | — |
 | **GUID** | ✅ Auto-UUID if not set | ✅ `WithGUID()`, `GUID()` | — | — |
-| **Doc options** | `client_id`, `guid`, `collection_id`, `offset_kind`, `skip_gc`, `auto_load`, `should_load` | `WithClientID`, `WithGUID`, `WithGC` | — | yrs has `offset_kind` and `collection_id`/`auto_load` that ygo lacks |
+| **Doc options** | `client_id`, `guid`, `collection_id`, `offset_kind`, `skip_gc`, `auto_load`, `should_load` | `WithClientID`, `WithGUID`, `WithGC`, `WithCollectionID`, `WithAutoLoad`, `WithShouldLoad` | — | yrs has `offset_kind`, which ygo lacks; ygo always counts UTF-16 units |
 | **offset_kind** | ✅ `Bytes` or `UTF16` — controls how text offsets are counted | ❌ Hardcoded UTF-16 (fixed in v1.0.4) | ⚠️ yrs default is `Bytes`; must be set to `UTF16` for JS client compat | **Critical JS-compat risk in yrs.** If Rust integrators don't set `offset_kind: UTF16`, their YText offsets will be wrong for emoji/supplementary chars. ygo is correct by default. |
 | **TransactContext** | ❌ Not present | ✅ `Doc.TransactContext(ctx, ...)` | — | ygo-only; fn polls ctx to exit early; no mid-fn interrupt (matches yrs' no-cancel model) |
 
