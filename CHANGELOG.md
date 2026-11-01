@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-11-01
+
+### Fixed
+
+- **`crdt`: an undo that follows restored copies splits only the last one, as
+  Yjs does.** When an undo deleted an item that earlier undos had restored more
+  than once as part of a longer copy, every copy on the way was split at that
+  item. The split parts keep their link to the next copy, so they never merged
+  again, and the document held more structs than Yjs, with other V1 and V2
+  bytes. Undo now carries the offset along the copies and splits only the last
+  one. The content was already the same as in Yjs.
+- **`crdt`: undo copies a restored run's content after tracing its neighbours,
+  as Yjs does.** When an undo traced a neighbour's restored copy into a run
+  that the same undo restores, Yjs splits the run there and restores only the
+  part before the split. ygo copied the content before the traces, so it
+  restored the whole run: different content from Yjs after that undo, and
+  other V1 and V2 bytes. A trace that passes through an earlier copy still
+  restores the whole run. An undo after a redo of the same run also leaves
+  the copy in between as one struct, where Yjs splits it, until ygo merges
+  every neighbour at the end of a transaction, as Yjs does.
+
+### Performance
+
+- **`crdt`: `UndoManager.Undo` and `Redo` no longer copy the stacks.** Each
+  call copied the deletions of every remaining undo and redo stack item, for a
+  map-key check that rarely runs. So each call took time and memory in
+  proportion to the history, and undoing all of a stack of n items took
+  O(n²) time. The check now reads the stacks in place, as Yjs does. An undo
+  and redo pair with 10,000 stack items now allocates 4.6 KiB instead of
+  645 KiB and takes 98% less time (`BenchmarkUndoManager_UndoRedo`). A
+  transaction that merges into the newest stack item no longer copies that
+  item's deletions: 1,000 merged keystrokes allocate 3.0 MiB instead of
+  24.1 MiB and take 78% less time
+  (`BenchmarkUndoManager_CaptureMergedTyping`). A stack item that
+  `Undo`, `Redo`, `Clear` or a new edit removes is no longer kept alive by
+  the stack's backing array.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

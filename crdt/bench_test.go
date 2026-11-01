@@ -1001,6 +1001,75 @@ func BenchmarkUndoManager_UndoMapClear(b *testing.B) {
 	}
 }
 
+// BenchmarkUndoManager_UndoInsertsThroughRedoneCopies undoes 1k one-element
+// inserts whose elements two earlier undos restored as one run each, so every
+// undo follows a redone chain into the middle of both copies.
+func BenchmarkUndoManager_UndoInsertsThroughRedoneCopies(b *testing.B) {
+	const n = 1_000
+	for range b.N {
+		b.StopTimer()
+		doc := New(WithClientID(1))
+		a := doc.GetArray("a")
+		um := NewUndoManager(doc, []SharedType{a})
+		step := func(fn func(*Transaction)) {
+			doc.Transact(fn)
+			um.StopCapturing()
+		}
+		step(func(txn *Transaction) { a.InsertType(txn, 0, NewArrayPrelim()) })
+		nested := a.Get(0).(*YArray)
+		for i := range n {
+			step(func(txn *Transaction) { nested.Insert(txn, i, []any{i}) })
+		}
+		for range 2 {
+			step(func(txn *Transaction) {
+				a.Delete(txn, 0, 1)
+				a.Insert(txn, 0, []any{-1})
+			})
+			um.Undo()
+		}
+		b.StartTimer()
+		for range n {
+			if !um.Undo() {
+				b.Fatal("nothing undone")
+			}
+		}
+	}
+}
+
+// BenchmarkUndoManager_UndoRedo undoes and redoes the newest of depth stack
+// items, so the stack depth stays fixed.
+func BenchmarkUndoManager_UndoRedo(b *testing.B) {
+	for _, depth := range []int{100, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("depth=%d", depth), func(b *testing.B) {
+			um := undoStackOfDepth(depth)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if !um.Undo() || !um.Redo() {
+					b.Fatal("nothing undone")
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkUndoManager_CaptureMergedTyping types and backspaces 1,000 times
+// into one stack item, so each capture merges into a growing delete set.
+func BenchmarkUndoManager_CaptureMergedTyping(b *testing.B) {
+	b.ReportAllocs()
+	for range b.N {
+		doc := newTestDoc(1)
+		txt := doc.GetText("t")
+		NewUndoManager(doc, []SharedType{txt}, mergeWindow)
+		for range 1_000 {
+			doc.Transact(func(txn *Transaction) {
+				txt.Insert(txn, 0, "ab", nil)
+				txt.Delete(txn, 0, 1)
+			})
+		}
+	}
+}
+
 // buildScatteredFormattedText builds a text of n one-character items inserted
 // at seeded-random positions, so no two merge and a walk over it is O(n).
 func buildScatteredFormattedText(n int) (*Doc, *YText) {

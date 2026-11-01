@@ -12,11 +12,13 @@
  *
  * Fixture kind — "author" (see gen_fixtures_prelim.js): a scripted sequence of
  * edits and undo/redo calls executed by Yjs with a PINNED clientID. The Go test
- * replays the identical sequence and must produce byte-identical V1 bytes, so
- * the redone container AND its re-inserted children land at the same clocks
- * with the same origins as in Yjs. Fixtures with a second peer are jsonOnly:
- * only the JSON can match, since ygo orders clients, merges structs and
- * encodes collected children differently.
+ * replays the identical sequence and must produce byte-identical V1 and V2
+ * bytes, so the redone container AND its re-inserted children land at the same
+ * clocks with the same origins as in Yjs. Fixtures with a second peer are
+ * jsonOnly: only the JSON can match, since ygo orders clients, merges structs
+ * and encodes collected children differently. So are one-peer fixtures whose
+ * bytes need Yjs's merge of every neighbour at the end of a transaction,
+ * where ygo merges only what the transaction made itself.
  */
 const Y = require('yjs')
 const fs = require('fs')
@@ -42,14 +44,18 @@ const remoteDoc = () => {
 const sync = (from, to) =>
   Y.applyUpdate(to, Y.encodeStateAsUpdate(from, Y.encodeStateVector(to)), 'remote')
 
-function authored(name, description, root, kind, build) {
+// MERGED_AT_TXN_END marks a one-peer fixture whose bytes need Yjs's merge of
+// every neighbour at the end of a transaction.
+const MERGED_AT_TXN_END = { jsonOnly: true }
+
+function authored(name, description, root, kind, build, { jsonOnly = false } = {}) {
   const doc = new Y.Doc()
   doc.clientID = CLIENT_ID
   const type = kind === 'map' ? doc.getMap(root) : doc.getArray(root)
   const um = new Y.UndoManager(type)
   twoPeer = false
   build(doc, type, um)
-  const jsonOnly = twoPeer
+  const bytesDiffer = jsonOnly || twoPeer
   const f = {
     name,
     description,
@@ -59,7 +65,8 @@ function authored(name, description, root, kind, build) {
     updateV1: toHex(Y.encodeStateAsUpdate(doc)),
     expectedJSON: JSON.stringify(type.toJSON()),
   }
-  if (jsonOnly) f.jsonOnly = true
+  if (bytesDiffer) f.jsonOnly = true
+  else f.updateV2 = toHex(Y.encodeStateAsUpdateV2(doc))
   return f
 }
 
@@ -67,6 +74,28 @@ const setText = (m) => {
   const t = new Y.Text()
   t.insert(0, 'Hello')
   m.set('t', t)
+}
+
+// undoThroughRestoredCopies restores the elements of a nested array `copies`
+// times as one copy each, then undoes the insert of its last two elements.
+function undoThroughRestoredCopies(doc, arr, um, copies) {
+  arr.insert(0, [new Y.Array()])
+  um.stopCapturing()
+  arr.get(0).insert(0, [88, 78])
+  um.stopCapturing()
+  arr.get(0).insert(2, [45, 97])
+  um.stopCapturing()
+  doc.transact(() => {
+    arr.delete(0, 1)
+    arr.insert(0, [25, 50, 51])
+  })
+  um.stopCapturing()
+  um.undo()
+  for (let i = 1; i < copies; i++) {
+    arr.delete(0, 1)
+    um.undo()
+  }
+  um.undo()
 }
 
 const fixtures = [
@@ -344,6 +373,362 @@ const fixtures = [
       ra.insert(0, ['z'])
       sync(r, doc)
     }
+  ),
+  authored(
+    'undo_follows_restored_copies_splitting_only_the_last',
+    'Undoing an insert follows its restored copies and splits only the last one, so the copy in between stays one struct.',
+    'a', 'array',
+    (doc, arr, um) => undoThroughRestoredCopies(doc, arr, um, 2)
+  ),
+  authored(
+    'undo_follows_three_restored_copies',
+    'The offset into the restored copies is carried over every hop of a longer chain.',
+    'a', 'array',
+    (doc, arr, um) => undoThroughRestoredCopies(doc, arr, um, 3)
+  ),
+  authored(
+    'restore_copies_run_after_neighbour_trace_splits_it',
+    'Restoring a run that holds a restored copy copies it after tracing the neighbours, so a trace that splits the run restores only its first part.',
+    'a', 'array',
+    (doc, arr, um) => {
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).insert(0, [10, 7])
+      um.stopCapturing()
+      arr.get(0).insert(0, [78])
+      um.stopCapturing()
+      arr.get(0).delete(1, 2)
+      um.stopCapturing()
+      um.undo()
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    }
+  ),
+  authored(
+    'restore_copy_split_inside_by_neighbour_trace',
+    'A remote insert splits the original of a restored copy, so tracing its second half reaches inside the copy, which is restored only up to there.',
+    'a', 'array',
+    (doc, arr, um) => {
+      const r = remoteDoc()
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).insert(0, [10, 7])
+      um.stopCapturing()
+      sync(doc, r)
+      arr.get(0).delete(0, 2)
+      um.stopCapturing()
+      um.undo()
+      r.getArray('a').get(0).insert(1, ['x'])
+      sync(r, doc)
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    }
+  ),
+  authored(
+    'trace_from_restored_run_keeps_its_copy_whole',
+    'Two pushes restored by one copy are traced from the start of that copy, so restoring them again does not split it.',
+    'a', 'array',
+    (doc, arr, um) => {
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).insert(0, [10])
+      um.stopCapturing()
+      arr.get(0).insert(1, [7])
+      um.stopCapturing()
+      arr.get(0).delete(0, 2)
+      um.stopCapturing()
+      um.undo()
+      arr.get(0).insert(2, [5])
+      um.stopCapturing()
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    },
+    MERGED_AT_TXN_END
+  ),
+  authored(
+    'trace_from_restored_run_after_partial_delete',
+    'After part of a restored run is deleted and restored again, its originals are still traced from the start of their copy, so nothing is split.',
+    'a', 'array',
+    (doc, arr, um) => {
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).insert(0, [10, 7])
+      um.stopCapturing()
+      arr.get(0).insert(0, [78])
+      um.stopCapturing()
+      arr.get(0).delete(1, 2)
+      um.stopCapturing()
+      um.undo()
+      arr.get(0).insert(3, [5])
+      um.stopCapturing()
+      arr.get(0).delete(1, 3)
+      um.stopCapturing()
+      um.undo()
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    },
+    MERGED_AT_TXN_END
+  ),
+  authored(
+    'trace_for_another_item_splits_a_later_run',
+    'Restoring a remote item traces into a run this undo restores later, which then restores only up to that point.',
+    'a', 'array',
+    (doc, arr, um) => {
+      const r = remoteDoc()
+      r.getArray('a').insert(0, [new Y.Array()])
+      sync(r, doc)
+      arr.get(0).insert(0, [10, 7])
+      um.stopCapturing()
+      sync(doc, r)
+      arr.get(0).delete(0, 2)
+      um.stopCapturing()
+      um.undo()
+      r.getArray('a').get(0).insert(1, ['x'])
+      sync(r, doc)
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    }
+  ),
+  authored(
+    'trace_for_another_item_splits_a_later_merged_run',
+    'Restoring a remote item traces into the second part of a merged run restored later, which then restores only its first part.',
+    'a', 'array',
+    (doc, arr, um) => {
+      const r = remoteDoc()
+      r.getArray('a').insert(0, [new Y.Array()])
+      sync(r, doc)
+      arr.get(0).insert(0, [10, 7])
+      um.stopCapturing()
+      sync(doc, r)
+      r.getArray('a').get(0).insert(2, ['a'])
+      sync(r, doc)
+      arr.get(0).insert(0, [78])
+      um.stopCapturing()
+      arr.get(0).delete(1, 2)
+      um.stopCapturing()
+      um.undo()
+      sync(doc, r)
+      r.getArray('a').get(0).insert(3, [new Y.Map()])
+      sync(r, doc)
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    }
+  ),
+  authored(
+    'trace_at_start_of_a_later_run_item_cuts_before_it',
+    'A remote insert splits a restored copy, so a trace lands at the start of a later item of the run, which is restored only up to there.',
+    'a', 'array',
+    (doc, arr, um) => {
+      const r = remoteDoc()
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).insert(0, [10, 7])
+      um.stopCapturing()
+      arr.get(0).insert(0, [78])
+      um.stopCapturing()
+      sync(doc, r)
+      arr.get(0).delete(1, 2)
+      um.stopCapturing()
+      um.undo()
+      r.getArray('a').get(0).insert(2, ['x'])
+      sync(r, doc)
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    }
+  ),
+  authored(
+    'trace_splits_the_first_item_of_a_merged_run',
+    'A trace lands inside the first item of a merged run, so nothing after that point is restored.',
+    'a', 'array',
+    (doc, arr, um) => {
+      const r = remoteDoc()
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).insert(0, [10, 7])
+      um.stopCapturing()
+      sync(doc, r)
+      arr.get(0).delete(0, 2)
+      um.stopCapturing()
+      um.undo()
+      arr.get(0).insert(2, [5])
+      um.stopCapturing()
+      r.getArray('a').get(0).insert(1, ['x'])
+      sync(r, doc)
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    }
+  ),
+  authored(
+    'trace_from_copies_restored_separately',
+    'Neighbours restored by separate copies are traced from their own copies, so the later copy splits the run that holds the earlier one.',
+    'a', 'array',
+    (doc, arr, um) => {
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).insert(0, [10])
+      um.stopCapturing()
+      arr.get(0).insert(1, [7])
+      um.stopCapturing()
+      arr.get(0).insert(0, [78])
+      um.stopCapturing()
+      arr.get(0).delete(1, 1)
+      um.stopCapturing()
+      um.undo()
+      arr.get(0).insert(3, ['s'])
+      um.stopCapturing()
+      arr.get(0).delete(2, 1)
+      um.stopCapturing()
+      um.undo()
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    },
+    MERGED_AT_TXN_END
+  ),
+  authored(
+    'trace_walk_over_a_restored_run_lands_at_its_start',
+    'Walking left over pushes that one copy restored lands at the start of that copy, so the copy is restored whole.',
+    'a', 'array',
+    (doc, arr, um) => {
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).push([10])
+      um.stopCapturing()
+      arr.get(0).push([7])
+      um.stopCapturing()
+      arr.get(0).push(['x'])
+      um.stopCapturing()
+      arr.get(0).delete(0, 2)
+      um.stopCapturing()
+      um.undo()
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    },
+    MERGED_AT_TXN_END
+  ),
+  authored(
+    'trace_splits_inside_a_later_run_item',
+    'A trace lands inside a later item of a merged run, which keeps only its part before that point.',
+    'a', 'array',
+    (doc, arr, um) => {
+      const r = remoteDoc()
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).push([10])
+      um.stopCapturing()
+      arr.get(0).push([7])
+      um.stopCapturing()
+      arr.get(0).push(['q'])
+      um.stopCapturing()
+      arr.get(0).insert(0, [78])
+      um.stopCapturing()
+      sync(doc, r)
+      arr.get(0).delete(1, 2)
+      um.stopCapturing()
+      um.undo()
+      r.getArray('a').get(0).insert(2, ['z'])
+      sync(r, doc)
+      sync(doc, r)
+      r.getArray('a').get(0).insert(3, ['x'])
+      sync(r, doc)
+      doc.transact(() => {
+        arr.get(0).delete(5, 1)
+        arr.get(0).delete(0, 3)
+      })
+      um.stopCapturing()
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+      um.undo()
+    }
+  ),
+  authored(
+    'trace_through_a_split_copy_lands_once',
+    'Pushes that one copy restored are traced as one struct even after a delete splits the copy, so nothing is cut.',
+    'a', 'array',
+    (doc, arr, um) => {
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).push([1, 2])
+      um.stopCapturing()
+      arr.get(0).push([3])
+      um.stopCapturing()
+      arr.get(0).push(['x'])
+      um.stopCapturing()
+      arr.get(0).delete(0, 3)
+      um.stopCapturing()
+      um.undo()
+      arr.get(0).delete(0, 1)
+      um.stopCapturing()
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    },
+    MERGED_AT_TXN_END
+  ),
+  authored(
+    'collected_children_do_not_split_a_traced_struct',
+    'Children a peer sends into a deleted container arrive collected and join no list in Yjs, so they do not split the originals a trace walks over.',
+    'a', 'array',
+    (doc, arr, um) => {
+      const r = remoteDoc()
+      const ra = () => r.getArray('a').get(0)
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).insert(0, [88, 89])
+      um.stopCapturing()
+      arr.get(0).insert(0, [90, 91])
+      um.stopCapturing()
+      arr.get(0).insert(1, [92, 93, 94])
+      um.stopCapturing()
+      sync(doc, r)
+      arr.get(0).delete(3, 1)
+      um.stopCapturing()
+      arr.get(0).delete(1, 3)
+      um.stopCapturing()
+      sync(r, doc)
+      um.undo()
+      arr.delete(0, 1)
+      um.stopCapturing()
+      ra().insert(0, [95])
+      ra().insert(1, [96])
+      ra().insert(4, [97, 98])
+      sync(doc, r)
+      sync(r, doc)
+      um.undo()
+    }
+  ),
+  authored(
+    'undo_after_redo_keeps_the_intermediate_copy_whole',
+    'An undo of a restored run after a redo leaves the copy in between as one struct, which Yjs splits when a later trace walks it.',
+    'a', 'array',
+    (doc, arr, um) => {
+      arr.insert(0, [new Y.Array()])
+      um.stopCapturing()
+      arr.get(0).insert(0, [91])
+      um.stopCapturing()
+      arr.get(0).insert(1, [98])
+      um.stopCapturing()
+      arr.get(0).delete(0, 2)
+      um.stopCapturing()
+      um.undo()
+      um.redo()
+      um.undo()
+      um.undo()
+      arr.delete(0, 1)
+      um.stopCapturing()
+      um.undo()
+    },
+    MERGED_AT_TXN_END
   ),
 ]
 

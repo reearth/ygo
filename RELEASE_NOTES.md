@@ -1,3 +1,24 @@
+## v1.55.1
+
+- **An undo that follows restored copies splits only the last one, as Yjs
+  does.** When an undo deleted an item that earlier undos had restored more
+  than once as part of a longer copy, every copy on the way was split at that
+  item. The split parts never merged again, so the document held more structs
+  than Yjs and encoded to other V1 and V2 bytes. The content was already the
+  same. Only code that compares or stores encoded state sees the change.
+- **An undo restores a run of nested items only up to where Yjs splits it.**
+  When an undo restored a run of items and tracing a neighbour's restored
+  copy reached into that run, Yjs restores only the part before that point.
+  ygo restored the whole run, so after that undo the document held different
+  content from a Yjs peer after the same undo. Undo now copies the content
+  after the traces, as Yjs does.
+- **`Undo` and `Redo` no longer copy the undo and redo stacks.** Each call
+  copied the deletions of every item on both stacks, so it took time in
+  proportion to the history, and undoing 32,000 separate edits one by one
+  took 27 s. It now takes 0.36 s; Yjs 13.6.32 takes 0.57 s. Removed stack
+  items are also freed now, not kept by the stack. Undo and redo results do
+  not change.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
