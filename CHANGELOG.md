@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes. Undo now carries the offset along the copies and splits only the last
   one. The content was already the same as in Yjs.
 
+### Performance
+
+- **`crdt`: `UndoManager.Undo` and `Redo` no longer copy the stacks.** Each
+  call copied the deletions of every remaining undo and redo stack item, for a
+  map-key check that rarely runs. So each call took time and memory in
+  proportion to the history, and undoing all of a stack of n items took
+  O(n²) time. The check now reads the stacks in place, as Yjs does. An undo
+  and redo pair with 10,000 stack items now allocates 4.6 KiB instead of
+  645 KiB and takes 98% less time (`BenchmarkUndoManager_UndoRedo`). A
+  transaction that merges into the newest stack item no longer copies that
+  item's deletions: 1,000 merged keystrokes allocate 3.0 MiB instead of
+  24.1 MiB and take 78% less time
+  (`BenchmarkUndoManager_CaptureMergedTyping`). A stack item that
+  `Undo`, `Redo`, `Clear` or a new edit removes is no longer kept alive by
+  the stack's backing array.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

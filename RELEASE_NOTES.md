@@ -6,6 +6,12 @@
   item. The split parts never merged again, so the document held more structs
   than Yjs and encoded to other V1 and V2 bytes. The content was already the
   same. Only code that compares or stores encoded state sees the change.
+- **`Undo` and `Redo` no longer copy the undo and redo stacks.** Each call
+  copied the deletions of every item on both stacks, so it took time in
+  proportion to the history, and undoing 32,000 separate edits one by one
+  took 27 s. It now takes 0.36 s; Yjs 13.6.32 takes 0.57 s. Removed stack
+  items are also freed now, not kept by the stack. Undo and redo results do
+  not change.
 
 ## v1.55.0
 
