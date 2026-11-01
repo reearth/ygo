@@ -237,6 +237,46 @@ if err := server.CloseRoom("my-room", false); err != nil { /* ... */ }
 // force=true closes connected peers first.
 ```
 
+`CloseRoom` returns `ErrRoomInUse`, with `force=true` as well as
+`force=false`, while a caller is inside the room: an `Apply` callback, a
+relay `Inject`, or a websocket join that has not yet registered its
+peer. The room stays resident. When that caller was inside before the
+call, no peer is disconnected. A caller that enters while `force` is
+closing the peers leaves those peers closed. Evicting such a room would
+take the document away from a caller still mutating it, and `force`
+exists to close connected peers rather than to interrupt a server-side
+writer. The refusal is transient; retry once that caller has returned.
+
+### `CloseRoomWithin(name, doc, force)`
+
+`CloseRoom` for a caller that is inside its own `Apply` on the room,
+which is how a room is closed without the idle sweeper retiring it
+between the decision to close and the close itself — the `Apply` holds
+the room resident for exactly that span:
+
+```go
+err := server.Apply(ctx, "my-room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+    // ... inspect doc, decide to close ...
+    closeErr = server.CloseRoomWithin("my-room", doc, true) // last act of fn
+})
+```
+
+`doc` is the document that `Apply` passed to `fn`: it names the room
+instance `fn` is writing, and if the name holds a different one by now —
+evicted and reloaded since — nothing is closed and the call returns
+`ErrRoomNotFound`. The one in-flight caller it discounts is that `Apply`;
+any other caller inside the room still gives `ErrRoomInUse`. The discount
+trusts the caller: a call made outside its `Apply` while another caller
+is inside would evict that caller's room.
+
+Call it from `fn`, not from inside a `transact` callback: a `force` close
+waits for each peer's read loop to exit, and a read loop applying an
+update needs the document lock that `transact` holds. Make it `fn`'s last
+act: the room leaves the server before the call returns, so anything `fn`
+mutates afterwards lands on a detached document. Called where nobody is
+inside the room at all, a call that escaped its `Apply`, it closes
+nothing and returns `ErrNotInApply`.
+
 ### Access control: `Server.OnInject`
 
 An optional hook gates all server-side writes:

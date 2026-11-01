@@ -129,6 +129,11 @@ var (
 	// ErrRoomHasPeers is returned by CloseRoom when called with force=false
 	// on a room that still has connected peers.
 	ErrRoomHasPeers = errors.New("ygo/websocket: room has connected peers")
+	// ErrRoomInUse is returned by CloseRoom, with or without force, while an
+	// Apply callback, a relay Inject or a join is inside the room.
+	ErrRoomInUse = errors.New("ygo/websocket: room is in use")
+	// ErrNotInApply is returned by CloseRoomWithin when no caller is inside the room.
+	ErrNotInApply = errors.New("ygo/websocket: not inside an Apply on the room")
 	// ErrInvalidUpdate is returned when BroadcastUpdate cannot parse the
 	// caller-supplied update bytes as a V1 update.
 	ErrInvalidUpdate = errors.New("ygo/websocket: invalid V1 update")
@@ -479,12 +484,57 @@ func encodeBroadcastWire(update []byte) []byte {
 //   - force=true:  closes each peer connection, dropping input its read loop
 //     has not handled, waits for disconnect handlers, then deletes the room.
 //
+// While a caller is inside the room (an Apply callback, a relay Inject, or a
+// join before its peer registers), CloseRoom returns ErrRoomInUse without
+// waiting, with or without force, and leaves the room resident. A caller
+// already inside is refused before any peer is closed; one that enters while
+// force closes the peers leaves those peers closed. A caller inside its own
+// Apply on the room uses CloseRoomWithin.
+//
 // CloseRoom is primarily intended for releasing rooms created by Apply
 // that never accumulated peer connections. In eager-evict mode
 // (RoomIdleTimeout == 0) such rooms linger until process exit without
 // it; with RoomIdleTimeout > 0 the idle sweeper reclaims them once they
 // have been idle that long.
 func (s *Server) CloseRoom(name string, force bool) error {
+	return s.closeRoom(name, force, nil)
+}
+
+// CloseRoomWithin is CloseRoom for a caller inside its own Apply on the room,
+// whose in-flight count it discounts. doc is the document that Apply passed to
+// its callback. If the name holds another room instance when the call starts,
+// it returns ErrRoomNotFound. Any other caller inside the room still gives
+// ErrRoomInUse, and a call with no caller inside returns ErrNotInApply. The
+// discount trusts the caller: made outside its Apply while another caller is
+// inside, it evicts that caller's room. Call it from the Apply callback, not
+// from a transact callback, as the callback's last act: a force close waits
+// for each peer's read loop, which needs the document lock transact holds, and
+// later mutations go to a document the server no longer holds.
+func (s *Server) CloseRoomWithin(name string, doc *crdt.Doc, force bool) error {
+	if doc == nil {
+		return ErrNotInApply
+	}
+	return s.closeRoom(name, force, doc)
+}
+
+// closeInUseErr returns the error a close gets from the room's in-flight count,
+// counting the calling Apply as one unit when within is set; rm.mu must be held.
+func (rm *room) closeInUseErr(within *crdt.Doc) error {
+	self := 0
+	if within != nil {
+		self = 1
+	}
+	switch {
+	case rm.inflight < self:
+		return ErrNotInApply
+	case rm.inflight > self:
+		return ErrRoomInUse
+	}
+	return nil
+}
+
+// closeRoom implements CloseRoom, and CloseRoomWithin when within is the calling Apply's doc.
+func (s *Server) closeRoom(name string, force bool, within *crdt.Doc) error {
 	select {
 	case <-s.shutdownCh:
 		return ErrServerShutdown
@@ -523,11 +573,24 @@ func (s *Server) CloseRoom(name string, force bool) error {
 	}
 
 	rm.mu.Lock()
+	if within != nil && rm.doc != within {
+		// The name holds another room instance than the one the calling Apply writes.
+		rm.mu.Unlock()
+		s.rmu.Unlock()
+		return ErrRoomNotFound
+	}
 	peerCount := len(rm.peers)
 	if peerCount > 0 && !force {
 		rm.mu.Unlock()
 		s.rmu.Unlock()
 		return ErrRoomHasPeers
+	}
+	// Refuse before closing any peer; the delete below checks again because
+	// both locks are released in between.
+	if err := rm.closeInUseErr(within); err != nil {
+		rm.mu.Unlock()
+		s.rmu.Unlock()
+		return err
 	}
 
 	// Collect peers and done channels for force-close.
@@ -597,6 +660,14 @@ func (s *Server) CloseRoom(name string, force bool) error {
 		// OnUnloadDocument; nothing more for CloseRoom to do here.
 		return nil
 	}
+	// A caller may have entered while both locks were released, so the check
+	// is repeated where the delete is, keeping the room alive as evictIdleRoom does.
+	rm.mu.Lock()
+	if err := rm.closeInUseErr(within); err != nil {
+		rm.mu.Unlock()
+		s.rmu.Unlock()
+		return err
+	}
 	delete(s.rooms, name)
 	if rm.persistStop != nil {
 		select {
@@ -606,6 +677,7 @@ func (s *Server) CloseRoom(name string, force bool) error {
 			close(rm.persistStop)
 		}
 	}
+	rm.mu.Unlock()
 	s.rmu.Unlock()
 
 	if rm.persistDone != nil {

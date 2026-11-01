@@ -137,7 +137,9 @@ func TestAutoVersion_FinalVersionOnUnloadWhenDirty(t *testing.T) {
 	assert.Eventually(t, func() bool { return a.count() == 1 }, time.Second, 5*time.Millisecond)
 	require.Equal(t, 0, a.versionCount(), "interval not elapsed, so no version yet")
 
-	// Unload the room.
+	// Unload the room after the release getOrCreateRoom's caller owes, since
+	// CloseRoom refuses a room a caller is inside.
+	s.releaseInflight(r)
 	require.NoError(t, s.CloseRoom("doc1", true))
 
 	assert.Eventually(t, func() bool { return a.versionCount() == 1 }, time.Second, 5*time.Millisecond,
@@ -159,6 +161,7 @@ func TestAutoVersion_NoFinalVersionWhenClean(t *testing.T) {
 	assert.Eventually(t, func() bool { return a.versionCount() == 1 }, time.Second, 5*time.Millisecond)
 
 	// Unload with no further edits.
+	s.releaseInflight(r) // balance getOrCreateRoom; see TestAutoVersion_FinalVersionOnUnloadWhenDirty
 	require.NoError(t, s.CloseRoom("doc1", true))
 
 	assert.Never(t, func() bool { return a.versionCount() > 1 }, 200*time.Millisecond, 10*time.Millisecond,
@@ -177,6 +180,7 @@ func TestAutoVersion_DisabledByDefault(t *testing.T) {
 	fc.advance(24 * time.Hour)
 	flushOnce(t, r)
 	assert.Eventually(t, func() bool { return a.count() == 1 }, time.Second, 5*time.Millisecond)
+	s.releaseInflight(r) // balance getOrCreateRoom; see TestAutoVersion_FinalVersionOnUnloadWhenDirty
 	require.NoError(t, s.CloseRoom("doc1", true))
 
 	assert.Never(t, func() bool { return a.versionCount() > 0 }, 200*time.Millisecond, 10*time.Millisecond,
@@ -196,5 +200,6 @@ func TestAutoVersion_NonVersionableAdapterIgnored(t *testing.T) {
 	flushOnce(t, r)
 	assert.Eventually(t, func() bool { return a.count() == 1 }, time.Second, 5*time.Millisecond,
 		"persistence must work normally for a non-versionable adapter")
+	s.releaseInflight(r) // balance getOrCreateRoom; see TestAutoVersion_FinalVersionOnUnloadWhenDirty
 	require.NoError(t, s.CloseRoom("doc1", true))
 }

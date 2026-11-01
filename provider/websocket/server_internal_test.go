@@ -302,6 +302,8 @@ func TestServer_AwarenessExpiry_GoroutineStoppedOnEvict(t *testing.T) {
 	if rm.awareness == nil {
 		t.Fatal("room has no awareness")
 	}
+	// Release the count getOrCreateRoom took, since CloseRoom refuses a room a caller is inside.
+	s.releaseInflight(rm)
 	if err := s.CloseRoom("room", true); err != nil {
 		t.Fatalf("CloseRoom: %v", err)
 	}

@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that arrives while the budget or more waits closes even a peer that reads,
   so set the budget above the largest room state. Zero, the default, or a
   negative value means no budget.
+- **`provider/websocket`: `ErrRoomInUse`, `ErrNotInApply` and
+  `Server.CloseRoomWithin`.** `CloseRoom` returns `ErrRoomInUse` when a caller
+  is inside the room — an `Apply` callback, a relay `Inject`, or a websocket
+  join between the room lookup and peer registration — and keeps the room
+  resident. `CloseRoomWithin(name, doc, force)` is the close a caller makes
+  from inside its own `Apply` on the room, which is how a room is closed
+  without the idle sweeper retiring it in between: `doc` is the document that
+  `Apply` passed to the callback, naming the room instance it is writing, and
+  the one in-flight caller discounted is that `Apply`. It returns
+  `ErrRoomNotFound` when the name holds a different instance by then, and
+  `ErrNotInApply` when nobody is inside the room at all.
 
 ### Fixed
 
@@ -82,6 +93,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to a document the server no longer held. The room now stays resident until
   a later last-peer leave or `CloseRoom` evicts it, and `OnUnloadDocument`
   fires then, not with `OnLastPeer`.
+- **`provider/websocket`: `CloseRoom` no longer evicts a room an `Apply` is
+  writing.** `Apply` holds the room's inflight count for the whole of its
+  callback, and the idle sweeper has honoured it since #193, but `CloseRoom`
+  removed the room regardless. Every mutation the callback made after that
+  landed on a document the server no longer held: it reached the adapter only
+  through the retiring worker's stranded-write path, and with no persistence
+  adapter it was lost outright, while `GetDoc` and the next `Apply` saw a room
+  without it. `CloseRoom` now returns `ErrRoomInUse` instead, with `force=true`
+  as well as `force=false` — `force` closes connected peers, which is not the
+  same as interrupting a server-side writer. When the caller is inside before
+  the call, no peer is closed; one that enters while `force` closes the peers
+  leaves those peers closed. The refusal is transient, and the call never
+  waits on the count, so it cannot deadlock. A caller that is itself inside
+  an `Apply` on the room, and so is the writer rather than a racer, calls
+  `CloseRoomWithin`.
 
 ## [1.55.0] — 2026-10-31
 

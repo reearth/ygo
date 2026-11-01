@@ -62,6 +62,36 @@ changes.
   With the default `RoomIdleTimeout == 0`, such a room now stays resident,
   as a room `Apply` created does, until a later last-peer leave or
   `CloseRoom` evicts it.
+- **`CloseRoom` no longer evicts a room an `Apply` is inside.** It evicted
+  a room even while an `Apply` callback was inside it, so whatever the
+  callback wrote afterwards landed on a document the server no longer held,
+  and with no persistence adapter it was lost. `CloseRoom` now returns the new
+  `ErrRoomInUse` and keeps the room resident while a caller is inside it: an
+  `Apply` callback, a relay `Inject`, or a websocket join between the room
+  lookup and peer registration. `force=true` refuses as well. When the caller
+  is inside before the call, no peer is closed; one that enters while `force`
+  closes the peers leaves those peers closed. The refusal is transient, so a
+  closer that treats `ErrRoomInUse` like `ErrRoomHasPeers` and retries will
+  succeed.
+
+  Code that closes a room from inside its own `Apply` on that room calls the
+  new `Server.CloseRoomWithin(name, doc, force)`, as the callback's last act:
+
+  ```go
+  err := server.Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+      // ... decide to close ...
+      closeErr = server.CloseRoomWithin(room, doc, true)
+  })
+  ```
+
+  `doc` names the room instance the callback is writing. If the name holds a
+  different instance by then, nothing is closed and the call returns
+  `ErrRoomNotFound`. A second `Apply`, a relay `Inject` or a joining peer still
+  gives `ErrRoomInUse`. Called with nobody inside the room, it closes nothing
+  and returns the new `ErrNotInApply`. **What to change:** an admin path that
+  treats a non-nil `CloseRoom` error as fatal should retry on `ErrRoomInUse`,
+  and a caller that closed a room from inside its own `Apply` switches that
+  call to `CloseRoomWithin`, passing the callback's `doc`.
 
 ## v1.55.0
 

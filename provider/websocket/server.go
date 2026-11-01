@@ -762,7 +762,8 @@ type room struct {
 	// interleave between a caller's lookup and its increment (#193 review).
 	// evictIdleRoom refuses to evict while inflight > 0: this closes the race
 	// where a lone creator's pre-registration failure reaps a room a
-	// concurrent joiner is still in the process of joining.
+	// concurrent joiner is still in the process of joining. CloseRoom refuses
+	// on it too, except for the Apply that calls CloseRoomWithin.
 	inflight int
 }
 
