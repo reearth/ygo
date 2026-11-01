@@ -213,6 +213,9 @@ func rejectSharedVals(vals []any) {
 
 // Insert inserts vals at logical position index (0 = prepend, Len() = append).
 func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
+	if len(vals) == 0 {
+		return // Yjs makes no item for no values.
+	}
 	for i, v := range vals {
 		checkAnyUTF8("YArray.Insert", fmt.Sprintf("value[%d]", i), v)
 	}
@@ -291,6 +294,9 @@ func (a *YArray) insertContentAfterItem(txn *Transaction, left *Item, content Co
 // a Yjs peer would order the two results differently — a convergence divergence
 // surfaced by the #70 cross-impl fuzz oracle.
 func (a *YArray) Push(txn *Transaction, vals []any) {
+	if len(vals) == 0 {
+		return // Yjs makes no item for no values.
+	}
 	for i, v := range vals {
 		checkAnyUTF8("YArray.Push", fmt.Sprintf("value[%d]", i), v)
 	}
