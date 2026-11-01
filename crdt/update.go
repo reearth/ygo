@@ -269,20 +269,32 @@ func (item *Item) isGCOrphan() bool {
 	return item.Parent == nil && item.Origin == nil && item.OriginRight == nil && item.parentID == nil
 }
 
-// markGCOrphan turns item into the GC struct Yjs integrates it as when its
-// parent cannot be resolved or a neighbour is a GC struct: deleted,
-// length-only content, and no parent or origins.
-// It then encodes as a GC struct, and nothing can resolve a parent through it,
-// so children that arrive later are orphaned too instead of integrating into a
-// detached type.
+// markGCOrphan turns item into the GC struct Yjs makes when its parent cannot
+// be resolved, a neighbour is a GC struct, or its nested type is collected:
+// deleted, length-only content, and no parent, origins, neighbours or redo
+// link. It then encodes as a GC struct, and nothing can resolve a parent
+// through it, so children that arrive later are orphaned too instead of
+// integrating into a detached type. Without neighbour links, a GC struct that
+// RunGC merges away is not kept in memory by the struct that absorbs it.
 func (item *Item) markGCOrphan() {
+	if _, ok := item.Content.(*ContentDeleted); !ok {
+		item.Content = NewContentDeleted(item.Content.Len())
+	}
+	item.dropGCLinks()
+}
+
+// dropGCLinks makes item deleted and clears what a GC struct does not have:
+// its parent, parent ID, origins, neighbours and redo link.
+func (item *Item) dropGCLinks() {
 	item.Deleted = true
-	item.Content = NewContentDeleted(item.Content.Len())
 	item.Parent = nil
 	item.ParentSub = nil
 	item.parentID = nil
 	item.Origin = nil
 	item.OriginRight = nil
+	item.Left = nil
+	item.Right = nil
+	item.redone = nil
 }
 
 func encodeItem(enc *encoding.Encoder, item *Item, offset int) {
@@ -1560,10 +1572,29 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	if item.Origin != nil {
 		item.Left = store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
 	}
+	// Yjs resolves an item's left neighbour and parent when it integrates the
+	// item. A neighbour or parent type that the GC collected while the item
+	// was parked makes it a GC struct, as an unresolvable parent does above.
+	if (item.Left != nil && item.Left.isGCOrphan()) || typeCollected(item.Parent) {
+		item.markGCOrphan()
+		appendTrimmed(store, item, existingEnd)
+		store.resolvePendingMoves(txn, item.ID.Client)
+		return true
+	}
 
 	// A parked range may now overlap the store; integrate only its new suffix.
 	item.integrate(txn, int(existingEnd-item.ID.Clock))
 	return true
+}
+
+// typeCollected reports whether the GC collected t: its holder item no longer
+// holds it.
+func typeCollected(t *abstractType) bool {
+	if t == nil || t.item == nil {
+		return false
+	}
+	ct, ok := t.item.Content.(*ContentType)
+	return !ok || ct.Type != t
 }
 
 // itemFutureDep reports whether item is blocked on a future-clock dependency

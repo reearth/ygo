@@ -261,12 +261,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// item) runs before the "delete if not the current attribute value"
 	// check in Item.integrate.
 	if cd, ok := item.Content.(*ContentDoc); ok && cd.Doc != nil {
-		if cd.Doc.item != nil && cd.Doc.item != item {
-			panic(ErrSubdocAlreadyIntegrated)
-		}
-		cd.Doc.item = item
+		shouldLoad := cd.Doc.attachSubdoc(item, txn.doc)
 		txn.addSubdocAdded(cd.Doc)
-		if cd.Doc.shouldLoad {
+		if shouldLoad {
 			txn.addSubdocLoaded(cd.Doc)
 		}
 	}
@@ -383,6 +380,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 			if existing, ok := item.Parent.itemMap[key]; ok && existing != item && !existing.Deleted {
 				existing.delete(txn)
 			}
+			if item.Parent.itemMap == nil {
+				item.Parent.itemMap = make(map[string]*Item)
+			}
 			item.Parent.itemMap[key] = item
 		}
 	}
@@ -474,6 +474,7 @@ func (item *Item) delete(txn *Transaction) {
 		// #63 — subdocument removal. Cancel an add-in-same-txn; else mark removed.
 		// GC does not remove subdocs (matches Yjs ContentDoc: gc is a no-op).
 		if cd, ok := current.Content.(*ContentDoc); ok && cd.Doc != nil {
+			cd.Doc.detachSubdoc(current)
 			if _, added := txn.subdocsAdded[cd.Doc]; added {
 				delete(txn.subdocsAdded, cd.Doc)
 				delete(txn.subdocsLoaded, cd.Doc)

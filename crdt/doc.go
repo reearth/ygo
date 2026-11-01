@@ -148,13 +148,19 @@ type subdocsSub struct {
 // Doc is the root of a Yjs collaborative document.
 // All shared types (YArray, YMap, YText, …) live inside a Doc.
 type Doc struct {
-	clientID        ClientID
-	gc              bool
-	guid            string // guid identifies this document (for subdocument embedding). Defaults to a random uuidv4 (see New) unless set with WithGUID.
+	clientID ClientID
+	gc       bool
+	guid     string // guid identifies this document (for subdocument embedding). Defaults to a random uuidv4 (see New) unless set with WithGUID.
+	// linkMu guards shouldLoad, item, parent and detached. It is a leaf lock:
+	// no other lock is taken while it is held, so a parent's transaction can
+	// take it, also for a document embedded in itself.
+	linkMu          sync.Mutex
 	shouldLoad      bool
 	autoLoad        bool
 	collectionID    string
 	item            *Item // set on integrate when this Doc is embedded as a subdocument (#63)
+	parent          *Doc  // document that owns item
+	detached        bool  // true once an embedded Doc is removed or destroyed
 	subdocs         map[string]*Doc
 	onSubdocs       []subdocsSub
 	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
@@ -207,8 +213,8 @@ func (d *Doc) AutoLoad() bool {
 
 // ShouldLoad returns whether a provider should sync this doc now.
 func (d *Doc) ShouldLoad() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
 	return d.shouldLoad
 }
 
@@ -221,31 +227,51 @@ func (d *Doc) CollectionID() string {
 // it sets shouldLoad=true and emits a subdocs "loaded" event on the parent; on a
 // root doc it just sets shouldLoad=true. Safe to call multiple times.
 //
-// Load opens a transaction on the PARENT document, so it MUST NOT be called from
-// inside a Transact closure (re-entrant lock — same footgun as GetText-in-Transact).
+// On an embedded subdocument, Load opens a transaction on the PARENT document,
+// so it MUST NOT be called from inside the parent's Transact closure
+// (re-entrant lock — same footgun as GetText-in-Transact).
 func (d *Doc) Load() {
-	d.mu.Lock()
+	d.linkMu.Lock()
 	if d.shouldLoad {
-		d.mu.Unlock()
+		d.linkMu.Unlock()
 		return
 	}
 	d.shouldLoad = true
-	item := d.item
-	d.mu.Unlock()
-	if item == nil || item.Parent == nil {
+	item, parent := d.item, d.parent
+	d.linkMu.Unlock()
+	if item == nil {
 		return
 	}
-	item.Parent.doc.Transact(func(txn *Transaction) {
-		// A detached/overwritten subdoc leaves item tombstoned but d.item still
-		// pointing at it; reporting it as loaded would be spurious (the doc is
-		// no longer resident in the parent's registry). item.Deleted is read
-		// here — inside the parent's transaction — so the parent lock guards it.
-		// Mirrors Yjs, where a removed subdoc is destroyed and load() is a no-op.
+	parent.Transact(func(txn *Transaction) {
+		// item can be deleted after Load copied it under linkMu and before this
+		// parent transaction starts. Do not report a loaded event for that
+		// removed item. A detached subdocument clears d.item and returns above.
 		if item.Deleted {
 			return
 		}
 		txn.addSubdocLoaded(d)
 	})
+}
+
+// attachSubdoc records the item and parent together under linkMu and returns
+// the load request that integration must report.
+func (d *Doc) attachSubdoc(item *Item, parent *Doc) bool {
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
+	if d.item != nil || d.detached {
+		panic(ErrSubdocAlreadyIntegrated)
+	}
+	d.item, d.parent = item, parent
+	return d.shouldLoad
+}
+
+// detachSubdoc drops links that would otherwise retain the former parent.
+func (d *Doc) detachSubdoc(item *Item) {
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
+	if d.item == item {
+		d.item, d.parent, d.detached = nil, nil, true
+	}
 }
 
 // maxPendingItemsLimit returns the effective cap on the pending queue depth.
@@ -1057,4 +1083,7 @@ func (d *Doc) Destroy() {
 	d.onAfterTxn = nil
 	d.share = make(map[string]sharedType)
 	d.store = newStructStore()
+	d.linkMu.Lock()
+	d.item, d.parent, d.detached = nil, nil, true
+	d.linkMu.Unlock()
 }

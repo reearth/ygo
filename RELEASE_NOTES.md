@@ -33,6 +33,24 @@ waiting moves are dropped once they outnumber the live ones. So many moves for
 an absent target no longer cost time on every later struct, and deleted ones
 never hold more memory than the moves still waiting.
 
+When the GC collected a deleted nested type (a map entry, array element or XML
+node that holds a map, array, text or XML type), it kept the items under that
+type as deleted items, each with its parent and origins. Yjs turns them into
+GC structs. The GC at the end of a transaction and `RunGC` now do the same,
+and an item that arrives later in a collected type is stored as a GC struct,
+as in Yjs. `RunGC` also merges neighbouring GC structs of one client into
+one, as Yjs does at the end of a transaction. Content does not change, but
+encoded state does: after such a
+delete, the state that `EncodeStateAsUpdate` returns holds GC structs where it
+held deleted items, and is smaller. A write through a handle to a type inside
+a collected type no longer fires the deep observers of the types above it, as
+in Yjs. `Doc.Load` no longer races with the GC, with attaching a subdocument
+or with an undo that restores it, and a removed or destroyed subdocument no
+longer keeps its parent in memory. A state that an earlier version stored
+loads as before. Every peer
+that can process updates with a GC neighbour must upgrade to get the same
+materialized state.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

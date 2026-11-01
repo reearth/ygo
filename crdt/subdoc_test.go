@@ -190,6 +190,12 @@ func TestSubdocs_LoadAfterRemoveIsNoOp(t *testing.T) {
 	if len(parent.GetSubdocs()) != 0 {
 		t.Fatalf("precondition: expected empty registry after delete, got %v", parent.GetSubdocGUIDs())
 	}
+	if child.item != nil || child.parent != nil || !child.detached {
+		t.Fatal("a removed subdocument must release its former parent links")
+	}
+	if child.ShouldLoad() {
+		t.Fatal("Load on a removed subdocument must be a no-op")
+	}
 
 	fires := 0
 	var ev SubdocsEvent
@@ -197,6 +203,19 @@ func TestSubdocs_LoadAfterRemoveIsNoOp(t *testing.T) {
 	child.Load()
 	if fires != 0 {
 		t.Fatalf("Load() on a removed subdoc must not fire a subdocs event; fired %d (Loaded=%v)", fires, ev.Loaded)
+	}
+	if !child.ShouldLoad() {
+		t.Fatal("Load on a removed subdocument must retain its load request")
+	}
+}
+
+func TestSubdocs_DestroyReleasesParentLinks(t *testing.T) {
+	parent := New()
+	child := New(WithGUID("c"))
+	embedSubdoc(t, parent, "a", child)
+	child.Destroy()
+	if child.item != nil || child.parent != nil || !child.detached {
+		t.Fatal("Destroy must release subdocument parent links")
 	}
 }
 
