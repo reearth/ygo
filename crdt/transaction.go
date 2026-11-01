@@ -74,6 +74,7 @@ type Transaction struct {
 	// apply's landed update carries them (encodeTxnV1Locked), as the update it
 	// was handed does.
 	parkedItems []*Item
+	parkedBuf   [1]*Item // a keystroke's parked struct needs no allocation
 	// parkedDeletes are the delete ranges this transaction parked, waiting for
 	// the structs they delete; a failed apply's landed update carries them too.
 	parkedDeletes DeleteSet
@@ -81,6 +82,9 @@ type Transaction struct {
 
 // noteParkedItem records item, which this transaction parked.
 func (t *Transaction) noteParkedItem(item *Item) {
+	if t.parkedItems == nil {
+		t.parkedItems = t.parkedBuf[:0]
+	}
 	t.parkedItems = append(t.parkedItems, item)
 }
 

@@ -905,7 +905,12 @@ func resolveDeferred(txn *Transaction, pending []*Item) ([]*Item, error) {
 	if len(pending) == 0 {
 		return nil, nil
 	}
-	done := make([]bool, len(pending))
+	var buf [8]bool // a keystroke's few structs need no allocation
+	done := buf[:]
+	if len(pending) > len(buf) {
+		done = make([]bool, len(pending))
+	}
+	done = done[:len(pending)]
 	refused := integratePending(txn, pending, done, nil)
 	remaining := pending[:0]
 	for i, item := range pending {

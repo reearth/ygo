@@ -13,18 +13,19 @@ type structRefs struct {
 }
 
 // groupStructRefs groups pending by client, each in clock order, ascending by
-// client. It returns the queue positions the groups index, or nil when pending
-// already holds one strictly clock-ordered run per client, as a decoded update
-// does. Of two queued copies of a clock, a GC struct goes first: it waits only
-// for its own client, so a copy blocked on another client cannot hold it back.
-func groupStructRefs(pending []*Item) ([]structRefs, []int) {
+// client, appending the groups to into. It returns the queue positions the
+// groups index, or nil when pending already holds one strictly clock-ordered
+// run per client, as a decoded update does. Of two queued copies of a clock, a
+// GC struct goes first: it waits only for its own client, so a copy blocked on
+// another client cannot hold it back.
+func groupStructRefs(pending []*Item, into []structRefs) ([]structRefs, []int) {
 	runs := 0
 	for i, item := range pending {
 		if i == 0 || item.ID.Client != pending[i-1].ID.Client || item.ID.Clock <= pending[i-1].ID.Clock {
 			runs++
 		}
 	}
-	groups := make([]structRefs, 0, runs)
+	groups := slices.Grow(into[:0], runs)
 	for i, item := range pending {
 		if i == 0 || item.ID.Client != pending[i-1].ID.Client || item.ID.Clock <= pending[i-1].ID.Clock {
 			groups = append(groups, structRefs{client: item.ID.Client, next: i})
@@ -95,7 +96,8 @@ func pendingBlocker(item *Item, store *StructStore) (ClientID, uint64, bool) {
 // dropped), returns at the first refusal, as Yjs stops when a struct throws,
 // where a drain drops it and goes on.
 func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *error) error {
-	groups, order := groupStructRefs(pending)
+	var buf [4]structRefs // a keystroke's groups need no allocation
+	groups, order := groupStructRefs(pending, buf[:0])
 	take := func(g *structRefs) int {
 		p := g.next
 		g.next++
@@ -112,7 +114,8 @@ func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *e
 		return &groups[i]
 	}
 	store := txn.doc.store
-	var stack []int
+	var stackBuf [8]int
+	stack := stackBuf[:0]
 	current := len(groups) - 1
 	for {
 		var head int
@@ -182,12 +185,17 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 	if held {
 		s.pending.coverOf()
 	}
-	var parked []*Item
+	var buf [4]*Item // a keystroke's parked structs need no allocation
+	parked := buf[:0]
 	defer func() {
 		if len(parked) > 0 {
 			s.pending.addCover(parked)
 		}
 	}()
+	if !held && len(pending) > 1 {
+		// Onto an empty queue every struct parks, so the record is reserved once.
+		txn.parkedItems = slices.Grow(txn.parkedItems, len(pending))
+	}
 	for _, item := range pending {
 		if held {
 			if item = unparked(s, item, s.NextClock(item.ID.Client)); item == nil {
