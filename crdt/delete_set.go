@@ -32,6 +32,50 @@ func newOrderedDeleteSet() DeleteSet {
 	return DeleteSet{clients: make(map[ClientID][]DeleteRange), order: []ClientID{}}
 }
 
+// rangeTally is how many ranges each client gets from an encoded delete set,
+// counted by a first pass so that the decode sizes every list once.
+type rangeTally struct {
+	clients []clientRanges
+	room    int // the entries the bytes can hold, reserved at the first range
+}
+
+type clientRanges struct {
+	client ClientID
+	ranges int
+}
+
+// count is the first pass's reader callback: it counts a range read in full,
+// opening a new count at an entry's first range.
+func (t *rangeTally) count(client ClientID, _ DeleteRange, first bool) {
+	if first {
+		if t.clients == nil {
+			t.clients = make([]clientRanges, 0, t.room) // so a set with no range allocates nothing
+		}
+		t.clients = append(t.clients, clientRanges{client: client})
+	}
+	t.clients[len(t.clients)-1].ranges++
+}
+
+// merge sorts the counts by client and sums those of a client that the set
+// names in more than one entry.
+func (t *rangeTally) merge() {
+	slices.SortFunc(t.clients, func(a, b clientRanges) int { return cmp.Compare(a.client, b.client) })
+	merged := t.clients[:0]
+	for _, c := range t.clients {
+		if n := len(merged); n > 0 && merged[n-1].client == c.client {
+			merged[n-1].ranges += c.ranges
+			continue
+		}
+		merged = append(merged, c)
+	}
+	t.clients = merged
+}
+
+// deleteSet returns an ordered set with room for the tally's clients.
+func (t *rangeTally) deleteSet() DeleteSet {
+	return DeleteSet{clients: make(map[ClientID][]DeleteRange, len(t.clients)), order: make([]ClientID, 0, len(t.clients))}
+}
+
 // add records that item (client, clock) with the given length has been deleted.
 // Adjacent ranges are merged eagerly to keep the set compact.
 func (ds *DeleteSet) add(id ID, length int) {
@@ -51,6 +95,21 @@ func (ds *DeleteSet) add(id ID, length int) {
 		Clock: id.Clock,
 		Len:   uint64(length),
 	})
+}
+
+// appendDecoded adds r, read from an encoded set, to client's ranges, sizing
+// them once, at the client's first range, to the merged tally's count.
+func (ds *DeleteSet) appendDecoded(client ClientID, r DeleteRange, tally *rangeTally) {
+	ranges, seen := ds.clients[client]
+	if !seen {
+		ds.order = append(ds.order, client) // Yjs applies a delete set in its encoded order
+		// Both passes read the same bytes, so the tally holds every client; if
+		// it ever does not, the list grows as it fills instead of panicking.
+		if i, ok := slices.BinarySearchFunc(tally.clients, client, func(c clientRanges, id ClientID) int { return cmp.Compare(c.client, id) }); ok {
+			ranges = make([]DeleteRange, 0, tally.clients[i].ranges)
+		}
+	}
+	ds.clients[client] = append(ranges, r)
 }
 
 // IsDeleted reports whether the item at the given ID has been marked deleted.
@@ -84,9 +143,8 @@ func (ds *DeleteSet) Merge(other DeleteSet) {
 
 func (ds *DeleteSet) sortAndCompact(client ClientID) {
 	ranges := ds.clients[client]
-	sort.Slice(ranges, func(i, j int) bool {
-		return ranges[i].Clock < ranges[j].Clock
-	})
+	// The sort allocates nothing, since a set of many clients sorts once per client.
+	slices.SortFunc(ranges, func(a, b DeleteRange) int { return cmp.Compare(a.Clock, b.Clock) })
 	compacted := ranges[:0]
 	for _, r := range ranges {
 		if len(compacted) > 0 {
@@ -175,17 +233,22 @@ func applyDecodedDeleteSet(txn *Transaction, ds DeleteSet, err error) error {
 // invariant: store.clients[client] is contiguous from clock 0.
 // If a future change relaxes contiguity, the applied-prefix math
 // may under-park ranges spanning a gap.
+// The result shares ds's ranges for clients the store has no struct of, so
+// neither may change them after.
 func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
+	store := txn.doc.store
+	if ds.allAbsent(store) {
+		// Nothing applies, and every range parks as read, so ds is the result.
+		return DeleteSet{clients: ds.clients}
+	}
 	unresolvable := newDeleteSet()
 	for _, client := range ds.orderedClients() {
 		ranges := ds.clients[client]
-		items := txn.doc.store.clients[client]
+		items := store.clients[client]
 		if len(items) == 0 {
 			// No items for this client — entire set of ranges is unresolvable.
-			for _, r := range ranges {
-				if r.Len > 0 {
-					unresolvable.clients[client] = append(unresolvable.clients[client], r)
-				}
+			if kept := nonEmptyRanges(ranges); len(kept) > 0 {
+				unresolvable.clients[client] = kept
 			}
 			continue
 		}
@@ -254,6 +317,17 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 		}
 	}
 	return unresolvable
+}
+
+// allAbsent reports whether store has no struct of any client of ds and ds has
+// no zero-length range, so every range of ds parks as read.
+func (ds *DeleteSet) allAbsent(store *StructStore) bool {
+	for client, ranges := range ds.clients {
+		if len(store.clients[client]) > 0 || slices.ContainsFunc(ranges, func(r DeleteRange) bool { return r.Len == 0 }) {
+			return false
+		}
+	}
+	return true
 }
 
 // checkParkedDeletes refuses, before anything changes, an update whose delete
@@ -374,8 +448,12 @@ func structClocksOf(b *pendingBudget) (StateVector, error) {
 	return known, nil
 }
 
-// parkedPartsOf is what applyToPartial parks of ds on a store at clocks.
+// parkedPartsOf is what applyToPartial parks of ds on a store at clocks; it
+// shares ds's ranges, and is ds itself when every range parks whole.
 func parkedPartsOf(ds DeleteSet, clocks StateVector) DeleteSet {
+	if parksWhole(ds, clocks) {
+		return DeleteSet{clients: ds.clients}
+	}
 	parked := newDeleteSet()
 	for client, ranges := range ds.clients {
 		if parts := cutParked(ranges, clocks.Clock(client)); len(parts) > 0 {
@@ -383,6 +461,19 @@ func parkedPartsOf(ds DeleteSet, clocks StateVector) DeleteSet {
 		}
 	}
 	return parked
+}
+
+// parksWhole reports whether every range of ds parks whole on a store at clocks.
+func parksWhole(ds DeleteSet, clocks StateVector) bool {
+	for client, ranges := range ds.clients {
+		next := clocks.Clock(client)
+		for _, r := range ranges {
+			if part, parks := parkedPart(r, next); !parks || part != r {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // parkedPart is the part of r that applyToPartial parks when r's client is held
@@ -425,24 +516,27 @@ func parkedDeleteRangesAfter(pending DeleteSet, before int, initial, clocks Stat
 }
 
 // cutParked is what the retry leaves of a client's parked ranges once the store
-// holds it up to next.
+// holds it up to next; it is ranges itself, not a copy, when it keeps them all.
 func cutParked(ranges []DeleteRange, next uint64) []DeleteRange {
-	var kept []DeleteRange
-	for _, r := range ranges {
-		if part, parks := parkedPart(r, next); parks {
-			kept = append(kept, part)
+	for i, r := range ranges {
+		if part, parks := parkedPart(r, next); !parks || part != r {
+			kept := make([]DeleteRange, i, len(ranges))
+			copy(kept, ranges[:i])
+			for _, r := range ranges[i:] {
+				if part, parks := parkedPart(r, next); parks {
+					kept = append(kept, part)
+				}
+			}
+			return kept
 		}
 	}
-	return kept
+	return ranges
 }
 
 // mergedRangeCount is how many ranges sortAndCompact leaves of have and add,
-// computed on copies so neither changes.
+// sorting copies only of an unsorted input, so neither changes.
 func mergedRangeCount(have, add []DeleteRange) int {
-	byClock := func(a, b DeleteRange) int { return cmp.Compare(a.Clock, b.Clock) }
-	have, add = slices.Clone(have), slices.Clone(add)
-	slices.SortFunc(have, byClock)
-	slices.SortFunc(add, byClock)
+	have, add = sortedByClock(have), sortedByClock(add)
 	count, end := 0, uint64(0)
 	for i, j := 0, 0; i < len(have) || j < len(add); {
 		var r DeleteRange
@@ -461,4 +555,15 @@ func mergedRangeCount(have, add []DeleteRange) int {
 		end = r.Clock + r.Len
 	}
 	return count
+}
+
+// sortedByClock is ranges, or a sorted copy of it when it is not in clock order.
+func sortedByClock(ranges []DeleteRange) []DeleteRange {
+	byClock := func(a, b DeleteRange) int { return cmp.Compare(a.Clock, b.Clock) }
+	if slices.IsSortedFunc(ranges, byClock) {
+		return ranges
+	}
+	ranges = slices.Clone(ranges)
+	slices.SortFunc(ranges, byClock)
+	return ranges
 }

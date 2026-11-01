@@ -126,8 +126,8 @@ func encodeTxnV1Locked(txn *Transaction) []byte {
 	}
 	// The delete ranges this apply parked travel too: a drain that fails
 	// after the delete set parked them leaves them parked in doc.
-	if txn.parkedDeletes.clients != nil {
-		ds.Merge(txn.parkedDeletes)
+	for _, parked := range txn.parkedDeletes {
+		ds.Merge(parked)
 	}
 	if len(perClient) == 0 && len(ds.clients) == 0 {
 		return nil
@@ -1372,7 +1372,6 @@ func decodeTypeContent(dec *encoding.Decoder, doc *Doc, typeClass byte) (*abstra
 // decodeDeleteSet returns the ranges it read in full, sorted and merged per
 // client, also on an error, since Yjs has applied those by then.
 func decodeDeleteSet(dec *encoding.Decoder) (ds DeleteSet, err error) {
-	ds = newOrderedDeleteSet()
 	defer func() {
 		for c := range ds.clients {
 			ds.sortAndCompact(c)
@@ -1380,38 +1379,53 @@ func decodeDeleteSet(dec *encoding.Decoder) (ds DeleteSet, err error) {
 	}()
 	n, err := dec.ReadVarUint()
 	if err != nil {
-		return ds, err
+		return newOrderedDeleteSet(), err
 	}
-	// Each pass reads input bytes, so the counts need no cap, and Yjs has none.
-	for i := uint64(0); i < n; i++ {
+	// A first pass on a copy of the cursor counts each client's ranges, so the
+	// decode sizes every list once; an entry with a range takes at least four
+	// bytes, which bounds the tally, and the counts are of ranges read in full.
+	scan, tally := *dec, rangeTally{room: int(min(n, uint64(dec.Remaining()/4)))}
+	scanErr := readDeleteSet(&scan, n, tally.count)
+	if len(tally.clients) == 0 {
+		*dec = scan // the pass read what the decode would, and added nothing
+		return newOrderedDeleteSet(), scanErr
+	}
+	tally.merge()
+	ds = tally.deleteSet()
+	err = readDeleteSet(dec, n, func(client ClientID, r DeleteRange, _ bool) {
+		ds.appendDecoded(client, r, &tally)
+	})
+	return ds, err
+}
+
+// readDeleteSet reads the n client entries of a V1 delete set, calling add for
+// each range read in full, with first set for an entry's first range.
+func readDeleteSet(dec *encoding.Decoder, n uint64, add func(client ClientID, r DeleteRange, first bool)) error {
+	for range n {
 		clientU, err := dec.ReadVarUint()
 		if err != nil {
-			return ds, err
+			return err
 		}
 		numRanges, err := dec.ReadVarUint()
 		if err != nil {
-			return ds, err
+			return err
 		}
-		client := ClientID(clientU)
-		for j := uint64(0); j < numRanges; j++ {
+		for j := range numRanges {
 			clock, err := dec.ReadVarUint()
 			if err != nil {
-				return ds, err
+				return err
 			}
 			length, err := dec.ReadVarUint()
 			if err != nil {
-				return ds, err
+				return err
 			}
 			if _, err := structEnd(clock, length); err != nil {
-				return ds, err
+				return err
 			}
-			if _, seen := ds.clients[client]; !seen {
-				ds.order = append(ds.order, client) // Yjs applies a delete set in its encoded order
-			}
-			ds.clients[client] = append(ds.clients[client], DeleteRange{Clock: clock, Len: length})
+			add(ClientID(clientU), DeleteRange{Clock: clock, Len: length}, j == 0)
 		}
 	}
-	return ds, nil
+	return nil
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

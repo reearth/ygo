@@ -80,6 +80,10 @@ func (s *StructStore) Append(item *Item) {
 
 // parkDeletes merges ds into pendingDs.
 func (s *StructStore) parkDeletes(ds DeleteSet) {
+	if len(s.pendingDs.clients) == 0 && len(ds.clients) > 1 {
+		// Sized once, so a park of many clients does not regrow the map.
+		s.pendingDs = DeleteSet{clients: make(map[ClientID][]DeleteRange, len(ds.clients))}
+	}
 	for client := range ds.clients {
 		s.pendingDsRanges -= len(s.pendingDs.clients[client])
 	}

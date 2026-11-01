@@ -1,7 +1,9 @@
 package crdt
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"reflect"
 	"strings"
@@ -313,6 +315,34 @@ func BenchmarkApplyUpdateV2_DeleteSetOverTheCap(b *testing.B) {
 	benchApplyUpdate(b, update, func(_ *Doc, u []byte, origin any) error {
 		return ApplyUpdateV2(New(WithClientID(2), WithMaxPendingItems(100)), u, origin)
 	})
+}
+
+// BenchmarkApplyUpdate_CraftedDeleteSet applies each of craftedDeleteSets at
+// the default cap, which refuses or parks it, and with the cap lifted, which
+// parks it whole; B/op over the update's bytes is what a delete set costs.
+func BenchmarkApplyUpdate_CraftedDeleteSet(b *testing.B) {
+	for _, format := range applyFormats {
+		for _, shape := range craftedDeleteSets(format.v2) {
+			update, apply := encodeRawDeleteSet(shape.entries, format.v2), ApplyUpdateV1
+			if format.v2 {
+				apply = ApplyUpdateV2
+			}
+			for _, lifted := range []bool{false, true} {
+				name, opts := shape.name+"/"+format.name+"/default_cap", []DocOption{WithClientID(1)}
+				if lifted {
+					name, opts = shape.name+"/"+format.name+"/cap_lifted", append(opts, WithMaxPendingItems(math.MaxInt))
+				}
+				b.Run(name, func(b *testing.B) {
+					b.ReportAllocs()
+					for range b.N {
+						if err := apply(New(opts...), update, nil); err != nil && (lifted && !shape.cut || !errors.Is(err, ErrInvalidUpdate)) {
+							b.Fatal(err)
+						}
+					}
+				})
+			}
+		}
+	}
 }
 
 func benchApplyUpdate(b *testing.B, update []byte, apply func(*Doc, []byte, any) error) {

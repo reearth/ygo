@@ -75,9 +75,9 @@ type Transaction struct {
 	// was handed does.
 	parkedItems []*Item
 	parkedBuf   [1]*Item // a keystroke's parked struct needs no allocation
-	// parkedDeletes are the delete ranges this transaction parked, waiting for
-	// the structs they delete; a failed apply's landed update carries them too.
-	parkedDeletes DeleteSet
+	// parkedDeletes are the delete sets this transaction parked, which a failed
+	// apply's landed update carries too, sharing ranges that nothing changes.
+	parkedDeletes []DeleteSet
 }
 
 // noteParkedItem records item, which this transaction parked.
@@ -90,10 +90,7 @@ func (t *Transaction) noteParkedItem(item *Item) {
 
 // noteParkedDeletes records ds, which this transaction parked.
 func (t *Transaction) noteParkedDeletes(ds DeleteSet) {
-	if t.parkedDeletes.clients == nil {
-		t.parkedDeletes = newDeleteSet()
-	}
-	t.parkedDeletes.Merge(ds)
+	t.parkedDeletes = append(t.parkedDeletes, ds)
 }
 
 // Ctx returns the context associated with this transaction. Transactions

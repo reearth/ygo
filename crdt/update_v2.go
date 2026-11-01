@@ -1112,7 +1112,6 @@ func decodeTypeContentV2(dec *v2Decoder, doc *Doc, typeRef byte) (*abstractType,
 
 // decodeDeleteSetV2 is decodeDeleteSet for V2, with the same result after an error.
 func decodeDeleteSetV2(dec *v2Decoder) (ds DeleteSet, err error) {
-	ds = newOrderedDeleteSet()
 	defer func() {
 		for c := range ds.clients {
 			ds.sortAndCompact(c)
@@ -1120,34 +1119,48 @@ func decodeDeleteSetV2(dec *v2Decoder) (ds DeleteSet, err error) {
 	}()
 	n, err := dec.restDec.ReadVarUint()
 	if err != nil {
-		return ds, err
+		return newOrderedDeleteSet(), err
 	}
-	// Each pass reads input bytes, so the counts need no cap, and Yjs has none.
-	for i := uint64(0); i < n; i++ {
+	// A counting first pass sizes every list once, as in decodeDeleteSet; it reads
+	// the rest decoder, which is restored after it unless the pass added nothing.
+	rest, cur := *dec.restDec, dec.dsCurrVal
+	tally := rangeTally{room: int(min(n, uint64(dec.restDec.Remaining()/4)))}
+	scanErr := readDeleteSetV2(dec, n, tally.count)
+	if len(tally.clients) == 0 {
+		return newOrderedDeleteSet(), scanErr
+	}
+	*dec.restDec, dec.dsCurrVal = rest, cur
+	tally.merge()
+	ds = tally.deleteSet()
+	err = readDeleteSetV2(dec, n, func(client ClientID, r DeleteRange, _ bool) {
+		ds.appendDecoded(client, r, &tally)
+	})
+	return ds, err
+}
+
+// readDeleteSetV2 is readDeleteSet for V2.
+func readDeleteSetV2(dec *v2Decoder, n uint64, add func(client ClientID, r DeleteRange, first bool)) error {
+	for range n {
 		dec.resetDsCurVal()
 		clientU, err := dec.restDec.ReadVarUint()
 		if err != nil {
-			return ds, err
+			return err
 		}
 		numRanges, err := dec.restDec.ReadVarUint()
 		if err != nil {
-			return ds, err
+			return err
 		}
-		client := ClientID(clientU)
-		for j := uint64(0); j < numRanges; j++ {
+		for j := range numRanges {
 			clock, err := dec.readDsClock()
 			if err != nil {
-				return ds, err
+				return err
 			}
 			length, err := dec.readDsLen()
 			if err != nil {
-				return ds, err
+				return err
 			}
-			if _, seen := ds.clients[client]; !seen {
-				ds.order = append(ds.order, client) // Yjs applies a delete set in its encoded order
-			}
-			ds.clients[client] = append(ds.clients[client], DeleteRange{Clock: clock, Len: length})
+			add(ClientID(clientU), DeleteRange{Clock: clock, Len: length}, j == 0)
 		}
 	}
-	return ds, nil
+	return nil
 }
