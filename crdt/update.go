@@ -690,7 +690,10 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		return err
 	}
 
-	ds, dsErr := decodeDeleteSet(dec)
+	ds, dsErr := budget.deleteSet, error(nil)
+	if !budget.deleteSetRead {
+		ds, dsErr = decodeDeleteSet(dec)
+	}
 	if err := applyDecodedDeleteSet(txn, ds, dsErr); err != nil {
 		return err
 	}

@@ -284,6 +284,37 @@ func BenchmarkApplyUpdateV2_Large(b *testing.B) {
 	benchApplyUpdate(b, EncodeStateAsUpdateV2(src, nil), ApplyUpdateV2)
 }
 
+// buildDeletedEveryOther is a text of 2n characters with every second one
+// deleted, whose state carries n delete ranges.
+func buildDeletedEveryOther(n int) *Doc {
+	src, txt := buildTextDocBulk(2 * n)
+	src.Transact(func(txn *Transaction) {
+		for i := range n {
+			txt.Delete(txn, i+1, 1)
+		}
+	})
+	return src
+}
+
+// BenchmarkApplyUpdateV1_DeleteSetOverTheCap applies a state of 5,000 delete
+// ranges to a document whose pending cap is far smaller, so the parked-range
+// check reads the delete set before the apply.
+func BenchmarkApplyUpdateV1_DeleteSetOverTheCap(b *testing.B) {
+	update := EncodeStateAsUpdateV1(buildDeletedEveryOther(5_000), nil)
+	benchApplyUpdate(b, update, func(_ *Doc, u []byte, origin any) error {
+		return ApplyUpdateV1(New(WithClientID(2), WithMaxPendingItems(100)), u, origin)
+	})
+}
+
+// BenchmarkApplyUpdateV2_DeleteSetOverTheCap is
+// BenchmarkApplyUpdateV1_DeleteSetOverTheCap in V2.
+func BenchmarkApplyUpdateV2_DeleteSetOverTheCap(b *testing.B) {
+	update := EncodeStateAsUpdateV2(buildDeletedEveryOther(5_000), nil)
+	benchApplyUpdate(b, update, func(_ *Doc, u []byte, origin any) error {
+		return ApplyUpdateV2(New(WithClientID(2), WithMaxPendingItems(100)), u, origin)
+	})
+}
+
 func benchApplyUpdate(b *testing.B, update []byte, apply func(*Doc, []byte, any) error) {
 	b.ReportAllocs()
 	b.ResetTimer()

@@ -797,8 +797,11 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		return err
 	}
 
-	// Decode delete set
-	ds, dsErr := decodeDeleteSetV2(dec)
+	// Decode delete set, unless the parked-range check read it whole.
+	ds, dsErr := budget.deleteSet, error(nil)
+	if !budget.deleteSetRead {
+		ds, dsErr = decodeDeleteSetV2(dec)
+	}
 	if err := applyDecodedDeleteSet(txn, ds, dsErr); err != nil {
 		return err
 	}

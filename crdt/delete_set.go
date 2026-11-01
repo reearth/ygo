@@ -280,6 +280,7 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	if err != nil {
 		return nil
 	}
+	b.deleteSet, b.deleteSetRead = ds, true
 	clocks, err := structClocksOf(b)
 	if err != nil {
 		return wrapUpdateErr(err)
