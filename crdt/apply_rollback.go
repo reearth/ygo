@@ -14,7 +14,7 @@ import (
 // by the bound, or for any other reason its apply returns an error - is
 // therefore integrated as far as it got and then taken out again
 // (applyJournal.rollBack) before the transaction commits, so the document is
-// left as it was and the transaction fires no observer (Transaction.rolledBack):
+// left as it was and the transaction fires no observer (boundedApplyState.rolledBack):
 // nothing the update carried is persisted, relayed or seen by anyone.
 //
 // The pending queue is not the update's. Items an earlier update parked behind
@@ -135,7 +135,7 @@ func beginRemoteApply(txn *Transaction, before StateVector) {
 	}
 	j.pendingDs = s.pendingDs
 	j.pendingMoves = clonePendingMoves(s.pendingMoves)
-	txn.journal = j
+	txn.beginBoundedApply().journal = j
 }
 
 // clonePendingMoves copies the pending moves, each client's slice included:
@@ -156,7 +156,7 @@ func clonePendingMoves(moves map[ClientID][]*Item) map[ClientID][]*Item {
 // found, so the apply's first write goes to a copy of it.
 func parkedMissing(txn *Transaction) StateVector {
 	p := txn.doc.store.pending
-	if j := txn.journal; j != nil && p == j.pending && !j.missingCopied {
+	if j := txn.applyJournal(); j != nil && p == j.pending && !j.missingCopied {
 		p.missing = maps.Clone(p.missing)
 		j.missingCopied = true
 	}
@@ -170,7 +170,7 @@ func parkedMissing(txn *Transaction) StateVector {
 // set whose map is a copy and whose ranges are copies for the clients ds names.
 func parkDeletes(txn *Transaction, ds DeleteSet) {
 	s := txn.doc.store
-	if txn.journal != nil {
+	if txn.applyJournal() != nil {
 		shared := s.pendingDs
 		s.pendingDs = DeleteSet{clients: maps.Clone(shared.clients)}
 		if s.pendingDs.clients == nil {
@@ -191,8 +191,12 @@ func parkDeletes(txn *Transaction, ds DeleteSet) {
 // endRemoteApply ends txn's journal, rolling the whole apply back when it
 // failed.
 func endRemoteApply(txn *Transaction, failed bool) {
-	j := txn.journal
-	txn.journal = nil
+	state := txn.boundedApply
+	if state == nil {
+		return
+	}
+	j := state.journal
+	state.journal = nil
 	if j != nil && failed {
 		j.rollBack(txn)
 	}
@@ -219,7 +223,7 @@ func endRemoteApply(txn *Transaction, failed bool) {
 // drain found it with (keepParked), and parkAgain clears the neighbours and
 // the move the drain gave it.
 func drainParked(txn *Transaction, drain func()) {
-	j := txn.journal
+	j := txn.applyJournal()
 	if j == nil {
 		drain()
 		return
@@ -228,7 +232,7 @@ func drainParked(txn *Transaction, drain func()) {
 	point := pointNow(txn, s.StateVector())
 	pending, pendingDs, pendingMoves := s.pending, s.pendingDs, clonePendingMoves(s.pendingMoves)
 	j.drain, j.at = &point, &point
-	txn.scanned = 0
+	txn.boundedApply.scanned = 0
 	defer func() {
 		r := recover()
 		j.at = &j.start
@@ -353,7 +357,7 @@ func (j *applyJournal) rollBack(txn *Transaction) {
 
 	txn.subdocsAdded, txn.subdocsRemoved, txn.subdocsLoaded = nil, nil, nil
 	txn.rearbitrate, txn.movedBefore = nil, nil
-	txn.rolledBack = true
+	txn.boundedApply.rolledBack = true
 }
 
 // rollBackTo returns txn's document to point: what was added, deleted and

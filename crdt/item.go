@@ -126,37 +126,33 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		// against). beforeOrigin tracks every item we have scanned past, so we
 		// can detect whether a later item's origin lies inside the conflict zone.
 		//
-		// Both sets are kept as one map of marks for the whole transaction
-		// (Transaction.scanMarks): an item is in beforeOrigin when its mark is
-		// this scan's, and in conflicting when it is also at or past the step
-		// the group last restarted at. A new scan, and a group restarting (Yjs's
-		// conflictingItems.clear()), is a new number rather than a clear, so the
-		// map is never cleared or remade: the common (no-conflict) case
-		// allocates nothing, a transaction's scans allocate one entry for each
-		// distinct item they pass, and no scan pays for the size of an earlier
-		// one (#54-C).
-		marks := txn.scanMarkMap()
-		txn.scanSerial++
-		scan, step, groupFrom := txn.scanSerial, uint32(0), uint32(1)
-
-		// A remote update's scans together pass at most the document's bound
-		// (WithMaxIntegrateScan): an item naming a left origin early in a list
-		// and no right origin scans to the list's end, and an update of many of
-		// them would otherwise pass a number of items that grows with its length
-		// times the list's. The scan is refused before this item is linked, and
-		// the apply's journal takes out what integrated before it.
+		// A bounded remote apply keeps both sets as one map of marks for the
+		// whole apply, so its scans allocate one entry per distinct item.
 		limit := 0
 		if !txn.Local {
 			limit = txn.doc.integrateScanLimit()
+		}
+		var bounded *boundedApplyState
+		var beforeOrigin, conflicting map[*Item]struct{}
+		var marks map[*Item]scanMark
+		var scan, step, groupFrom uint32
+		if limit > 0 {
+			bounded = txn.beginBoundedApply()
+			marks = bounded.scanMarkMap()
+			bounded.scanSerial++
+			scan, groupFrom = bounded.scanSerial, 1
+		} else {
+			beforeOrigin = make(map[*Item]struct{})
+			conflicting = make(map[*Item]struct{})
 		}
 
 		// Scan right until we hit our right origin (item.Right) or the end.
 		for o != nil && o != item.Right {
 			// Every item the scan passes counts toward the bound, including
 			// one it steps over for a different key.
-			if limit > 0 {
-				txn.scanned++
-				if txn.scanned > limit {
+			if bounded != nil {
+				bounded.scanned++
+				if bounded.scanned > limit {
 					panic(integrateScanBudgetExceeded{})
 				}
 			}
@@ -165,15 +161,24 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 				o = o.Right
 				continue
 			}
-			step++
-			marks[o] = scanMark{scan: scan, step: step}
+			if bounded != nil {
+				step++
+				marks[o] = scanMark{scan: scan, step: step}
+			} else {
+				beforeOrigin[o] = struct{}{}
+				conflicting[o] = struct{}{}
+			}
 
 			if originIDEquals(item.Origin, o.Origin) {
 				// Case 1: o has the same left origin as us — concurrent insert at
 				// the same position. Lower ClientID wins (placed to the left).
 				if o.ID.Client < item.ID.Client {
 					left = o
-					groupFrom = step + 1 // conflicting starts again, o not in it
+					if bounded != nil {
+						groupFrom = step + 1
+					} else {
+						clear(conflicting)
+					}
 				} else if originIDEquals(item.OriginRight, o.OriginRight) {
 					// Same left and right origin — truly symmetric; stop.
 					break
@@ -186,10 +191,19 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 				if oOriginItem == nil {
 					break
 				}
-				if mark, seen := marks[oOriginItem]; seen && mark.scan == scan {
-					if mark.step < groupFrom {
+				if bounded != nil {
+					if mark, seen := marks[oOriginItem]; seen && mark.scan == scan {
+						if mark.step < groupFrom {
+							left = o
+							groupFrom = step + 1
+						}
+					} else {
+						break
+					}
+				} else if _, inBefore := beforeOrigin[oOriginItem]; inBefore {
+					if _, inConflict := conflicting[oOriginItem]; !inConflict {
 						left = o
-						groupFrom = step + 1
+						clear(conflicting)
 					}
 				} else {
 					break
@@ -203,8 +217,8 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	}
 
 	// Insert item between left and left.Right.
-	if txn.journal != nil {
-		txn.journal.integrating = item
+	if j := txn.applyJournal(); j != nil {
+		j.integrating = item
 	}
 	item.Left = left
 	if left == nil {
@@ -260,8 +274,8 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 
 	// Register in the document store.
 	txn.doc.store.Append(item)
-	if txn.journal != nil {
-		txn.journal.integrating = nil
+	if j := txn.applyJournal(); j != nil {
+		j.integrating = nil
 	}
 
 	// #63 — register an embedded subdocument (Content has no integrate hook).
@@ -402,8 +416,8 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 			if existing, ok := item.Parent.itemMap[key]; ok && existing != item && !existing.Deleted {
 				existing.delete(txn)
 			}
-			if txn.journal != nil {
-				txn.journal.tookMapKey(item.Parent, key)
+			if j := txn.applyJournal(); j != nil {
+				j.tookMapKey(item.Parent, key)
 			}
 			item.Parent.itemMap[key] = item
 		}
@@ -538,7 +552,7 @@ func nextDeleteItem(current, root *Item) *Item {
 // Both halves are registered in the store. The linked-list pointers are updated.
 func splitItem(txn *Transaction, item *Item, offset int) *Item {
 	// A drain taken back parks again the items it integrated, whole.
-	if j := txn.journal; j != nil && j.drained(item) {
+	if j := txn.applyJournal(); j != nil && j.drained(item) {
 		j.keepParked(item)
 	}
 	rightContent := item.Content.Splice(offset) // mutates item.Content → [0, offset)

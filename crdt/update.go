@@ -1498,7 +1498,7 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 
 	// From here the item is resolved, trimmed or integrated in place; a drain
 	// taken back parks it again as it was (drainParked).
-	if j := txn.journal; j != nil {
+	if j := txn.applyJournal(); j != nil {
 		j.keepParked(item)
 	}
 

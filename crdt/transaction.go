@@ -29,19 +29,9 @@ type Transaction struct {
 	// transient (no item was inserted between them). Mirrors Yjs JS's
 	// `_mergeStructs` and powers gap #78 H2.
 	mergeStructs []*Item
-	// scanned counts the items the conflict scans of this transaction's
-	// integrates have passed, against the document's integrateScanLimit when
-	// the transaction applies a remote update. scanMarks holds what those scans
-	// mark (Item.integrate): made by the first scan that needs it, kept for the
-	// transaction and dropped when it commits; scanSerial numbers the scans.
-	scanned    int
-	scanMarks  map[*Item]scanMark
-	scanSerial uint32
-	// journal is the record a remote apply on a document with a scan bound
-	// keeps to undo itself on failure, and rolledBack whether it did, so the
-	// commit fires nothing (apply_rollback.go).
-	journal    *applyJournal
-	rolledBack bool
+	// boundedApply holds a bounded remote apply's scan and rollback state, so
+	// other transactions do not carry it.
+	boundedApply *boundedApplyState
 	// rearbitrate queues, per parent, move targets whose winning ContentMove
 	// was tombstoned; rearbitrateMoves resolves them in one pass at commit.
 	rearbitrate map[*abstractType]map[*Item]struct{}
@@ -589,10 +579,36 @@ func tryMergeWithLeft(item *Item, merging *mergeRuns) bool {
 // transaction, and at which step of it (Item.integrate).
 type scanMark struct{ scan, step uint32 }
 
-// scanMarkMap returns the transaction's scan marks, made on first use.
-func (txn *Transaction) scanMarkMap() map[*Item]scanMark {
-	if txn.scanMarks == nil {
-		txn.scanMarks = make(map[*Item]scanMark)
+// boundedApplyState is the scan and rollback state of one remote apply on a
+// document with a scan bound.
+type boundedApplyState struct {
+	scanned    int
+	scanMarks  map[*Item]scanMark
+	scanSerial uint32
+	journal    *applyJournal
+	rolledBack bool
+}
+
+// beginBoundedApply returns txn's bounded apply state, made on first use.
+func (txn *Transaction) beginBoundedApply() *boundedApplyState {
+	if txn.boundedApply == nil {
+		txn.boundedApply = &boundedApplyState{}
 	}
-	return txn.scanMarks
+	return txn.boundedApply
+}
+
+// applyJournal returns the journal of txn's bounded apply, or nil.
+func (txn *Transaction) applyJournal() *applyJournal {
+	if txn.boundedApply == nil {
+		return nil
+	}
+	return txn.boundedApply.journal
+}
+
+// scanMarkMap returns the bounded apply's scan marks, made on first use.
+func (state *boundedApplyState) scanMarkMap() map[*Item]scanMark {
+	if state.scanMarks == nil {
+		state.scanMarks = make(map[*Item]scanMark)
+	}
+	return state.scanMarks
 }

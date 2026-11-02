@@ -14,7 +14,12 @@ import (
 func boundedScans(t *testing.T, doc *Doc, update []byte) int {
 	t.Helper()
 	scanned := -1
-	stop := doc.OnAfterTransaction(func(txn *Transaction) { scanned = txn.scanned })
+	stop := doc.OnAfterTransaction(func(txn *Transaction) {
+		scanned = 0
+		if txn.boundedApply != nil {
+			scanned = txn.boundedApply.scanned
+		}
+	})
 	defer stop()
 	if err := ApplyUpdateV1(doc, update, nil); err != nil {
 		t.Fatal(err)

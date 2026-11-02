@@ -519,7 +519,7 @@ func (d *Doc) GetText(name string) *YText {
 func buildPhase2(d *Doc, txn *Transaction) func() {
 	// A remote apply rolled back left the document as it was: there is no
 	// update to encode and nothing for any observer (apply_rollback.go).
-	if txn.rolledBack {
+	if txn.boundedApply != nil && txn.boundedApply.rolledBack {
 		return nil
 	}
 	// Encode the incremental update and snapshot observer slices while still
@@ -750,7 +750,9 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 	retErr = fn(txn)
 	// The scans' marks are the transaction's alone; an observer that keeps the
 	// *Transaction must not keep them.
-	txn.scanMarks = nil
+	if txn.boundedApply != nil {
+		txn.boundedApply.scanMarks = nil
+	}
 
 	rearbitrateMoves(txn)
 	txn.afterState = d.store.StateVector()
