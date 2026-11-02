@@ -263,8 +263,9 @@ func TestUnit_PendingResolver_ParkRecordHoldsOnlyWhatParks(t *testing.T) {
 }
 
 // Parking state uses one lazy pointer, so ordinary transactions and stores
-// stay compact.
+// stay compact on every supported pointer width.
 func TestUnit_Transaction_ParkRecordKeepsItsSize(t *testing.T) {
-	require.Equal(t, uintptr(216), unsafe.Sizeof(Transaction{}))
-	require.Equal(t, uintptr(80), unsafe.Sizeof(StructStore{}))
+	word := unsafe.Sizeof(uintptr(0))
+	require.Equal(t, 27*word, unsafe.Sizeof(Transaction{}))
+	require.Equal(t, 10*word, unsafe.Sizeof(StructStore{}))
 }
