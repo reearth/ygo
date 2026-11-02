@@ -1,10 +1,12 @@
 package crdt
 
 import (
+	"cmp"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -608,4 +610,129 @@ func TestUnit_TryIntegrate_NamesTheClientItWaitsOn(t *testing.T) {
 			require.Equal(t, "abc", text.ToString())
 		})
 	}
+}
+
+// A decoded update's structs, one run per client in client order, ascending as
+// ygo writes them or descending as Yjs does, integrate without a group per
+// client when no struct waits on a client that still has structs to take.
+func TestUnit_PendingResolver_ClientRunsBuildNoGroups(t *testing.T) {
+	const n = 1000
+	for _, shape := range []string{"missing", "left"} {
+		for _, descending := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/descending=%t", shape, descending), func(t *testing.T) {
+				doc := New(WithClientID(100001))
+				defer doc.Destroy()
+				pending := resolverTestItems(doc, n, shape)
+				if descending {
+					slices.Reverse(pending)
+				}
+				done := make([]bool, n)
+				var allocs float64
+				doc.Transact(func(txn *Transaction) {
+					// The first run integrates "left"; the later ones find it done.
+					allocs = testing.AllocsPerRun(5, func() {
+						clear(done)
+						require.NoError(t, integratePending(txn, pending, done, nil))
+					})
+				})
+				require.Zero(t, allocs)
+			})
+		}
+	}
+}
+
+// Structs in one clock-ordered run per client, in either client order,
+// integrate in the order, and leave out the structs, that the same structs in
+// any other order do.
+func TestUnit_PendingResolver_ClientRunsIntegrateAsGroupsDo(t *testing.T) {
+	for seed := int64(0); seed < 300; seed++ {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			var got [3]string
+			for k := range got {
+				rng := rand.New(rand.NewSource(seed))
+				doc := New(WithClientID(100001))
+				text := doc.GetText("t")
+				pending := clientRunItems(rng, text)
+				switch k {
+				case 1: // descending runs, each still in clock order
+					slices.SortStableFunc(pending, func(a, b *Item) int { return cmp.Compare(b.ID.Client, a.ID.Client) })
+				case 2: // no order the runs can be read in
+					for readsAsClientRuns(pending) {
+						rng.Shuffle(len(pending), func(i, j int) { pending[i], pending[j] = pending[j], pending[i] })
+					}
+				}
+				var integrated, left []string
+				doc.Transact(func(txn *Transaction) {
+					done := make([]bool, len(pending))
+					require.NoError(t, integratePending(txn, pending, done, nil))
+					for _, it := range txn.newItems {
+						integrated = append(integrated, fmt.Sprint(it.ID))
+					}
+					for i, it := range pending {
+						if !done[i] {
+							left = append(left, fmt.Sprint(it.ID))
+						}
+					}
+				})
+				slices.Sort(left)
+				got[k] = fmt.Sprintf("integrated %v, left %v, text %q", integrated, left, text.ToString())
+				doc.Destroy()
+			}
+			require.Equal(t, got[2], got[0], "ascending runs")
+			require.Equal(t, got[2], got[1], "descending runs")
+		})
+	}
+}
+
+// clientRunItems is one run of one to three text structs for each of three to
+// ten clients, in ascending client order, whose origins name an earlier struct
+// of their own client, a struct of another client, a clock past another
+// client's run, or a client absent from the update.
+func clientRunItems(rng *rand.Rand, text *YText) []*Item {
+	clients := rng.Perm(30)[:3+rng.Intn(8)]
+	slices.Sort(clients)
+	lengths := make(map[ClientID]int, len(clients))
+	for _, c := range clients {
+		lengths[ClientID(c+1)] = 1 + rng.Intn(3)
+	}
+	var pending []*Item
+	for _, c := range clients {
+		client := ClientID(c + 1)
+		for clock := range lengths[client] {
+			item := &Item{ID: ID{Client: client, Clock: uint64(clock)}, Parent: &text.abstractType, Content: NewContentString("x")}
+			other := ClientID(clients[rng.Intn(len(clients))] + 1)
+			switch r := rng.Intn(10); {
+			case clock > 0 && r < 4:
+				item.Origin = &ID{Client: client, Clock: uint64(clock - 1)}
+			case r < 7 && other != client:
+				item.Origin = &ID{Client: other, Clock: uint64(rng.Intn(lengths[other] + 1))}
+			case r < 8:
+				item.Origin = &ID{Client: 40}
+			case clock > 0:
+				item.Origin = &ID{Client: client, Clock: uint64(clock - 1)}
+			}
+			pending = append(pending, item)
+		}
+	}
+	return pending
+}
+
+// readsAsClientRuns reports whether pending holds one clock-ordered run per
+// client, the runs in ascending or descending client order.
+func readsAsClientRuns(pending []*Item) bool {
+	up, down := true, true
+	for i := 1; i < len(pending); i++ {
+		a, b := pending[i-1].ID, pending[i].ID
+		switch {
+		case a.Client == b.Client:
+			if b.Clock <= a.Clock {
+				return false
+			}
+		case a.Client < b.Client:
+			down = false
+		default:
+			up = false
+		}
+	}
+	return up || down
 }

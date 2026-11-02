@@ -77,8 +77,22 @@ func copyRank(it *Item) int {
 // dropped), returns at the first refusal, as Yjs stops when a struct throws,
 // where a drain drops it and goes on.
 func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *error) error {
+	at, err := integrateClientRuns(txn, pending, done, dropped)
+	if at < 0 {
+		return err
+	}
 	var buf [4]structRefs // a keystroke's groups need no allocation
 	groups, order := groupStructRefs(pending, buf[:0])
+	if at < len(pending) {
+		// The runs above at's client are taken, and at's run goes on from at.
+		client := pending[at].ID.Client
+		for i := len(groups) - 1; i >= 0 && groups[i].client >= client; i-- {
+			groups[i].next = groups[i].end
+			if groups[i].client == client {
+				groups[i].next = at
+			}
+		}
+	}
 	take := func(g *structRefs) int {
 		p := g.next
 		g.next++
@@ -150,8 +164,78 @@ func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *e
 	}
 }
 
-// tryIntegrateOrDrop is tryIntegrate that, with a non-nil dropped, reports a
-// panicking item as integrated so the caller stops retrying it.
+// integrateClientRuns avoids groups for a decoded update's client-ordered
+// runs, falling back when a run waits on a client still to take.
+func integrateClientRuns(txn *Transaction, pending []*Item, done []bool, dropped *error) (int, error) {
+	step := clientRunStep(pending)
+	if step == 0 {
+		return len(pending), nil
+	}
+	lo, hi := 0, len(pending) // the runs not yet taken
+	var absent ClientID       // a client with no struct in [lo, hi), once known
+	absentKnown := false
+	for lo < hi {
+		s, e := lo, hi
+		if step > 0 {
+			for s = hi - 1; s > lo && pending[s-1].ID.Client == pending[s].ID.Client; s-- {
+			}
+			hi = s
+		} else {
+			for e = lo + 1; e < hi && pending[e].ID.Client == pending[lo].ID.Client; e++ {
+			}
+			lo = e
+		}
+		client := pending[s].ID.Client
+		for i := s; i < e; i++ {
+			ok, waitsOn, err := tryIntegrateOrDrop(txn, pending[i], dropped)
+			if err != nil && dropped == nil {
+				done[i] = true
+				return -1, err
+			}
+			if ok {
+				done[i] = true
+				continue
+			}
+			if waitsOn != client && (!absentKnown || waitsOn != absent) {
+				if _, found := slices.BinarySearchFunc(pending[lo:hi], waitsOn, func(it *Item, c ClientID) int {
+					return step * cmp.Compare(it.ID.Client, c)
+				}); found {
+					return i, nil
+				}
+				absent, absentKnown = waitsOn, true
+			}
+			break // the rest of the run waits behind it
+		}
+	}
+	return -1, nil
+}
+
+// clientRunStep is 1 when pending holds one strictly clock-ordered run per
+// client in ascending client order, as ygo writes an update's clients, -1 in
+// descending order, as Yjs writes them, and 0 otherwise.
+func clientRunStep(pending []*Item) int {
+	step := 0
+	for i := 1; i < len(pending); i++ {
+		a, b := pending[i-1].ID, pending[i].ID
+		if a.Client == b.Client {
+			if b.Clock <= a.Clock {
+				return 0
+			}
+			continue
+		}
+		if c := cmp.Compare(b.Client, a.Client); step == 0 {
+			step = c
+		} else if c != step {
+			return 0
+		}
+	}
+	if step == 0 {
+		return 1 // one run
+	}
+	return step
+}
+
+// tryIntegrateOrDrop marks a panicking item done while a drain continues.
 func tryIntegrateOrDrop(txn *Transaction, item *Item, dropped *error) (ok bool, waitsOn ClientID, err error) {
 	if dropped == nil {
 		return tryIntegrate(txn, item)
