@@ -192,3 +192,106 @@ func TestUnit_IntegrateScan_RefusedUpdateLandsNothing(t *testing.T) {
 	}
 	requireUnchanged(t, doc, before, text, updates)
 }
+
+// The drain of the pending queue counts against an allowance of its own, so an
+// update whose own scans and whose drain each fit the bound applies with its
+// parked item, though the two together pass the bound.
+func TestUnit_IntegrateScan_DrainStartsAFreshAllowance(t *testing.T) {
+	const l = 2_000
+	first := ID{Client: 5, Clock: 0}
+	fill := itemAfter(99, 0, first, "f")   // client 99's clock 0, scanning the list
+	parked := itemAfter(99, 1, first, "p") // behind it, scanning the list again
+	// apply applies updates in order and the last of them under bound.
+	apply := func(bound int, updates ...[]byte) (*Doc, error) {
+		doc := chainedList(t, l, WithMaxIntegrateScan(testScanBound))
+		for _, update := range updates[:len(updates)-1] {
+			if err := ApplyUpdateV1(doc, update, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		doc.SetMaxIntegrateScan(bound)
+		return doc, ApplyUpdateV1(doc, updates[len(updates)-1], nil)
+	}
+	// The smallest bound under which the last update applies, found by bisection.
+	smallest := func(updates ...[]byte) int {
+		lo, hi := 1, 4*l
+		for lo < hi {
+			mid := (lo + hi) / 2
+			if _, err := apply(mid, updates...); err == nil {
+				hi = mid
+			} else if errors.Is(err, ErrIntegrateScanBudget) {
+				lo = mid + 1
+			} else {
+				t.Fatal(err)
+			}
+		}
+		return lo
+	}
+	own := smallest(fill)
+	drain := smallest(fill, parked) // the parked item's scans, applied directly
+	bound := max(own, drain)
+	if own+drain <= bound {
+		t.Fatalf("the fill scans %d items and the parked item %d, want them together past the bound %d", own, drain, bound)
+	}
+
+	doc, err := apply(bound, parked, fill)
+	if err != nil {
+		t.Fatalf("the filling update was refused: %v", err)
+	}
+	if stats := doc.PendingStats(); stats.Items != 0 {
+		t.Fatalf("%d items are still parked, want the drain to apply the parked item", stats.Items)
+	}
+	if got := doc.StateVector().Clock(99); got != 2 {
+		t.Fatalf("client 99's clock is %d, want 2", got)
+	}
+}
+
+// Every item a bounded scan passes counts, including an item of another key it
+// steps over: an XML child's scan past the element's attributes counts each.
+func TestUnit_IntegrateScan_SkippedKeyItemsCount(t *testing.T) {
+	const attributes = 20
+	base := New(WithClientID(100))
+	fragment := base.GetXmlFragment("x")
+	base.Transact(func(txn *Transaction) { fragment.InsertElement(txn, 0, NewYXmlElement("e")) })
+	initial := EncodeStateAsUpdateV1(base, nil)
+	edit := func(client ClientID, change func(*Transaction, *YXmlElement)) []byte {
+		doc := New(WithClientID(client))
+		if err := ApplyUpdateV1(doc, initial, nil); err != nil {
+			t.Fatal(err)
+		}
+		sv := doc.StateVector()
+		element := doc.GetXmlFragment("x").Children()[0].(*YXmlElement)
+		doc.Transact(func(txn *Transaction) { change(txn, element) })
+		return EncodeStateAsUpdateV1(doc, sv)
+	}
+	keys := edit(9, func(txn *Transaction, el *YXmlElement) {
+		for i := range attributes {
+			el.SetAttribute(txn, fmt.Sprintf("k%d", i), "v")
+		}
+	})
+	child := edit(2, func(txn *Transaction, el *YXmlElement) { el.InsertElement(txn, 0, NewYXmlElement("c")) })
+
+	for _, bound := range []int{attributes - 1, attributes} {
+		doc := New()
+		for _, update := range [][]byte{initial, keys} {
+			if err := ApplyUpdateV1(doc, update, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		doc.SetMaxIntegrateScan(bound)
+		err := ApplyUpdateV1(doc, child, nil)
+		if bound < attributes {
+			if !errors.Is(err, ErrIntegrateScanBudget) {
+				t.Fatalf("under a bound of %d the child applied with err %v, want ErrIntegrateScanBudget", bound, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("under a bound of %d the child was refused: %v", bound, err)
+		}
+		element := doc.GetXmlFragment("x").Children()[0].(*YXmlElement)
+		if got := len(element.Children()); got != 1 {
+			t.Fatalf("the element has %d children, want the child applied", got)
+		}
+	}
+}
