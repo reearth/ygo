@@ -52,7 +52,9 @@ func countStructRefs(pending []*Item) (runs, step int) {
 func groupStructRefs(pending []*Item, runs, step int, into []structRefs) ([]structRefs, []int) {
 	groups := slices.Grow(into[:0], runs)
 	for i, item := range pending {
-		if i == 0 || item.ID.Client != pending[i-1].ID.Client || item.ID.Clock <= pending[i-1].ID.Clock {
+		// An ordered run's clocks may change when an overlapping item trims,
+		// but its client boundary stays valid for a fallback.
+		if i == 0 || item.ID.Client != pending[i-1].ID.Client || (step == 0 && item.ID.Clock <= pending[i-1].ID.Clock) {
 			groups = append(groups, structRefs{client: item.ID.Client, next: i})
 		}
 		groups[len(groups)-1].end = i + 1

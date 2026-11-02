@@ -736,3 +736,37 @@ func readsAsClientRuns(pending []*Item) bool {
 	}
 	return up || down
 }
+
+// A client run stays one run when an earlier overlapping item is trimmed
+// before another client makes the resolver fall back to groups.
+func TestUnit_PendingResolver_RunFallbackKeepsUnrelatedParkedItem(t *testing.T) {
+	updates := []string{
+		"010109018407000961626364656667686900",
+		"01010903000100",
+		"0101090a840500017a00",
+		"01010500840700017100",
+		"01010300841400017200",
+		"020109000401017405313233343501070004010174014100",
+	}
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("V%d", version), func(t *testing.T) {
+			doc := New(WithClientID(100), WithGC(false))
+			defer doc.Destroy()
+			apply := ApplyUpdateV1
+			if version == 2 {
+				apply = ApplyUpdateV2
+			}
+			for i, text := range updates {
+				update, err := hex.DecodeString(text)
+				require.NoError(t, err)
+				if version == 2 {
+					update, err = UpdateV1ToV2(update)
+					require.NoError(t, err)
+				}
+				err = apply(doc, update, nil)
+				require.NoErrorf(t, err, "update %d", i)
+			}
+			require.Equal(t, PendingStats{Items: 1, MissingFor: []ClientID{20}}, doc.PendingStats())
+		})
+	}
+}
