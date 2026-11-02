@@ -216,7 +216,7 @@ func retryPassesWithinUpdatePending(txn *Transaction, pending []*Item) error {
 	for len(pending) > 0 {
 		var remaining []*Item
 		for _, item := range pending {
-			if ok, _ := tryIntegrate(txn, item); !ok {
+			if ok, _, _ := tryIntegrate(txn, item); !ok {
 				remaining = append(remaining, item)
 			}
 		}
@@ -552,10 +552,60 @@ func TestUnit_TryIntegrate_FutureOriginWithKnownParent(t *testing.T) {
 		Content: NewContentString("x"),
 	}
 	doc.Transact(func(txn *Transaction) {
-		ok, err := tryIntegrate(txn, item)
+		ok, waitsOn, err := tryIntegrate(txn, item)
 		require.False(t, ok)
+		require.Equal(t, ClientID(1), waitsOn)
 		require.NoError(t, err)
 	})
 	require.Equal(t, "abc", text.ToString())
 	require.Equal(t, uint64(0), doc.StateVector().Clock(2))
+}
+
+// A struct that cannot integrate yet names the client whose next clock it
+// waits on: its own past a gap, then its origin, its right origin, and its
+// parent last.
+func TestUnit_TryIntegrate_NamesTheClientItWaitsOn(t *testing.T) {
+	key := "k"
+	for _, tc := range []struct {
+		name    string
+		item    func(text *YText) *Item
+		waitsOn ClientID
+	}{
+		{"own gap", func(text *YText) *Item {
+			return &Item{ID: ID{Client: 5, Clock: 3}, Parent: &text.abstractType, Content: NewContentString("x")}
+		}, 5},
+		{"origin of a client with no structs", func(text *YText) *Item {
+			return &Item{ID: ID{Client: 5}, Parent: &text.abstractType, Origin: &ID{Client: 7}, Content: NewContentString("x")}
+		}, 7},
+		{"right origin past the known clock", func(text *YText) *Item {
+			return &Item{ID: ID{Client: 5}, Parent: &text.abstractType, Origin: &ID{Client: 1, Clock: 1}, OriginRight: &ID{Client: 1, Clock: 9}, Content: NewContentString("x")}
+		}, 1},
+		{"right origin with no parent", func(*YText) *Item {
+			return &Item{ID: ID{Client: 5}, OriginRight: &ID{Client: 8}, Content: NewContentString("x")}
+		}, 8},
+		{"right origin after an origin that gives the parent", func(*YText) *Item {
+			return &Item{ID: ID{Client: 5}, Origin: &ID{Client: 1}, OriginRight: &ID{Client: 8}, Content: NewContentString("x")}
+		}, 8},
+		{"parent", func(*YText) *Item {
+			return &Item{ID: ID{Client: 5}, parentID: &ID{Client: 9}, ParentSub: &key, Content: NewContentAny([]any{1})}
+		}, 9},
+		{"origin before parent", func(*YText) *Item {
+			return &Item{ID: ID{Client: 5}, Origin: &ID{Client: 7}, parentID: &ID{Client: 9}, Content: NewContentString("x")}
+		}, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := New(WithClientID(1))
+			defer doc.Destroy()
+			text := doc.GetText("t")
+			doc.Transact(func(txn *Transaction) { text.Insert(txn, 0, "abc", nil) })
+			item := tc.item(text)
+			doc.Transact(func(txn *Transaction) {
+				ok, waitsOn, err := tryIntegrate(txn, item)
+				require.False(t, ok)
+				require.NoError(t, err)
+				require.Equal(t, tc.waitsOn, waitsOn)
+			})
+			require.Equal(t, "abc", text.ToString())
+		})
+	}
 }

@@ -222,7 +222,7 @@ func TestUnit_PendingResolver_InterleavedClientsBoundWork(t *testing.T) {
 	first, rest := interleavedWorkItems(doc, people, n, &work)
 	var err error
 	doc.Transact(func(txn *Transaction) {
-		ok, terr := tryIntegrate(txn, first)
+		ok, _, terr := tryIntegrate(txn, first)
 		require.True(t, ok)
 		require.NoError(t, terr)
 		err = resolveWithinUpdatePending(txn, rest)
@@ -252,7 +252,7 @@ func TestUnit_DrainPending_NewestFirstBoundWork(t *testing.T) {
 	doc.store.pending = &pendingUpdate{items: parked, missing: StateVector{first.ID.Client: 0}}
 	work.lengths = 0
 	doc.Transact(func(txn *Transaction) {
-		ok, terr := tryIntegrate(txn, first)
+		ok, _, terr := tryIntegrate(txn, first)
 		require.True(t, ok)
 		require.NoError(t, terr)
 		require.NoError(t, drainPending(txn))

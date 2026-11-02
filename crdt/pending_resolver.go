@@ -71,25 +71,6 @@ func copyRank(it *Item) int {
 	return 1
 }
 
-// pendingBlocker returns the first unmet clock dependency of an item that
-// tryIntegrate rejected; the item can integrate only once NextClock(client)
-// exceeds clock. Same-client gaps, origins and right origins always block, so
-// the parent ID is reported only when none of them does.
-func pendingBlocker(item *Item, store *StructStore) (ClientID, uint64, bool) {
-	if item.ID.Clock > store.NextClock(item.ID.Client) {
-		return item.ID.Client, item.ID.Clock - 1, true
-	}
-	for _, dep := range []*ID{item.Origin, item.OriginRight} {
-		if dep != nil && dep.Clock >= store.NextClock(dep.Client) {
-			return dep.Client, dep.Clock, true
-		}
-	}
-	if item.Parent == nil && item.parentID != nil && item.parentID.Clock >= store.NextClock(item.parentID.Client) {
-		return item.parentID.Client, item.parentID.Clock, true
-	}
-	return 0, 0, false
-}
-
 // integratePending integrates pending in Yjs's integrateStructs order (highest
 // client first, each in clock order, a blocked struct first taking the client
 // it waits on), marks in done what leaves the queue, and, within an update (nil
@@ -125,7 +106,6 @@ func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *e
 		}
 		return nil
 	}
-	store := txn.doc.store
 	var stackBuf [8]int
 	stack := stackBuf[:0]
 	for {
@@ -143,7 +123,7 @@ func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *e
 		}
 		for {
 			item := pending[head]
-			ok, err := tryIntegrateOrDrop(txn, item, dropped)
+			ok, waitsOn, err := tryIntegrateOrDrop(txn, item, dropped)
 			if err != nil && dropped == nil {
 				done[head] = true
 				return err
@@ -152,8 +132,8 @@ func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *e
 				done[head] = true
 				break
 			}
-			if client, _, ok := pendingBlocker(item, store); ok && client != item.ID.Client {
-				if g := find(client); g != nil && g.next < g.end {
+			if waitsOn != item.ID.Client {
+				if g := find(waitsOn); g != nil && g.next < g.end {
 					stack = append(stack, head)
 					head = take(g)
 					continue
@@ -172,14 +152,14 @@ func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *e
 
 // tryIntegrateOrDrop is tryIntegrate that, with a non-nil dropped, reports a
 // panicking item as integrated so the caller stops retrying it.
-func tryIntegrateOrDrop(txn *Transaction, item *Item, dropped *error) (ok bool, err error) {
+func tryIntegrateOrDrop(txn *Transaction, item *Item, dropped *error) (ok bool, waitsOn ClientID, err error) {
 	if dropped == nil {
 		return tryIntegrate(txn, item)
 	}
 	defer func() {
 		if r := recover(); r != nil {
 			*dropped = integrationPanicErr(r)
-			ok, err = true, nil
+			ok, waitsOn, err = true, 0, nil
 		}
 	}()
 	return tryIntegrate(txn, item)

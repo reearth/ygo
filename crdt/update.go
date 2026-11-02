@@ -1661,13 +1661,15 @@ func namesGCStruct(store *StructStore, id *ID) bool {
 // true on success (item is now integrated into the linked list, or
 // stored as an orphan when its parent is truly unresolvable). Returns
 // false if blocked on a future-clock dependency — the caller should
-// leave it in the pending queue. An item that continues its client's GC
-// struct also leaves the queue: tryIntegrate returns true and an error.
+// leave it in the pending queue — with waitsOn, the client of the first
+// unmet one: item's own client past a gap, then its origin, right origin
+// and parent. An item that continues its client's GC struct also leaves
+// the queue: tryIntegrate returns true and an error.
 //
 // Used by the inline retry loop to drain pending items that may now
 // be integrable. Parallels the normal decode-loop path but with items
 // that have already been decoded.
-func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
+func tryIntegrate(txn *Transaction, item *Item) (ok bool, waitsOn ClientID, err error) {
 	store := txn.doc.store
 
 	// Read bounds directly in the retry hot path; missing clients need no
@@ -1680,12 +1682,12 @@ func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 
 	// A same-client clock gap is blocked regardless of content length.
 	if item.ID.Clock > existingEnd {
-		return false, nil
+		return false, item.ID.Client, nil
 	}
 
 	// Fully covered ranges need no further integration.
 	if item.ID.Clock+uint64(item.Content.Len()) <= existingEnd {
-		return true, nil
+		return true, 0, nil
 	}
 
 	// GC-orphan path (no parent, deleted): store without integration, trimmed
@@ -1700,7 +1702,7 @@ func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 	// here, so the offset is never negative.
 	if item.Parent == nil && item.Deleted {
 		appendTrimmed(store, item, existingEnd)
-		return true, nil
+		return true, 0, nil
 	}
 
 	// Try to resolve parent via Origin / OriginRight / ParentSub fallback.
@@ -1711,7 +1713,7 @@ func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 	if item.Parent == nil {
 		if item.Origin != nil {
 			if len(store.clients[item.Origin.Client]) == 0 {
-				return false, nil
+				return false, item.Origin.Client, nil
 			}
 			if oi := store.Find(*item.Origin); oi != nil {
 				item.Parent = oi.Parent
@@ -1719,12 +1721,12 @@ func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 					item.ParentSub = oi.ParentSub
 				}
 			} else if item.Origin.Clock >= store.NextClock(item.Origin.Client) {
-				return false, nil // future clock — still blocked
+				return false, item.Origin.Client, nil // future clock — still blocked
 			}
 		}
 		if item.Parent == nil && item.OriginRight != nil {
 			if len(store.clients[item.OriginRight.Client]) == 0 {
-				return false, nil
+				return false, item.OriginRight.Client, nil
 			}
 			if ori := store.Find(*item.OriginRight); ori != nil {
 				item.Parent = ori.Parent
@@ -1732,7 +1734,7 @@ func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 					item.ParentSub = ori.ParentSub
 				}
 			} else if item.OriginRight.Clock >= store.NextClock(item.OriginRight.Client) {
-				return false, nil
+				return false, item.OriginRight.Client, nil
 			}
 		}
 		// Parent referenced by container item-ID (review finding C-3): resolve
@@ -1741,14 +1743,14 @@ func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 		// via the ParentSub fallback below.
 		if item.Parent == nil && item.parentID != nil {
 			if len(store.clients[item.parentID.Client]) == 0 {
-				return false, nil
+				return false, item.parentID.Client, nil
 			}
 			if pi := store.Find(*item.parentID); pi != nil {
 				if ct, ok := pi.Content.(*ContentType); ok {
 					item.Parent = ct.Type
 				}
 			} else if item.parentID.Clock >= store.NextClock(item.parentID.Client) {
-				return false, nil
+				return false, item.parentID.Client, nil
 			}
 		}
 		if item.Parent == nil {
@@ -1759,7 +1761,7 @@ func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 			// struct Yjs integrates it as.
 			item.markGCOrphan()
 			appendTrimmed(store, item, existingEnd)
-			return true, nil
+			return true, 0, nil
 		}
 	}
 
@@ -1767,11 +1769,11 @@ func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 	if item.Origin != nil {
 		items := store.clients[item.Origin.Client]
 		if len(items) == 0 {
-			return false, nil
+			return false, item.Origin.Client, nil
 		}
 		last := items[len(items)-1]
 		if item.Origin.Clock >= last.ID.Clock+uint64(last.Content.Len()) {
-			return false, nil
+			return false, item.Origin.Client, nil
 		}
 	}
 
@@ -1786,17 +1788,17 @@ func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 	if item.OriginRight != nil {
 		items := store.clients[item.OriginRight.Client]
 		if len(items) == 0 {
-			return false, nil
+			return false, item.OriginRight.Client, nil
 		}
 		last := items[len(items)-1]
 		if item.OriginRight.Clock >= last.ID.Clock+uint64(last.Content.Len()) {
-			return false, nil
+			return false, item.OriginRight.Client, nil
 		}
 	}
 
 	offset := int(existingEnd - item.ID.Clock)
 	if continuesGC(store, item, offset) {
-		return true, wrapUpdateErr(errGCContinuation)
+		return true, 0, wrapUpdateErr(errGCContinuation)
 	}
 
 	// Resolve left neighbor for integrate().
@@ -1806,7 +1808,7 @@ func tryIntegrate(txn *Transaction, item *Item) (bool, error) {
 
 	// A parked range may now overlap the store; integrate only its new suffix.
 	item.integrate(txn, offset)
-	return true, nil
+	return true, 0, nil
 }
 
 // itemFutureDep reports whether item is blocked on a future-clock dependency

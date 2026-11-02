@@ -169,7 +169,7 @@ func TestUnit_PendingResolver_CoveredItemWithMissingOrigin(t *testing.T) {
 	doc.Transact(func(txn *Transaction) { text.Insert(txn, 0, "x", nil) })
 	duplicate := &Item{ID: ID{Client: 1}, Parent: &text.abstractType, Origin: &ID{Client: 9999}, Content: NewContentString("x")}
 	doc.Transact(func(txn *Transaction) {
-		ok, err := tryIntegrate(txn, duplicate)
+		ok, _, err := tryIntegrate(txn, duplicate)
 		require.True(t, ok)
 		require.NoError(t, err)
 	})
