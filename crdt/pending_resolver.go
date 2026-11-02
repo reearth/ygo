@@ -12,25 +12,57 @@ type structRefs struct {
 	next, end int
 }
 
-// groupStructRefs groups pending by client, each in clock order, ascending by
-// client, appending the groups to into. It returns the queue positions the
-// groups index, or nil when pending already holds one strictly clock-ordered
-// run per client, as a decoded update does. Of two queued copies of a clock, a
-// GC struct goes first: it waits only for its own client, so a copy blocked on
-// another client cannot hold it back.
-func groupStructRefs(pending []*Item, into []structRefs) ([]structRefs, []int) {
-	runs := 0
+// countStructRefs counts pending's runs, each one client's structs in rising
+// clocks, and gives in step whether the runs' clients rise (1), as ygo writes
+// an update's, fall (-1), as Yjs writes them, or neither (0).
+func countStructRefs(pending []*Item) (runs, step int) {
+	monotone := true
+	var prev ID
 	for i, item := range pending {
-		if i == 0 || item.ID.Client != pending[i-1].ID.Client || item.ID.Clock <= pending[i-1].ID.Clock {
-			runs++
+		id := item.ID
+		if i > 0 && id.Client == prev.Client && id.Clock > prev.Clock {
+			prev = id
+			continue
 		}
+		runs++
+		if i > 0 && monotone {
+			if c := cmp.Compare(id.Client, prev.Client); c == 0 || (step != 0 && c != step) {
+				monotone = false
+			} else {
+				step = c
+			}
+		}
+		prev = id
 	}
+	switch {
+	case !monotone:
+		return runs, 0
+	case step == 0:
+		return runs, 1 // one run, or none
+	}
+	return runs, step
+}
+
+// groupStructRefs groups pending by client, each in clock order, ascending by
+// client, appending the groups to into; runs and step are countStructRefs's.
+// It returns the queue positions the groups index, or nil when pending already
+// holds one strictly clock-ordered run per client, as a decoded update does.
+// Of two queued copies of a clock, a GC struct goes first: it waits only for
+// its own client, so a copy blocked on another client cannot hold it back.
+func groupStructRefs(pending []*Item, runs, step int, into []structRefs) ([]structRefs, []int) {
 	groups := slices.Grow(into[:0], runs)
 	for i, item := range pending {
 		if i == 0 || item.ID.Client != pending[i-1].ID.Client || item.ID.Clock <= pending[i-1].ID.Clock {
 			groups = append(groups, structRefs{client: item.ID.Client, next: i})
 		}
 		groups[len(groups)-1].end = i + 1
+	}
+	switch step {
+	case 1:
+		return groups, nil
+	case -1:
+		slices.Reverse(groups)
+		return groups, nil
 	}
 	slices.SortFunc(groups, func(a, b structRefs) int { return cmp.Compare(a.client, b.client) })
 	unique := true
@@ -77,12 +109,16 @@ func copyRank(it *Item) int {
 // dropped), returns at the first refusal, as Yjs stops when a struct throws,
 // where a drain drops it and goes on.
 func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *error) error {
-	at, err := integrateClientRuns(txn, pending, done, dropped)
-	if at < 0 {
-		return err
+	runs, step := countStructRefs(pending)
+	at := len(pending)
+	if step != 0 {
+		var err error
+		if at, err = integrateClientRuns(txn, pending, step, done, dropped); at < 0 {
+			return err
+		}
 	}
 	var buf [4]structRefs // a keystroke's groups need no allocation
-	groups, order := groupStructRefs(pending, buf[:0])
+	groups, order := groupStructRefs(pending, runs, step, buf[:0])
 	if at < len(pending) {
 		// The runs above at's client are taken, and at's run goes on from at.
 		client := pending[at].ID.Client
@@ -165,12 +201,10 @@ func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *e
 }
 
 // integrateClientRuns avoids groups for a decoded update's client-ordered
-// runs, falling back when a run waits on a client still to take.
-func integrateClientRuns(txn *Transaction, pending []*Item, done []bool, dropped *error) (int, error) {
-	step := clientRunStep(pending)
-	if step == 0 {
-		return len(pending), nil
-	}
+// runs, step as countStructRefs gives it. It returns -1 once every run is
+// taken, else the first struct that waits on a client still to take, where
+// integratePending's groups go on.
+func integrateClientRuns(txn *Transaction, pending []*Item, step int, done []bool, dropped *error) (int, error) {
 	lo, hi := 0, len(pending) // the runs not yet taken
 	var absent ClientID       // a client with no struct in [lo, hi), once known
 	absentKnown := false
@@ -208,31 +242,6 @@ func integrateClientRuns(txn *Transaction, pending []*Item, done []bool, dropped
 		}
 	}
 	return -1, nil
-}
-
-// clientRunStep is 1 when pending holds one strictly clock-ordered run per
-// client in ascending client order, as ygo writes an update's clients, -1 in
-// descending order, as Yjs writes them, and 0 otherwise.
-func clientRunStep(pending []*Item) int {
-	step := 0
-	for i := 1; i < len(pending); i++ {
-		a, b := pending[i-1].ID, pending[i].ID
-		if a.Client == b.Client {
-			if b.Clock <= a.Clock {
-				return 0
-			}
-			continue
-		}
-		if c := cmp.Compare(b.Client, a.Client); step == 0 {
-			step = c
-		} else if c != step {
-			return 0
-		}
-	}
-	if step == 0 {
-		return 1 // one run
-	}
-	return step
 }
 
 // tryIntegrateOrDrop marks a panicking item done while a drain continues.
