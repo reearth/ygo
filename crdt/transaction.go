@@ -1,7 +1,9 @@
 package crdt
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -27,6 +29,9 @@ type Transaction struct {
 	// transient (no item was inserted between them). Mirrors Yjs JS's
 	// `_mergeStructs` and powers gap #78 H2.
 	mergeStructs []*Item
+	// boundedApply holds a bounded remote apply's scan and rollback state, so
+	// other transactions do not carry it.
+	boundedApply *boundedApplyState
 	// rearbitrate queues, per parent, move targets whose winning ContentMove
 	// was tombstoned; rearbitrateMoves resolves them in one pass at commit.
 	rearbitrate map[*abstractType]map[*Item]struct{}
@@ -351,10 +356,110 @@ func tryMergeWithLefts(txn *Transaction) {
 	if len(txn.mergeStructs) == 0 {
 		return
 	}
-	store := txn.doc.store
+	// In client and clock order each half merges into the run left of it, so a
+	// run split n times is copied once rather than n times.
+	slices.SortFunc(txn.mergeStructs, func(a, b *Item) int {
+		if c := cmp.Compare(a.ID.Client, b.ID.Client); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ID.Clock, b.ID.Clock)
+	})
+	merging := mergeRuns{store: txn.doc.store}
 	for _, item := range txn.mergeStructs {
-		tryMergeWithLeft(item, store)
+		tryMergeWithLeft(item, &merging)
 	}
+	merging.finish()
+}
+
+// mergeRuns is the state of tryMergeWithLefts's merges, which take the halves
+// in client and clock order.
+type mergeRuns struct {
+	store *StructStore
+
+	// text is the run the last string merge extended, and joined its text from
+	// the run's second merge on, written back when another run starts.
+	text   *ContentString
+	joined strings.Builder
+
+	// items is client's store slice while merged halves leave it: items[:kept]
+	// is compacted and items[next:] not yet reached.
+	client     ClientID
+	items      []*Item
+	kept, next int
+}
+
+// appendString adds right's text to left's run without copying the whole run
+// at every merge.
+func (m *mergeRuns) appendString(left, right *ContentString) {
+	switch {
+	case left != m.text:
+		m.flushText()
+		m.text = left
+		left.Str += right.Str
+	case m.joined.Len() == 0:
+		m.joined.Grow(len(left.Str) + len(right.Str))
+		m.joined.WriteString(left.Str)
+		m.joined.WriteString(right.Str)
+	default:
+		m.joined.WriteString(right.Str)
+	}
+	left.utf16Len += right.utf16Len
+}
+
+// flushText writes the joined text back to its run.
+func (m *mergeRuns) flushText() {
+	if m.joined.Len() > 0 {
+		m.text.Str = m.joined.String()
+		m.joined.Reset()
+	}
+}
+
+// remove takes item, merged into its left neighbour, out of its client's store
+// slice, moving each item that stays at most once, as a single removal did.
+func (m *mergeRuns) remove(item *Item) {
+	if m.items != nil && item.ID.Client == m.client {
+		// Later halves come in clock order, so this scan passes only items the
+		// compaction moves anyway.
+		for i := m.next; i < len(m.items) && m.items[i].ID.Clock <= item.ID.Clock; i++ {
+			if m.items[i] == item {
+				m.kept += copy(m.items[m.kept:], m.items[m.next:i])
+				m.next = i + 1
+				return
+			}
+		}
+		return
+	}
+	m.flushItems()
+	items := m.store.clients[item.ID.Client]
+	if i, ok := indexOfItem(items, item); ok {
+		m.client, m.items, m.kept, m.next = item.ID.Client, items, i, i+1
+	}
+}
+
+// flushItems closes the gap the merged halves left in the current client's
+// store slice.
+func (m *mergeRuns) flushItems() {
+	if m.items == nil {
+		return
+	}
+	n := m.kept + copy(m.items[m.kept:], m.items[m.next:])
+	clear(m.items[n:])
+	m.store.clients[m.client] = m.items[:n]
+	m.items = nil
+}
+
+// finish writes back the last run's text and the last client's store slice.
+func (m *mergeRuns) finish() {
+	m.flushText()
+	m.flushItems()
+}
+
+// indexOfItem finds item in items, a store slice in clock order.
+func indexOfItem(items []*Item, item *Item) (int, bool) {
+	i, found := slices.BinarySearchFunc(items, item.ID.Clock, func(it *Item, clock uint64) int {
+		return cmp.Compare(it.ID.Clock, clock)
+	})
+	return i, found && items[i] == item
 }
 
 // tryMergeWithLeft attempts to absorb item into item.Left. Returns true when
@@ -369,7 +474,7 @@ func tryMergeWithLefts(txn *Transaction) {
 //
 // On success: left's content is extended in place, the linked list is spliced
 // past item, and item is removed from the store.
-func tryMergeWithLeft(item *Item, store *StructStore) bool {
+func tryMergeWithLeft(item *Item, merging *mergeRuns) bool {
 	left := item.Left
 	if left == nil {
 		return false
@@ -423,8 +528,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		if !ok {
 			return false
 		}
-		lc.Str += rc.Str
-		lc.utf16Len += rc.utf16Len
+		merging.appendString(lc, rc)
 	case *ContentAny:
 		rc, ok := item.Content.(*ContentAny)
 		if !ok {
@@ -466,13 +570,45 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		left.Parent.clearMarkers()
 	}
 
-	// Remove item from the store's per-client slice.
-	storeItems := store.clients[item.ID.Client]
-	for i, it := range storeItems {
-		if it == item {
-			store.clients[item.ID.Client] = append(storeItems[:i], storeItems[i+1:]...)
-			break
-		}
-	}
+	// Remove item from its client's store slice.
+	merging.remove(item)
 	return true
+}
+
+// scanMark is a conflict scan's mark on an item it passed: which scan of the
+// transaction, and at which step of it (Item.integrate).
+type scanMark struct{ scan, step uint32 }
+
+// boundedApplyState is the scan and rollback state of one remote apply on a
+// document with a scan bound.
+type boundedApplyState struct {
+	scanned    int
+	scanMarks  map[*Item]scanMark
+	scanSerial uint32
+	journal    *applyJournal
+	rolledBack bool
+}
+
+// beginBoundedApply returns txn's bounded apply state, made on first use.
+func (txn *Transaction) beginBoundedApply() *boundedApplyState {
+	if txn.boundedApply == nil {
+		txn.boundedApply = &boundedApplyState{}
+	}
+	return txn.boundedApply
+}
+
+// applyJournal returns the journal of txn's bounded apply, or nil.
+func (txn *Transaction) applyJournal() *applyJournal {
+	if txn.boundedApply == nil {
+		return nil
+	}
+	return txn.boundedApply.journal
+}
+
+// scanMarkMap returns the bounded apply's scan marks, made on first use.
+func (state *boundedApplyState) scanMarkMap() map[*Item]scanMark {
+	if state.scanMarks == nil {
+		state.scanMarks = make(map[*Item]scanMark)
+	}
+	return state.scanMarks
 }

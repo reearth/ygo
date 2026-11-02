@@ -126,32 +126,59 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		// against). beforeOrigin tracks every item we have scanned past, so we
 		// can detect whether a later item's origin lies inside the conflict zone.
 		//
-		// Both maps are allocated here rather than unconditionally so that the
-		// common (no-conflict) case pays zero allocation cost.
-		conflicting := make(map[*Item]struct{})
-		beforeOrigin := make(map[*Item]struct{})
+		// A bounded remote apply keeps both sets as one map of marks for the
+		// whole apply, so its scans allocate one entry per distinct item.
+		limit := 0
+		if !txn.Local {
+			limit = txn.doc.integrateScanLimit()
+		}
+		var bounded *boundedApplyState
+		var beforeOrigin, conflicting map[*Item]struct{}
+		var marks map[*Item]scanMark
+		var scan, step, groupFrom uint32
+		if limit > 0 {
+			bounded = txn.beginBoundedApply()
+			marks = bounded.scanMarkMap()
+			bounded.scanSerial++
+			scan, groupFrom = bounded.scanSerial, 1
+		} else {
+			beforeOrigin = make(map[*Item]struct{})
+			conflicting = make(map[*Item]struct{})
+		}
 
 		// Scan right until we hit our right origin (item.Right) or the end.
 		for o != nil && o != item.Right {
+			// Every item the scan passes counts toward the bound, including
+			// one it steps over for a different key.
+			if bounded != nil {
+				bounded.scanned++
+				if bounded.scanned > limit {
+					panic(integrateScanBudgetExceeded{})
+				}
+			}
 			// Children and keyed attributes have independent conflict orders.
 			if !parentSubEqual(item.ParentSub, o.ParentSub) {
 				o = o.Right
 				continue
 			}
-			beforeOrigin[o] = struct{}{}
-			conflicting[o] = struct{}{}
+			if bounded != nil {
+				step++
+				marks[o] = scanMark{scan: scan, step: step}
+			} else {
+				beforeOrigin[o] = struct{}{}
+				conflicting[o] = struct{}{}
+			}
 
 			if originIDEquals(item.Origin, o.Origin) {
 				// Case 1: o has the same left origin as us — concurrent insert at
 				// the same position. Lower ClientID wins (placed to the left).
 				if o.ID.Client < item.ID.Client {
 					left = o
-					// Reuse the map instead of reallocating (Yjs does
-					// conflictingItems.clear() here). Under high same-position
-					// contention this fires O(group size) times per integrate, so
-					// a fresh make() each time made conflict-scan allocation
-					// quadratic in the conflict-group size (#54-C).
-					clear(conflicting)
+					if bounded != nil {
+						groupFrom = step + 1
+					} else {
+						clear(conflicting)
+					}
 				} else if originIDEquals(item.OriginRight, o.OriginRight) {
 					// Same left and right origin — truly symmetric; stop.
 					break
@@ -164,10 +191,19 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 				if oOriginItem == nil {
 					break
 				}
-				if _, inBefore := beforeOrigin[oOriginItem]; inBefore {
+				if bounded != nil {
+					if mark, seen := marks[oOriginItem]; seen && mark.scan == scan {
+						if mark.step < groupFrom {
+							left = o
+							groupFrom = step + 1
+						}
+					} else {
+						break
+					}
+				} else if _, inBefore := beforeOrigin[oOriginItem]; inBefore {
 					if _, inConflict := conflicting[oOriginItem]; !inConflict {
 						left = o
-						clear(conflicting) // reuse the map, not realloc (see above / Yjs parity)
+						clear(conflicting)
 					}
 				} else {
 					break
@@ -181,6 +217,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	}
 
 	// Insert item between left and left.Right.
+	if j := txn.applyJournal(); j != nil {
+		j.integrating = item
+	}
 	item.Left = left
 	if left == nil {
 		item.Right = item.Parent.start
@@ -235,6 +274,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 
 	// Register in the document store.
 	txn.doc.store.Append(item)
+	if j := txn.applyJournal(); j != nil {
+		j.integrating = nil
+	}
 
 	// #63 — register an embedded subdocument (Content has no integrate hook).
 	// This MUST run here, before the ParentSub last-writer-wins block below,
@@ -374,6 +416,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 			if existing, ok := item.Parent.itemMap[key]; ok && existing != item && !existing.Deleted {
 				existing.delete(txn)
 			}
+			if j := txn.applyJournal(); j != nil {
+				j.tookMapKey(item.Parent, key)
+			}
 			item.Parent.itemMap[key] = item
 		}
 	}
@@ -506,6 +551,10 @@ func nextDeleteItem(current, root *Item) *Item {
 // item.Content is mutated to hold [0, offset); the returned item holds [offset, end).
 // Both halves are registered in the store. The linked-list pointers are updated.
 func splitItem(txn *Transaction, item *Item, offset int) *Item {
+	// A drain taken back parks again the items it integrated, whole.
+	if j := txn.applyJournal(); j != nil && j.drained(item) {
+		j.keepParked(item)
+	}
 	rightContent := item.Content.Splice(offset) // mutates item.Content → [0, offset)
 	right := &Item{
 		ID:          ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset)},

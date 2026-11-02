@@ -1,3 +1,37 @@
+## v1.56.0
+
+**Who is affected: servers that apply updates from peers they do not fully
+trust, which includes every `provider/websocket` server.** Nothing changes for
+a document that sets no bound, except that the commit-time merge below is
+faster.
+
+Two parts of applying a remote update cost time and memory that grow with the
+square of the update, so one small update could hold a document's lock for
+many seconds and allocate gigabytes:
+
+- **The conflict scan.** YATA places an item by scanning right from its left
+  origin past every item whose own origin lies in what the scan has passed. An
+  item naming an early left origin and no right origin scans to the end of a
+  list, so an update of n of them scans n times the list: 2,000 such items
+  (about 12 KB) into a list of 20,000 unmerged items took 20.8 s and allocated
+  2,365,640,192 bytes. A document can now set a bound with
+  `WithMaxIntegrateScan` or `Doc.SetMaxIntegrateScan`: the scans of one remote
+  update together pass at most that many items, and past it `ApplyUpdateV1` and
+  `ApplyUpdateV2` return `ErrIntegrateScanBudget`, which wraps
+  `ErrInvalidUpdate`. A bounded document applies every remote update whole or
+  not at all: an update whose apply fails leaves the document as it was, and
+  its transaction fires no observer, so nothing of it is persisted or relayed.
+  A bounded document refuses a remote update that carries a subdocument or a
+  move. Local transactions are never bounded, and no bound is set by default.
+- **The merge at commit.** An unbounded apply of 20,000 halves into a
+  40,000-character run allocated 440,968,992 bytes before the linear merge.
+  The same unbounded apply allocated 11,384,168 bytes with the first linear
+  merge, and 12,565,704 bytes while every transaction kept one map of scan
+  marks. It now allocates 10,200,800 bytes, because only a bounded apply keeps
+  scan marks. The same apply on a document bounded at 1<<30 allocates
+  12,567,400 bytes, because it keeps a rollback journal and one map of scan
+  marks. The text and the merged run are as before.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

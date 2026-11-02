@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.0] — 2026-11-02
+
+### Added
+
+- **`crdt`: `WithMaxIntegrateScan`, `Doc.SetMaxIntegrateScan` and
+  `ErrIntegrateScanBudget`: a document can bound the conflict scans of a remote
+  update, and then applies every remote update whole or not at all.** YATA
+  places an item by scanning right from its left origin past every item whose
+  own origin lies in what the scan has passed, so an item naming an early left
+  origin and no right origin scans to the end of a list, and an update of n of
+  them scans n times the list: 2,000 such items (about 12 KB) into a list of
+  20,000 unmerged items took 20.8 s and allocated 2,365,640,192 bytes. With a
+  bound, the scans of one remote update together pass at most that many items;
+  past it, `ApplyUpdateV1` and `ApplyUpdateV2` return `ErrIntegrateScanBudget`
+  (which wraps `ErrInvalidUpdate`). A bounded document takes out what such an
+  update, or any remote update whose apply fails, integrated before it failed,
+  so the document is left as it was and the transaction fires no observer:
+  nothing of the update is persisted or relayed. A bounded document refuses a
+  remote update carrying a subdocument or a move. Local transactions are never
+  bounded. No bound is set by default. The drain of the pending queue that
+  ends an apply has an allowance of its own, the bound again; a drain that
+  would pass it is taken back and the queue is parked again as it was, every
+  peer's items kept, while the update that filled the gap stands. The clocks
+  the queue waits on are raised to the store's, so only an apply that brings
+  one of its clients further drains it again. A bounded remote apply's conflict
+  scans share one map of marks, made by the first scan that needs it and kept
+  until the transaction commits: each mark records which scan, and which step
+  of it, passed the item, so a new scan reuses the map without clearing it.
+  Unbounded transactions keep two maps per scan, as before.
+
+### Fixed
+
+- **`crdt`: a bounded document's remote apply no longer copies what earlier
+  updates parked.** To restore them when it refuses an update, the apply of a
+  document with a scan bound (`WithMaxIntegrateScan`) copied the pending queue's
+  items, the clocks it waits on and the pending deletes as it began, and the
+  drain copied the pending deletes again, so every remote apply cost time and
+  memory in proportion to what sat parked: one keystroke allocated 2,805,128
+  bytes on a bounded document holding 349,517 parked structs (1,624 unbounded)
+  and 61,515,232 bytes on one holding 524,280 parked delete ranges (44,735,792
+  unbounded). The apply now keeps them by reference: it only appends to the
+  parked items past the length it keeps, copies the map of clocks the queue
+  waits on at its first write to it, and merges a delete range it parks into
+  copies of the clients that range names, so a refused update still leaves the
+  parked items, the clocks they wait on and the pending deletes exactly as they
+  were. The same two keystrokes now allocate 3,208 and 44,737,376 bytes on a
+  bounded document (1,592 and 44,735,760 unbounded).
+
+- **`crdt`: merging split runs back at commit is linear in the run.** An
+  unbounded apply of 20,000 halves into a 40,000-character run allocated
+  440,968,992 bytes before the linear merge. The same unbounded apply allocated
+  11,384,168 bytes with the first linear merge, and 12,565,704 bytes while
+  every transaction kept one map of scan marks. It now allocates 10,200,800
+  bytes, because only a bounded apply keeps scan marks. The same apply on a
+  document bounded at 1<<30 allocates 12,567,400 bytes, because it keeps a
+  rollback journal and one map of scan marks. The halves merge in clock order,
+  each run's text is joined once, and the merged halves leave their store slices
+  in one pass per client.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added
