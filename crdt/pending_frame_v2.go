@@ -191,7 +191,7 @@ func (f *v2Frame) fail(err error) {
 }
 
 // scanPendingGroupsV2 is scanPendingGroupsV1 for a V2 update.
-func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int, parked *pendingUpdate) (pendingPass, error) {
+func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int, parked *pendingUpdate, whole bool) (pendingPass, error) {
 	var result pendingPass
 	read := 0
 	f := v2Frame{d: d}
@@ -262,7 +262,10 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 			clock = end
 			read++
 			if unread := pendingUnread(structs, read, i+1 == clients, n-j-1); unread >= 0 && result.pending+unread <= remaining {
-				return result, nil
+				if !whole {
+					return result, nil
+				}
+				result.settled = true
 			}
 		}
 		if knownClock != startClock {
@@ -272,5 +275,6 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 	if f.err != nil {
 		return result, scanReason(f.err)
 	}
+	result.rest, result.exact = d.restDec.RemainingBytes(), clients <= 1
 	return result, nil
 }

@@ -35,6 +35,11 @@ type pendingBudget struct {
 	// set, which implies groupsKnown.
 	deleteSetBytes []byte
 	walked         bool
+	// deleteRoom is the room left for parked delete ranges.
+	deleteRoom int
+	// clocks, when set, is the state vector once the update's structs are in,
+	// from a first pass that read them all.
+	clocks StateVector
 	// deleteSet is the update's delete set once the parked-range check read
 	// it whole from deleteSetBytes, the bytes the apply's decoder reaches after
 	// the structs, so the apply does not decode it again.
@@ -43,14 +48,16 @@ type pendingBudget struct {
 }
 
 func newPendingBudget(doc *Doc, initial StateVector, update []byte, v2 bool) pendingBudget {
-	remaining := doc.maxPendingItemsLimit()
+	limit := doc.maxPendingItemsLimit()
+	remaining := limit
 	if doc.store.pending != nil {
 		// A document can hold more parked items than its cap (stored state
 		// loaded with the cap lifted, SetMaxPendingItems): its room is none,
 		// not below none, so an update that parks nothing still applies.
 		remaining = max(remaining-len(doc.store.pending.items), 0)
 	}
-	return pendingBudget{initial: initial, update: update, remaining: remaining, v2: v2, parked: doc.store.pending}
+	return pendingBudget{initial: initial, update: update, remaining: remaining, v2: v2, parked: doc.store.pending,
+		deleteRoom: max(limit-doc.store.pendingDsRanges, 0)}
 }
 
 // setSuperseded records the groups the decoder drops, so preflight counts
@@ -111,10 +118,11 @@ func (b *pendingBudget) check() error {
 		var result pendingPass
 		var err error
 		if pass == 0 {
-			if b.v2 {
-				result, err = b.firstPassV2(known, &clients)
-			} else {
-				result, err = scanPendingGroupsV1(b.update, known, b.remaining, &clients, b.superseded, b.structs, b.parked)
+			result, err = b.firstPass(known, &clients, b.remaining, !b.walked && b.readsDeleteSet())
+			if err != nil && result.settled {
+				// A pass that is not whole stops before the fault, so the group
+				// walk names it as it did.
+				err = b.walkGroups()
 			}
 		} else {
 			var clientRange *pendingClientRange
@@ -464,6 +472,12 @@ func pendingWireContainsDependencies(s *pendingScanner, known StateVector) bool 
 type pendingPass struct {
 	heads, pending int
 	progressed     bool
+	// rest is the update past its structs when a first pass read them all,
+	// and exact whether its known then holds the clocks the structs reach.
+	rest  []byte
+	exact bool
+	// settled is whether a pass that is not whole would have stopped already.
+	settled bool
 }
 
 type pendingBoundedPass struct {

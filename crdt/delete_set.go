@@ -336,18 +336,15 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 	limit := doc.maxPendingItemsLimit()
 	pending := doc.store.pendingDs
 	before := doc.store.pendingDsRanges
-	room := max(limit-before, 0)
-	// A delete range takes at least 2 bytes, a clock and a length, so a delete
-	// set read from at most twice the room in bytes cannot park past it.
-	if b.deleteSetLimit()/2 <= room {
+	if !b.readsDeleteSet() {
 		return nil
 	}
-	if err := b.walkGroups(); err != nil {
+	if err := b.readStructs(); err != nil {
 		return wrapUpdateErr(err)
 	}
 	// A delete set that does not read parks nothing, so the apply reads it and
 	// keeps what came before the cut, as Yjs does.
-	if n, err := parkingRangesBound(b.deleteSetScanner(), b.initial); err != nil || n <= room {
+	if n, err := parkingRangesBound(b.deleteSetScanner(), b.initial); err != nil || n <= b.deleteRoom {
 		return nil
 	}
 	ds, err := deleteSetOf(b)
@@ -364,6 +361,37 @@ func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
 		return nil
 	}
 	return ErrInvalidUpdate
+}
+
+// readStructs reads the update's structs once for the delete-set check, as a
+// whole first pass with no room limit, unless a walk or a pass read them,
+// returning an unwrapped error.
+func (b *pendingBudget) readStructs() error {
+	if err := b.knowSuperseded(); err != nil {
+		return err
+	}
+	if b.walked {
+		return nil
+	}
+	if err := b.decodeV2(); err != nil {
+		return err
+	}
+	known := make(StateVector, len(b.initial))
+	for client, clock := range b.initial {
+		known[client] = clock
+	}
+	if _, err := b.firstPass(known, nil, math.MaxInt, true); err != nil {
+		// The group walk this pass replaces names the fault, or reads past it.
+		return b.walkGroups()
+	}
+	return nil
+}
+
+// readsDeleteSet is whether the update's delete set may park more ranges than
+// their room by its bytes, so the delete-set check must read it.
+func (b *pendingBudget) readsDeleteSet() bool {
+	// A delete range takes at least 2 bytes, a clock and a length.
+	return b.deleteSetLimit()/2 > b.deleteRoom
 }
 
 // deleteSetOf reads the delete set of b's V1 or V2 update, where the walk of
@@ -424,6 +452,9 @@ func parkingRangesBound(s *pendingScanner, sv StateVector) (int, error) {
 // structClocksOf is the store's state vector once b's update structs are in,
 // leaving out earlier parked items so the count it feeds can only be high.
 func structClocksOf(b *pendingBudget) (StateVector, error) {
+	if b.clocks != nil {
+		return b.clocks, nil
+	}
 	if err := b.knowSuperseded(); err != nil {
 		return nil, err
 	}

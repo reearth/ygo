@@ -11,12 +11,31 @@ func (b *pendingBudget) checkBeforeApply(size int) error {
 	return b.check()
 }
 
-// firstPassV2 runs scanPendingGroupsV2 on copies of the update's cursors.
-func (b *pendingBudget) firstPassV2(known StateVector, clients *pendingClientRange) (pendingPass, error) {
-	v2 := *b.v2Start
-	rest := b.v2Rest
-	v2.restDec = &rest
-	return scanPendingGroupsV2(&v2, known, b.remaining, clients, b.superseded, b.structs, b.parked)
+// firstPass runs the frame's first pass over the update; a whole pass keeps
+// where the structs end and, when exact, the clocks they reach, so the
+// delete-set check does not read the structs again.
+func (b *pendingBudget) firstPass(known StateVector, clients *pendingClientRange, remaining int, whole bool) (pendingPass, error) {
+	var result pendingPass
+	var err error
+	if b.v2 {
+		v2 := *b.v2Start
+		rest := b.v2Rest
+		v2.restDec = &rest
+		result, err = scanPendingGroupsV2(&v2, known, remaining, clients, b.superseded, b.structs, b.parked, whole)
+	} else {
+		result, err = scanPendingGroupsV1(b.update, known, remaining, clients, b.superseded, b.structs, b.parked, whole)
+	}
+	if err == nil && whole {
+		b.deleteSetBytes, b.walked = result.rest, true
+		if result.exact {
+			// A copy, by hand, so that known stays on its callers' stacks.
+			b.clocks = make(StateVector, len(known))
+			for client, clock := range known {
+				b.clocks[client] = clock
+			}
+		}
+	}
+	return result, err
 }
 
 // mayParkPastRoom is whether the update may park more items than the room left,

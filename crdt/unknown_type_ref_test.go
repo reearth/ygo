@@ -87,11 +87,11 @@ func TestUnit_PendingScanners_RefuseAnUnknownTypeRef(t *testing.T) {
 	}
 
 	var r pendingClientRange
-	_, err := scanPendingGroupsV1(v1, StateVector{}, 0, &r, nil, 0, nil)
+	_, err := scanPendingGroupsV1(v1, StateVector{}, 0, &r, nil, 0, nil, false)
 	want(t, "V1 frame", err)
 	d, err := newV2Decoder(v2)
 	require.NoError(t, err)
-	_, err = scanPendingGroupsV2(d, StateVector{}, 0, &r, nil, 0, nil)
+	_, err = scanPendingGroupsV2(d, StateVector{}, 0, &r, nil, 0, nil, false)
 	want(t, "V2 frame", err)
 
 	for _, update := range [][]byte{v1, v2} {

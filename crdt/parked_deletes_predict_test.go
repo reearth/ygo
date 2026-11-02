@@ -1,6 +1,8 @@
 package crdt
 
 import (
+	"bytes"
+	"fmt"
 	"maps"
 	"math"
 	"math/rand/v2"
@@ -179,4 +181,130 @@ func TestUnit_ApplyUpdate_TheParkedDeletesCheckedAreWhatTheApplyParks(t *testing
 		t.Fatalf("only %d of %d applies parked a delete range", parkedSome, 2*rounds)
 	}
 	t.Logf("%d of %d applies parked delete ranges", parkedSome, 2*rounds)
+}
+
+// A whole first pass over a one-client update gives the clocks structClocksOf
+// scans for and the delete set walkGroups finds, in V1 and V2.
+func TestUnit_PendingBudget_AWholeFirstPassReadsWhatTheStructScansRead(t *testing.T) {
+	rng := rand.New(rand.NewPCG(340, 918))
+	compared, blocked := 0, 0
+	for round := range 200 {
+		held, update := gappedUpdate(t, rng)
+		receiver := New(WithMaxPendingItems(math.MaxInt))
+		if err := ApplyUpdateV1(receiver, held, nil); err != nil {
+			t.Fatal(err)
+		}
+		sv := receiver.store.StateVector()
+		for _, target := range []ClientID{1, 2, 3} {
+			// The target's structs and the whole delete set.
+			others := StateVector{1: 1 << 53, 2: 1 << 53, 3: 1 << 53}
+			delete(others, target)
+			single, err := DiffUpdateV1(update, others)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, format := range applyFormats {
+				u := single
+				if format.v2 {
+					if u, err = UpdateV1ToV2(single); err != nil {
+						t.Fatal(err)
+					}
+				}
+				whole := newPendingBudget(receiver, sv, u, format.v2)
+				whole.setSuperseded(nil)
+				if err := whole.readStructs(); err != nil {
+					t.Fatalf("round %d %s client %d: %v", round, format.name, target, err)
+				}
+				scan := newPendingBudget(receiver, sv, u, format.v2)
+				want, err := structClocksOf(&scan)
+				if err != nil {
+					t.Fatalf("round %d %s client %d: %v", round, format.name, target, err)
+				}
+				if whole.clocks == nil || !maps.Equal(whole.clocks, want) || !bytes.Equal(whole.deleteSetBytes, scan.deleteSetBytes) {
+					t.Fatalf("round %d %s client %d: the whole pass reads clocks %v and a %d-byte delete set, the scans %v and %d bytes",
+						round, format.name, target, whole.clocks, len(whole.deleteSetBytes), want, len(scan.deleteSetBytes))
+				}
+				probe := New(WithMaxPendingItems(math.MaxInt))
+				if err := ApplyUpdateV1(probe, held, nil); err != nil {
+					t.Fatal(err)
+				}
+				apply := ApplyUpdateV1
+				if format.v2 {
+					apply = ApplyUpdateV2
+				}
+				if err := apply(probe, u, nil); err != nil {
+					t.Fatalf("round %d %s client %d: %v", round, format.name, target, err)
+				}
+				if probe.PendingStats().Items > 0 {
+					blocked++
+				}
+				compared++
+			}
+		}
+	}
+	if blocked == 0 {
+		t.Fatal("no update had a struct the receiver could not integrate")
+	}
+	t.Logf("%d updates compared, %d with a struct left out", compared, blocked)
+}
+
+// The item check and the delete-set read, which read a one-client update's
+// structs in one whole pass, refuse each corruption of it as a first pass that
+// stops and the group walk after it do, V1 and V2.
+func TestUnit_PendingBudget_AWholeFirstPassNamesAFaultAsTheWalkItReplaces(t *testing.T) {
+	src := New(WithClientID(4))
+	text := src.GetText("t")
+	for i := range 30 {
+		src.Transact(func(txn *Transaction) { text.Insert(txn, 0, fmt.Sprintf("w%d", i), nil) })
+	}
+	src.Transact(func(txn *Transaction) {
+		for i := range 10 {
+			text.Delete(txn, 2*i, 1)
+		}
+	})
+	compared := 0
+	for _, f := range formats(t, EncodeStateAsUpdateV1(src, nil)) {
+		for at := range f.update {
+			for _, value := range []byte{0xc4, 0xff} {
+				bad := append([]byte(nil), f.update...)
+				bad[at] = value
+				budget := func() (*pendingBudget, error) {
+					b := newPendingBudget(New(WithMaxPendingItems(4)), StateVector{}, bad, f.name == "V2")
+					b.setSuperseded(nil)
+					return &b, b.decodeV2()
+				}
+				wrapped := func(err error) string {
+					if err == nil {
+						return "<nil>"
+					}
+					return wrapUpdateErr(err).Error()
+				}
+				ref, err := budget()
+				if err != nil {
+					continue // the columns do not read, before any check
+				}
+				_, want := ref.firstPass(StateVector{}, nil, ref.remaining, false)
+				if want == nil {
+					want = ref.walkGroups()
+				}
+				checked, _ := budget()
+				got := checked.check()
+				if got == nil {
+					if err := checked.readStructs(); err != nil {
+						got = wrapUpdateErr(err)
+					}
+				}
+				read, _ := budget()
+				readErr := read.readStructs()
+				walk, _ := budget()
+				walkErr := walk.walkGroups()
+				if wrapped(want) != wrapped(got) || wrapped(walkErr) != wrapped(readErr) {
+					t.Fatalf("%s, byte %d set to %#x: the checks give %v, the pass and the walk %v; the delete-set read gives %v, the walk %v",
+						f.name, at, value, got, want, readErr, walkErr)
+				}
+				compared++
+			}
+		}
+	}
+	t.Logf("%d corruptions compared", compared)
 }

@@ -197,9 +197,9 @@ func (f *v1Frame) frameJSON() uint64 {
 }
 
 // scanPendingGroupsV1 is the pending budget's first pass over a V1 update,
-// stopping once the unread structs cannot change its answer, and not counting
-// a struct parked holds.
-func scanPendingGroupsV1(update []byte, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int, parked *pendingUpdate) (pendingPass, error) {
+// stopping once the unread structs cannot change its answer, unless whole, and
+// not counting a struct parked holds.
+func scanPendingGroupsV1(update []byte, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int, parked *pendingUpdate, whole bool) (pendingPass, error) {
 	var result pendingPass
 	read := 0
 	f := v1Frame{buf: update}
@@ -270,7 +270,10 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 			clock = end
 			read++
 			if unread := pendingUnread(structs, read, i+1 == clients, n-j-1); unread >= 0 && result.pending+unread <= remaining {
-				return result, nil
+				if !whole {
+					return result, nil
+				}
+				result.settled = true
 			}
 		}
 		if knownClock != startClock {
@@ -280,6 +283,7 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 	if f.err != nil {
 		return result, f.err
 	}
+	result.rest, result.exact = update[f.p:], clients <= 1
 	return result, nil
 }
 
