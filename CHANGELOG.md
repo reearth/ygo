@@ -5,26 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.55.0] — 2026-10-26
-
-### Fixed
-
-- **`crdt`: a bounded document's remote apply no longer copies what earlier
-  updates parked.** To restore them when it refuses an update, the apply of a
-  document with a scan bound (`WithMaxIntegrateScan`) copied the pending queue's
-  items, the clocks it waits on and the pending deletes as it began, and the
-  drain copied the pending deletes again, so every remote apply cost time and
-  memory in proportion to what sat parked: one keystroke allocated 2,806,176
-  bytes on a bounded document holding 349,517 parked structs (2,880 unbounded)
-  and 25,171,104 bytes on one holding 524,280 parked delete ranges (8,391,872
-  unbounded). The apply now keeps them by reference: it only appends to the
-  parked items past the length it keeps, copies the map of clocks the queue
-  waits on at its first write to it, and merges a delete range it parks into
-  copies of the clients that range names, so a refused update still leaves the
-  parked items, the clocks they wait on and the pending deletes exactly as they
-  were. With 100,000 parked items a keystroke now allocates 3,176 bytes on a
-  bounded document against 1,608 unbounded (806,264 before), and with 100,000
-  parked delete ranges 1,609,192 against 1,607,624 (4,821,112 before).
+## [1.56.0] — 2026-11-02
 
 ### Added
 
@@ -56,13 +37,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`crdt`: a bounded document's remote apply no longer copies what earlier
+  updates parked.** To restore them when it refuses an update, the apply of a
+  document with a scan bound (`WithMaxIntegrateScan`) copied the pending queue's
+  items, the clocks it waits on and the pending deletes as it began, and the
+  drain copied the pending deletes again, so every remote apply cost time and
+  memory in proportion to what sat parked: one keystroke allocated 2,806,176
+  bytes on a bounded document holding 349,517 parked structs (2,880 unbounded)
+  and 25,171,104 bytes on one holding 524,280 parked delete ranges (8,391,872
+  unbounded). The apply now keeps them by reference: it only appends to the
+  parked items past the length it keeps, copies the map of clocks the queue
+  waits on at its first write to it, and merges a delete range it parks into
+  copies of the clients that range names, so a refused update still leaves the
+  parked items, the clocks they wait on and the pending deletes exactly as they
+  were. With 100,000 parked items a keystroke now allocates 3,176 bytes on a
+  bounded document against 1,608 unbounded (806,264 before), and with 100,000
+  parked delete ranges 1,609,192 against 1,607,624 (4,821,112 before).
+
 - **`crdt`: merging split runs back at commit is linear in the run.** An update
   that splits one run n times and leaves each half where it merges back at
   commit made each merge append the half to the run's whole text and search and
   shift the client's store slice: 20,000 halves of a 40,000-character run
-  allocated 440,968,992 bytes in one apply, 11,384,168 bytes with this change.
+  allocated 440,968,992 bytes in one apply, 12,565,704 bytes with this change.
   The halves merge in clock order, each run's text is joined once, and the
   merged halves leave their store slices in one pass per client.
+
+## [1.55.0] — 2026-10-31
+
+### Added
+
+- **`provider/websocket`: `Server.MaxAwarenessClientsPerConn` bounds the
+  awareness client IDs one connection may hold live in its room (#204).** A
+  client can claim any ID, so one connection could fill a room's presence
+  budget and, in a cluster, have the relay fan the fabricated IDs to every node
+  holding the room. Each entry of a frame is judged as the room applies it,
+  under the awareness lock, so the verdict uses the outcome the entry really
+  has; an entry that would take the connection past the cap is refused and
+  reaches neither the room, its other peers nor the relay, while the rest of
+  the frame applies. Only IDs the connection introduced that are still live
+  count, so a y-protocols timeout-removal broadcast and a full-state echo cost
+  nothing and a room of any size is unaffected. Because a removal frees the
+  slot, this bounds concurrent presence rather than lifetime ID creation. `0`
+  (the default) selects 64, a negative value disables the gate, and a positive
+  value is used as given, inverting the `0 = unlimited` convention of the
+  neighbouring `Max*` fields. The cap is server-wide. With the gate on, peers
+  cannot claim client ID `0`, the room's own awareness client, which no removal
+  from the wire could retire, and a connection's departure removes the IDs it
+  introduced and has not itself removed, not every ID it ever named in a
+  frame.
+- **`provider/websocket`: `Server.MaxForeignAwarenessClients` reserves part of a
+  room's presence budget for local clients.** Once the room holds this many
+  live awareness entries, presence relayed from another node is refused for a
+  client ID that is not currently live (new, or removed and returning); a live
+  client keeps updating. `0` (the default) disables it, and a value at or above
+  a bounded `MaxAwarenessClientsPerRoom` has no effect. Size it as a large
+  fraction of `MaxAwarenessClientsPerRoom`, because in an N-node cluster
+  relayed presence is about (N-1)/N of a room, and note that in a room `Inject`
+  created with no local peers it is that node's whole presence ceiling. See
+  `docs/CLUSTERING.md`.
+- **`awareness`: `Awareness.ApplyUpdateWith(update, origin, opts)` and
+  `Awareness.SetMaxForeignClients(n)`.** `ApplyUpdateWith` is `ApplyUpdate`
+  with `ApplyOptions`: `Foreign` holds the update to the foreign sub-cap, and
+  `Admit` vets each entry, with the lock held, given whether the client is live
+  before and after it. The `ApplyResult` it returns lists the clients applied
+  and whether any entry was refused or not applied as sent.
+  `SetMaxForeignClients` sets the sub-cap, which counts live entries only.
+
+- **`crdt`: inspect live text-formatting boundaries with `YText.WalkFormatting` (#317).**
+  The callback receives each non-deleted formatting marker's key and value,
+  including boundaries that have no visible text and are absent from `ToDelta`.
+  `YXmlText` inherits the method. The walk holds the document read lock and
+  stops on the first callback error; callbacks must not mutate values or call
+  document APIs. Existing readers, merging and wire formats are unchanged.
+
+- **`crdt`: `ErrRootTypeMismatch`.** The panic raised when a named root is
+  accessed as a different type than it already has wraps it, so callers can
+  match it with `errors.Is`.
+
+### Changed
+
+- **`provider/websocket`: a connection that introduces more than 64 awareness
+  client IDs now has the excess refused.** `MaxAwarenessClientsPerConn` is on
+  by default. A browser tab introduces one ID, so ordinary clients are
+  unaffected; an embedder that bridges many clients over a single connection
+  must raise the cap or set it negative.
+- **`awareness`: at the `SetMaxClients` cap, a new client asserting state
+  reclaims the oldest removal tombstone instead of being refused.** Tombstones
+  count toward the cap, so removal churn — ordinary, or a peer introducing and
+  retiring IDs, locally or over the relay — used to fill a room and lock new
+  live clients out until expiry reclaimed them. An unseen client's null is
+  still refused at the cap, and so is a newcomer when every entry is live. A
+  reclaimed tombstone's clock is forgotten early, as `PurgeTombstones` does
+  after its grace period, but without `AwarenessExpiry` too: a delayed stale
+  update for that client is then accepted as new. This applies to
+  `Server.MaxAwarenessClientsPerRoom`.
+- **`provider/websocket`: local peers are sent an awareness frame as is only
+  when the room applied it exactly as sent.** Otherwise they get the room's
+  state for the clients it applied. Previously the frame was always forwarded
+  whole, so peers rendered presence the room had refused, discarded as stale,
+  or dropped as invalid. This also stops re-broadcasting the equal-clock
+  echoes y-websocket clients send of every update they apply, which made each
+  awareness change cost about N² frames in a room of N clients instead of N.
+
+### Fixed
+
+- **`crdt`: accessing a root as a different type panics instead of discarding
+  it (#293).** The first accessor fixes a named root's type for the document's
+  lifetime; a later accessor of another type used to replace the root and lose
+  its contents. The existing root is now left unchanged. A root that has only
+  arrived in a peer's update has no type yet, so the first local accessor still
+  decides it, as in Yjs.
+- **`mobile`: a root-type mismatch is returned as an error, not a crash.**
+  Methods with an error return return one wrapping `crdt.ErrRootTypeMismatch`;
+  `GetText` returns `""`.
 
 ## [1.54.0] — 2026-10-22
 
