@@ -363,80 +363,110 @@ func tryMergeWithLefts(txn *Transaction) {
 	if len(txn.mergeStructs) == 0 {
 		return
 	}
-	// The right halves are merged in clock order, so a run of halves of one
-	// client merges left to right, each into the run already merged before it:
-	// a merge's conditions are all local to the two items, so the runs it
-	// leaves do not depend on the order. Merged left to right, each merge adds
-	// only its own half to the run: a ContentAny or ContentJSON run appends the
-	// half's values, and a ContentString run's text is joined once, when every
-	// half has been merged (merging.strings), rather than copied whole by each
-	// merge. The merged halves leave their clients' store slices in one pass
-	// each (merging.removed) rather than one search and shift each. A
-	// transaction that split a long run n times, each half merged back at
-	// commit, otherwise copied the run's text and its client's store slice n
-	// times: n = 20,000 halves of a 40,000-character run allocated 407 MB.
+	// In client and clock order each half merges into the run left of it, so a
+	// run split n times is copied once rather than n times.
 	slices.SortFunc(txn.mergeStructs, func(a, b *Item) int {
 		if c := cmp.Compare(a.ID.Client, b.ID.Client); c != 0 {
 			return c
 		}
 		return cmp.Compare(a.ID.Clock, b.ID.Clock)
 	})
-	store := txn.doc.store
-	merging := &mergeRuns{}
+	merging := mergeRuns{store: txn.doc.store}
 	for _, item := range txn.mergeStructs {
-		tryMergeWithLeft(item, merging)
+		tryMergeWithLeft(item, &merging)
 	}
-	merging.finish(store)
+	merging.finish()
 }
 
-// mergeRuns is what tryMergeWithLefts defers to the end of its merges: the
-// text each ContentString run gains, joined once, and the merged halves, which
-// leave their clients' store slices together.
+// mergeRuns is the state of tryMergeWithLefts's merges, which take the halves
+// in client and clock order.
 type mergeRuns struct {
-	strings map[*ContentString]*strings.Builder
-	removed map[ClientID]map[*Item]struct{}
+	store *StructStore
+
+	// text is the run the last string merge extended, and joined its text from
+	// the run's second merge on, written back when another run starts.
+	text   *ContentString
+	joined strings.Builder
+
+	// items is client's store slice while merged halves leave it: items[:kept]
+	// is compacted and items[next:] not yet reached.
+	client     ClientID
+	items      []*Item
+	kept, next int
 }
 
-// appendString adds right's text to left's run.
+// appendString adds right's text to left's run without copying the whole run
+// at every merge.
 func (m *mergeRuns) appendString(left, right *ContentString) {
-	if m.strings == nil {
-		m.strings = make(map[*ContentString]*strings.Builder)
+	switch {
+	case left != m.text:
+		m.flushText()
+		m.text = left
+		left.Str += right.Str
+	case m.joined.Len() == 0:
+		m.joined.Grow(len(left.Str) + len(right.Str))
+		m.joined.WriteString(left.Str)
+		m.joined.WriteString(right.Str)
+	default:
+		m.joined.WriteString(right.Str)
 	}
-	b := m.strings[left]
-	if b == nil {
-		b = &strings.Builder{}
-		b.WriteString(left.Str)
-		m.strings[left] = b
-	}
-	b.WriteString(right.Str)
 	left.utf16Len += right.utf16Len
 }
 
-// remove records item, merged into its left neighbour, to leave the store.
-func (m *mergeRuns) remove(item *Item) {
-	if m.removed == nil {
-		m.removed = make(map[ClientID]map[*Item]struct{})
+// flushText writes the joined text back to its run.
+func (m *mergeRuns) flushText() {
+	if m.joined.Len() > 0 {
+		m.text.Str = m.joined.String()
+		m.joined.Reset()
 	}
-	gone := m.removed[item.ID.Client]
-	if gone == nil {
-		gone = make(map[*Item]struct{})
-		m.removed[item.ID.Client] = gone
-	}
-	gone[item] = struct{}{}
 }
 
-// finish joins each ContentString run's text and removes the merged halves
-// from their clients' store slices.
-func (m *mergeRuns) finish(store *StructStore) {
-	for content, b := range m.strings {
-		content.Str = b.String()
+// remove takes item, merged into its left neighbour, out of its client's store
+// slice, moving each item that stays at most once, as a single removal did.
+func (m *mergeRuns) remove(item *Item) {
+	if m.items != nil && item.ID.Client == m.client {
+		// Later halves come in clock order, so this scan passes only items the
+		// compaction moves anyway.
+		for i := m.next; i < len(m.items) && m.items[i].ID.Clock <= item.ID.Clock; i++ {
+			if m.items[i] == item {
+				m.kept += copy(m.items[m.kept:], m.items[m.next:i])
+				m.next = i + 1
+				return
+			}
+		}
+		return
 	}
-	for client, gone := range m.removed {
-		store.clients[client] = slices.DeleteFunc(store.clients[client], func(it *Item) bool {
-			_, merged := gone[it]
-			return merged
-		})
+	m.flushItems()
+	items := m.store.clients[item.ID.Client]
+	if i, ok := indexOfItem(items, item); ok {
+		m.client, m.items, m.kept, m.next = item.ID.Client, items, i, i+1
 	}
+}
+
+// flushItems closes the gap the merged halves left in the current client's
+// store slice.
+func (m *mergeRuns) flushItems() {
+	if m.items == nil {
+		return
+	}
+	n := m.kept + copy(m.items[m.kept:], m.items[m.next:])
+	clear(m.items[n:])
+	m.store.clients[m.client] = m.items[:n]
+	m.items = nil
+}
+
+// finish writes back the last run's text and the last client's store slice.
+func (m *mergeRuns) finish() {
+	m.flushText()
+	m.flushItems()
+}
+
+// indexOfItem finds item in items, a store slice in clock order.
+func indexOfItem(items []*Item, item *Item) (int, bool) {
+	i, found := slices.BinarySearchFunc(items, item.ID.Clock, func(it *Item, clock uint64) int {
+		return cmp.Compare(it.ID.Clock, clock)
+	})
+	return i, found && items[i] == item
 }
 
 // tryMergeWithLeft attempts to absorb item into item.Left. Returns true when
@@ -547,8 +577,7 @@ func tryMergeWithLeft(item *Item, merging *mergeRuns) bool {
 		left.Parent.clearMarkers()
 	}
 
-	// Remove item from the store's per-client slice, with the run's other
-	// merged halves (mergeRuns.finish).
+	// Remove item from its client's store slice.
 	merging.remove(item)
 	return true
 }
