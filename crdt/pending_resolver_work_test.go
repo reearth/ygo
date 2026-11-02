@@ -163,6 +163,9 @@ func TestUnit_PendingResolver_ProgressPreservesBlockedItems(t *testing.T) {
 	}
 }
 
+// A struct the document already holds still waits on an origin of another
+// client it lacks, since Yjs getMissing looks for it before integrateStructs
+// checks the struct's clocks.
 func TestUnit_PendingResolver_CoveredItemWithMissingOrigin(t *testing.T) {
 	doc := New(WithClientID(1))
 	defer doc.Destroy()
@@ -170,8 +173,9 @@ func TestUnit_PendingResolver_CoveredItemWithMissingOrigin(t *testing.T) {
 	doc.Transact(func(txn *Transaction) { text.Insert(txn, 0, "x", nil) })
 	duplicate := &Item{ID: ID{Client: 1}, Parent: &text.abstractType, Origin: &ID{Client: 9999}, Content: NewContentString("x")}
 	doc.Transact(func(txn *Transaction) {
-		ok, _, err := tryIntegrate(txn, duplicate)
-		require.True(t, ok)
+		ok, waitsOn, err := tryIntegrate(txn, duplicate)
+		require.False(t, ok)
+		require.Equal(t, ClientID(9999), waitsOn)
 		require.NoError(t, err)
 	})
 	require.Equal(t, "x", text.ToString())

@@ -225,9 +225,8 @@ func BenchmarkPendingParkBatch(b *testing.B) {
 }
 
 // BenchmarkPendingParkGCBatch: the queue holds client 2's clocks [2, 2+2s) as
-// alternating GC structs and items, so its span list is one span and its GC
-// span list is s spans. One update then parks k GC copies of the item clocks:
-// each joins two GC spans.
+// alternating GC structs and items, one run. One update then parks k GC copies
+// of the item clocks, which the merge drops, as Yjs's merge does.
 func BenchmarkPendingParkGCBatch(b *testing.B) {
 	gc := func(clock uint64) *Item {
 		return &Item{ID: ID{Client: 2, Clock: clock}, Content: NewContentDeleted(1), Deleted: true}
@@ -257,17 +256,16 @@ func BenchmarkPendingParkGCBatch(b *testing.B) {
 				if err := ApplyUpdateV1(doc, state, nil); err != nil {
 					b.Fatal(err)
 				}
-				c := doc.store.pending.coverOf()
-				if len(c.spans[2]) != 1 || len(c.gc[2]) != s {
-					b.Fatalf("spans %d, gc spans %d", len(c.spans[2]), len(c.gc[2]))
+				if c := doc.store.pending.coverOf(); len(c.spans[2]) != 1 {
+					b.Fatalf("spans %d", len(c.spans[2]))
 				}
 				b.StartTimer()
 				if err := ApplyUpdateV1(doc, u, nil); err != nil {
 					b.Fatal(err)
 				}
 				b.StopTimer()
-				if got := doc.PendingStats().Items; got != 2*s+k {
-					b.Fatalf("%d parked, want %d", got, 2*s+k)
+				if got := doc.PendingStats().Items; got != 2*s {
+					b.Fatalf("%d parked, want %d", got, 2*s)
 				}
 				b.StartTimer()
 			}

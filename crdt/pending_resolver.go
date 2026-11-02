@@ -47,8 +47,6 @@ func countStructRefs(pending []*Item) (runs, step int) {
 // client, appending the groups to into; runs and step are countStructRefs's.
 // It returns the queue positions the groups index, or nil when pending already
 // holds one strictly clock-ordered run per client, as a decoded update does.
-// Of two queued copies of a clock, a GC struct goes first: it waits only for
-// its own client, so a copy blocked on another client cannot hold it back.
 func groupStructRefs(pending []*Item, runs, step int, into []structRefs) ([]structRefs, []int) {
 	groups := slices.Grow(into[:0], runs)
 	for i, item := range pending {
@@ -82,10 +80,7 @@ func groupStructRefs(pending []*Item, runs, step int, into []structRefs) ([]stru
 		if c := cmp.Compare(pending[a].ID.Client, pending[b].ID.Client); c != 0 {
 			return c
 		}
-		if c := cmp.Compare(pending[a].ID.Clock, pending[b].ID.Clock); c != 0 {
-			return c
-		}
-		return cmp.Compare(copyRank(pending[a]), copyRank(pending[b]))
+		return cmp.Compare(pending[a].ID.Clock, pending[b].ID.Clock)
 	})
 	groups = groups[:0]
 	for i, p := range order {
@@ -95,14 +90,6 @@ func groupStructRefs(pending []*Item, runs, step int, into []structRefs) ([]stru
 		groups[len(groups)-1].end = i + 1
 	}
 	return groups, order
-}
-
-// copyRank orders a GC struct before another struct at the same clock.
-func copyRank(it *Item) int {
-	if isGCStruct(it) {
-		return 0
-	}
-	return 1
 }
 
 // integratePending integrates pending in Yjs's integrateStructs order (highest
@@ -260,17 +247,22 @@ func tryIntegrateOrDrop(txn *Transaction, item *Item, dropped *error) (ok bool, 
 	return tryIntegrate(txn, item)
 }
 
-// parkWithinUpdatePending parks what the update could not integrate, minus
-// clocks the queue already holds, as Yjs merges its pending structs, and
-// charges only those to the persistent cap, as a last guard behind the apply's
-// check.
+// parkWithinUpdatePending parks what the update could not integrate, merged
+// into the queue as Yjs merges an update's rest into its pending update, and
+// checks the persistent cap as a last guard behind the apply's check, which
+// lets a queue above a lowered cap stay there but not grow.
 func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 	s := txn.doc.store
-	// The cover is built before the park adds to it, from the queue as it was.
-	held := s.pending != nil && len(s.pending.items) > 0
-	tailAppend := held && s.pending.tailAppends(pending)
-	if held && !tailAppend {
-		s.pending.coverOf()
+	limit := txn.doc.maxPendingItemsLimit()
+	if s.pending != nil {
+		limit = max(limit, len(s.pending.items))
+	}
+	if s.pending != nil && len(s.pending.items) > 0 && !s.pending.tailAppends(pending) && s.pending.mergesAny(pending) {
+		pl := s.pending.plan(refsOf(pending))
+		if len(s.pending.items)+pl.growth() > limit {
+			return ErrInvalidUpdate
+		}
+		pending = s.pending.apply(pl, pending, s.parked != nil && len(s.parked.items) > 0)
 	}
 	from := 0
 	if s.pending != nil {
@@ -286,12 +278,7 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 		}
 	}()
 	for _, item := range pending {
-		if held && !tailAppend {
-			if item = unparked(s, item, s.NextClock(item.ID.Client)); item == nil {
-				continue
-			}
-		}
-		if s.pending != nil && len(s.pending.items) >= txn.doc.maxPendingItemsLimit() {
+		if s.pending != nil && len(s.pending.items) >= limit {
 			return ErrInvalidUpdate
 		}
 		if s.pending == nil {

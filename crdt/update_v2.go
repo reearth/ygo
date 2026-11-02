@@ -723,6 +723,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			group = slices.Grow(group, int(min(numStructs, uint64(len(update)))))
 		}
 
+		kept := false // Yjs's rest takes a client's structs from one that waits
 		for j := uint64(0); j < numStructs; j++ {
 			info, err := dec.readInfo()
 			if err != nil {
@@ -783,8 +784,8 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			case numClients > 1:
 				// Several clients' structs integrate in Yjs's order once all
 				// are decoded, as in the V1 decoder.
-				if itemEnd > existingEnd {
-					pending = append(pending, item)
+				if kept || itemEnd > existingEnd || hasMissingDep(txn.doc.store, item) || namesFutureOwn(item, existingEnd) {
+					pending, kept = append(pending, item), true
 				}
 			default:
 				group = append(group, item)

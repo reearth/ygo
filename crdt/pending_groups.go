@@ -8,12 +8,13 @@ import (
 // pendingCollector retains a record per blocked group and the group's
 // unresolved structs as a varint summary, so a blocked group costs about its
 // wire size rather than a decoder copy. A sizing pass (fill false) only
-// counts, letting the filling pass allocate exact capacities.
+// counts, letting the filling pass allocate exact capacities. With permanent,
+// it keeps the groups that can never integrate as well.
 type pendingCollector struct {
-	groups      []pendingGroup
-	sum         []byte
-	heads, size int
-	fill        bool
+	groups          []pendingGroup
+	sum             []byte
+	heads, size     int
+	fill, permanent bool
 }
 
 // head records a blocked group; gc marks its first blocked struct a GC
@@ -198,17 +199,19 @@ func resolvePendingGroups(groups []pendingGroup, sum []byte, known StateVector) 
 		top, g.sibling = g.sibling, -1
 		start := known.Clock(g.client)
 		for !g.done {
-			if g.end > known.Clock(g.client) {
-				if g.clock > known.Clock(g.client) {
-					break // Only this group could fill its own clock gap.
+			// A covered struct still waits on what it names, as in Yjs.
+			covered := g.end <= known.Clock(g.client)
+			if !covered && g.clock > known.Clock(g.client) {
+				break // Only this group could fill its own clock gap.
+			}
+			if dep, missing := g.missing(sum, known); missing {
+				if target := find(dep.Client); target >= 0 && target != index {
+					g.wake = dep.Clock
+					groups[target].watchers = pendingMeld(groups, groups[target].watchers, index)
 				}
-				if dep, missing := g.missing(sum, known); missing {
-					if target := find(dep.Client); target >= 0 && target != index {
-						g.wake = dep.Clock
-						groups[target].watchers = pendingMeld(groups, groups[target].watchers, index)
-					}
-					break
-				}
+				break
+			}
+			if !covered {
 				known[g.client] = g.end
 			}
 			g.next(sum)

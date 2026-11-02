@@ -11,7 +11,13 @@ the same document.
 - Parked delete ranges count against the same cap, separately, and are
   retried only when they can apply. `Doc.SetMaxPendingItems` sets the cap
   after construction.
-- A struct sent again parks once.
+- A struct sent again merges into the pending queue as Yjs merges its pending
+  update, so the queue holds what Yjs's pending update holds.
+- A struct the document already holds waits on another client's struct it
+  names and the document lacks, as in Yjs.
+- An item next to a GC struct integrates as a GC struct, as in Yjs.
+- An item that names a struct of its own client past that client's clock is
+  refused, as Yjs throws for it.
 - Clocks past 2^53-1, and struct, origin and parent clients past 2^55-1, are
   refused.
 - `ApplyUpdateV1Landed`, which the websocket provider relays after a partial

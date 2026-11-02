@@ -25,9 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WithMaxPendingItems` also bounds, separately, the delete ranges waiting for
   structs the document lacks, and a client's parked ranges are retried only
   once its structs move past the lowest of them.
-- **`crdt`: a re-sent pending struct parks once, as in Yjs.** A struct whose
-  clocks the pending queue already holds parks without them, and the pending
-  cap does not count it again.
+- **`crdt`: the pending queue merges a struct sent again as Yjs merges its
+  pending update.** Of the structs that give one clock, the one that Yjs's
+  merge takes first keeps it, and the queue drops or cuts the others. The
+  pending cap counts what the park adds after the merge, and a queue above a
+  lowered cap does not grow.
+- **`crdt`: a struct the document already holds waits on an origin, right
+  origin or parent of another client that the document lacks, as Yjs
+  `getMissing` does,** and parks with every struct of its client after it.
+- **`crdt`: an item whose right origin is a GC struct, or a parked item whose
+  origin is one, integrates as a GC struct, as Yjs `getMissing` makes it.**
+- **`crdt`: an item that names a struct of its own client past that client's
+  clock is refused, as Yjs throws for it.**
 - **`crdt`: clocks past 2^53-1, and struct, origin and parent clients past
   2^55-1, are refused.** Both decoders and the merge decoders refuse them, so
   `EncodeStateAsUpdateV2` cannot meet a struct it cannot write, and encoding

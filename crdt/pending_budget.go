@@ -28,8 +28,8 @@ type pendingBudget struct {
 	// structs, when not zero, bounds the update's structs so the first pass can
 	// stop early.
 	structs int
-	// parked is the store's pending queue: a blocked struct whose clocks it
-	// already holds parks nothing (pending_cover.go) and is not counted.
+	// parked is the store's pending queue, which a blocked struct that merges
+	// with it grows by at most one (pending_merge.go).
 	parked *pendingUpdate
 	// deleteSetBytes is the rest of the update past its structs once walked is
 	// set, which implies groupsKnown.
@@ -137,8 +137,11 @@ func (b *pendingBudget) check() error {
 		if err != nil {
 			return wrapUpdateErr(err)
 		}
-		if result.pending <= b.remaining {
+		if result.charged() <= b.remaining {
 			return nil
+		}
+		if result.overlapping > 0 {
+			break // only the merge itself tells what overlapping structs add
 		}
 		if !result.progressed {
 			return ErrInvalidUpdate
@@ -154,34 +157,7 @@ func (b *pendingBudget) check() error {
 			return wrapUpdateErr(err)
 		}
 	}
-	// A sizing pass makes the retained records and summary exact.
-	sizing := pendingCollector{}
-	if _, err := scanPendingGroupsBounded(b.scanner(), known, b.remaining, &sizing, bounds, nil, b.superseded); err != nil {
-		return wrapUpdateErr(err)
-	}
-	collect := pendingCollector{fill: true, groups: make([]pendingGroup, 0, sizing.heads), sum: make([]byte, 0, sizing.size)}
-	result, err := scanPendingGroupsBounded(b.scanner(), known, b.remaining, &collect, bounds, nil, b.superseded)
-	if err != nil {
-		return wrapUpdateErr(err)
-	}
-	groups := collect.groups
-	if len(groups) > 0 {
-		resolvePendingGroups(groups, collect.sum, known)
-		pending := result.permanent
-		for i := range groups {
-			g := &groups[i]
-			for !g.done {
-				if g.end > known.Clock(g.client) && !b.parked.holds(g.client, g.clock, known.Clock(g.client), g.end, g.gc) {
-					pending++
-					if pending > b.remaining {
-						return ErrInvalidUpdate
-					}
-				}
-				g.next(collect.sum)
-			}
-		}
-	}
-	return nil
+	return b.checkCollected(known, bounds)
 }
 
 // knowSuperseded records the groups the decoder drops and the update's struct
@@ -469,15 +445,26 @@ func pendingWireContainsDependencies(s *pendingScanner, known StateVector) bool 
 	return w.containsDependencies()
 }
 
+// A pass counts in pending the blocked structs that each add one struct to the
+// queue, and in overlapping those that merge with it and add at most one.
 type pendingPass struct {
-	heads, pending int
-	progressed     bool
+	heads, pending, overlapping int
+	progressed                  bool
 	// rest is the update past its structs when a first pass read them all,
 	// and exact whether its known then holds the clocks the structs reach.
 	rest  []byte
 	exact bool
 	// settled is whether a pass that is not whole would have stopped already.
 	settled bool
+}
+
+// charged is the most structs the pass's blocked structs can add to the queue.
+func (p pendingPass) charged() int { return p.pending + p.overlapping }
+
+// pastRoom reports whether n structs that each add one to the queue overflow
+// remaining, whatever structs merging may drop of the held ones it holds.
+func pastRoom(n, remaining, held int) bool {
+	return n > remaining && n-held > remaining
 }
 
 type pendingBoundedPass struct {
@@ -492,6 +479,8 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 		return result, ErrInvalidUpdate
 	}
 	var total uint64
+	// Overlapping structs can drop at most every queued struct.
+	held := s.parked.heldStructs()
 	for i := uint64(0); i < clients && s.err == nil; i++ {
 		n := s.uint()
 		total += n
@@ -511,7 +500,7 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 			if collected {
 				collect.put(skip, s.gc, length, deps[:numDeps])
 			}
-			if !drop && !skip && end > knownClock {
+			if !drop && !skip && (end > knownClock || blocked || depMissing(known, client, knownClock, deps[:numDeps])) {
 				if !blocked {
 					if clientRange != nil {
 						permanent = clientRange.headImpossible(known, client, clock, deps[:numDeps])
@@ -520,33 +509,38 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 					}
 				}
 				if permanent {
-					if !s.parked.holds(client, clock, knownClock, end, s.gc) {
+					if s.parked.merges(client, clock, end, s.gc) {
+						result.overlapping++
+					} else {
 						result.permanent++
+						if pastRoom(result.permanent, remaining, held) {
+							return result, ErrInvalidUpdate
+						}
 					}
-					if result.permanent > remaining {
-						return result, ErrInvalidUpdate
+					if !blocked && collect != nil && collect.permanent {
+						collect.head(client, clock, end, n-j-1, s.gc)
+						collect.put(false, s.gc, length, deps[:numDeps])
+						collected = true
 					}
 					blocked = true
 					clock = end
 					continue
 				}
-				ready := clock <= knownClock
+				// A covered struct waits on what it names, as in Yjs, and every
+				// struct of a group after one that waits parks with it.
+				ready := !blocked && clock <= knownClock && !depMissing(known, client, knownClock, deps[:numDeps])
 				if ready {
-					for _, dep := range deps[:numDeps] {
-						if dep.Clock >= known.Clock(dep.Client) {
-							ready = false
-							break
-						}
+					if end > knownClock {
+						known[client] = end
+						knownClock = end
 					}
-				}
-				if ready {
-					known[client] = end
-					knownClock = end
 					result.progressed = true
 				} else {
-					if !s.parked.holds(client, clock, knownClock, end, s.gc) {
+					if s.parked.merges(client, clock, end, s.gc) {
+						result.overlapping++
+					} else {
 						result.pending++
-						if clients == 1 && result.pending > remaining {
+						if clients == 1 && pastRoom(result.pending, remaining, held) {
 							// No other group can fill this group's first blocked head. All
 							// following uncovered non-Skip structs remain permanently pending.
 							return result, ErrInvalidUpdate
@@ -569,6 +563,21 @@ func scanPendingGroupsBounded(s *pendingScanner, known StateVector, remaining in
 	return result, s.err
 }
 
+// depMissing reports whether one of deps is a clock known does not hold yet,
+// knownClock standing for client's own.
+func depMissing(known StateVector, client ClientID, knownClock uint64, deps []ID) bool {
+	for _, dep := range deps {
+		at := knownClock
+		if dep.Client != client {
+			at = known.Clock(dep.Client)
+		}
+		if dep.Clock >= at {
+			return true
+		}
+	}
+	return false
+}
+
 // pendingScanner reads struct framing without retaining or validating anything,
 // since the decoder still validates everything.
 type pendingScanner struct {
@@ -578,11 +587,10 @@ type pendingScanner struct {
 	err     error
 	frame   bool
 	lenient bool
-	// parked is the store's pending queue, whose structs a scan does not
-	// count again (pendingUpdate.holds); nil counts every blocked struct.
+	// parked is the store's pending queue, which a scan counts the structs
+	// that merge with apart (pendingUpdate.merges); nil merges none.
 	parked *pendingUpdate
-	// gc is whether the struct item last read is a GC struct, which only
-	// parked GC structs hold.
+	// gc is whether the struct item last read is a GC struct.
 	gc bool
 }
 

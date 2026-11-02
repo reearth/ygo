@@ -218,6 +218,7 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 		}
 		knownClock := known.Clock(client)
 		startClock := knownClock
+		stalled := false // a covered struct waits, so the rest of the group does
 		var depClient ClientID
 		var depClock uint64
 		depCached := false
@@ -232,9 +233,12 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 			if end < clock {
 				return result, ErrInvalidUpdate
 			}
-			if !drop && !skip && end > knownClock {
-				ready := clock <= knownClock
-				if ready {
+			if !drop && !skip {
+				// Yjs checks a struct's dependencies before its clocks, so a
+				// covered struct can wait too, and every struct of the client
+				// after one that waits parks with it.
+				waits := stalled || clock > knownClock
+				if !waits {
 					for _, dep := range deps[:numDeps] {
 						at := knownClock
 						if dep.Client != client {
@@ -244,24 +248,31 @@ func scanPendingGroupsV2(d *v2Decoder, known StateVector, remaining int, clientR
 							at = depClock
 						}
 						if dep.Clock >= at {
-							ready = false
+							waits = true
 							break
 						}
 					}
 				}
-				if ready {
-					knownClock = end
-					result.progressed = true
-				} else if !parked.holds(client, clock, knownClock, end, f.gc) {
-					result.pending++
-					if clients == 1 && result.pending > remaining {
-						return result, ErrInvalidUpdate
+				if !waits {
+					if end > knownClock {
+						knownClock = end
+						result.progressed = true
+					}
+				} else {
+					stalled = stalled || end <= knownClock
+					if parked.merges(client, clock, end, f.gc) {
+						result.overlapping++
+					} else {
+						result.pending++
+						if clients == 1 && pastRoom(result.pending, remaining, parked.heldStructs()) {
+							return result, ErrInvalidUpdate
+						}
 					}
 				}
 			}
 			clock = end
 			read++
-			if unread := pendingUnread(structs, read, i+1 == clients, n-j-1); unread >= 0 && result.pending+unread <= remaining {
+			if unread := pendingUnread(structs, read, i+1 == clients, n-j-1); unread >= 0 && result.charged()+unread <= remaining {
 				if !whole {
 					return result, nil
 				}

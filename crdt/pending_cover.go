@@ -6,48 +6,41 @@ import (
 	"sort"
 )
 
-// The pending queue parks a re-sent struct once, as Yjs does, since reconnects and stored states re-send parked structs.
+// The pending queue holds what Yjs's pending update holds, since reconnects and
+// stored states re-send parked structs: a park merges an update's unintegrated
+// structs into it as Yjs mergeUpdatesV2 merges rest into pending (pending_merge.go).
 
 // clockSpan is the clocks [start, end) of one client.
 type clockSpan struct{ start, end uint64 }
 
-// pendingCover is the clock spans a pending queue holds per client, with GC
-// structs kept apart because only a parked GC struct holds a GC copy.
+// pendingCover indexes a pending queue: each client's clock spans, and, once a
+// park merged, its structs in clock order, with the clients in order.
 type pendingCover struct {
-	spans map[ClientID][]clockSpan
-	gc    map[ClientID][]clockSpan
+	spans   map[ClientID][]clockSpan
+	structs map[ClientID][]*Item
+	clients []ClientID
 }
 
 // isGCStruct reports whether it is a GC placeholder (wire tag 0).
 func isGCStruct(it *Item) bool { return it.Deleted && it.isGCOrphan() }
 
-func (c *pendingCover) of(gc bool) map[ClientID][]clockSpan {
-	if gc {
-		return c.gc
-	}
-	return c.spans
-}
-
 // coverOf is p's cover, built on first use and kept current by addCover.
 func (p *pendingUpdate) coverOf() *pendingCover {
 	if p.cover == nil {
-		p.cover = &pendingCover{spans: sortedSpans(p.items, false), gc: sortedSpans(p.items, true)}
+		p.cover = &pendingCover{spans: sortedSpans(p.items)}
 	}
 	return p.cover
 }
 
-// sortedSpans is the merged spans of items (GC structs only when gcOnly) per
-// client, built in one pass for structs in clock order.
-func sortedSpans(items []*Item, gcOnly bool) map[ClientID][]clockSpan {
+// sortedSpans is the merged spans of items per client, built in one pass for
+// structs in clock order.
+func sortedSpans(items []*Item) map[ClientID][]clockSpan {
 	spans := make(map[ClientID][]clockSpan)
 	var unsorted map[ClientID]bool
 	var client ClientID
 	var list []clockSpan
 	have := false
 	for _, it := range items {
-		if gcOnly && !isGCStruct(it) {
-			continue
-		}
 		start := it.ID.Clock
 		end := start + uint64(it.Content.Len())
 		if end <= start {
@@ -101,6 +94,7 @@ const coverInsertWork = 1 << 19
 
 // tailAppends reports whether every item starts past every clock the queue's
 // only client holds, so none overlaps a parked struct and cover is not needed.
+// A GC struct may merge with the GC struct before it, so it takes no shortcut.
 func (p *pendingUpdate) tailAppends(items []*Item) bool {
 	if !p.tailValid {
 		return false
@@ -132,32 +126,169 @@ func (p *pendingUpdate) addCover(items []*Item) {
 	if p.cover == nil {
 		return
 	}
+	p.cover.addStructs(items)
 	work := 0
 	for _, it := range items {
-		work += len(p.cover.spans[it.ID.Client]) + 1
-		if isGCStruct(it) {
-			work += len(p.cover.gc[it.ID.Client]) + 1
-		}
-		if work > coverInsertWork {
+		if work += len(p.cover.spans[it.ID.Client]) + 1; work > coverInsertWork {
 			break
 		}
 	}
 	if work <= coverInsertWork {
 		for _, it := range items {
 			insertSpan(p.cover.spans, it)
-			if isGCStruct(it) {
-				insertSpan(p.cover.gc, it)
-			}
 		}
 		return
 	}
-	for _, gc := range []bool{false, true} {
-		add := sortedSpans(items, gc)
-		m := p.cover.of(gc)
-		for client, list := range add {
-			m[client] = mergeSpans(m[client], list)
+	for client, list := range sortedSpans(items) {
+		p.cover.spans[client] = mergeSpans(p.cover.spans[client], list)
+	}
+}
+
+// structIndex is p's cover with each client's structs in clock order, built
+// on first use and kept by addCover and the merge.
+func (p *pendingUpdate) structIndex() *pendingCover {
+	c := p.coverOf()
+	if c.structs == nil {
+		c.structs = make(map[ClientID][]*Item)
+		for _, it := range p.items {
+			c.structs[it.ID.Client] = append(c.structs[it.ID.Client], it)
+		}
+		c.clients = make([]ClientID, 0, len(c.structs))
+		for client, list := range c.structs {
+			if !slices.IsSortedFunc(list, byClock) {
+				slices.SortFunc(list, byClock)
+			}
+			c.clients = append(c.clients, client)
+		}
+		slices.Sort(c.clients)
+	}
+	return c
+}
+
+func byClock(a, b *Item) int { return cmp.Compare(a.ID.Clock, b.ID.Clock) }
+
+// addStructs adds items to the struct index, if built, merging what goes
+// before a client's last struct, and new clients, in one pass each.
+func (c *pendingCover) addStructs(items []*Item) {
+	if c.structs == nil {
+		return
+	}
+	var fresh []ClientID
+	var early map[ClientID][]*Item
+	for _, it := range items {
+		client := it.ID.Client
+		list := c.structs[client]
+		switch n := len(list); {
+		case n == 0:
+			fresh = append(fresh, client)
+			c.structs[client] = append(list, it)
+		case list[n-1].ID.Clock < it.ID.Clock:
+			c.structs[client] = append(list, it)
+		default:
+			if early == nil {
+				early = make(map[ClientID][]*Item)
+			}
+			early[client] = append(early[client], it)
 		}
 	}
+	for client, add := range early {
+		slices.SortFunc(add, byClock)
+		c.structs[client] = mergeSorted(c.structs[client], add, byClock)
+	}
+	slices.Sort(fresh)
+	c.clients = mergeSorted(c.clients, fresh, cmp.Compare[ClientID])
+}
+
+// mergeSorted merges add into list, both sorted by compare, from the back, so
+// it moves only what follows add's first element.
+func mergeSorted[T any](list, add []T, compare func(a, b T) int) []T {
+	if len(add) == 0 {
+		return list
+	}
+	old := list
+	list = slices.Grow(list, len(add))[:len(old)+len(add)]
+	for i, j, k := len(old)-1, len(add)-1, len(list)-1; j >= 0; k-- {
+		if i >= 0 && compare(old[i], add[j]) > 0 {
+			list[k], i = old[i], i-1
+		} else {
+			list[k], j = add[j], j-1
+		}
+	}
+	return list
+}
+
+// spliceWindows puts kepts, what the merge kept of each of a client's windows
+// (nil for none it changed), in their place in the struct index, moving the
+// structs after them only from the first window that shrinks, and reports
+// whether the client has none left.
+func (c *pendingCover) spliceWindows(wins []queueWindow, kepts [][]*Item) bool {
+	client := wins[0].client
+	list := c.structs[client]
+	shrink := len(wins)
+	for i, w := range wins {
+		kept := kepts[i]
+		if kept == nil {
+			continue
+		}
+		if !slices.IsSortedFunc(kept, byClock) {
+			slices.SortFunc(kept, byClock)
+		}
+		if len(kept) < w.to-w.from {
+			shrink = i
+			break
+		}
+		copy(list[w.from:w.to], kept)
+	}
+	if shrink == len(wins) {
+		return false
+	}
+	out, read := list[:wins[shrink].from], wins[shrink].from
+	for i, w := range wins[shrink:] {
+		out = append(out, list[read:w.from]...)
+		kept := kepts[shrink+i]
+		if kept == nil {
+			kept = list[w.from:w.to]
+		} else if !slices.IsSortedFunc(kept, byClock) {
+			slices.SortFunc(kept, byClock)
+		}
+		out, read = append(out, kept...), w.to
+	}
+	out = append(out, list[read:]...)
+	clear(list[len(out):])
+	if len(out) > 0 {
+		c.structs[client] = out
+		return false
+	}
+	delete(c.structs, client)
+	return true
+}
+
+// dropClients takes gone, clients with no struct left, out of the ordered list
+// in one pass.
+func (c *pendingCover) dropClients(gone []ClientID) {
+	if len(gone) == 0 {
+		return
+	}
+	slices.Sort(gone)
+	out, j := c.clients[:0], 0
+	for _, client := range c.clients {
+		for j < len(gone) && gone[j] < client {
+			j++
+		}
+		if j == len(gone) || gone[j] != client {
+			out = append(out, client)
+		}
+	}
+	c.clients = out
+}
+
+// holdsBetween reports whether the queue holds a client between lo and hi.
+func (c *pendingCover) holdsBetween(lo, hi ClientID) bool {
+	at, found := slices.BinarySearch(c.clients, lo)
+	if found {
+		at++
+	}
+	return at < len(c.clients) && c.clients[at] < hi
 }
 
 // insertSpan adds its clocks to m, merging the spans they overlap or touch.
@@ -208,56 +339,34 @@ func mergeSpans(a, b []clockSpan) []clockSpan {
 	return out
 }
 
-// heldUntil is the first clock of [max(clock, from), end) of client that p
-// does not hold (as GC structs, when gc), or end; p may be nil.
-func (p *pendingUpdate) heldUntil(client ClientID, clock, from, end uint64, gc bool) uint64 {
-	start := max(clock, from)
-	if p == nil || start >= end {
-		return start
+// mergesAny reports whether any of items merges with p's queue.
+func (p *pendingUpdate) mergesAny(items []*Item) bool {
+	for _, it := range items {
+		if p.merges(it.ID.Client, it.ID.Clock, it.ID.Clock+uint64(it.Content.Len()), isGCStruct(it)) {
+			return true
+		}
 	}
-	spans := p.coverOf().of(gc)[client]
+	return false
+}
+
+// merges reports whether a struct of client at [start, end) merges with p's
+// queue, sharing a clock with it or, as a GC struct, touching it; p may be nil.
+func (p *pendingUpdate) merges(client ClientID, start, end uint64, gc bool) bool {
+	if p == nil || len(p.items) == 0 {
+		return false
+	}
+	if gc {
+		start, end = max(start, 1)-1, end+1
+	}
+	spans := p.coverOf().spans[client]
 	i := sort.Search(len(spans), func(k int) bool { return spans[k].end > start })
-	if i == len(spans) || spans[i].start > start {
-		return start
-	}
-	return min(spans[i].end, end)
+	return i < len(spans) && spans[i].start < end
 }
 
-// holds reports whether p holds every clock of [max(clock, from), end) of
-// client (as GC structs, when gc), so a struct spanning them parks nothing.
-func (p *pendingUpdate) holds(client ClientID, clock, from, end uint64, gc bool) bool {
-	return p.heldUntil(client, clock, from, end, gc) >= end
-}
-
-// heldTailFrom is where the span of p holding end-1 of [start, end) starts,
-// when it starts after start, or else end.
-func (p *pendingUpdate) heldTailFrom(client ClientID, start, end uint64, gc bool) uint64 {
-	spans := p.coverOf().of(gc)[client]
-	i := sort.Search(len(spans), func(k int) bool { return spans[k].end >= end })
-	if i == len(spans) || spans[i].start >= end || spans[i].start <= start {
-		return end
-	}
-	return spans[i].start
-}
-
-// unparked trims only item's held front and tail, so an arrival spanning a gap in the queue's clocks parks the clocks past the gap again.
-func unparked(s *StructStore, item *Item, from uint64) *Item {
-	p := s.pending
+// heldStructs is the number of structs p's queue holds; p may be nil.
+func (p *pendingUpdate) heldStructs() int {
 	if p == nil {
-		return item
+		return 0
 	}
-	client := item.ID.Client
-	gc := isGCStruct(item)
-	end := item.ID.Clock + uint64(item.Content.Len())
-	at := p.heldUntil(client, item.ID.Clock, from, end, gc)
-	if at >= end {
-		return nil
-	}
-	if at > max(item.ID.Clock, from) {
-		sliceItemFront(item, int(at-item.ID.Clock))
-	}
-	if tail := p.heldTailFrom(client, max(at, item.ID.Clock), end, gc); tail < end {
-		item.Content.Splice(int(tail - item.ID.Clock))
-	}
-	return item
+	return len(p.items)
 }

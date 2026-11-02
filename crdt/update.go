@@ -163,7 +163,7 @@ func withParked(doc *Doc, sv StateVector, state []byte,
 	}
 	var parts [][]byte
 	if s.pending != nil {
-		// One update per item: parked items may overlap, and merge dedups.
+		// One update per item, so one that does not merge is left out alone.
 		for _, it := range s.pending.items {
 			parts = append(parts, encode(map[ClientID][]*Item{it.ID.Client: {it}}, newDeleteSet(), sv, s))
 		}
@@ -757,6 +757,7 @@ func decodeStructs(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			group = slices.Grow(group, int(min(numStructs, uint64(dec.Remaining()/2))))
 		}
 
+		kept := false // Yjs's rest takes a client's structs from one that waits
 		for j := uint64(0); j < numStructs; j++ {
 			item, err := decodeItem(dec, txn.doc, client, clock)
 			if err != nil {
@@ -781,8 +782,8 @@ func decodeStructs(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			case numClients > 1:
 				// Yjs integrates several clients' structs highest client
 				// first, whatever the wire order.
-				if itemEnd > existingEnd {
-					pending = append(pending, item)
+				if kept || itemEnd > existingEnd || hasMissingDep(txn.doc.store, item) || namesFutureOwn(item, existingEnd) {
+					pending, kept = append(pending, item), true
 				}
 			default:
 				group = append(group, item)
@@ -798,14 +799,29 @@ func decodeStructs(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 // those that must wait: past a gap, or for a parent or right origin the
 // document lacks.
 func integrateGroup(txn *Transaction, group []*Item, existingEnd uint64, pending []*Item) ([]*Item, error) {
+	store := txn.doc.store
+	// Once a covered struct waits, Yjs's rest takes the client's structs from
+	// there, covered or not.
+	blocked := false
 	for _, item := range group {
 		if item.Parent == nil {
-			resolveDecodedParent(txn.doc.store, item)
+			resolveDecodedParent(store, item)
+		}
+		if blocked {
+			pending = append(pending, item)
+			continue
 		}
 		clock := item.ID.Clock
 		itemEnd := clock + uint64(item.Content.Len())
 		if itemEnd <= existingEnd {
-			// Already fully integrated — skip.
+			// Already integrated, unless it names a struct the store lacks,
+			// which Yjs looks for first.
+			if hasMissingDep(store, item) {
+				pending, blocked = append(pending, item), true
+			} else if namesFutureOwn(item, existingEnd) {
+				integrateBeforeRefusal(txn, pending)
+				return nil, errFutureOwnRef
+			}
 			continue
 		}
 
@@ -864,6 +880,13 @@ func integrateGroup(txn *Transaction, group []*Item, existingEnd uint64, pending
 			item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
 		}
 
+		if rightIsGC(txn, item) {
+			item.Left = nil
+			item.markGCOrphan()
+			appendTrimmed(store, item, existingEnd)
+			existingEnd = itemEnd
+			continue
+		}
 		item.integrate(txn, offset)
 		existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
 	}
@@ -996,9 +1019,6 @@ func unresolvedPending(store *StructStore, items []*Item, done []bool) ([]*Item,
 		remaining = append(remaining, item)
 		if client, parkedAt, isFuture := itemFutureDep(item, store); isFuture {
 			mergePendingMissing(missing, client, parkedAt)
-		} else if item.ID.Clock > store.NextClock(item.ID.Client) {
-			// Same-client gap still blocks it.
-			mergePendingMissing(missing, item.ID.Client, store.NextClock(item.ID.Client))
 		}
 	}
 	return remaining, missing
@@ -1652,6 +1672,47 @@ func integrateBeforeRefusal(txn *Transaction, pending []*Item) {
 	_, _ = resolveDeferred(txn, pending)
 }
 
+// missingDep is the client Yjs getMissing names for item: that of the first of
+// its origin, right origin and parent of another client past what store holds.
+func missingDep(store *StructStore, item *Item) (ClientID, bool) {
+	c := item.ID.Client
+	if o := item.Origin; o != nil && o.Client != c && o.Clock >= store.NextClock(o.Client) {
+		return o.Client, true
+	}
+	if o := item.OriginRight; o != nil && o.Client != c && o.Clock >= store.NextClock(o.Client) {
+		return o.Client, true
+	}
+	if p := item.parentID; p != nil && item.Parent == nil && p.Client != c && p.Clock >= store.NextClock(p.Client) {
+		return p.Client, true
+	}
+	return 0, false
+}
+
+// hasMissingDep reports whether missingDep names a client.
+func hasMissingDep(store *StructStore, item *Item) bool {
+	_, ok := missingDep(store, item)
+	return ok
+}
+
+// errFutureOwnRef refuses an item that names a struct of its own client past
+// that client's clock, which Yjs throws on when it looks the struct up.
+var errFutureOwnRef = errors.New("item names a struct of its own client that does not exist")
+
+// namesFutureOwn reports whether item names, as its origin, right origin or
+// parent, a clock of its own client at or past next, the client's clock.
+func namesFutureOwn(item *Item, next uint64) bool {
+	c := item.ID.Client
+	if o := item.Origin; o != nil && o.Client == c && o.Clock >= next {
+		return true
+	}
+	if o := item.OriginRight; o != nil && o.Client == c && o.Clock >= next {
+		return true
+	}
+	// Only a struct with no origins names a parent, which Yjs then reads.
+	p := item.parentID
+	return p != nil && item.Parent == nil && p.Client == c && p.Clock >= next
+}
+
 // namesGCStruct reports whether id names a GC struct in store.
 func namesGCStruct(store *StructStore, id *ID) bool {
 	if id == nil {
@@ -1659,6 +1720,26 @@ func namesGCStruct(store *StructStore, id *ID) bool {
 	}
 	s := store.Find(*id)
 	return s != nil && s.isGCOrphan()
+}
+
+// rightIsGC resolves item.Right from its right origin, as Yjs getMissing does,
+// and reports whether that struct is a GC struct, which it leaves whole.
+func rightIsGC(txn *Transaction, item *Item) bool {
+	if item.OriginRight == nil || item.Right != nil {
+		return false
+	}
+	r := txn.doc.store.Find(*item.OriginRight)
+	if r == nil {
+		return false
+	}
+	if r.isGCOrphan() {
+		return true
+	}
+	if c := item.OriginRight.Clock; c > r.ID.Clock {
+		r = splitItem(txn, r, int(c-r.ID.Clock))
+	}
+	item.Right = r
+	return false
 }
 
 // tryIntegrate attempts to integrate item into the doc store. Returns
@@ -1689,8 +1770,18 @@ func tryIntegrate(txn *Transaction, item *Item) (ok bool, waitsOn ClientID, err 
 		return false, item.ID.Client, nil
 	}
 
-	// Fully covered ranges need no further integration.
+	// Yjs looks up what an item names before it checks the item's clocks,
+	// waiting on another client's missing struct, else throwing on its own.
+	if namesFutureOwn(item, existingEnd) {
+		if client, ok := missingDep(store, item); ok {
+			return false, client, nil
+		}
+		return true, 0, wrapUpdateErr(errFutureOwnRef)
+	}
 	if item.ID.Clock+uint64(item.Content.Len()) <= existingEnd {
+		if client, ok := missingDep(store, item); ok {
+			return false, client, nil
+		}
 		return true, 0, nil
 	}
 
@@ -1810,6 +1901,15 @@ func tryIntegrate(txn *Transaction, item *Item) (ok bool, waitsOn ClientID, err 
 		item.Left = store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
 	}
 
+	// Yjs integrates an item next to a GC struct as a GC struct, also when it
+	// found a parent through its right origin.
+	if (item.Left != nil && item.Left.isGCOrphan()) || rightIsGC(txn, item) {
+		item.Left = nil
+		item.markGCOrphan()
+		appendTrimmed(store, item, existingEnd)
+		return true, 0, nil
+	}
+
 	// A parked range may now overlap the store; integrate only its new suffix.
 	item.integrate(txn, offset)
 	return true, 0, nil
@@ -1821,6 +1921,14 @@ func tryIntegrate(txn *Transaction, item *Item) (ok bool, waitsOn ClientID, err 
 // (0, 0, false) indicating the item's parent is truly unresolvable (e.g.
 // origin references a GC placeholder whose parent info was lost).
 func itemFutureDep(item *Item, store *StructStore) (ClientID, uint64, bool) {
+	// A gap of its own client, then another client's missing struct, come
+	// first, in tryIntegrate's order, which is Yjs getMissing's.
+	if next := store.NextClock(item.ID.Client); item.ID.Clock > next {
+		return item.ID.Client, next, true
+	}
+	if client, ok := missingDep(store, item); ok {
+		return client, store.NextClock(client), true
+	}
 	if item.Origin != nil {
 		storeClock := store.NextClock(item.Origin.Client)
 		if item.Origin.Clock >= storeClock {

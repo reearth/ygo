@@ -283,14 +283,16 @@ func waitingFor9(clock uint64) *Item {
 }
 
 // The queue holds client 2's clock 1 as an item that waits for client 9; a GC
-// copy of clock 1 arrives, then client 2's clock 0. The GC copy waits only for
-// clock 0, so it integrates then, and client 2's clock reaches 2.
-func TestUnit_PendingQueue_AGCCopyOfAParkedItemParksAndIntegrates(t *testing.T) {
+// copy of clock 1 arrives, then client 2's clock 0. Where a GC struct and an
+// item start at one clock, Yjs's merge keeps the arriving one, so the queue
+// holds the GC copy alone. It waits only for clock 0, so it integrates then.
+func TestUnit_PendingQueue_AGCCopyOfAParkedItemTakesItsPlace(t *testing.T) {
 	for _, v2 := range []bool{false, true} {
 		room := New(WithClientID(1))
 		require.NoError(t, applyVersioned(t, room, v2, structsV1(map[ClientID][]*Item{2: {waitingFor9(1)}})))
 		require.NoError(t, applyVersioned(t, room, v2, structsV1(map[ClientID][]*Item{2: {gcStruct(2, 1, 1)}})))
-		require.Equal(t, 2, room.PendingStats().Items, "v2=%v: the GC copy parks", v2)
+		require.Equal(t, 1, room.PendingStats().Items, "v2=%v", v2)
+		require.True(t, isGCStruct(room.store.pending.items[0]), "v2=%v: the GC copy is parked", v2)
 		require.NoError(t, applyVersioned(t, room, v2, structsV1(map[ClientID][]*Item{2: {gcStruct(2, 0, 1)}})))
 		require.Equal(t, uint64(2), room.StateVector().Clock(2), "v2=%v", v2)
 	}
@@ -308,26 +310,41 @@ func TestUnit_PendingQueue_AGCStructWhoseTailIsAParkedItemParksWhole(t *testing.
 	}
 }
 
-// At a full queue, the budget counts a GC copy of a parked item (the park
-// would add it) and refuses the update before it integrates client 5's "k".
-// V1 only: the V1 wire puts client 2 first, so the budget runs first.
-func TestUnit_PendingBudget_AGCCopyOfAParkedItemCounts(t *testing.T) {
-	room := New(WithClientID(1), WithMaxPendingItems(1))
-	require.NoError(t, ApplyUpdateV1(room, structsV1(map[ClientID][]*Item{2: {waitingFor9(1)}}), nil))
+// At a full queue, a GC copy of the parked item takes its place and adds
+// nothing, as in Yjs's merge, so the update applies; a GC struct at a clock the
+// queue lacks adds one, and the budget refuses that update before client 5's
+// "k" integrates. V1 only: the V1 wire puts client 2 first, so the budget runs
+// first.
+func TestUnit_PendingBudget_AGCCopyOfAParkedItemAddsNothing(t *testing.T) {
 	typist := New(WithClientID(5))
 	typist.Transact(func(txn *Transaction) { txn.GetText("u").Insert(txn, 0, "k", nil) })
-	update, err := MergeUpdatesV1(structsV1(map[ClientID][]*Item{2: {gcStruct(2, 1, 1)}}), EncodeStateAsUpdateV1(typist, nil))
-	require.NoError(t, err)
-	require.ErrorIs(t, ApplyUpdateV1(room, update, nil), ErrInvalidUpdate)
-	require.Empty(t, room.GetText("u").ToString(), "refused by the budget, before any integration")
-	require.Equal(t, 1, room.PendingStats().Items)
+	for _, tc := range []struct {
+		clock  uint64
+		refuse bool
+	}{{1, false}, {2, true}} {
+		room := New(WithClientID(1), WithMaxPendingItems(1))
+		require.NoError(t, ApplyUpdateV1(room, structsV1(map[ClientID][]*Item{2: {waitingFor9(1)}}), nil))
+		update, err := MergeUpdatesV1(structsV1(map[ClientID][]*Item{2: {gcStruct(2, tc.clock, 1)}}), EncodeStateAsUpdateV1(typist, nil))
+		require.NoError(t, err)
+		if tc.refuse {
+			require.ErrorIs(t, ApplyUpdateV1(room, update, nil), ErrInvalidUpdate)
+			require.Empty(t, room.GetText("u").ToString(), "refused by the budget, before any integration")
+		} else {
+			require.NoError(t, ApplyUpdateV1(room, update, nil))
+			require.Equal(t, "k", room.GetText("u").ToString())
+		}
+		require.Equal(t, 1, room.PendingStats().Items, "clock %d", tc.clock)
+	}
 }
 
 // The same, in the walk over collected groups: a three-deep client chain
 // (3 on 4 on 5) makes both scans exceed the room, and client 2's group (a
 // waiting item, then a GC copy of the parked clock 1) waits for client 9,
-// which is on the wire but waits for the absent client 10. V1 only, as above.
-func TestUnit_PendingBudget_AGCCopyInACollectedGroupCounts(t *testing.T) {
+// which is on the wire but waits for the absent client 10. The update parks
+// client 9's struct and client 2's two, and the copy takes the parked item's
+// place, so the queue grows by two, as in Yjs: a room of two applies it, a room
+// of one refuses it before any change. V1 only, as above.
+func TestUnit_PendingBudget_AGCCopyInACollectedGroupMerges(t *testing.T) {
 	world := New(WithClientID(100))
 	typeAs(t, world, 10, "t", 0, "Q")
 	typeAs(t, world, 9, "t", 1, "ab")
@@ -339,12 +356,20 @@ func TestUnit_PendingBudget_AGCCopyInACollectedGroupCounts(t *testing.T) {
 	update, err := MergeUpdatesV1(structsV1(map[ClientID][]*Item{2: {head, gcStruct(2, 1, 1)}}), rest)
 	require.NoError(t, err)
 
-	room := New(WithClientID(1), WithMaxPendingItems(3))
-	parked := &Item{ID: ID{Client: 2, Clock: 1}, Origin: &ID{Client: 9, Clock: 1}, Content: NewContentDeleted(1)}
-	require.NoError(t, ApplyUpdateV1(room, structsV1(map[ClientID][]*Item{2: {parked}}), nil))
-	require.ErrorIs(t, ApplyUpdateV1(room, update, nil), ErrInvalidUpdate)
-	require.Empty(t, room.GetText("u").ToString(), "refused by the budget, before any integration")
-	require.Equal(t, 1, room.PendingStats().Items)
+	for _, limit := range []int{3, 2} {
+		room := New(WithClientID(1), WithMaxPendingItems(limit))
+		parked := &Item{ID: ID{Client: 2, Clock: 1}, Origin: &ID{Client: 9, Clock: 1}, Content: NewContentDeleted(1)}
+		require.NoError(t, ApplyUpdateV1(room, structsV1(map[ClientID][]*Item{2: {parked}}), nil))
+		if limit == 2 {
+			require.ErrorIs(t, ApplyUpdateV1(room, update, nil), ErrInvalidUpdate)
+			require.Empty(t, room.GetText("u").ToString(), "refused by the budget, before any integration")
+			require.Equal(t, 1, room.PendingStats().Items)
+			continue
+		}
+		require.NoError(t, ApplyUpdateV1(room, update, nil))
+		require.Equal(t, "Pom", room.GetText("u").ToString())
+		require.Equal(t, 3, room.PendingStats().Items)
+	}
 }
 
 // A park whose insertions would move more than coverInsertWork spans merges
@@ -368,7 +393,7 @@ func TestUnit_PendingCover_ABatchParkJoinsTheSpanItTouches(t *testing.T) {
 	batch = append(batch, item(k, 100-k))
 	p.items = append(p.items, batch...)
 	p.addCover(batch)
-	require.Equal(t, sortedSpans(p.items, false), p.cover.spans)
+	require.Equal(t, sortedSpans(p.items), p.cover.spans)
 	require.Equal(t, clockSpan{0, 101}, p.cover.spans[2][0], "the batch joins the span at clock 100")
 }
 
@@ -431,18 +456,14 @@ func TestUnit_PendingCover_SortedSpansMatchesASortAndMerge(t *testing.T) {
 		if rng.IntN(2) == 0 {
 			slices.SortStableFunc(items, func(a, b *Item) int { return cmp.Compare(a.ID.Clock, b.ID.Clock) })
 		}
-		for _, gcOnly := range []bool{false, true} {
-			want := make(map[ClientID][]clockSpan)
-			for _, it := range items {
-				if !gcOnly || isGCStruct(it) {
-					want[it.ID.Client] = append(want[it.ID.Client], clockSpan{it.ID.Clock, it.ID.Clock + uint64(it.Content.Len())})
-				}
-			}
-			for c, list := range want {
-				want[c] = coalesce(list)
-			}
-			require.Equal(t, want, sortedSpans(items, gcOnly))
+		want := make(map[ClientID][]clockSpan)
+		for _, it := range items {
+			want[it.ID.Client] = append(want[it.ID.Client], clockSpan{it.ID.Clock, it.ID.Clock + uint64(it.Content.Len())})
 		}
+		for c, list := range want {
+			want[c] = coalesce(list)
+		}
+		require.Equal(t, want, sortedSpans(items))
 	}
 }
 
@@ -459,24 +480,24 @@ func TestUnit_PendingCover_Spans(t *testing.T) {
 		add(it)
 	}
 	require.Equal(t, []clockSpan{{4, 7}, {10, 15}, {20, 21}}, p.coverOf().spans[1])
-	for _, tc := range []struct{ start, end, want uint64 }{
-		{4, 7, 7}, {5, 6, 6}, {4, 9, 7}, {3, 5, 3}, {10, 15, 15}, {14, 16, 15}, {15, 16, 15}, {7, 10, 7}, {20, 21, 21}, {8, 8, 8},
+	for _, tc := range []struct {
+		start, end uint64
+		item, gc   bool // merges as an item, and as a GC struct
+	}{
+		{4, 7, true, true}, {3, 5, true, true}, {6, 10, true, true}, {7, 10, false, true}, {8, 9, false, false},
+		{14, 16, true, true}, {15, 20, false, true}, {21, 22, false, true}, {0, 4, false, true}, {0, 3, false, false},
 	} {
-		require.Equal(t, tc.want, p.heldUntil(1, tc.start, 0, tc.end, false), "[%d,%d)", tc.start, tc.end)
+		require.Equal(t, tc.item, p.mergesAny([]*Item{item(tc.start, int(tc.end-tc.start))}), "item [%d,%d)", tc.start, tc.end)
+		require.Equal(t, tc.gc, p.merges(1, tc.start, tc.end, true), "GC struct [%d,%d)", tc.start, tc.end)
 	}
-	require.Equal(t, uint64(7), p.heldUntil(1, 4, 6, 9, false), "from above clock")
-	require.Equal(t, uint64(4), p.heldUntil(2, 4, 0, 7, false), "another client")
-	require.True(t, p.holds(1, 8, 0, 8, false), "an empty range")
-	require.Equal(t, uint64(4), (*pendingUpdate)(nil).heldUntil(1, 4, 0, 7, false), "no queue")
-	require.Equal(t, uint64(10), p.heldTailFrom(1, 8, 15, false), "the span [10,15) holds the end")
-	require.Equal(t, uint64(9), p.heldTailFrom(1, 8, 9, false), "no span holds 8")
-	require.Equal(t, uint64(15), p.heldTailFrom(1, 10, 15, false), "the span holds the start too")
+	require.False(t, p.merges(2, 10, 12, true), "another client")
+	require.False(t, (*pendingUpdate)(nil).merges(1, 10, 12, false), "no queue")
 	// add keeps the cover in order and out of order, merging what touches.
 	add(item(30, 1))
 	add(item(25, 1))
 	add(item(7, 3))
 	require.Equal(t, []clockSpan{{4, 15}, {20, 21}, {25, 26}, {30, 31}}, p.cover.spans[1])
-	require.Equal(t, sortedSpans(p.items, false), p.cover.spans)
+	require.Equal(t, sortedSpans(p.items), p.cover.spans)
 }
 
 // A resend whose one struct spans the parked tail and new clocks is sliced at

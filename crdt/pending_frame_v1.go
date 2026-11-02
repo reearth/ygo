@@ -198,7 +198,7 @@ func (f *v1Frame) frameJSON() uint64 {
 
 // scanPendingGroupsV1 is the pending budget's first pass over a V1 update,
 // stopping once the unread structs cannot change its answer, unless whole, and
-// not counting a struct parked holds.
+// counting apart a struct that merges with the queue.
 func scanPendingGroupsV1(update []byte, known StateVector, remaining int, clientRange *pendingClientRange, superseded groupSet, structs int, parked *pendingUpdate, whole bool) (pendingPass, error) {
 	var result pendingPass
 	read := 0
@@ -226,6 +226,7 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 		}
 		knownClock := known.Clock(client)
 		startClock := knownClock
+		stalled := false // a covered struct waits, so the rest of the group does
 		var depClient ClientID
 		var depClock uint64
 		depCached := false
@@ -240,9 +241,12 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 			if end < clock {
 				return result, ErrInvalidUpdate
 			}
-			if !drop && !skip && end > knownClock {
-				ready := clock <= knownClock
-				if ready {
+			if !drop && !skip {
+				// Yjs checks a struct's dependencies before its clocks, so a
+				// covered struct can wait too, and every struct of the client
+				// after one that waits parks with it.
+				waits := stalled || clock > knownClock
+				if !waits {
 					for _, dep := range deps[:numDeps] {
 						at := knownClock
 						if dep.Client != client {
@@ -252,24 +256,31 @@ func scanPendingGroupsV1(update []byte, known StateVector, remaining int, client
 							at = depClock
 						}
 						if dep.Clock >= at {
-							ready = false
+							waits = true
 							break
 						}
 					}
 				}
-				if ready {
-					knownClock = end
-					result.progressed = true
-				} else if !parked.holds(client, clock, knownClock, end, f.gc) {
-					result.pending++
-					if clients == 1 && result.pending > remaining {
-						return result, ErrInvalidUpdate
+				if !waits {
+					if end > knownClock {
+						knownClock = end
+						result.progressed = true
+					}
+				} else {
+					stalled = stalled || end <= knownClock
+					if parked.merges(client, clock, end, f.gc) {
+						result.overlapping++
+					} else {
+						result.pending++
+						if clients == 1 && pastRoom(result.pending, remaining, parked.heldStructs()) {
+							return result, ErrInvalidUpdate
+						}
 					}
 				}
 			}
 			clock = end
 			read++
-			if unread := pendingUnread(structs, read, i+1 == clients, n-j-1); unread >= 0 && result.pending+unread <= remaining {
+			if unread := pendingUnread(structs, read, i+1 == clients, n-j-1); unread >= 0 && result.charged()+unread <= remaining {
 				if !whole {
 					return result, nil
 				}
