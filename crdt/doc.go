@@ -621,6 +621,10 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 	}
 
 	d.mu.Lock()
+	// A parking apply records only what this transaction parks.
+	if d.store.parked != nil {
+		*d.store.parked = transactionParked{}
+	}
 
 	txn := &Transaction{
 		doc:         d,
@@ -691,6 +695,11 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		// registered. RunGC remains available as the explicit manual entry point.
 		if d.gc && d.undoManagerCount == 0 && !deferGC {
 			gcTxnDeleteSet(d, txn)
+		}
+
+		// The document's park record drops this transaction's views of the queue.
+		if d.store.parked != nil {
+			*d.store.parked = transactionParked{}
 		}
 
 		// Mark the transaction committed BEFORE releasing the lock so the

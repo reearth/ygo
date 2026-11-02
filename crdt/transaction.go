@@ -63,34 +63,45 @@ type Transaction struct {
 	// once its observers have fired; afterTypeObservers, when set, decides
 	// it after the type observers (typeObserved: there are some), where
 	// Yjs does.
-	formatCleanup      bool
-	typeObserved       bool
-	afterTypeObservers func()
+	formatCleanup bool
+	typeObserved  bool
 	// refused marks a remote apply that failed before integrating, so the
 	// commit fires nothing.
-	refused bool
-	// parkedItems are the structs this transaction parked in the store's
-	// pending queue, waiting for something the document lacks. A failed
-	// apply's landed update carries them (encodeTxnV1Locked), as the update it
-	// was handed does.
-	parkedItems []*Item
-	// parkedDeletes are the delete sets this transaction parked, which a failed
-	// apply's landed update carries too, sharing ranges that nothing changes.
-	parkedDeletes []DeleteSet
+	refused            bool
+	afterTypeObservers func()
+}
+
+// transactionParked is what one transaction parked, which a failed apply's
+// landed update carries (encodeTxnV1Locked); each document keeps one, since
+// its transactions run one at a time.
+type transactionParked struct {
+	items   []*Item     // the first run is a view of the pending queue
+	deletes []DeleteSet // sharing ranges that nothing changes
+}
+
+// parkRecord allocates the document's record only when a transaction parks.
+func (t *Transaction) parkRecord() *transactionParked {
+	s := t.doc.store
+	if s.parked == nil {
+		s.parked = &transactionParked{}
+	}
+	return s.parked
 }
 
 // noteParked keeps the first appended run as a queue view to avoid copying it.
 func (t *Transaction) noteParked(run []*Item) {
-	if t.parkedItems == nil {
-		t.parkedItems = run
+	p := t.parkRecord()
+	if p.items == nil {
+		p.items = run
 		return
 	}
-	t.parkedItems = append(t.parkedItems, run...)
+	p.items = append(p.items, run...)
 }
 
 // noteParkedDeletes records ds, which this transaction parked.
 func (t *Transaction) noteParkedDeletes(ds DeleteSet) {
-	t.parkedDeletes = append(t.parkedDeletes, ds)
+	p := t.parkRecord()
+	p.deletes = append(p.deletes, ds)
 }
 
 // Ctx returns the context associated with this transaction. Transactions

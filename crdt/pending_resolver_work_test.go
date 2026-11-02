@@ -3,6 +3,7 @@ package crdt
 import (
 	"fmt"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 )
@@ -219,6 +220,9 @@ func TestUnit_PendingResolver_ParkRecordHoldsOnlyWhatParks(t *testing.T) {
 	const n = 4096
 	doc := New(WithClientID(1), WithMaxPendingItems(n+3))
 	defer doc.Destroy()
+	doc.Transact(func(*Transaction) {})
+	require.Nil(t, doc.store.parked, "an ordinary transaction does not allocate a park record")
+
 	text := doc.GetText("t")
 	structs := func(clock uint64, count int) []*Item {
 		out := make([]*Item, count)
@@ -232,7 +236,9 @@ func TestUnit_PendingResolver_ParkRecordHoldsOnlyWhatParks(t *testing.T) {
 			for _, items := range runs {
 				require.NoError(t, parkWithinUpdatePending(txn, items))
 			}
-			record = txn.parkedItems
+			if txn.doc.store.parked != nil {
+				record = txn.doc.store.parked.items
+			}
 		})
 		return record
 	}
@@ -254,4 +260,11 @@ func TestUnit_PendingResolver_ParkRecordHoldsOnlyWhatParks(t *testing.T) {
 	record = park(first, second)
 	require.Equal(t, []*Item{first[0], second[0]}, record)
 	require.Equal(t, []*Item{first[0], second[0]}, doc.store.pending.items[n+1:])
+}
+
+// Parking state uses one lazy pointer, so ordinary transactions and stores
+// stay compact.
+func TestUnit_Transaction_ParkRecordKeepsItsSize(t *testing.T) {
+	require.Equal(t, uintptr(216), unsafe.Sizeof(Transaction{}))
+	require.Equal(t, uintptr(80), unsafe.Sizeof(StructStore{}))
 }

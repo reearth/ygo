@@ -256,3 +256,41 @@ func TestUnit_ApplyUpdateLanded_RelaysADrainedStructOnce(t *testing.T) {
 		t.Fatalf("room %q %v, peer %q %v", text(room).ToString(), rs, text(peer).ToString(), ps)
 	}
 }
+
+// A failed apply's landed update carries what that apply parked, not the
+// structs and delete ranges an earlier transaction parked and left parked.
+func TestUnit_ApplyUpdateLanded_CarriesOnlyWhatThisApplyParked(t *testing.T) {
+	seven := New(WithClientID(7))
+	st := seven.GetText("t")
+	seven.Transact(func(txn *Transaction) { st.Insert(txn, 0, "AB", nil) })
+	eight := New(WithClientID(8))
+	if err := ApplyUpdateV1(eight, EncodeStateAsUpdateV1(seven, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	et := eight.GetText("t")
+	eight.Transact(func(txn *Transaction) {
+		et.Insert(txn, 1, "q", nil)
+		et.Delete(txn, 2, 1)
+	})
+	// Client 8's "q" and its deletion of client 7's "B", without client 7's "AB".
+	earlier := EncodeStateAsUpdateV1(eight, seven.StateVector())
+	failing, _ := failingAfterParking(t)
+
+	room, peer := New(WithClientID(1)), New(WithClientID(2))
+	if err := ApplyUpdateV1(room, earlier, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := room.PendingStats(); got.Items != 1 || got.DeleteRanges != 1 {
+		t.Fatalf("the earlier update parks %+v, want client 8's \"q\" and one range", got)
+	}
+	landed, err := ApplyUpdateV1Landed(room, failing, nil)
+	if err == nil || landed == nil {
+		t.Fatalf("apply err %v, landed %d bytes: want a failure with landed bytes", err, len(landed))
+	}
+	if err := ApplyUpdateV1(peer, landed, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := peer.PendingStats(); got.Items != 1 || got.DeleteRanges != 0 {
+		t.Fatalf("the landed update parks %+v in a peer, want only client 5's \"xy\"", got)
+	}
+}

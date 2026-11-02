@@ -95,15 +95,19 @@ func encodeTxnV1Locked(txn *Transaction) []byte {
 			perClient[client] = items[i:]
 		}
 	}
+	var record transactionParked
+	if store.parked != nil {
+		record = *store.parked
+	}
 	parked := make(map[ClientID][]*Item)
-	if len(txn.parkedItems) > 0 && store.pending != nil {
+	if len(record.items) > 0 && store.pending != nil {
 		// Only the structs still parked: one that a drain integrated before a
 		// later failure is already among the added structs.
 		pending := make(map[*Item]struct{}, len(store.pending.items))
 		for _, it := range store.pending.items {
 			pending[it] = struct{}{}
 		}
-		for _, it := range txn.parkedItems {
+		for _, it := range record.items {
 			if _, ok := pending[it]; ok {
 				parked[it.ID.Client] = append(parked[it.ID.Client], it)
 			}
@@ -126,7 +130,7 @@ func encodeTxnV1Locked(txn *Transaction) []byte {
 	}
 	// The delete ranges this apply parked travel too: a drain that fails
 	// after the delete set parked them leaves them parked in doc.
-	for _, parked := range txn.parkedDeletes {
+	for _, parked := range record.deletes {
 		ds.Merge(parked)
 	}
 	if len(perClient) == 0 && len(ds.clients) == 0 {

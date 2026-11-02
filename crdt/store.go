@@ -39,6 +39,9 @@ type StructStore struct {
 	// next resolve pass for that target client — bounded by move-op count,
 	// and it is never applied without its target.
 	pendingMoves map[ClientID][]*Item
+
+	// parked is allocated only for a transaction that parks (Transaction.parkRecord).
+	parked *transactionParked
 }
 
 // pendingUpdate holds decoded items parked because of unresolved
