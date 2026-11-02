@@ -23,11 +23,14 @@ many seconds and allocate gigabytes:
   its transaction fires no observer, so nothing of it is persisted or relayed.
   A bounded document refuses a remote update that carries a subdocument or a
   move. Local transactions are never bounded, and no bound is set by default.
-- **The merge at commit.** An update that splits one run many times, leaving
-  each half where it merges back at commit, made each merge copy the run's
-  whole text and shift the client's store slice: 20,000 halves of a
-  40,000-character run allocated 440,968,992 bytes in one apply, and
-  12,565,704 bytes now. The text and the merged run are as before.
+- **The merge at commit.** An unbounded apply of 20,000 halves into a
+  40,000-character run allocated 440,968,992 bytes before the linear merge.
+  The same unbounded apply allocated 11,384,168 bytes with the first linear
+  merge, and 12,565,704 bytes while every transaction kept one map of scan
+  marks. It now allocates 10,200,800 bytes, because only a bounded apply keeps
+  scan marks. The same apply on a document bounded at 1<<30 allocates
+  12,567,400 bytes, because it keeps a rollback journal and one map of scan
+  marks. The text and the merged run are as before.
 
 ## v1.55.0
 

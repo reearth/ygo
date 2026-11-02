@@ -29,11 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would pass it is taken back and the queue is parked again as it was, every
   peer's items kept, while the update that filled the gap stands. The clocks
   the queue waits on are raised to the store's, so only an apply that brings
-  one of its clients further drains it again. Bounded or not, a transaction's
-  conflict scans share one map of marks, made by the first scan that needs it
-  and kept until the transaction commits: each mark records which scan, and
-  which step of it, passed the item, so a new scan reuses the map without
-  clearing it.
+  one of its clients further drains it again. A bounded remote apply's conflict
+  scans share one map of marks, made by the first scan that needs it and kept
+  until the transaction commits: each mark records which scan, and which step
+  of it, passed the item, so a new scan reuses the map without clearing it.
+  Unbounded transactions keep two maps per scan, as before.
 
 ### Fixed
 
@@ -42,25 +42,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document with a scan bound (`WithMaxIntegrateScan`) copied the pending queue's
   items, the clocks it waits on and the pending deletes as it began, and the
   drain copied the pending deletes again, so every remote apply cost time and
-  memory in proportion to what sat parked: one keystroke allocated 2,806,176
-  bytes on a bounded document holding 349,517 parked structs (2,880 unbounded)
-  and 25,171,104 bytes on one holding 524,280 parked delete ranges (8,391,872
+  memory in proportion to what sat parked: one keystroke allocated 2,805,128
+  bytes on a bounded document holding 349,517 parked structs (1,624 unbounded)
+  and 61,515,232 bytes on one holding 524,280 parked delete ranges (44,735,792
   unbounded). The apply now keeps them by reference: it only appends to the
   parked items past the length it keeps, copies the map of clocks the queue
   waits on at its first write to it, and merges a delete range it parks into
   copies of the clients that range names, so a refused update still leaves the
   parked items, the clocks they wait on and the pending deletes exactly as they
-  were. With 100,000 parked items a keystroke now allocates 3,176 bytes on a
-  bounded document against 1,608 unbounded (806,264 before), and with 100,000
-  parked delete ranges 1,609,192 against 1,607,624 (4,821,112 before).
+  were. The same two keystrokes now allocate 3,208 and 44,737,376 bytes on a
+  bounded document (1,592 and 44,735,760 unbounded).
 
-- **`crdt`: merging split runs back at commit is linear in the run.** An update
-  that splits one run n times and leaves each half where it merges back at
-  commit made each merge append the half to the run's whole text and search and
-  shift the client's store slice: 20,000 halves of a 40,000-character run
-  allocated 440,968,992 bytes in one apply, 12,565,704 bytes with this change.
-  The halves merge in clock order, each run's text is joined once, and the
-  merged halves leave their store slices in one pass per client.
+- **`crdt`: merging split runs back at commit is linear in the run.** An
+  unbounded apply of 20,000 halves into a 40,000-character run allocated
+  440,968,992 bytes before the linear merge. The same unbounded apply allocated
+  11,384,168 bytes with the first linear merge, and 12,565,704 bytes while
+  every transaction kept one map of scan marks. It now allocates 10,200,800
+  bytes, because only a bounded apply keeps scan marks. The same apply on a
+  document bounded at 1<<30 allocates 12,567,400 bytes, because it keeps a
+  rollback journal and one map of scan marks. The halves merge in clock order,
+  each run's text is joined once, and the merged halves leave their store slices
+  in one pass per client.
 
 ## [1.55.0] — 2026-10-31
 
