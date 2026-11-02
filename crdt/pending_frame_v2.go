@@ -178,8 +178,7 @@ func (f *v2Frame) content(tag byte) uint64 {
 		f.uint()
 		f.uint()
 	default:
-		// No update reaches this: the group walk or v2StructCount reads every tag first.
-		f.fail(ErrInvalidUpdate)
+		f.fail(tagError(tag, true))
 	}
 	return 1
 }

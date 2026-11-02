@@ -35,23 +35,6 @@ func (d *RleByteDecoder) ReadInRun() (byte, bool) {
 	return 0, false
 }
 
-// ReadRun returns the next byte and how many copies of it, from one to max, it
-// read from the same run in one step.
-func (d *RleByteDecoder) ReadRun(max int) (byte, int, error) {
-	b, err := d.Read()
-	if err != nil {
-		return 0, 0, err
-	}
-	n := 1
-	if d.count < 0 {
-		n = max
-	} else if more := min(d.count, max-1); more > 0 {
-		d.count -= more
-		n += more
-	}
-	return b, n, nil
-}
-
 // ReadRleByte shares the wire traversal with the public decoder facade.
 func ReadRleByte(dec *Decoder, state *byte, count *int) (byte, error) {
 	if *count == 0 {

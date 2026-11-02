@@ -182,23 +182,13 @@ func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testi
 			if d, err = newV2Decoder(update); err != nil {
 				t.Fatal(err)
 			}
-			if got, err := v2StructCount(d, false); err != nil || got != want {
-				t.Fatalf("v2StructCount = %d, %v; the scan reads %d structs", got, err, want)
-			}
-			d, err = newV2Decoder(update)
+			got, ok := v2OneGroupStructs(*d.restDec)
+			groups, err := d.restDec.ReadVarUint()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got, err := v2StructCount(d, true); err != nil || got != want {
-				t.Fatalf("v2StructCount to the end = %d, %v; the scan reads %d structs", got, err, want)
-			}
-			walked, errWalked := decodeDeleteSetV2(d)
-			scanned, errScanned := decodeDeleteSetV2(full.v2)
-			if errWalked != nil || errScanned != nil {
-				t.Fatalf("the delete set does not read: %v, %v", errWalked, errScanned)
-			}
-			if !reflect.DeepEqual(walked.clients, scanned.clients) {
-				t.Fatalf("the delete set read after the walk is %v, after the full scan %v", walked.clients, scanned.clients)
+			if ok != (groups <= 1) || ok && got != uint64(want) {
+				t.Fatalf("v2OneGroupStructs = %d, %v for %d groups; the scan reads %d structs", got, ok, groups, want)
 			}
 		}
 	}
@@ -208,7 +198,7 @@ func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testi
 		count(t, update)
 	}
 
-	// V2 writes the highest client first, so the walk steps over client 2's
+	// V2 writes the highest client first, so the readers step over client 2's
 	// rest content to reach client 1's header.
 	doc := New(WithClientID(2))
 	text, arr, m := doc.GetText("t"), doc.GetArray("a"), doc.GetMap("m")
@@ -223,6 +213,7 @@ func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testi
 		arr.Insert(txn, 1, []any{7, 8})
 	})
 	doc.Transact(func(txn *Transaction) { text.Delete(txn, 1, 2) })
+	count(t, EncodeStateAsUpdateV1(doc, nil))
 	second := New(WithClientID(1))
 	if err := ApplyUpdateV1(second, EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
 		t.Fatal(err)

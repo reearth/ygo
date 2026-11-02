@@ -17,10 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`crdt`: an update that would park past `WithMaxPendingItems` is refused
   before it changes anything.** The cap was checked while the apply
   integrated, so a refused update could leave part of itself in the document
-  and tell its observers. The whole update is now checked first. For an
-  update cut short, the refusal names the decoder's reason. An apply that
-  fails after it began to integrate drains the pending queue on what it
-  kept.
+  and tell its observers. The check now runs before the first change. For an
+  update cut short before the struct that takes it past the cap, the refusal
+  names the decoder's reason. An apply that fails after it began to integrate
+  drains the pending queue on what it kept.
 - **`crdt`: parked delete ranges are capped and refused before any change.**
   `WithMaxPendingItems` also bounds, separately, the delete ranges waiting for
   structs the document lacks, and a client's parked ranges are retried only

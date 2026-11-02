@@ -2,14 +2,13 @@ package crdt
 
 import (
 	"errors"
-	"strings"
 	"testing"
 )
 
-// The V2 walk reports a struct section it cannot read, and the pending-cap
-// check refuses such an update for the reason the decoder gives, before the
-// decoder reads it.
-func TestUnit_PendingBudget_WalkStructsV2ReportsAnUnreadableSection(t *testing.T) {
+// The V2 first pass reports a struct section it cannot read, and the
+// pending-cap check refuses such an update with the decoder's error, before
+// the decoder reads it.
+func TestUnit_PendingBudget_FirstPassV2ReportsAnUnreadableSection(t *testing.T) {
 	src := New(WithClientID(4))
 	text := src.GetText("t")
 	for i := range 6 {
@@ -26,20 +25,23 @@ func TestUnit_PendingBudget_WalkStructsV2ReportsAnUnreadableSection(t *testing.T
 			continue
 		}
 		start := *dec
-		b := newPendingBudget(New(), StateVector{}, update, true)
-		b.v2Start, b.v2Rest = &start, *dec.restDec
-		_, walkErr := b.walkStructsV2()
-		if walkErr == nil {
+		// The group walk reads every struct, so it fails only where the cut is
+		// in the struct section.
+		if _, _, _, walkErr := supersededGroups(update, &start, *dec.restDec); walkErr == nil {
 			continue
 		}
 		unreadable++
+		b := newPendingBudget(New(), StateVector{}, update, true)
+		b.v2Start, b.v2Rest = &start, *dec.restDec
+		b.setSuperseded(nil) // as the apply does for one client
 		b.remaining = 0
+		plain := ApplyUpdateV2(New(), update, nil)
 		err = b.checkBeforeApply(len(update))
-		if !errors.Is(err, ErrInvalidUpdate) || !strings.Contains(err.Error(), scanReason(walkErr).Error()) {
-			t.Fatalf("cut at %d: the check returned %v, want a refusal naming %v", cut, err, scanReason(walkErr))
+		if plain == nil || !errors.Is(err, ErrInvalidUpdate) || err.Error() != plain.Error() {
+			t.Fatalf("cut at %d: the check returned %v, the decoder %v", cut, err, plain)
 		}
 	}
 	if unreadable == 0 {
-		t.Fatal("no cut of the update made the V2 walk report an unreadable section")
+		t.Fatal("no cut of the update left its struct section unreadable")
 	}
 }
