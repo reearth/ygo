@@ -197,17 +197,19 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 	if held && !tailAppend {
 		s.pending.coverOf()
 	}
-	var buf [4]*Item // a keystroke's parked structs need no allocation
-	parked := buf[:0]
+	from := 0
+	if s.pending != nil {
+		from = len(s.pending.items)
+	}
 	defer func() {
-		if len(parked) > 0 {
-			s.pending.addCover(parked)
+		// The run this park appended, also when the cap stops it partway.
+		if s.pending != nil && len(s.pending.items) > from {
+			n := len(s.pending.items)
+			run := s.pending.items[from:n:n]
+			s.pending.addCover(run)
+			txn.noteParked(run)
 		}
 	}()
-	if !held && len(pending) > 1 {
-		// Onto an empty queue every struct parks, so the record is reserved once.
-		txn.parkedItems = slices.Grow(txn.parkedItems, len(pending))
-	}
 	for _, item := range pending {
 		if held && !tailAppend {
 			if item = unparked(s, item, s.NextClock(item.ID.Client)); item == nil {
@@ -222,11 +224,6 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 		}
 		s.pending.items = append(s.pending.items, item)
 		s.pending.noteTail(item)
-		txn.noteParkedItem(item)
-		if held && (!tailAppend || s.pending.cover != nil) {
-			// Only a queue that held structs has a cover to keep.
-			parked = append(parked, item)
-		}
 		if client, parkedAt, future := itemFutureDep(item, s); future {
 			mergePendingMissing(s.pending.missing, client, parkedAt)
 		} else {

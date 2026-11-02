@@ -46,11 +46,11 @@ type StructStore struct {
 // park time. A retry is worth attempting when the store's current
 // clock for any client in `missing` has advanced past its recorded value.
 type pendingUpdate struct {
-	items   []*Item     // parked items, in arrival order
+	// items are appended or replaced, so a transaction can record its park as
+	// a view of this queue.
+	items   []*Item
 	missing StateVector // clientID -> store clock at park time for that client
-	// cover is the clocks items span, built when first asked for and kept
-	// by add (pending_cover.go). A writer that replaces or cuts back items
-	// builds a new pendingUpdate, or sets cover to nil.
+	// cover is the clocks items span, built on demand and kept by addCover.
 	cover *pendingCover
 	// tail is the single client's clock past every parked struct, when tail
 	// is valid and no struct of another client parked; it lets a tail append

@@ -211,12 +211,13 @@ func TestUnit_PendingResolver_OverlappingRangesBoundWork(t *testing.T) {
 	require.LessOrEqual(t, work.lengths, 32*len(pending), "overlapping copies must not cause quadratic retries")
 }
 
-// The record of what a transaction parked is reserved once when every struct
-// parks onto an empty queue, a lone parked struct takes the transaction's own
-// slot, and a resend that parks nothing records and reserves nothing.
+// The record of what a transaction parked is the queue's own run of the
+// structs it parked, not a copy, and a resend that parks nothing records
+// nothing. A second park in the transaction copies the record, so the queue
+// keeps its structs.
 func TestUnit_PendingResolver_ParkRecordHoldsOnlyWhatParks(t *testing.T) {
 	const n = 4096
-	doc := New(WithClientID(1), WithMaxPendingItems(n+1))
+	doc := New(WithClientID(1), WithMaxPendingItems(n+3))
 	defer doc.Destroy()
 	text := doc.GetText("t")
 	structs := func(clock uint64, count int) []*Item {
@@ -226,25 +227,31 @@ func TestUnit_PendingResolver_ParkRecordHoldsOnlyWhatParks(t *testing.T) {
 		}
 		return out
 	}
-	park := func(items []*Item) (record []*Item, txn *Transaction) {
-		doc.Transact(func(t2 *Transaction) {
-			require.NoError(t, parkWithinUpdatePending(t2, items))
-			record, txn = t2.parkedItems, t2
+	park := func(runs ...[]*Item) (record []*Item) {
+		doc.Transact(func(txn *Transaction) {
+			for _, items := range runs {
+				require.NoError(t, parkWithinUpdatePending(txn, items))
+			}
+			record = txn.parkedItems
 		})
-		return record, txn
+		return record
 	}
 
-	record, _ := park(structs(1, n)) // past the gap at clock 0
+	record := park(structs(1, n)) // past the gap at clock 0
 	require.Equal(t, n, doc.PendingStats().Items)
 	require.Len(t, record, n)
-	require.Equal(t, n, cap(record), "reserved once for the whole park")
+	require.Same(t, &doc.store.pending.items[0], &record[0], "the record is the queue's run, not a copy")
 
-	record, _ = park(structs(1, n))
+	require.Nil(t, park(structs(1, n)), "a resend that parks nothing records nothing")
 	require.Equal(t, n, doc.PendingStats().Items)
-	require.Nil(t, record, "a resend that parks nothing reserves no record")
 
-	record, txn := park(structs(n+1, 1))
+	record = park(structs(n+1, 1))
 	require.Equal(t, n+1, doc.PendingStats().Items)
 	require.Len(t, record, 1)
-	require.Same(t, &txn.parkedBuf[0], &record[0], "a lone parked struct takes the transaction's slot")
+	require.Same(t, &doc.store.pending.items[n], &record[0], "a lone parked struct is recorded in the queue's slot")
+
+	first, second := structs(n+2, 1), structs(n+3, 1)
+	record = park(first, second)
+	require.Equal(t, []*Item{first[0], second[0]}, record)
+	require.Equal(t, []*Item{first[0], second[0]}, doc.store.pending.items[n+1:])
 }

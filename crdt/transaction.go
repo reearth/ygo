@@ -74,18 +74,18 @@ type Transaction struct {
 	// apply's landed update carries them (encodeTxnV1Locked), as the update it
 	// was handed does.
 	parkedItems []*Item
-	parkedBuf   [1]*Item // a keystroke's parked struct needs no allocation
 	// parkedDeletes are the delete sets this transaction parked, which a failed
 	// apply's landed update carries too, sharing ranges that nothing changes.
 	parkedDeletes []DeleteSet
 }
 
-// noteParkedItem records item, which this transaction parked.
-func (t *Transaction) noteParkedItem(item *Item) {
+// noteParked keeps the first appended run as a queue view to avoid copying it.
+func (t *Transaction) noteParked(run []*Item) {
 	if t.parkedItems == nil {
-		t.parkedItems = t.parkedBuf[:0]
+		t.parkedItems = run
+		return
 	}
-	t.parkedItems = append(t.parkedItems, item)
+	t.parkedItems = append(t.parkedItems, run...)
 }
 
 // noteParkedDeletes records ds, which this transaction parked.
