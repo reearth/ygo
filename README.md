@@ -724,10 +724,17 @@ JS and yrs, neither of which has transactional rollback. Callers who need
 atomicity must implement it above `Transact` and reconcile via sync;
 `UndoManager` is the supported route for undoing already-committed work.
 
-### `Doc.ClientID` is read-only after creation
+### `Doc.ClientID` changes when a remote update moves its own clock
 
-Use `crdt.WithClientID(id)` at construction time. Changing the ID after the
-document has started accepting operations will corrupt the item store.
+Use `crdt.WithClientID(id)` at construction time; there is no setter. When a
+remote transaction (an applied update) changes the clock of the document's own
+client, the document takes a new random client ID as the transaction commits,
+as Yjs does, so a local write never continues a clock that another peer set.
+The ID changes before that transaction's observers run, so they already see
+the new ID; in Yjs the type observers and `afterTransaction` still see the old
+one. A document built with `WithClientID` that then applies its own earlier
+updates gets a new ID the same way: read `ClientID()` again after the apply if
+you track what the document writes by client ID.
 
 ## What's changed since v1.0
 

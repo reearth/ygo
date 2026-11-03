@@ -12,6 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`crdt`: `Doc.SetMaxPendingItems(n)`** sets the pending cap after
   construction, so stored state over a cap can load first.
 
+### Changed
+
+- **`crdt` (breaking): a document whose own client's clock is advanced by a
+  non-local transaction takes a new random client ID when that transaction
+  commits.** Anyone who sets `WithClientID` and re-applies their own updates
+  must read `ClientID()` again after doing so. This breaks the documented
+  contract of `WithClientID` (a fixed, deterministic ID) and of `ClientID`
+  (read-only after creation). It is Yjs's `cleanupTransactions` rule, so a
+  local write never continues a clock that another peer set. Before, a peer
+  could send a GC struct over the document's own client, and the next local
+  write continued that clock, past 2^53-1 if the GC struct reached it; this
+  release's clock bound refuses that state.
+
 ### Fixed
 
 - **`crdt`: an update that would park past `WithMaxPendingItems` is refused

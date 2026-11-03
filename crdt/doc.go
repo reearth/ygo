@@ -49,6 +49,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // ErrSubdocAlreadyIntegrated is raised when a Doc already embedded as a
@@ -64,6 +65,8 @@ type DocOption func(*Doc)
 
 // WithClientID sets a fixed ClientID instead of generating a random one.
 // Useful in tests and server-side scenarios where the ID must be deterministic.
+// The document still takes a new ID when a remote update moves this client's
+// clock (see ClientID).
 // id must be at most 2^55-1, the largest client a V2 update can carry; a larger
 // one panics here, since the document could not encode its own writes in V2
 // and every decoder refuses them. Yjs client IDs fit in 53 bits.
@@ -72,7 +75,7 @@ func WithClientID(id ClientID) DocOption {
 		// A programmer error: random and remote client IDs are always within it.
 		panic(fmt.Sprintf("crdt: WithClientID(%d): a client ID must be at most 2^55-1", id))
 	}
-	return func(d *Doc) { d.clientID = id }
+	return func(d *Doc) { d.setClientID(id) }
 }
 
 // WithGC controls whether deleted item content is freed at the end of each
@@ -157,7 +160,8 @@ type subdocsSub struct {
 // Doc is the root of a Yjs collaborative document.
 // All shared types (YArray, YMap, YText, …) live inside a Doc.
 type Doc struct {
-	clientID        ClientID
+	clientID        ClientID      // read and written under mu, or before the doc is shared
+	sharedClientID  atomic.Uint64 // clientID's copy for ClientID, read without mu
 	gc              bool
 	guid            string // guid identifies this document (for subdocument embedding). Defaults to a random uuidv4 (see New) unless set with WithGUID.
 	shouldLoad      bool
@@ -199,9 +203,18 @@ type Doc struct {
 	undoManagerCount int
 }
 
-// ClientID returns the document's client identifier (read-only after creation).
+// ClientID returns the document's client identifier. A remote transaction
+// that changes this document's own client's clock gives it a new random one
+// when it commits, as Yjs does.
 func (d *Doc) ClientID() ClientID {
-	return d.clientID
+	return ClientID(d.sharedClientID.Load())
+}
+
+// setClientID sets the document's client identifier; called under mu once the
+// doc is shared.
+func (d *Doc) setClientID(id ClientID) {
+	d.clientID = id
+	d.sharedClientID.Store(uint64(id))
 }
 
 // GUID returns the document's identifier. Every Doc has one — a random uuidv4 by default (Yjs parity), or the value passed to WithGUID.
@@ -298,7 +311,6 @@ func NewClientID() ClientID {
 // New creates a new Doc with a randomly generated ClientID.
 func New(opts ...DocOption) *Doc {
 	d := &Doc{
-		clientID:   NewClientID(),
 		gc:         true,
 		guid:       uuidV4(),
 		shouldLoad: true,
@@ -306,6 +318,7 @@ func New(opts ...DocOption) *Doc {
 		share:      make(map[string]sharedType),
 		subdocs:    make(map[string]*Doc),
 	}
+	d.setClientID(NewClientID())
 	for _, opt := range opts {
 		opt(d)
 	}
@@ -700,6 +713,13 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		// The document's park record drops this transaction's views of the queue.
 		if d.store.parked != nil {
 			*d.store.parked = transactionParked{}
+		}
+
+		// A remote transaction that moved this document's own clock gives it a
+		// new client ID, as Yjs cleanupTransactions does, so a local write never
+		// continues a clock that another peer set.
+		if !txn.Local && txn.afterState != nil && txn.afterState.Clock(d.clientID) != txn.beforeState.Clock(d.clientID) {
+			d.setClientID(NewClientID())
 		}
 
 		// Mark the transaction committed BEFORE releasing the lock so the

@@ -1,10 +1,15 @@
 ## v1.56.0
 
 **Who is affected: servers that apply updates from peers they do not trust,
-and every relay or cluster that forwards updates.** A refused, cut-off or
+every relay or cluster that forwards updates, and code that builds a document
+with `WithClientID` and re-applies its own updates.** A refused, cut-off or
 reordered update now leaves the server and the peers it relays to holding
 the same document.
 
+- Breaking: a document takes a new random client ID when a remote update
+  changes its own client's clock, as in Yjs. A document built with
+  `WithClientID` that re-applies its own updates gets a new ID too: read
+  `ClientID()` again after the apply if you track writes by client ID.
 - An update that would park past `MaxPendingItems` (`WithMaxPendingItems`) is
   refused before it changes the document. Before, part of it stayed and its
   observers were told.
