@@ -1,3 +1,16 @@
+## v1.55.1
+
+**Who is affected: servers and peers that hold large documents.** The updates
+`OnUpdate` delivers do not change.
+
+Applying an update took time in proportion to the items the document holds for
+a client, not to the size of the update, when:
+
+- a delete set deleted again inside a run already deleted, as a stale or
+  concurrent peer's delete set does. ygo split the run at both ends and merged
+  it back. Like Yjs, it now splits only live items. A deleted run that undo
+  restored no longer stays split after such a delete set.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

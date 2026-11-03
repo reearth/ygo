@@ -1,0 +1,110 @@
+{
+  "fixtures": [
+    {
+      "name": "redelete_redone_run",
+      "description": "Undo restores a deleted run as a redone copy; a delete set inside the deleted original then leaves it whole; redo and undo follow.",
+      "steps": [
+        {
+          "label": "undo",
+          "updates": [
+            "0101010844010008616263646566676800"
+          ]
+        },
+        {
+          "label": "redelete",
+          "updates": []
+        },
+        {
+          "label": "redo",
+          "updates": [
+            "000101010808"
+          ]
+        },
+        {
+          "label": "undo again",
+          "updates": [
+            "0101011044010808616263646566676800"
+          ]
+        }
+      ],
+      "state": "01030100040101740861626364656667684401000861626364656667684401080861626364656667680101010010",
+      "text": "abcdefgh"
+    },
+    {
+      "name": "redelete_start_inside_supplementary",
+      "description": "A delete set starting inside a deleted emoji (clocks 1-2) leaves it whole, so undo and redo restore and delete the emoji itself.",
+      "steps": [
+        {
+          "label": "redelete",
+          "updates": []
+        },
+        {
+          "label": "undo",
+          "updates": [
+            "010101044401000678f09f98807900"
+          ]
+        },
+        {
+          "label": "redo",
+          "updates": [
+            "000101010404"
+          ]
+        }
+      ],
+      "state": "01020100040101740678f09f9880794401000678f09f9880790101010008",
+      "text": ""
+    },
+    {
+      "name": "redelete_end_inside_supplementary",
+      "description": "A delete set ending inside a deleted emoji (clocks 1-2) leaves it whole, so undo and redo restore and delete the emoji itself.",
+      "steps": [
+        {
+          "label": "redelete",
+          "updates": []
+        },
+        {
+          "label": "undo",
+          "updates": [
+            "010101044401000678f09f98807900"
+          ]
+        },
+        {
+          "label": "redo",
+          "updates": [
+            "000101010404"
+          ]
+        }
+      ],
+      "state": "01020100040101740678f09f9880794401000678f09f9880790101010008",
+      "text": ""
+    },
+    {
+      "name": "cascade_into_supplementary",
+      "description": "A delete set from a nested text's container into its emoji deletes the container first; the cascade deletes the text, so its range end does not split the emoji.",
+      "steps": [
+        {
+          "label": "delete",
+          "updates": [
+            "000101010005"
+          ]
+        }
+      ],
+      "state": "010201000701016102040001000678f09f9880790101010005",
+      "text": ""
+    },
+    {
+      "name": "two_ranges",
+      "description": "One delete set with two ranges: the first ends inside the live run \"abcdefgh\" (clocks 0-7), which splits; the second lies inside the deleted run at clocks 8-10, which stays whole.",
+      "steps": [
+        {
+          "label": "delete",
+          "updates": [
+            "000101010202"
+          ]
+        }
+      ],
+      "state": "010401000401017402616284010102636484010304656667688401070358595a01010202020803",
+      "text": "abefgh"
+    }
+  ]
+}

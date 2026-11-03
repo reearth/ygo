@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-11-03
+
+### Performance
+
+- **`crdt`: a delete set that deletes again inside an item already deleted no
+  longer costs time in proportion to the client's items.** Applying an update
+  split the item at both ends of each delete range even when the item was
+  already deleted, which shifted the rest of the client's items in the store
+  twice, and the commit then merged the halves back. Like Yjs's
+  `readAndApplyDeleteSet`, ygo now splits only live items. A stale or
+  concurrent peer's delete set takes this path. A deleted item that undo
+  restored, whose halves could not merge back, no longer stays split and
+  encodes as one struct again, as in Yjs.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added
