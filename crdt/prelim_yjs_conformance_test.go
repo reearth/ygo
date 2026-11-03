@@ -189,6 +189,22 @@ var prelimBuilders = map[string]func(*Doc){
 			root.PushType(txn, outer)
 		})
 	},
+	"xml_fragment_nested_in_map": func(doc *Doc) {
+		root := doc.GetArray("root")
+		doc.Transact(func(txn *Transaction) {
+			outer := NewMapPrelim()
+			body := NewXmlFragmentPrelim()
+			p := NewYXmlElement("paragraph")
+			p.SetAttributeValue(txn, "blockId", "b1")
+			t := NewYXmlText()
+			t.Insert(txn, 0, "hello", nil)
+			p.InsertText(txn, 0, t)
+			body.InsertElement(txn, 0, p)
+			outer.Set(txn, "kind", "text")
+			outer.Set(txn, "body", body)
+			root.PushType(txn, outer)
+		})
+	},
 }
 
 func TestPrelimYjsConformanceDecode(t *testing.T) {

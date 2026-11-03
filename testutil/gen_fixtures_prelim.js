@@ -241,6 +241,26 @@ const fixtures = [
       })
     }
   ),
+  authored(
+    'xml_fragment_nested_in_map',
+    'Y.Map holding a Y.XmlFragment (a paragraph with an attribute and text), built detached: a rich-text body inside a map, as a slide element holds one.',
+    (doc) => {
+      const root = doc.getArray('root')
+      doc.transact(() => {
+        const outer = new Y.Map()
+        const body = new Y.XmlFragment()
+        const p = new Y.XmlElement('paragraph')
+        p.setAttribute('blockId', 'b1')
+        const t = new Y.XmlText()
+        t.insert(0, 'hello')
+        p.insert(0, [t])
+        body.insert(0, [p])
+        outer.set('kind', 'text')
+        outer.set('body', body)
+        root.push([outer])
+      })
+    }
+  ),
 ]
 
 const out = path.join(__dirname, '..', 'crdt', 'testdata', 'prelim_yjs_fixtures.json')
