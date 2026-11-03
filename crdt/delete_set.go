@@ -184,19 +184,10 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 			if r.Len == 0 {
 				continue
 			}
-			// Split at the range boundaries so each overlapping item lies
-			// entirely inside [r.Clock, r.Clock+r.Len). Pre-#72 we deleted
-			// overlapping items whole, which wiped content outside the range
-			// when the item was a locally-squashed run that the sender saw as
-			// shorter. getItemCleanStart is a no-op when no item contains the
-			// target clock (boundary already clean or past the store).
-			//
-			// Mirrors Yjs JS iterateDeletedStructs and yrs Update::integrate
-			// which both pre-split at boundaries before tombstoning.
-			if r.Len > 0 {
-				txn.doc.store.getItemCleanStart(txn, ID{Client: client, Clock: r.Clock})
-				txn.doc.store.getItemCleanStart(txn, ID{Client: client, Clock: r.Clock + r.Len})
-				// Splits may have inserted new items; refresh the slice.
+			// Split a live item at the range start so content before it stays
+			// live; a deleted item stays whole, as in Yjs readAndApplyDeleteSet.
+			if it := txn.doc.store.Find(ID{Client: client, Clock: r.Clock}); it != nil && !it.Deleted && it.ID.Clock < r.Clock {
+				splitItem(txn, it, int(r.Clock-it.ID.Clock))
 				items = txn.doc.store.clients[client]
 			}
 
@@ -210,9 +201,14 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 				if item.ID.Clock >= r.Clock+r.Len {
 					break
 				}
-				// After our boundary splits, item is entirely inside the range.
 				end := r.Clock + r.Len
 				itemEnd := item.ID.Clock + uint64(item.Content.Len())
+				// Split at the range end only on reaching the item, as Yjs does,
+				// since deleting an earlier item can cascade into it.
+				if !item.Deleted && itemEnd > end {
+					splitItem(txn, item, int(end-item.ID.Clock))
+					items = txn.doc.store.clients[client]
+				}
 				if itemEnd < end {
 					end = itemEnd
 				}
