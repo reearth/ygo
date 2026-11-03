@@ -181,7 +181,7 @@ func BenchmarkPendingParkOutOfOrder(b *testing.B) {
 
 // BenchmarkPendingParkBatch times one update parking k structs of client 2
 // between the s spans the queue holds for client 2 (out of order, each behind
-// a gap): addCover's insertion below coverInsertWork, its merge above.
+// a gap): addCover's insertion for a small batch, its merge for a large one.
 func BenchmarkPendingParkBatch(b *testing.B) {
 	item := func(clock uint64) *Item {
 		return &Item{ID: ID{Client: 2, Clock: clock}, Origin: &ID{Client: 9, Clock: 0}, Content: NewContentDeleted(1)}
@@ -256,8 +256,8 @@ func BenchmarkPendingParkGCBatch(b *testing.B) {
 				if err := ApplyUpdateV1(doc, state, nil); err != nil {
 					b.Fatal(err)
 				}
-				if c := doc.store.pending.coverOf(); len(c.spans[2]) != 1 {
-					b.Fatalf("spans %d", len(c.spans[2]))
+				if c := doc.store.pending.coverOf(); c.spans[2].len() != 1 {
+					b.Fatalf("spans %d", c.spans[2].len())
 				}
 				b.StartTimer()
 				if err := ApplyUpdateV1(doc, u, nil); err != nil {

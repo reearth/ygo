@@ -12,7 +12,8 @@ the same document.
   retried only when they can apply. `Doc.SetMaxPendingItems` sets the cap
   after construction.
 - A struct sent again merges into the pending queue as Yjs merges its pending
-  update, so the queue holds what Yjs's pending update holds.
+  update, so the queue holds what Yjs's pending update holds. Each struct a
+  park adds, cuts or drops costs, on average, time logarithmic in the queue.
 - A struct the document already holds waits on another client's struct it
   names and the document lacks, as in Yjs.
 - An item next to a GC struct integrates as a GC struct, as in Yjs.

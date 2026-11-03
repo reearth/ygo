@@ -253,13 +253,10 @@ func tryIntegrateOrDrop(txn *Transaction, item *Item, dropped *error) (ok bool, 
 // lets a queue above a lowered cap stay there but not grow.
 func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 	s := txn.doc.store
-	limit := txn.doc.maxPendingItemsLimit()
-	if s.pending != nil {
-		limit = max(limit, len(s.pending.items))
-	}
-	if s.pending != nil && len(s.pending.items) > 0 && !s.pending.tailAppends(pending) && s.pending.mergesAny(pending) {
+	limit := max(txn.doc.maxPendingItemsLimit(), s.pending.heldStructs())
+	if s.pending.heldStructs() > 0 && !s.pending.tailAppends(pending) && s.pending.mergesAny(pending) {
 		pl := s.pending.plan(refsOf(pending))
-		if len(s.pending.items)+pl.growth() > limit {
+		if s.pending.heldStructs()+pl.growth() > limit {
 			return ErrInvalidUpdate
 		}
 		pending = s.pending.apply(pl, pending, s.parked != nil && len(s.parked.items) > 0)
@@ -273,12 +270,12 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 		if s.pending != nil && len(s.pending.items) > from {
 			n := len(s.pending.items)
 			run := s.pending.items[from:n:n]
-			s.pending.addCover(run)
+			s.pending.addCover(run, from)
 			txn.noteParked(run)
 		}
 	}()
 	for _, item := range pending {
-		if s.pending != nil && len(s.pending.items) >= limit {
+		if s.pending.heldStructs() >= limit {
 			return ErrInvalidUpdate
 		}
 		if s.pending == nil {

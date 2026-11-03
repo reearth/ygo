@@ -49,9 +49,10 @@ type StructStore struct {
 // park time. A retry is worth attempting when the store's current
 // clock for any client in `missing` has advanced past its recorded value.
 type pendingUpdate struct {
-	// items are appended or replaced, so a transaction can record its park as
-	// a view of this queue.
+	// items are appended, or emptied in place (nil) when a merge drops them,
+	// so a transaction can record its park as a view of this queue.
 	items   []*Item
+	dead    int         // the nil slots of items
 	missing StateVector // clientID -> store clock at park time for that client
 	// cover is the clocks items span, built on demand and kept by addCover.
 	cover *pendingCover

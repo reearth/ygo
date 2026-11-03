@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -139,7 +140,7 @@ func TestUnit_PendingQueue_AResendWhoseTailIsParkedParksItsHead(t *testing.T) {
 		require.NoError(t, applyVersioned(t, room, v2, end), "v2=%v", v2)
 		require.NoError(t, applyVersioned(t, room, v2, long), "v2=%v", v2)
 		held := 0
-		for _, it := range room.store.pending.items {
+		for _, it := range room.store.pending.heldItems() {
 			held += it.Content.Len()
 		}
 		require.Equal(t, 6, held, "v2=%v: each parked clock is held once", v2)
@@ -292,7 +293,7 @@ func TestUnit_PendingQueue_AGCCopyOfAParkedItemTakesItsPlace(t *testing.T) {
 		require.NoError(t, applyVersioned(t, room, v2, structsV1(map[ClientID][]*Item{2: {waitingFor9(1)}})))
 		require.NoError(t, applyVersioned(t, room, v2, structsV1(map[ClientID][]*Item{2: {gcStruct(2, 1, 1)}})))
 		require.Equal(t, 1, room.PendingStats().Items, "v2=%v", v2)
-		require.True(t, isGCStruct(room.store.pending.items[0]), "v2=%v: the GC copy is parked", v2)
+		require.True(t, isGCStruct(room.store.pending.heldItems()[0]), "v2=%v: the GC copy is parked", v2)
 		require.NoError(t, applyVersioned(t, room, v2, structsV1(map[ClientID][]*Item{2: {gcStruct(2, 0, 1)}})))
 		require.Equal(t, uint64(2), room.StateVector().Clock(2), "v2=%v", v2)
 	}
@@ -372,56 +373,81 @@ func TestUnit_PendingBudget_AGCCopyInACollectedGroupMerges(t *testing.T) {
 	}
 }
 
-// A park whose insertions would move more than coverInsertWork spans merges
-// them in one pass per client; the cover then equals the one built from
-// scratch, and the batch joins the span it touches.
+// coverSpans is c's spans as slices.
+func coverSpans(c *pendingCover) map[ClientID][]clockSpan {
+	out := make(map[ClientID][]clockSpan, len(c.spans))
+	for client, s := range c.spans {
+		out[client] = s.slice()
+	}
+	return out
+}
+
+// A park adds its spans to the cover one by one, or, for a batch of many
+// spans, in one merge per client; the cover then equals the one built from
+// scratch, and the batch joins the spans it touches.
 func TestUnit_PendingCover_ABatchParkJoinsTheSpanItTouches(t *testing.T) {
 	item := func(clock uint64, n int) *Item {
 		return &Item{ID: ID{Client: 2, Clock: clock}, Content: NewContentDeleted(n)}
 	}
 	const spans = 10_000
-	p := &pendingUpdate{missing: make(StateVector)}
-	for i := range uint64(spans) {
-		p.items = append(p.items, item(4*i+100, 1))
+	for _, tc := range []struct {
+		name string
+		k    int
+		gaps bool
+	}{{"one by one", 50, true}, {"few spans", seqFlat + 1, false}, {"many spans", spans / 16, true}} {
+		p := &pendingUpdate{missing: make(StateVector)}
+		for i := range uint64(spans) {
+			p.items = append(p.items, item(4*i+100, 1))
+		}
+		p.coverOf()
+		// The batch joins the span at 100 from below and the spans at 200
+		// and 204 to each other, and adds k structs in the gaps or as one run.
+		batch := []*Item{item(99, 1), item(201, 3)}
+		for i := range uint64(tc.k) {
+			if tc.gaps {
+				batch = append(batch, item(4*i+1002, 1))
+			} else {
+				batch = append(batch, item(1001+i, 1))
+			}
+		}
+		from := len(p.items)
+		p.items = append(p.items, batch...)
+		p.addCover(batch, from)
+		require.Equal(t, sortedSpans(p.items), coverSpans(p.cover), tc.name)
+		got := p.cover.spans[2]
+		require.Equal(t, clockSpan{99, 101}, got.at(0), "%s: the batch joins the span at clock 100", tc.name)
+		require.Equal(t, clockSpan{200, 205}, got.at(got.search(func(s clockSpan) bool { return s.end > 200 })), tc.name)
 	}
-	p.coverOf()
-	const k = coverInsertWork/spans + 1 // more insertion work than the bound
-	batch := make([]*Item, 0, k+1)
-	for c := range uint64(k) {
-		batch = append(batch, item(c, 1))
-	}
-	batch = append(batch, item(k, 100-k))
-	p.items = append(p.items, batch...)
-	p.addCover(batch)
-	require.Equal(t, sortedSpans(p.items), p.cover.spans)
-	require.Equal(t, clockSpan{0, 101}, p.cover.spans[2][0], "the batch joins the span at clock 100")
 }
 
 // A batch park that merges as one span touching the end of the cover joins
-// the last span, so no two spans of the cover touch.
+// the last span, so no two spans of the cover touch, whether the cover is a
+// short list or a long one.
 func TestUnit_PendingCover_ASingleSpanBatchJoinsTheLastSpan(t *testing.T) {
 	item := func(clock uint64, n int) *Item {
 		return &Item{ID: ID{Client: 2, Clock: clock}, Content: NewContentDeleted(n)}
 	}
-	const spans = 10_000
-	p := &pendingUpdate{missing: make(StateVector)}
-	for i := range uint64(spans) {
-		p.items = append(p.items, item(4*i+100, 1))
-	}
-	p.coverOf()
-	last := p.cover.spans[2][spans-1].end
-	const k = coverInsertWork/spans + 1 // more insertion work than the bound
-	batch := make([]*Item, 0, k)
-	for c := range uint64(k) {
-		batch = append(batch, item(last+c, 1))
-	}
-	p.items = append(p.items, batch...)
-	p.addCover(batch)
-	got := p.cover.spans[2]
-	require.Len(t, got, spans)
-	require.Equal(t, clockSpan{last - 1, last + k}, got[spans-1])
-	for i := 1; i < len(got); i++ {
-		require.Greater(t, got[i].start, got[i-1].end, "spans %d and %d touch", i-1, i)
+	for _, spans := range []int{seqFlat / 2, 10_000} {
+		p := &pendingUpdate{missing: make(StateVector)}
+		for i := range uint64(spans) {
+			p.items = append(p.items, item(4*i+100, 1))
+		}
+		p.coverOf()
+		last := p.cover.spans[2].at(spans - 1).end
+		const k = seqFlat + 1 // a batch, not one by one
+		batch := make([]*Item, 0, k)
+		for c := range uint64(k) {
+			batch = append(batch, item(last+c, 1))
+		}
+		from := len(p.items)
+		p.items = append(p.items, batch...)
+		p.addCover(batch, from)
+		got := p.cover.spans[2].slice()
+		require.Len(t, got, spans)
+		require.Equal(t, clockSpan{last - 1, last + k}, got[spans-1])
+		for i := 1; i < len(got); i++ {
+			require.Greater(t, got[i].start, got[i-1].end, "spans %d and %d touch", i-1, i)
+		}
 	}
 }
 
@@ -474,12 +500,12 @@ func TestUnit_PendingCover_Spans(t *testing.T) {
 	p := &pendingUpdate{missing: make(StateVector)}
 	add := func(it *Item) {
 		p.items = append(p.items, it)
-		p.addCover([]*Item{it})
+		p.addCover([]*Item{it}, len(p.items)-1)
 	}
 	for _, it := range []*Item{item(10, 2), item(4, 2), item(12, 3), item(6, 1), item(20, 1)} {
 		add(it)
 	}
-	require.Equal(t, []clockSpan{{4, 7}, {10, 15}, {20, 21}}, p.coverOf().spans[1])
+	require.Equal(t, []clockSpan{{4, 7}, {10, 15}, {20, 21}}, p.coverOf().spans[1].slice())
 	for _, tc := range []struct {
 		start, end uint64
 		item, gc   bool // merges as an item, and as a GC struct
@@ -496,8 +522,8 @@ func TestUnit_PendingCover_Spans(t *testing.T) {
 	add(item(30, 1))
 	add(item(25, 1))
 	add(item(7, 3))
-	require.Equal(t, []clockSpan{{4, 15}, {20, 21}, {25, 26}, {30, 31}}, p.cover.spans[1])
-	require.Equal(t, sortedSpans(p.items), p.cover.spans)
+	require.Equal(t, []clockSpan{{4, 15}, {20, 21}, {25, 26}, {30, 31}}, p.cover.spans[1].slice())
+	require.Equal(t, sortedSpans(p.items), coverSpans(p.cover))
 }
 
 // A resend whose one struct spans the parked tail and new clocks is sliced at
@@ -520,7 +546,7 @@ func TestUnit_PendingQueue_AResentStructSpanningTheParkedTailIsSliced(t *testing
 		require.NoError(t, applyVersioned(t, room, v2, short))
 		require.NoError(t, applyVersioned(t, room, v2, long))
 		require.Equal(t, 2, room.PendingStats().Items, "v2=%v", v2)
-		require.Equal(t, uint64(4), room.store.pending.items[1].ID.Clock, "v2=%v", v2)
+		require.Equal(t, uint64(4), room.store.pending.heldItems()[1].ID.Clock, "v2=%v", v2)
 		require.NoError(t, applyVersioned(t, room, v2, ab))
 		require.Zero(t, room.PendingStats().Items)
 		require.Equal(t, writer.GetText("t").ToString(), room.GetText("t").ToString(), "v2=%v", v2)
@@ -559,7 +585,48 @@ func TestUnit_PendingQueue_ATailAppendKeepsABuiltCover(t *testing.T) {
 	}
 	room.store.pending.coverOf()
 	require.NoError(t, ApplyUpdateV1(room, keystrokes[3], nil))
-	require.Equal(t, []clockSpan{{0, 4}}, room.store.pending.cover.spans[2])
+	require.Equal(t, []clockSpan{{0, 4}}, room.store.pending.cover.spans[2].slice())
 	require.NoError(t, ApplyUpdateV1(room, keystrokes[3], nil))
 	require.Equal(t, 4, room.PendingStats().Items)
+}
+
+// Structs that each park in front of every struct parked before them, behind
+// a gap, one per update, cost time linear in the updates: no park moves the
+// spans after it.
+func TestPerf_PendingCover_ParkingInFrontIsLinear(t *testing.T) {
+	if testing.Short() || raceEnabled || testing.CoverMode() != "" {
+		t.Skip("timing test")
+	}
+	clock := threadCPUClock(t)
+	park := func(n int) time.Duration {
+		room := New(WithClientID(1), WithMaxPendingItems(n))
+		ups := make([][]byte, n)
+		for i := range ups {
+			ups[i] = structsV1(map[ClientID][]*Item{2: {{ID: ID{Client: 2, Clock: uint64(4*(n-i) + 2)}, Origin: &ID{Client: 99}, Content: NewContentDeleted(1)}}})
+		}
+		took := clock(func() {
+			for _, u := range ups {
+				if err := ApplyUpdateV1(room, u, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+		if got := room.PendingStats().Items; got != n {
+			t.Fatalf("parked %d, want %d", got, n)
+		}
+		return took
+	}
+	const small, large, runs = 2000, 64000, 32
+	var s, l time.Duration = math.MaxInt64, math.MaxInt64
+	for range 5 {
+		var sum time.Duration
+		for range runs {
+			sum += park(small)
+		}
+		s, l = min(s, sum), min(l, park(large))
+	}
+	t.Logf("%d structs parked each in front, as %d queues of %d: %v; as one: %v (%.1f×)", large, runs, small, s, l, float64(l)/float64(s))
+	if l > 3*s {
+		t.Fatalf("parking in front grows superlinearly: %v for %d, %v for %d queues of %d", l, large, s, runs, small)
+	}
 }

@@ -3,7 +3,6 @@ package crdt
 import (
 	"cmp"
 	"slices"
-	"sort"
 )
 
 // The pending queue holds what Yjs's pending update holds, since reconnects and
@@ -16,9 +15,15 @@ type clockSpan struct{ start, end uint64 }
 // pendingCover indexes a pending queue: each client's clock spans, and, once a
 // park merged, its structs in clock order, with the clients in order.
 type pendingCover struct {
-	spans   map[ClientID][]clockSpan
-	structs map[ClientID][]*Item
-	clients []ClientID
+	spans   map[ClientID]seq[clockSpan]
+	structs map[ClientID]seq[queued]
+	clients seq[ClientID]
+}
+
+// queued is a struct of the queue and its slot in the queue's items.
+type queued struct {
+	*Item
+	slot int
 }
 
 // isGCStruct reports whether it is a GC placeholder (wire tag 0).
@@ -27,7 +32,12 @@ func isGCStruct(it *Item) bool { return it.Deleted && it.isGCOrphan() }
 // coverOf is p's cover, built on first use and kept current by addCover.
 func (p *pendingUpdate) coverOf() *pendingCover {
 	if p.cover == nil {
-		p.cover = &pendingCover{spans: sortedSpans(p.items)}
+		lists := sortedSpans(p.items)
+		spans := make(map[ClientID]seq[clockSpan], len(lists))
+		for client, list := range lists {
+			spans[client] = seqOf(list)
+		}
+		p.cover = &pendingCover{spans: spans}
 	}
 	return p.cover
 }
@@ -88,10 +98,6 @@ func coalesce(list []clockSpan) []clockSpan {
 	return merged
 }
 
-// coverInsertWork is the span-move count above which addCover merges per
-// client, since insertion stops being cheaper there.
-const coverInsertWork = 1 << 19
-
 // tailAppends reports whether every item starts past every clock the queue's
 // only client holds, so none overlaps a parked struct and cover is not needed.
 // A GC struct may merge with the GC struct before it, so it takes no shortcut.
@@ -121,26 +127,29 @@ func (p *pendingUpdate) noteTail(item *Item) {
 	p.tail = max(p.tail, item.ID.Clock+uint64(item.Content.Len()))
 }
 
-// addCover adds the clocks of items just parked in p to p's cover, if any.
-func (p *pendingUpdate) addCover(items []*Item) {
+// addCover adds the clocks of items, just parked in p from slot from, to p's
+// cover, if any.
+func (p *pendingUpdate) addCover(items []*Item, from int) {
 	if p.cover == nil {
 		return
 	}
-	p.cover.addStructs(items)
-	work := 0
-	for _, it := range items {
-		if work += len(p.cover.spans[it.ID.Client]) + 1; work > coverInsertWork {
-			break
-		}
-	}
-	if work <= coverInsertWork {
+	p.cover.addStructs(items, from)
+	if len(items) <= seqFlat {
 		for _, it := range items {
-			insertSpan(p.cover.spans, it)
+			p.cover.insertSpan(it)
 		}
 		return
 	}
 	for client, list := range sortedSpans(items) {
-		p.cover.spans[client] = mergeSpans(p.cover.spans[client], list)
+		spans := p.cover.spans[client]
+		if spans.bulk(len(list)) {
+			spans = seqOf(mergeSpans(spans.slice(), list))
+		} else {
+			for _, s := range list {
+				addSpan(&spans, s)
+			}
+		}
+		p.cover.spans[client] = spans
 	}
 }
 
@@ -149,54 +158,59 @@ func (p *pendingUpdate) addCover(items []*Item) {
 func (p *pendingUpdate) structIndex() *pendingCover {
 	c := p.coverOf()
 	if c.structs == nil {
-		c.structs = make(map[ClientID][]*Item)
-		for _, it := range p.items {
-			c.structs[it.ID.Client] = append(c.structs[it.ID.Client], it)
+		lists := make(map[ClientID][]queued)
+		for slot, it := range p.items {
+			lists[it.ID.Client] = append(lists[it.ID.Client], queued{it, slot})
 		}
-		c.clients = make([]ClientID, 0, len(c.structs))
-		for client, list := range c.structs {
+		c.structs = make(map[ClientID]seq[queued], len(lists))
+		clients := make([]ClientID, 0, len(lists))
+		for client, list := range lists {
 			if !slices.IsSortedFunc(list, byClock) {
 				slices.SortFunc(list, byClock)
 			}
-			c.clients = append(c.clients, client)
+			c.structs[client] = seqOf(list)
+			clients = append(clients, client)
 		}
-		slices.Sort(c.clients)
+		slices.Sort(clients)
+		c.clients = seqOf(clients)
 	}
 	return c
 }
 
-func byClock(a, b *Item) int { return cmp.Compare(a.ID.Clock, b.ID.Clock) }
+func byClock(a, b queued) int { return cmp.Compare(a.ID.Clock, b.ID.Clock) }
 
-// addStructs adds items to the struct index, if built, merging what goes
-// before a client's last struct, and new clients, in one pass each.
-func (c *pendingCover) addStructs(items []*Item) {
+// addStructs adds items, parked from slot from, to the struct index, if
+// built, merging what goes before a client's last struct, and new clients.
+func (c *pendingCover) addStructs(items []*Item, from int) {
 	if c.structs == nil {
 		return
 	}
 	var fresh []ClientID
-	var early map[ClientID][]*Item
-	for _, it := range items {
-		client := it.ID.Client
+	var early map[ClientID][]queued
+	for i, it := range items {
+		q, client := queued{it, from + i}, it.ID.Client
 		list := c.structs[client]
-		switch n := len(list); {
+		switch n := list.len(); {
 		case n == 0:
 			fresh = append(fresh, client)
-			c.structs[client] = append(list, it)
-		case list[n-1].ID.Clock < it.ID.Clock:
-			c.structs[client] = append(list, it)
-		default:
+		case list.at(n-1).ID.Clock >= it.ID.Clock:
 			if early == nil {
-				early = make(map[ClientID][]*Item)
+				early = make(map[ClientID][]queued)
 			}
-			early[client] = append(early[client], it)
+			early[client] = append(early[client], q)
+			continue
 		}
+		list.insert(list.len(), q)
+		c.structs[client] = list
 	}
 	for client, add := range early {
 		slices.SortFunc(add, byClock)
-		c.structs[client] = mergeSorted(c.structs[client], add, byClock)
+		list := c.structs[client]
+		list.mergeIn(add, byClock)
+		c.structs[client] = list
 	}
 	slices.Sort(fresh)
-	c.clients = mergeSorted(c.clients, fresh, cmp.Compare[ClientID])
+	c.clients.mergeIn(fresh, cmp.Compare[ClientID])
 }
 
 // mergeSorted merges add into list, both sorted by compare, from the back, so
@@ -218,60 +232,45 @@ func mergeSorted[T any](list, add []T, compare func(a, b T) int) []T {
 }
 
 // spliceWindows puts kepts, what the merge kept of each of a client's windows
-// (nil for none it changed), in their place in the struct index, moving the
-// structs after them only from the first window that shrinks, and reports
-// whether the client has none left.
-func (c *pendingCover) spliceWindows(wins []queueWindow, kepts [][]*Item) bool {
+// (nil for none it changed), in their place in the struct index, from the
+// last window so the earlier keep their positions, and reports whether the
+// client has none left.
+func (c *pendingCover) spliceWindows(wins []queueWindow, kepts [][]queued) bool {
 	client := wins[0].client
 	list := c.structs[client]
-	shrink := len(wins)
-	for i, w := range wins {
-		kept := kepts[i]
-		if kept == nil {
-			continue
+	for i := len(wins) - 1; i >= 0; i-- {
+		if kept := kepts[i]; kept != nil {
+			if !slices.IsSortedFunc(kept, byClock) {
+				slices.SortFunc(kept, byClock)
+			}
+			list.replace(wins[i].from, wins[i].to, kept)
 		}
-		if !slices.IsSortedFunc(kept, byClock) {
-			slices.SortFunc(kept, byClock)
-		}
-		if len(kept) < w.to-w.from {
-			shrink = i
-			break
-		}
-		copy(list[w.from:w.to], kept)
 	}
-	if shrink == len(wins) {
-		return false
-	}
-	out, read := list[:wins[shrink].from], wins[shrink].from
-	for i, w := range wins[shrink:] {
-		out = append(out, list[read:w.from]...)
-		kept := kepts[shrink+i]
-		if kept == nil {
-			kept = list[w.from:w.to]
-		} else if !slices.IsSortedFunc(kept, byClock) {
-			slices.SortFunc(kept, byClock)
-		}
-		out, read = append(out, kept...), w.to
-	}
-	out = append(out, list[read:]...)
-	clear(list[len(out):])
-	if len(out) > 0 {
-		c.structs[client] = out
+	if list.len() > 0 {
+		c.structs[client] = list
 		return false
 	}
 	delete(c.structs, client)
 	return true
 }
 
-// dropClients takes gone, clients with no struct left, out of the ordered list
-// in one pass.
+// dropClients takes gone, clients with no struct left, out of the ordered list.
 func (c *pendingCover) dropClients(gone []ClientID) {
 	if len(gone) == 0 {
 		return
 	}
 	slices.Sort(gone)
-	out, j := c.clients[:0], 0
-	for _, client := range c.clients {
+	if !c.clients.bulk(len(gone)) {
+		for _, client := range gone {
+			if at := c.clients.search(func(x ClientID) bool { return x >= client }); at < c.clients.len() && c.clients.at(at) == client {
+				c.clients.replace(at, at+1, nil)
+			}
+		}
+		return
+	}
+	clients := c.clients.slice()
+	out, j := clients[:0], 0
+	for _, client := range clients {
 		for j < len(gone) && gone[j] < client {
 			j++
 		}
@@ -279,38 +278,35 @@ func (c *pendingCover) dropClients(gone []ClientID) {
 			out = append(out, client)
 		}
 	}
-	c.clients = out
+	c.clients = seqOf(out)
 }
 
 // holdsBetween reports whether the queue holds a client between lo and hi.
 func (c *pendingCover) holdsBetween(lo, hi ClientID) bool {
-	at, found := slices.BinarySearch(c.clients, lo)
-	if found {
-		at++
-	}
-	return at < len(c.clients) && c.clients[at] < hi
+	at := c.clients.search(func(x ClientID) bool { return x > lo })
+	return at < c.clients.len() && c.clients.at(at) < hi
 }
 
-// insertSpan adds its clocks to m, merging the spans they overlap or touch.
-func insertSpan(m map[ClientID][]clockSpan, it *Item) {
+// insertSpan adds its clocks to the cover.
+func (c *pendingCover) insertSpan(it *Item) {
 	start := it.ID.Clock
 	end := start + uint64(it.Content.Len())
 	if end <= start {
 		return
 	}
-	spans := m[it.ID.Client]
-	i := sort.Search(len(spans), func(k int) bool { return spans[k].end >= start })
-	j := i
-	for j < len(spans) && spans[j].start <= end {
-		j++
+	spans := c.spans[it.ID.Client]
+	addSpan(&spans, clockSpan{start, end})
+	c.spans[it.ID.Client] = spans
+}
+
+// addSpan adds s to spans, merging the spans it overlaps or touches.
+func addSpan(spans *seq[clockSpan], s clockSpan) {
+	i := spans.search(func(x clockSpan) bool { return x.end >= s.start })
+	j := spans.search(func(x clockSpan) bool { return x.start > s.end })
+	if i < j {
+		s = clockSpan{min(s.start, spans.at(i).start), max(s.end, spans.at(j-1).end)}
 	}
-	if i == j {
-		spans = slices.Insert(spans, i, clockSpan{start, end})
-	} else {
-		spans[i] = clockSpan{min(start, spans[i].start), max(end, spans[j-1].end)}
-		spans = slices.Delete(spans, i+1, j)
-	}
-	m[it.ID.Client] = spans
+	spans.replace(i, j, []clockSpan{s})
 }
 
 // mergeSpans merges two sorted, coalesced span lists into one.
@@ -352,15 +348,15 @@ func (p *pendingUpdate) mergesAny(items []*Item) bool {
 // merges reports whether a struct of client at [start, end) merges with p's
 // queue, sharing a clock with it or, as a GC struct, touching it; p may be nil.
 func (p *pendingUpdate) merges(client ClientID, start, end uint64, gc bool) bool {
-	if p == nil || len(p.items) == 0 {
+	if p.heldStructs() == 0 {
 		return false
 	}
 	if gc {
 		start, end = max(start, 1)-1, end+1
 	}
 	spans := p.coverOf().spans[client]
-	i := sort.Search(len(spans), func(k int) bool { return spans[k].end > start })
-	return i < len(spans) && spans[i].start < end
+	i := spans.search(func(s clockSpan) bool { return s.end > start })
+	return i < spans.len() && spans.at(i).start < end
 }
 
 // heldStructs is the number of structs p's queue holds; p may be nil.
@@ -368,5 +364,5 @@ func (p *pendingUpdate) heldStructs() int {
 	if p == nil {
 		return 0
 	}
-	return len(p.items)
+	return len(p.items) - p.dead
 }

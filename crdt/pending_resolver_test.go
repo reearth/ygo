@@ -198,7 +198,7 @@ func referenceWithinUpdatePending(txn *Transaction, pending []*Item) error {
 						}
 					}
 					txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
-					txn.doc.store.pending.addCover([]*Item{item})
+					txn.doc.store.pending.addCover([]*Item{item}, len(txn.doc.store.pending.items)-1)
 					mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
 				} else {
 					txn.doc.store.Append(item)

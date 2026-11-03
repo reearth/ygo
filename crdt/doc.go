@@ -354,7 +354,7 @@ func (d *Doc) upgradeRawType(raw *rawType, dst sharedType, name string) {
 	}
 	if d.store.pending != nil {
 		for _, item := range d.store.pending.items {
-			if item.Parent == &raw.abstractType {
+			if item != nil && item.Parent == &raw.abstractType {
 				item.Parent = at
 			}
 		}
@@ -1055,7 +1055,7 @@ func (d *Doc) PendingStats() PendingStats {
 
 	stats := PendingStats{}
 	if d.store.pending != nil {
-		stats.Items = len(d.store.pending.items)
+		stats.Items = d.store.pending.heldStructs()
 		// missing is a StateVector (map[ClientID]uint64) — extract sorted keys
 		missing := make([]ClientID, 0, len(d.store.pending.missing))
 		for c := range d.store.pending.missing {

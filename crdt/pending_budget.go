@@ -54,7 +54,7 @@ func newPendingBudget(doc *Doc, initial StateVector, update []byte, v2 bool) pen
 		// A document can hold more parked items than its cap (stored state
 		// loaded with the cap lifted, SetMaxPendingItems): its room is none,
 		// not below none, so an update that parks nothing still applies.
-		remaining = max(remaining-len(doc.store.pending.items), 0)
+		remaining = max(remaining-doc.store.pending.heldStructs(), 0)
 	}
 	return pendingBudget{initial: initial, update: update, remaining: remaining, v2: v2, parked: doc.store.pending,
 		deleteRoom: max(limit-doc.store.pendingDsRanges, 0)}

@@ -103,9 +103,11 @@ func encodeTxnV1Locked(txn *Transaction) []byte {
 	if len(record.items) > 0 && store.pending != nil {
 		// Only the structs still parked: one that a drain integrated before a
 		// later failure is already among the added structs.
-		pending := make(map[*Item]struct{}, len(store.pending.items))
+		pending := make(map[*Item]struct{}, store.pending.heldStructs())
 		for _, it := range store.pending.items {
-			pending[it] = struct{}{}
+			if it != nil {
+				pending[it] = struct{}{}
+			}
 		}
 		for _, it := range record.items {
 			if _, ok := pending[it]; ok {
@@ -164,7 +166,7 @@ func withParked(doc *Doc, sv StateVector, state []byte,
 	var parts [][]byte
 	if s.pending != nil {
 		// One update per item, so one that does not merge is left out alone.
-		for _, it := range s.pending.items {
+		for _, it := range s.pending.heldItems() {
 			parts = append(parts, encode(map[ClientID][]*Item{it.ID.Client: {it}}, newDeleteSet(), sv, s))
 		}
 	}
@@ -976,7 +978,7 @@ func drainPending(txn *Transaction) error {
 	// notification.
 	var dropped error
 	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
-		items := txn.doc.store.pending.items
+		items := txn.doc.store.pending.heldItems()
 		txn.doc.store.pending = nil
 
 		done := make([]bool, len(items))

@@ -134,7 +134,7 @@ func TestUnit_PendingMerge_GCStructsMerge(t *testing.T) {
 			if err := applyHexes(t, doc, v2, "01010201000100", second); err != nil { // GC 2@1+1 first
 				t.Fatalf("%s v2=%v: %v", second, v2, err)
 			}
-			if items := doc.store.pending.items; len(items) != 1 || items[0].ID.Clock != 1 || items[0].Content.Len() != 2 {
+			if items := doc.store.pending.heldItems(); len(items) != 1 || items[0].ID.Clock != 1 || items[0].Content.Len() != 2 {
 				t.Fatalf("%s v2=%v: parked %d structs, want one GC struct 2@1+2", second, v2, len(items))
 			}
 		}
@@ -208,7 +208,7 @@ func TestUnit_PendingMerge_AQueueOverALoweredCapDoesNotGrow(t *testing.T) {
 		if err := applyHexes(t, doc, v2, "01010301000100"); err != nil { // GC 3@1
 			t.Fatalf("v2=%v: the GC copy: %v", v2, err)
 		}
-		if items := doc.store.pending.items; len(items) != 2 || !slices.ContainsFunc(items, isGCStruct) {
+		if items := doc.store.pending.heldItems(); len(items) != 2 || !slices.ContainsFunc(items, isGCStruct) {
 			t.Fatalf("v2=%v: parked %d, want 2 with the GC copy", v2, len(items))
 		}
 		before := EncodeStateAsUpdateV1(doc, nil)
@@ -254,9 +254,25 @@ func TestUnit_PendingMerge_AResendOverALargeQueueAllocatesLittle(t *testing.T) {
 	}
 }
 
+// structsIndexed is each client's structs in c, the struct index of p, after
+// checking that each names its slot in p's queue, and the index's clients.
+func structsIndexed(t *testing.T, p *pendingUpdate, c *pendingCover) (map[ClientID][]*Item, []ClientID) {
+	t.Helper()
+	structs := make(map[ClientID][]*Item, len(c.structs))
+	for client, list := range c.structs {
+		for _, q := range list.slice() {
+			if p.items[q.slot] != q.Item {
+				t.Fatalf("struct %d@%d names slot %d, which holds another", client, q.ID.Clock, q.slot)
+			}
+			structs[client] = append(structs[client], q.Item)
+		}
+	}
+	return structs, c.clients.slice()
+}
+
 // plan reads only windows of each arrival client's queue structs, and keeps
 // what the merge over the whole queue keeps, which is Yjs's merge, also for
-// arrivals spread over a long queue.
+// arrivals spread over a long queue, and over clients held past seqFlat.
 func TestUnit_PendingMerge_AWindowKeepsWhatTheWholeQueueKeeps(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 5))
 	run := func(c ClientID, n, gap, maxLen int) []*Item {
@@ -284,9 +300,12 @@ func TestUnit_PendingMerge_AWindowKeepsWhatTheWholeQueueKeeps(t *testing.T) {
 		for c := ClientID(8); c >= 3; c-- {
 			sparse := n%2 == 1 // a long queue, and arrivals spread over it
 			if rng.IntN(3) > 0 {
-				if sparse {
+				switch {
+				case sparse && n%10 == 9 && !raceEnabled: // the race detector makes a long queue slow
+					held = append(held, run(c, seqFlat+rng.IntN(seqFlat), gap, 3)...)
+				case sparse:
 					held = append(held, run(c, 10+rng.IntN(100), gap, 3)...)
-				} else {
+				default:
 					held = append(held, run(c, rng.IntN(12), gap, 3)...)
 				}
 			}
@@ -310,8 +329,8 @@ func TestUnit_PendingMerge_AWindowKeepsWhatTheWholeQueueKeeps(t *testing.T) {
 		wantHeld, wantArrived := make([]mergeKeep, len(all)), make([]mergeKeep, len(in))
 		yjsMerge(all, in, wantHeld, wantArrived, func(ClientID) bool { return false })
 		gotHeld := make(map[*Item]mergeKeep, len(pl.held))
-		for i, it := range pl.held {
-			gotHeld[it] = pl.keepHeld[i]
+		for i, q := range pl.held {
+			gotHeld[q.Item] = pl.keepHeld[i]
 		}
 		for i, q := range ho {
 			it := held[q]
@@ -330,10 +349,13 @@ func TestUnit_PendingMerge_AWindowKeepsWhatTheWholeQueueKeeps(t *testing.T) {
 		}
 		// After the park, the index is what a rebuild from the queue gives.
 		out := p.apply(pl, arrived, n%4 == 0)
+		from := len(p.items)
 		p.items = append(p.items, out...)
-		p.addCover(out)
-		rebuilt := (&pendingUpdate{items: p.items}).structIndex()
-		if !maps.EqualFunc(p.cover.structs, rebuilt.structs, slices.Equal) || !slices.Equal(p.cover.clients, rebuilt.clients) {
+		p.addCover(out, from)
+		got, gotClients := structsIndexed(t, p, p.structIndex())
+		rebuilt := &pendingUpdate{items: p.heldItems()}
+		want, wantClients := structsIndexed(t, rebuilt, rebuilt.structIndex())
+		if !maps.EqualFunc(got, want, slices.Equal) || !slices.Equal(gotClients, wantClients) {
 			t.Fatalf("case %d: the index after the park is not the queue's", n)
 		}
 	}
@@ -405,7 +427,7 @@ func TestPerf_PendingMerge_SparseReplacementIsLinear(t *testing.T) {
 			}
 		})
 		gcs := 0
-		for _, it := range room.store.pending.items {
+		for _, it := range room.store.pending.heldItems() {
 			if isGCStruct(it) {
 				gcs++
 			}
@@ -430,6 +452,53 @@ func TestPerf_PendingMerge_SparseReplacementIsLinear(t *testing.T) {
 	}
 }
 
+// GC copies that each take the place of one parked item, one copy per update
+// from the lowest clock up, cost time linear in the updates: no update walks
+// the queue.
+func TestPerf_PendingMerge_OneReplacementPerUpdateIsLinear(t *testing.T) {
+	if testing.Short() || raceEnabled || testing.CoverMode() != "" {
+		t.Skip("timing test")
+	}
+	clock := threadCPUClock(t)
+	replace := func(n int) time.Duration {
+		room := New(WithClientID(1), WithMaxPendingItems(n))
+		items, copies := make([]*Item, n), make([][]byte, n)
+		for i := range items {
+			// Items behind a gap, each with its own GC copy over the gap and it.
+			items[i] = &Item{ID: ID{Client: 2, Clock: uint64(4*i + 2)}, Origin: &ID{Client: 99}, Content: NewContentDeleted(1)}
+			copies[i] = structsV1(map[ClientID][]*Item{2: {gcStruct(2, uint64(4*i+1), 2)}})
+		}
+		if err := ApplyUpdateV1(room, structsV1(map[ClientID][]*Item{2: items}), nil); err != nil {
+			t.Fatal(err)
+		}
+		took := clock(func() {
+			for _, u := range copies {
+				if err := ApplyUpdateV1(room, u, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+		held := room.store.pending.heldItems()
+		if len(held) != n || slices.ContainsFunc(held, func(it *Item) bool { return !isGCStruct(it) }) {
+			t.Fatalf("parked %d, want %d GC structs", len(held), n)
+		}
+		return took
+	}
+	const small, large, runs = 2000, 32000, 16
+	var s, l time.Duration = math.MaxInt64, math.MaxInt64
+	for range 5 {
+		var sum time.Duration
+		for range runs {
+			sum += replace(small)
+		}
+		s, l = min(s, sum), min(l, replace(large))
+	}
+	t.Logf("%d parked items replaced one per update, as %d queues of %d: %v; as one: %v (%.1f×)", large, runs, small, s, l, float64(l)/float64(s))
+	if l > 3*s {
+		t.Fatalf("one replacement per update grows superlinearly: %v for %d, %v for %d queues of %d", l, large, s, runs, small)
+	}
+}
+
 // A queue struct between two windows of one client sets the decoder order the
 // second window starts with, as in Yjs: the GC copy at 20 merges the queue's
 // two GC structs there into one.
@@ -440,8 +509,8 @@ func TestUnit_PendingMerge_StructsBetweenWindowsSetTheOrder(t *testing.T) {
 		if err := applyHexes(t, doc, v2, queue, update); err != nil {
 			t.Fatalf("v2=%v: %v", v2, err)
 		}
-		got := make([]string, 0, len(doc.store.pending.items))
-		for _, it := range doc.store.pending.items {
+		got := make([]string, 0, doc.store.pending.heldStructs())
+		for _, it := range doc.store.pending.heldItems() {
 			got = append(got, fmt.Sprintf("%d+%d gc=%v", it.ID.Clock, it.Content.Len(), isGCStruct(it)))
 		}
 		slices.Sort(got)
@@ -528,16 +597,19 @@ func TestUnit_PendingMerge_TheIndexFollowsTheQueue(t *testing.T) {
 	arrived := []*Item{{ID: ID{Client: 2, Clock: 0}, Origin: &ID{Client: 9}, Content: NewContentDeleted(2)}}
 	pl := p.plan(refsOf(arrived))
 	run := p.apply(pl, arrived, false)
+	from := len(p.items)
 	p.items = append(p.items, run...)
-	p.addCover(run)
+	p.addCover(run, from)
+	index, _ := structsIndexed(t, p, p.structIndex())
 	var indexed []*Item
-	for _, list := range p.cover.structs {
+	for _, list := range index {
 		indexed = append(indexed, list...)
 	}
-	if len(indexed) != len(p.items) {
-		t.Fatalf("the index holds %d structs for %d queued", len(indexed), len(p.items))
+	held := p.heldItems()
+	if len(indexed) != len(held) {
+		t.Fatalf("the index holds %d structs for %d queued", len(indexed), len(held))
 	}
-	for _, it := range p.items {
+	for _, it := range held {
 		if !slices.Contains(indexed, it) {
 			t.Fatalf("queued %d@%d is not in the index", it.ID.Client, it.ID.Clock)
 		}

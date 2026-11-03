@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"math"
 	"slices"
-	"sort"
 )
 
 // mergeDropped marks a struct the merge leaves out.
@@ -185,7 +184,7 @@ func mergeOrder(refs []mergeRef) []int {
 // structs, held, and of each arrival.
 type mergePlan struct {
 	wins                  []queueWindow
-	held                  []*Item
+	held                  []queued
 	keepHeld, keepArrived []mergeKeep
 }
 
@@ -194,7 +193,7 @@ type mergePlan struct {
 // last chain of them touching GC structs past the arrivals, from chainStart.
 type queueWindow struct {
 	client     ClientID
-	list       []*Item
+	list       seq[queued]
 	from, to   int
 	tail       []mergeRef
 	chain      int
@@ -217,10 +216,17 @@ func (p *pendingUpdate) plan(arrived []mergeRef) mergePlan {
 	}
 }
 
-// gcChain reports whether list[to] is a GC struct touching list[to-1].
-func gcChain(list []*Item, to int) bool {
-	return to > 0 && to < len(list) && isGCStruct(list[to]) &&
-		list[to].ID.Clock <= list[to-1].ID.Clock+uint64(list[to-1].Content.Len())
+// gcChain reports whether list's struct at to is a GC struct touching the one
+// before it.
+func gcChain(list seq[queued], to int) bool {
+	if to <= 0 || to >= list.len() {
+		return false
+	}
+	if q := list.at(to); isGCStruct(q.Item) {
+		prev := list.at(to - 1)
+		return q.ID.Clock <= prev.ID.Clock+uint64(prev.Content.Len())
+	}
+	return false
 }
 
 // planChains plans the merge reading of each touching GC chain past a window
@@ -238,16 +244,16 @@ func (c *pendingCover) planChains(in []mergeRef, ao []int, whole map[*Item]bool)
 		list := c.structs[client]
 		for k := i; k < j; {
 			lo, hi := in[k].clock, in[k].end
-			from := sort.Search(len(list), func(n int) bool { return list[n].ID.Clock+uint64(list[n].Content.Len()) >= lo })
+			from := list.search(func(q queued) bool { return q.ID.Clock+uint64(q.Content.Len()) >= lo })
 			to, chain := -1, 0
 			var start *Item
 			// Arrivals whose structs a window shares join it; a window only
 			// grows, so a chain read whole stays read.
 			for m := k + 1; ; m++ {
-				if t := sort.Search(len(list), func(n int) bool { return list[n].ID.Clock > hi }); t > to {
+				if t := list.search(func(q queued) bool { return q.ID.Clock > hi }); t > to {
 					to, start, chain = t, nil, 0
 					if gcChain(list, to) {
-						start = list[to]
+						start = list.at(to).Item
 						for chain == 0 || (whole[start] && gcChain(list, to)) {
 							to, chain = to+1, chain+1
 						}
@@ -257,7 +263,8 @@ func (c *pendingCover) planChains(in []mergeRef, ao []int, whole map[*Item]bool)
 					k = m
 					break
 				}
-				next := sort.Search(len(list), func(n int) bool { return list[n].ID.Clock+uint64(list[n].Content.Len()) >= in[m].clock })
+				at := in[m].clock
+				next := list.search(func(q queued) bool { return q.ID.Clock+uint64(q.Content.Len()) >= at })
 				if max(next, 1)-1 >= to {
 					k = m
 					break
@@ -266,12 +273,12 @@ func (c *pendingCover) planChains(in []mergeRef, ao []int, whole map[*Item]bool)
 			}
 			if from > 0 {
 				from-- // the struct before the window sets the decoder order for it
-			} else if len(pl.wins) > 0 && pl.wins[len(pl.wins)-1].client != client && to > 0 && list[0].ID.Clock == lo {
+			} else if len(pl.wins) > 0 && pl.wins[len(pl.wins)-1].client != client && to > 0 && list.at(0).ID.Clock == lo {
 				// A first step at one clock goes by the decoder order the client
 				// before leaves, which a client only the queue holds resets.
 				prev := &pl.wins[len(pl.wins)-1]
-				if restarts[client] = c.holdsBetween(client, prev.client); !restarts[client] {
-					prev.tail = c.tailRefs(prev.list[prev.to:])
+				if restarts[client] = c.holdsBetween(client, prev.client); !restarts[client] && prev.to < prev.list.len() {
+					prev.tail = c.tailRefs(prev.list.at(prev.to).Item)
 				}
 			}
 			pl.wins = append(pl.wins, queueWindow{client: client, list: list, from: from, to: to, chain: chain, chainStart: start})
@@ -282,13 +289,13 @@ func (c *pendingCover) planChains(in []mergeRef, ao []int, whole map[*Item]bool)
 	var real []int // where pl.held's structs are in held
 	for wi, w := range pl.wins {
 		if wi > 0 && pl.wins[wi-1].client == w.client && pl.wins[wi-1].to < w.from {
-			held = append(held, c.gapRefs(w.list[pl.wins[wi-1].to:w.from])...)
+			held = append(held, c.gapRefs(w.list.at(pl.wins[wi-1].to).Item, w.list.at(w.from-1).Item)...)
 		}
-		for _, it := range w.list[w.from:w.to] {
-			pl.held = append(pl.held, it)
+		w.list.each(w.from, w.to, func(q queued) {
+			pl.held = append(pl.held, q)
 			real = append(real, len(held))
-			held = append(held, refOf(it))
-		}
+			held = append(held, refOf(q.Item))
+		})
 		held = append(held, w.tail...)
 	}
 	hk, ak := make([]mergeKeep, len(held)), make([]mergeKeep, len(in))
@@ -310,33 +317,33 @@ func (c *pendingCover) planChains(in []mergeRef, ao []int, whole map[*Item]bool)
 	return pl, done
 }
 
-// tailRefs stands in for past, which the merge keeps whole and reads only for
-// its decoder order, with its first run of touching structs and one more.
-func (c *pendingCover) tailRefs(past []*Item) []mergeRef {
-	if len(past) == 0 {
-		return nil
-	}
-	first := refOf(past[0])
+// tailRefs stands in for a client's structs from past on, which the merge
+// keeps whole and reads only for its decoder order, with its first run of
+// touching structs and one more.
+func (c *pendingCover) tailRefs(past *Item) []mergeRef {
+	first := refOf(past)
 	spans := c.spans[first.client]
-	s := sort.Search(len(spans), func(k int) bool { return spans[k].end > first.clock })
-	refs := []mergeRef{{client: first.client, clock: first.clock, end: spans[s].end, gc: first.gc}}
-	if s+1 < len(spans) {
-		refs = append(refs, mergeRef{client: first.client, clock: spans[s+1].start, end: spans[s+1].end})
+	s := spans.search(func(x clockSpan) bool { return x.end > first.clock })
+	refs := []mergeRef{{client: first.client, clock: first.clock, end: spans.at(s).end, gc: first.gc}}
+	if s+1 < spans.len() {
+		next := spans.at(s + 1)
+		refs = append(refs, mergeRef{client: first.client, clock: next.start, end: next.end})
 	}
 	return refs
 }
 
-// gapRefs stands in for gap, a client's structs between two of its windows,
-// which the merge keeps whole and reads only for its decoder order: the run of
-// touching structs from the first of them, and one struct to the last one's end.
-func (c *pendingCover) gapRefs(gap []*Item) []mergeRef {
-	first, last := refOf(gap[0]), refOf(gap[len(gap)-1])
+// gapRefs stands in for a client's structs from gapFirst to gapLast between
+// two of its windows, which the merge keeps whole and reads only for its
+// decoder order: the run of touching structs from the first, and one struct
+// to the last one's end.
+func (c *pendingCover) gapRefs(gapFirst, gapLast *Item) []mergeRef {
+	first, last := refOf(gapFirst), refOf(gapLast)
 	spans := c.spans[first.client]
-	s := sort.Search(len(spans), func(k int) bool { return spans[k].end > first.clock })
-	end := min(spans[s].end, last.end)
+	s := spans.search(func(x clockSpan) bool { return x.end > first.clock })
+	end := min(spans.at(s).end, last.end)
 	refs := []mergeRef{{client: first.client, clock: first.clock, end: end, gc: first.gc}}
 	if end < last.end {
-		refs = append(refs, mergeRef{client: first.client, clock: spans[s+1].start, end: last.end})
+		refs = append(refs, mergeRef{client: first.client, clock: spans.at(s + 1).start, end: last.end})
 	}
 	return refs
 }
@@ -385,32 +392,32 @@ func refsOf(items []*Item) []mergeRef {
 }
 
 // apply merges arrived into p's queue by plan and returns the arrivals to
-// append, cutting the queue in place unless a recorded view must stay.
+// append; viewed is whether a recorded view of the queue must stay.
 func (p *pendingUpdate) apply(pl mergePlan, arrived []*Item, viewed bool) []*Item {
-	var dropped []*Item
+	var dropped []queued
 	var gone []ClientID
 	held := pl.held
-	kepts := make([][]*Item, len(pl.wins)) // nil where the merge changed nothing
+	kepts := make([][]queued, len(pl.wins)) // nil where the merge changed nothing
 	for wi, w := range pl.wins {
 		n := w.to - w.from
 		win, keeps := held[:n], pl.keepHeld[:n]
 		held, pl.keepHeld = held[n:], pl.keepHeld[n:]
-		kept, changed := make([]*Item, 0, n), false
-		for i, it := range win {
-			k, end := keeps[i], it.ID.Clock+uint64(it.Content.Len())
+		kept, changed := make([]queued, 0, n), false
+		for i, q := range win {
+			k, end := keeps[i], q.ID.Clock+uint64(q.Content.Len())
 			switch {
-			case k == mergeKeep{start: it.ID.Clock, end: end}:
-				kept = append(kept, it)
+			case k == mergeKeep{start: q.ID.Clock, end: end}:
+				kept = append(kept, q)
 			case !k.kept():
-				dropped, changed = append(dropped, it), true
+				dropped, changed = append(dropped, q), true
 			default:
 				// A GC struct grows by the GC structs it took in.
-				keep(it, k)
+				keep(q.Item, k)
 				if k.end > end {
-					insertSpan(p.cover.spans, it)
-					p.noteTail(it)
+					p.cover.insertSpan(q.Item)
+					p.noteTail(q.Item)
 				}
-				kept, changed = append(kept, it), true
+				kept, changed = append(kept, q), true
 			}
 		}
 		if changed {
@@ -422,14 +429,14 @@ func (p *pendingUpdate) apply(pl mergePlan, arrived []*Item, viewed bool) []*Ite
 		for b < len(pl.wins) && pl.wins[b].client == pl.wins[a].client {
 			b++
 		}
-		if slices.ContainsFunc(kepts[a:b], func(k []*Item) bool { return k != nil }) && p.cover.spliceWindows(pl.wins[a:b], kepts[a:b]) {
+		if slices.ContainsFunc(kepts[a:b], func(k []queued) bool { return k != nil }) && p.cover.spliceWindows(pl.wins[a:b], kepts[a:b]) {
 			gone = append(gone, pl.wins[a].client)
 		}
 		a = b
 	}
 	p.cover.dropClients(gone)
 	if len(dropped) > 0 {
-		p.items = withoutItems(p.items, dropped, viewed)
+		p.drop(dropped, viewed)
 	}
 	out := arrived[:0]
 	for i, it := range arrived {
@@ -440,45 +447,45 @@ func (p *pendingUpdate) apply(pl mergePlan, arrived []*Item, viewed bool) []*Ite
 	return out
 }
 
-// withoutItems is items less dropped, in place unless viewed.
-func withoutItems(items, dropped []*Item, viewed bool) []*Item {
-	var set map[*Item]struct{}
-	if len(dropped) > 8 {
-		set = make(map[*Item]struct{}, len(dropped))
-		for _, it := range dropped {
-			set[it] = struct{}{}
-		}
+// drop empties the slots of dropped, so a merge costs no pass over the queue,
+// and compacts the queue once they are as many as the structs it holds, in
+// place unless viewed.
+func (p *pendingUpdate) drop(dropped []queued, viewed bool) {
+	for _, q := range dropped {
+		p.items[q.slot] = nil
 	}
-	first := 0
-	for first < len(items) && !isDropped(items[first], dropped, set) {
-		first++
+	if p.dead += len(dropped); 2*p.dead < len(p.items) {
+		return
 	}
-	out := items[:first]
+	held := p.items[:0]
 	if viewed {
-		out = append(make([]*Item, 0, len(items)-len(dropped)), out...)
+		held = make([]*Item, 0, len(p.items)-p.dead)
 	}
-	for _, it := range items[min(first+1, len(items)):] {
-		if !isDropped(it, dropped, set) {
-			out = append(out, it)
+	for _, it := range p.items {
+		if it != nil {
+			held = append(held, it)
 		}
 	}
 	if !viewed {
-		clear(items[len(out):])
+		clear(p.items[len(held):])
 	}
-	return out
+	p.items, p.dead = held, 0
+	// The slots moved, so the next merge builds the struct index again.
+	p.cover.structs, p.cover.clients = nil, seq[ClientID]{}
 }
 
-func isDropped(it *Item, dropped []*Item, set map[*Item]struct{}) bool {
-	if set != nil {
-		_, ok := set[it]
-		return ok
+// heldItems is the structs the queue holds, in queue order.
+func (p *pendingUpdate) heldItems() []*Item {
+	if p.dead == 0 {
+		return p.items
 	}
-	for _, d := range dropped {
-		if it == d {
-			return true
+	held := make([]*Item, 0, len(p.items)-p.dead)
+	for _, it := range p.items {
+		if it != nil {
+			held = append(held, it)
 		}
 	}
-	return false
+	return held
 }
 
 // checkCollected refuses the update when what it parks, by the walk over its

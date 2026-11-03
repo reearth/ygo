@@ -29,7 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pending update.** Of the structs that give one clock, the one that Yjs's
   merge takes first keeps it, and the queue drops or cuts the others. The
   pending cap counts what the park adds after the merge, and a queue above a
-  lowered cap does not grow.
+  lowered cap does not grow. Each struct a park adds, cuts or drops costs, on
+  average, time logarithmic in the queue.
 - **`crdt`: a struct the document already holds waits on an origin, right
   origin or parent of another client that the document lacks, as Yjs
   `getMissing` does,** and parks with every struct of its client after it.
