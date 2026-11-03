@@ -163,7 +163,7 @@ func (t *Transaction) GetXmlFragment(name string) *YXmlFragment {
 // Performance: uses a two-pointer (run) approach with strings.Builder so that
 // string concatenation is O(total_run_length) rather than O(n²), and tracks
 // the expected next-clock without calling left.Content.Len() on the growing
-// merged string. Store compaction is a single O(n) filter pass per client.
+// merged string. Store compaction starts at the first squashed item.
 func squashRuns(txn *Transaction) {
 	if len(txn.newItems) == 0 {
 		return
@@ -276,13 +276,14 @@ func squashRuns(txn *Transaction) {
 		}
 	}
 
-	// Single O(n) compaction pass per client using a two-pointer merge.
-	// removed is already in clock order (squashRuns processes items that way),
-	// matching the clock-sorted order of storeItems — no hash lookup needed.
+	// Squashed items are new in this transaction, so they sit in the tail of the
+	// clock-sorted slice: one two-pointer pass from the first of them drops them.
 	for client, removed := range removedByClient {
 		storeItems := store.clients[client]
-		n, ri := 0, 0
-		for _, item := range storeItems {
+		first := removed[0].ID.Clock
+		n := sort.Search(len(storeItems), func(i int) bool { return storeItems[i].ID.Clock >= first })
+		ri := 0
+		for _, item := range storeItems[n:] {
 			if ri < len(removed) && item == removed[ri] {
 				ri++ // skip this squashed item
 			} else {

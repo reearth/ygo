@@ -9,15 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
-- **`crdt`: a delete set that deletes again inside an item already deleted no
-  longer costs time in proportion to the client's items.** Applying an update
-  split the item at both ends of each delete range even when the item was
-  already deleted, which shifted the rest of the client's items in the store
-  twice, and the commit then merged the halves back. Like Yjs's
-  `readAndApplyDeleteSet`, ygo now splits only live items. A stale or
-  concurrent peer's delete set takes this path. A deleted item that undo
-  restored, whose halves could not merge back, no longer stays split and
-  encodes as one struct again, as in Yjs.
+- **`crdt`: applying a delete set no longer splits items already deleted.**
+  `applyToPartial` split the item at both ends of each delete range, even
+  when it was already deleted, before deleting anything. Each split shifted
+  the rest of the client's items in the store, and the commit then merged the
+  halves back, so a stale or concurrent peer's delete set that deleted again
+  inside a deleted run cost time in proportion to the client's items. Like
+  Yjs's `readAndApplyDeleteSet`, ygo now splits only live items, and splits an
+  item at the range end only on reaching it, after the deletions before it.
+  With an `OnUpdate` subscriber, encoding each update still reads the whole
+  store; that cost is separate. Three effects of the old splits also go, each
+  now as in Yjs, where ygo keeps deleted text: a deleted item that undo
+  restored, whose halves could not merge back, stayed split and encoded as
+  several structs; a range that started or ended inside a deleted
+  supplementary character replaced it with two U+FFFD characters in the kept
+  text, which a later undo restored and sent to every peer; and, with garbage
+  collection off, a range from a nested type into its own text split that
+  text before the type's deletion deleted it, with the same U+FFFD result.
+- **`crdt`: squashing typed characters no longer walks every item of their
+  client.** When an update carries characters typed in separate transactions,
+  the receiver squashes them into one item and removes the rest from the
+  store. The removal walked the client's whole item slice. It now starts at
+  the first squashed item, which the transaction created and so lies at the
+  end of the slice, as Yjs's transaction cleanup does.
 
 ## [1.55.0] — 2026-10-31
 

@@ -1,15 +1,37 @@
 ## v1.55.1
 
-**Who is affected: servers and peers that hold large documents.** The updates
-`OnUpdate` delivers do not change.
+**Who is affected: servers and peers that hold large documents, and documents
+that keep deleted text (garbage collection off, or an `UndoManager` attached).**
 
-Applying an update took time in proportion to the items the document holds for
-a client, not to the size of the update, when:
+Two steps of applying an update walked or shifted every item the document
+holds for one client, whatever the size of the update:
 
-- a delete set deleted again inside a run already deleted, as a stale or
-  concurrent peer's delete set does. ygo split the run at both ends and merged
-  it back. Like Yjs, it now splits only live items. A deleted run that undo
-  restored no longer stays split after such a delete set.
+- A delete set split the item at both ends of each range before deleting
+  anything, even an item already deleted, and the commit merged the halves
+  back. A stale or concurrent peer's delete set that deleted again inside a
+  deleted run took this path. Like Yjs, ygo now splits only live items, and
+  splits an item at the range end only on reaching it, after the deletions
+  before it.
+- An update carried characters typed in separate transactions, which the
+  receiver squashes into one item. Removing the squashed items walked every
+  item of the client. It now starts at the first of them.
+
+With an `OnUpdate` subscriber, encoding each update still reads the whole
+store; that cost is separate.
+
+Where deleted text is kept, the old splits also changed it, and now ygo keeps
+what Yjs keeps. A deleted run that undo restored stayed split. A range that
+started or ended inside a deleted supplementary character, such as an emoji,
+replaced it with two U+FFFD characters in the kept text, which a later undo
+restored and sent to every peer. With garbage collection off, a range from a
+nested type into its own text split that text before deleting the type, with
+the same result. So `EncodeStateAsUpdateV1` of such a document, and an undo or
+redo of such text, can now give different bytes from before: the bytes Yjs
+gives. Each peer that undoes needs the fix, not only the server.
+
+In 400 random runs of 1,000 steps each, with garbage collection on and off, and
+without undo, nested types or supplementary characters, every update that
+`OnUpdate` delivered kept its bytes.
 
 ## v1.55.0
 
