@@ -21,17 +21,17 @@ the same document.
   refused, as Yjs throws for it.
 - Clocks past 2^53-1, and struct, origin and parent clients past 2^55-1, are
   refused. The attribution decoders (`DecodeIDSet`, `DecodeIDMap`,
-  `DecodeContentIDs`, `DecodeContentMap`) refuse a range past 2^53-1 and an
-  `IDMap` client past 2^55-1.
+  `DecodeContentIDs`, `DecodeContentMap`) refuse a range whose running clock
+  would pass 2^64-1, and an `IDMap` client past 2^55-1.
 - `ApplyUpdateV1Landed`, which the websocket provider relays after a partial
   apply, carries the structs the apply parked.
 - `Server.Inject` relays to local peers what a partly applied update left.
 - A parked struct that panics in the drain is dropped, not the structs after
   it.
 - An item that continues its client's GC struct is refused, as in Yjs.
-- The deletions read before a cut in the delete set, or before a range past
-  2^53-1, stay applied, as in Yjs for a cut, whatever the pending cap, and
-  `ApplyUpdateV1Landed` carries them.
+- The deletions read before a cut in the delete set, or before a range that
+  reaches a clock past 2^53-1, stay applied, as in Yjs for a cut, whatever the
+  pending cap, and `ApplyUpdateV1Landed` carries them.
 - An item that arrives with deleted content is deleted when it integrates, as
   in Yjs.
 - `EncodeStateVectorFromUpdate` and its V2 form return the state vector Yjs
