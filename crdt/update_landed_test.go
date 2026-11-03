@@ -1,9 +1,11 @@
 package crdt
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -113,4 +115,64 @@ func TestUnit_ApplyUpdateV1Landed(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidUpdate)
 		assert.Nil(t, landed)
 	})
+}
+
+// Applies that each park a struct and then fail, one per 20 parked structs,
+// cost time linear in the applies: what a failed apply relays is read from
+// what it parked, not from a pass over the queue.
+func TestPerf_FailedApplyAfterAParkIsLinear(t *testing.T) {
+	if testing.Short() || raceEnabled || testing.CoverMode() != "" {
+		t.Skip("timing test")
+	}
+	clock := threadCPUClock(t)
+	// waiting is n structs of new clients from base, each after a struct of a
+	// client the room never gets.
+	waiting := func(n int, base ClientID) map[ClientID][]*Item {
+		m := make(map[ClientID][]*Item, n)
+		for i := range n {
+			c := base + ClientID(i)
+			m[c] = []*Item{{ID: ID{Client: c}, Origin: &ID{Client: 1 << 40}, Content: NewContentDeleted(1)}}
+		}
+		return m
+	}
+	fail := func(n int) time.Duration {
+		k := n / 20
+		failing := make([][]byte, k)
+		for i := range failing {
+			u := structsV1(waiting(1, ClientID(50_000_000+i)))
+			u[len(u)-1] = 1 // a delete set of one client that the update cuts off
+			failing[i] = u
+		}
+		room := New(WithClientID(1), WithMaxPendingItems(math.MaxInt))
+		require.NoError(t, ApplyUpdateV1(room, structsV1(waiting(n, 1_000_000)), nil))
+		landed := make([][]byte, k)
+		took := clock(func() {
+			for i, u := range failing {
+				var err error
+				if landed[i], err = ApplyUpdateV1Landed(room, u, nil); err == nil {
+					t.Fatal("the cut update applied")
+				}
+			}
+		})
+		for i := 0; i < k; i += 97 { // a sample keeps the test fast
+			peer := New(WithClientID(2))
+			require.NoError(t, ApplyUpdateV1(peer, landed[i], nil))
+			require.Equal(t, 1, peer.PendingStats().Items, "update %d: the landed bytes carry its parked struct", i)
+		}
+		require.Equal(t, n+k, room.PendingStats().Items)
+		return took
+	}
+	const small, large, runs = 2000, 32000, 16
+	var s, l time.Duration = math.MaxInt64, math.MaxInt64
+	for range 5 {
+		var sum time.Duration
+		for range runs {
+			sum += fail(small)
+		}
+		s, l = min(s, sum), min(l, fail(large))
+	}
+	t.Logf("a failed apply after a park per 20 parked structs, as %d queues of %d: %v; as one of %d: %v (%.1f×)", runs, small, s, large, l, float64(l)/float64(s))
+	if l > 3*s {
+		t.Fatalf("failed applies grow with the queue: %v for one queue of %d, %v for %d queues of %d", l, large, s, runs, small)
+	}
 }

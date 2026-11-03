@@ -80,9 +80,10 @@ func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, er
 // deletions it has made and the structs and deletions it parked, or returns nil
 // when there are none. Each client's new structs are found by binary search
 // from txn.beforeState, so the cost is proportional to the clients in the
-// store plus what txn added and parked. A client's parked structs follow its added
-// ones, whole, past a skip where the store has a gap, so a reader parks each
-// as the store did. Called with the document lock held.
+// store plus what txn added, parked and took out of the queue. A client's
+// parked structs follow its added ones, whole, past a skip where the store has
+// a gap, so a reader parks each as the store did. Called with the document
+// lock held.
 func encodeTxnV1Locked(txn *Transaction) []byte {
 	store := txn.doc.store
 	perClient := make(map[ClientID][]*Item)
@@ -101,16 +102,16 @@ func encodeTxnV1Locked(txn *Transaction) []byte {
 	}
 	parked := make(map[ClientID][]*Item)
 	if len(record.items) > 0 && store.pending != nil {
-		// Only the structs still parked: one that a drain integrated before a
-		// later failure is already among the added structs.
-		pending := make(map[*Item]struct{}, store.pending.heldStructs())
-		for _, it := range store.pending.items {
-			if it != nil {
-				pending[it] = struct{}{}
+		// Only the structs still parked: a drain took the others out.
+		var left map[*Item]struct{}
+		if len(record.left) > 0 {
+			left = make(map[*Item]struct{}, len(record.left))
+			for _, it := range record.left {
+				left[it] = struct{}{}
 			}
 		}
 		for _, it := range record.items {
-			if _, ok := pending[it]; ok {
+			if _, gone := left[it]; it != nil && !gone {
 				parked[it.ID.Client] = append(parked[it.ID.Client], it)
 			}
 		}
@@ -985,6 +986,13 @@ func drainPending(txn *Transaction) error {
 		// A refused parked item is dropped without failing the update, since the
 		// drain cannot tell which update carried it.
 		_ = integratePending(txn, items, done, &dropped)
+		if rec := txn.doc.store.parked; rec != nil && len(rec.items) > 0 {
+			for i, it := range items {
+				if done[i] {
+					rec.left = append(rec.left, it)
+				}
+			}
+		}
 		stillPending, stillMissing := unresolvedPending(txn.doc.store, items, done)
 		progressed := len(stillPending) < len(items)
 

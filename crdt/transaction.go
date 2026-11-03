@@ -77,6 +77,10 @@ type Transaction struct {
 type transactionParked struct {
 	items   []*Item     // the first run is a view of the pending queue
 	deletes []DeleteSet // sharing ranges that nothing changes
+	// left is what a drain took out of the queue after the park, so the
+	// structs still parked are found without a pass over the queue; a merge
+	// runs before the transaction's one park and cannot take them.
+	left []*Item
 }
 
 // parkRecord allocates the document's record only when a transaction parks.
