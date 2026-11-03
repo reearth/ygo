@@ -44,11 +44,15 @@ func (w *idSetRLEWriter) writeLen(l uint64) { // caller guarantees l > 0
 	w.cur += l
 }
 
-// idSetRLEReader mirrors idSetRLEWriter.
+// idSetRLEReader mirrors idSetRLEWriter. It refuses a clock past
+// maxSafeInteger, as the update decoders do, so the running sum cannot wrap.
 type idSetRLEReader struct {
 	dec *encoding.Decoder
 	cur uint64
 }
+
+// errAttrClockBound is the reason a range's clock passes maxSafeInteger.
+var errAttrClockBound = errors.New("clock past 2^53-1")
 
 func (r *idSetRLEReader) reset() { r.cur = 0 }
 func (r *idSetRLEReader) readClock() (uint64, error) {
@@ -56,7 +60,9 @@ func (r *idSetRLEReader) readClock() (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	r.cur += diff
+	if r.cur, err = structEnd(r.cur, diff); err != nil || r.cur > maxSafeInteger {
+		return 0, errAttrClockBound
+	}
 	return r.cur, nil
 }
 func (r *idSetRLEReader) readLen() (uint64, error) {
@@ -65,7 +71,9 @@ func (r *idSetRLEReader) readLen() (uint64, error) {
 		return 0, err
 	}
 	l := v + 1
-	r.cur += l
+	if r.cur, err = structEnd(r.cur, l); err != nil {
+		return 0, errAttrClockBound
+	}
 	return l, nil
 }
 
@@ -233,6 +241,10 @@ func readIDMap(dec *encoding.Decoder) (*IDMap, error) {
 		delta, err := dec.ReadVarUint()
 		if err != nil {
 			return nil, attrDecodeErr("idmap client delta: %v", err)
+		}
+		// Clients are a running sum too, refused past maxClient so it cannot wrap.
+		if delta > maxClient-lastClient {
+			return nil, attrDecodeErr("idmap client past 2^55-1")
 		}
 		client := lastClient + delta
 		lastClient = client

@@ -41,7 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`crdt`: clocks past 2^53-1, and struct, origin and parent clients past
   2^55-1, are refused.** Both decoders and the merge decoders refuse them, so
   `EncodeStateAsUpdateV2` cannot meet a struct it cannot write, and encoding
-  parked state keeps every part that merges.
+  parked state keeps every part that merges. The attribution decoders
+  (`DecodeIDSet`, `DecodeIDMap`, `DecodeContentIDs`, `DecodeContentMap`)
+  refuse a range past 2^53-1 and an `IDMap` client past 2^55-1, so their
+  running clock cannot pass 2^64 and wrap onto a low clock.
 - **`crdt`: `ApplyUpdateV1Landed` carries the structs and delete ranges a
   failed apply parked.** A peer that applies the update it returns parks what
   the document parks.
@@ -51,9 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   structs after it.** The apply returns the panic as its error.
 - **`crdt`: an item that continues its client's GC struct is refused, as in
   Yjs.**
-- **`crdt`: the deletions read before a cut in the delete set stay applied,
-  as in Yjs, whatever the pending cap,** and the delete-set decoders no longer
-  cap the client and range counts.
+- **`crdt`: the deletions read before a cut in the delete set, or before a
+  range past 2^53-1, stay applied, as in Yjs for a cut, whatever the pending
+  cap,** and the delete-set decoders no longer cap the client and range
+  counts. The apply returns its error, and `ApplyUpdateV1Landed` carries
+  those deletions.
 - **`crdt`: an item that arrives with deleted content is deleted when it
   integrates, as in Yjs,** and a V2 GC struct adds nothing to the
   transaction's delete set.

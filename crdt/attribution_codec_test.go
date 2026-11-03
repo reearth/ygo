@@ -1,9 +1,12 @@
 package crdt
 
 import (
+	"errors"
 	"reflect"
 	"strconv"
 	"testing"
+
+	"github.com/reearth/ygo/encoding"
 )
 
 // A single range carrying more attributes than maxPreallocAttrs must still
@@ -132,6 +135,87 @@ func TestDecodeIDMap_Malformed(t *testing.T) {
 	for name, data := range cases {
 		if _, err := DecodeIDMap(data); err == nil {
 			t.Errorf("%s: expected error, got nil", name)
+		}
+	}
+}
+
+// attrWords is words as varuints, the raw form of an IdSet or IdMap.
+func attrWords(words ...uint64) []byte {
+	enc := encoding.NewEncoder()
+	for _, w := range words {
+		enc.WriteVarUint(w)
+	}
+	return enc.Bytes()
+}
+
+// rangeWords is one client's ranges, each given as its clock diff and length
+// minus one, with an IdMap range's attribute count of zero after each pair.
+func rangeWords(idMap bool, pairs ...uint64) []uint64 {
+	words := []uint64{1, 1, uint64(len(pairs) / 2)}
+	for i := 0; i < len(pairs); i += 2 {
+		words = append(words, pairs[i], pairs[i+1])
+		if idMap {
+			words = append(words, 0)
+		}
+	}
+	return words
+}
+
+// wrapPairs is 2,049 one-clock ranges whose running clock passes 2^64 and
+// comes back to clock 1.
+func wrapPairs() []uint64 {
+	var pairs []uint64
+	for range 2048 {
+		pairs = append(pairs, maxSafeInteger, 0)
+	}
+	return append(pairs, 1, 0)
+}
+
+// The attribution decoders read a range's clock as a running sum and refuse
+// one past 2^53-1, as the update decoders do, so a sum past 2^64 cannot wrap
+// back onto a low clock; an IdMap's client sum is refused past 2^55-1.
+func TestUnit_DecodeAttribution_RefusesClocksPastMaxSafeInteger(t *testing.T) {
+	idSet := func(data []byte) error { _, err := DecodeIDSet(data); return err }
+	idMap := func(data []byte) error { _, err := DecodeIDMap(data); return err }
+	contentIDs := func(data []byte) error { _, err := DecodeContentIDs(data); return err }
+	contentMap := func(data []byte) error { _, err := DecodeContentMap(data); return err }
+	type decodeCase struct {
+		name   string
+		decode func([]byte) error
+		data   []byte
+		ok     bool
+	}
+	var cases []decodeCase
+	for _, kind := range []struct {
+		name   string
+		idMap  bool
+		decode func([]byte) error
+	}{{"IdSet", false, idSet}, {"IdMap", true, idMap}} {
+		ranges := func(pairs ...uint64) []byte { return attrWords(rangeWords(kind.idMap, pairs...)...) }
+		cases = append(cases,
+			decodeCase{kind.name + " range ending at 2^53", kind.decode, ranges(maxSafeInteger, 0), true},
+			decodeCase{kind.name + " range ending past 2^53", kind.decode, ranges(maxSafeInteger, 1), false},
+			decodeCase{kind.name + " range at 2^53", kind.decode, ranges(maxSafeInteger+1, 0), false},
+			decodeCase{kind.name + " running clock past 2^53", kind.decode, ranges(1<<52, 1<<52-1, 0, 0), false},
+			decodeCase{kind.name + " running clock past 2^64", kind.decode, ranges(wrapPairs()...), false},
+		)
+	}
+	pastBound := func(idMap bool) []byte {
+		return append([]byte{0}, attrWords(rangeWords(idMap, maxSafeInteger, 1)...)...)
+	}
+	cases = append(cases,
+		decodeCase{"IdMap client 2^55-1", idMap, attrWords(1, maxClient, 1, 0, 0, 0), true},
+		decodeCase{"IdMap client sum 2^55", idMap, attrWords(2, maxClient, 1, 0, 0, 0, 1, 1, 0, 0, 0), false},
+		decodeCase{"ContentIDs deletes past 2^53", contentIDs, pastBound(false), false},
+		decodeCase{"ContentMap deletes past 2^53", contentMap, pastBound(true), false},
+	)
+	for _, c := range cases {
+		err := c.decode(c.data)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err %v, want accepted %v", c.name, err, c.ok)
+		}
+		if err != nil && !errors.Is(err, ErrAttributionDecode) {
+			t.Errorf("%s: err %v is not ErrAttributionDecode", c.name, err)
 		}
 	}
 }
