@@ -8,9 +8,9 @@ import (
 
 // V2 struct-level merge / diff / state-vector extraction (#57). Mirrors the V1
 // path in merge.go but drives the columnar V2 codec (newV2Decoder /
-// decodeItemV2 / newV2Encoder / encodeItemV2). The merge/dedup/resolveParents
-// logic in merge.go is format-agnostic (it operates on *Item), so only the
-// decode and encode steps differ.
+// decodeItemV2 / newV2Encoder / encodeItemV2). The merge/dedup logic in
+// merge.go is format-agnostic (it operates on *Item), so only the decode and
+// encode steps differ.
 
 // decodeStructsV2 decodes every struct in a V2 update into per-client,
 // clock-ordered slices (without integrating) plus the delete set.
@@ -94,8 +94,8 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 // encodeStructStoreV2 encodes per-client struct slices + a delete set into a V2
 // update. Mirrors encodeStructStoreV1 but uses the columnar V2 encoder and the
 // V2 conventions (clients written in DESCENDING order; skip length on the rest
-// stream). store provides origin look-ups for encodeItemV2.
-func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateVector, store *StructStore) []byte {
+// stream).
+func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateVector) []byte {
 	clients := make([]ClientID, 0, len(perClient))
 	for c, items := range perClient {
 		if len(items) > 0 {
@@ -160,7 +160,7 @@ func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 				enc.restEnc.WriteVarUint(e.skip)
 				continue
 			}
-			encodeItemV2(enc, e.item, e.offset, store)
+			encodeItemV2(enc, e.item, e.offset)
 		}
 	}
 	encodeDeleteSetV2(enc, ds)
@@ -170,28 +170,28 @@ func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 // MergeUpdatesV2 merges several V2 updates into one at the struct level
 // (preserving non-integrable structs and clock gaps; unioning delete sets). (#57)
 func MergeUpdatesV2(updates ...[]byte) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore(updates, decodeStructsV2)
+	perClient, ds, err := buildMergeStore(updates, decodeStructsV2)
 	if err != nil {
 		return nil, err
 	}
-	return encodeStructStoreV2(perClient, ds, StateVector{}, store), nil
+	return encodeStructStoreV2(perClient, ds, StateVector{}), nil
 }
 
 // DiffUpdateV2 returns the portion of a V2 update missing from sv (structs
 // sliced at the sv boundary; full delete set preserved). (#57)
 func DiffUpdateV2(update []byte, sv StateVector) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore([][]byte{update}, decodeStructsV2)
+	perClient, ds, err := buildMergeStore([][]byte{update}, decodeStructsV2)
 	if err != nil {
 		return nil, err
 	}
-	return encodeStructStoreV2(perClient, ds, sv, store), nil
+	return encodeStructStoreV2(perClient, ds, sv), nil
 }
 
 // EncodeStateVectorFromUpdateV2 extracts the state vector described by a V2
 // update (next clock per client) without integrating it. The state vector wire
 // format is identical to V1 (client/clock varuint pairs). (#57)
 func EncodeStateVectorFromUpdateV2(update []byte) ([]byte, error) {
-	perClient, _, _, err := buildMergeStore([][]byte{update}, decodeStructsV2)
+	perClient, _, err := buildMergeStore([][]byte{update}, decodeStructsV2)
 	if err != nil {
 		return nil, err
 	}

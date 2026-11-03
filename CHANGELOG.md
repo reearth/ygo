@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-10-31
+
+### Fixed
+
+- **`crdt`: an item whose origin or right origin is a GC struct becomes a GC
+  struct.** Yjs does this for either neighbour. ygo did it only when the item
+  had no live neighbour. With a GC right origin, ygo showed the item where
+  Yjs shows none. With a GC origin, ygo stored the item without linking it,
+  so a replica loaded from the document's encoded state showed other text
+  than the document, with the same state vector.
+  The item now becomes a GC struct once both neighbours are present, as in
+  Yjs. A GC struct is no longer split, as in Yjs. A move never claims a GC
+  struct, and a move that waits for a target that arrives as a GC struct
+  stops waiting. Waiting moves are indexed by target clock, so an update no
+  longer rescans all of them for every struct it adds, and deleted waiting
+  moves are dropped once they outnumber the live ones.
+- **`crdt`: encoders keep an origin that names a GC struct, as Yjs does.**
+  They dropped it, so `MergeUpdatesV1/V2`, `DiffUpdateV1/V2`,
+  `UpdateV1ToV2`/`UpdateV2ToV1` and an encoded state holding a parked item
+  put the item into the text where the original updates make it a GC struct.
+- **`crdt`: GC turns the items under a deleted nested type into GC structs.**
+  When the GC collected a deleted item that holds a nested type, it replaced
+  the item's content but kept the type's items, and those of the types nested
+  in it, as deleted items with their parent and origins. Yjs stores a GC
+  struct for each of them. The GC at the end of a transaction and `RunGC` now
+  turn every item under a collected type into a GC struct and empty the type,
+  as Yjs `ContentType.gc` does, so an item that arrives later in that type is
+  a GC struct too. For a map entry that holds an array of 10,000 one-entry
+  maps, the encoded state after the delete goes from 133,510 to 40,023 bytes.
+  Content does not change. A write through a handle to a type inside a
+  collected type no longer fires the deep observers above it, as in Yjs.
+  `Doc.Load` now reads a subdocument's parent from the subdocument under its
+  own lock, so it no longer races with the GC, with attaching the
+  subdocument or with an undo that restores it, and a removed or destroyed
+  subdocument no longer keeps its parent in memory.
+  `RunGC` also merges neighbouring GC structs of one client, as Yjs does at
+  the end of a transaction: after `RunGC`, the same delete keeps one GC
+  struct where it kept 20,000, and the state is 25 bytes. Both GC passes
+  take the contents of the structs they collect from blocks, so collecting n
+  items makes O(log n + n/128) allocations instead of n.
+- **`crdt`: a Yjs `Y.XmlHook` keeps its type and hook name, and reads as Yjs
+  reads it.** ygo decoded a hook (type ref 5) to an untyped placeholder and
+  dropped its name, so every update it encoded from the document
+  (`EncodeStateAsUpdateV1`/`V2`, the `OnUpdate` output, `MergeUpdates`,
+  `DiffUpdate`, `UpdateV1ToV2`/`V2ToV1`, an undone delete) wrote the hook as an
+  empty `YArray` (type ref 0). ygo now keeps the hook and writes it back as Yjs
+  does. `ToJSON`, `Entries`, `ToSlice` and observer values give its entries as
+  an object, as Yjs `toJSON` does. `YXmlFragment.Children()` includes a hook,
+  so its indexes match `Len()`, and `ToXML` renders it as `[object Object]`,
+  as Yjs `toString` does. `YMap.Get` and `YArray.Get` return a hook as a
+  `*YMap`. State that an older ygo already stored keeps the hook as a
+  `YArray`.
+- **`crdt`: a subdocument's opts are written as Yjs writes them.** Yjs
+  `ContentDoc` writes `gc: false`, `autoLoad: true` and `meta` only when they
+  are set, so a subdocument with GC on writes `{}`. ygo always wrote `gc` and
+  wrote a `collectionId` key that Yjs does not read, so its bytes differed
+  whenever GC was on, autoLoad was set or a collection ID was set. ygo now
+  writes the same keys in the same order and keeps a `meta` value it decodes.
+  A `collectionId` key that an earlier ygo wrote still decodes; the collection
+  ID is no longer sent, and a subdocument without one takes its parent's when
+  it is added, as in Yjs. A subdocument that an undo restores starts with
+  `ShouldLoad()` equal to `AutoLoad()` and takes its parent's collection ID,
+  as Yjs's copy does.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added
@@ -2224,15 +2288,15 @@ surfaced by ygo's new randomized convergence fuzzer (#70).
   cancels out, so no event fires for a net no-op.
 - **`Doc.Load()`** — signals that a subdocument's data should be synced.
   Flips `ShouldLoad()` to `true` and, for a doc already embedded in a
-  parent, emits a `Loaded` event on the parent. Idempotent. Must not be
-  called from inside a `Transact` closure — like `GetText`, it acquires a
-  document lock itself (the parent's, not the callee's).
+  parent, emits a `Loaded` event on the parent. Idempotent. On an embedded
+  subdocument it opens a transaction on the parent, so it must not be called
+  from inside the parent's `Transact` closure, like `GetText`.
 - **`crdt.WithAutoLoad(bool)`**, **`crdt.WithShouldLoad(bool)`**,
   **`crdt.WithCollectionID(string)`** — new `DocOption`s for subdocument
   configuration, plus matching accessors `Doc.AutoLoad()`, `Doc.ShouldLoad()`,
   and `Doc.CollectionID()`. A doc constructed directly defaults
   `ShouldLoad()` to `true`; a doc materialized from a decoded update starts
-  `false` (derived from `autoLoad`, matching Yjs) until `Load()` is called.
+  with `ShouldLoad()` equal to `AutoLoad()`, as in Yjs.
 - **`crdt.Example_subdocs`** — a runnable godoc example
   (`crdt/example_subdocs_test.go`) showing embed → `OnSubdocs` → `GetSubdocGUIDs`.
 - **`ContentDoc` opts round-trip on both wire formats.** A subdocument's

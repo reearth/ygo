@@ -263,6 +263,11 @@ func (d *v2Decoder) readString() (string, error) {
 
 func (d *v2Decoder) readTypeRef() (byte, error) {
 	v, err := d.typeRefDec.Read()
+	if v > math.MaxUint8 {
+		// A ref past a byte names no type; truncating it could alias a known
+		// ref, such as 261 to the hook's 5, and read a name it does not have.
+		return math.MaxUint8, err
+	}
 	return byte(v), err
 }
 
@@ -372,7 +377,7 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 			if i == 0 && g.startClock > item.ID.Clock {
 				offset = int(g.startClock - item.ID.Clock)
 			}
-			encodeItemV2(enc, item, offset, doc.store)
+			encodeItemV2(enc, item, offset)
 		}
 	}
 
@@ -380,7 +385,7 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 	return enc.toBytes()
 }
 
-func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
+func encodeItemV2(enc *v2Encoder, item *Item, offset int) {
 	// Orphaned items (no parent) came from GC wire format where the parent
 	// type name is lost. Encode as GC struct for valid clock accounting.
 	//
@@ -413,20 +418,6 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 	} else {
 		origin = item.Origin
 		originRight = item.OriginRight
-	}
-
-	// If the origin item is a GC placeholder (no Parent), the receiver can't
-	// infer this item's parent from it. Clear the origin so explicit parent
-	// info is encoded instead.
-	if origin != nil {
-		if oi := store.Find(*origin); oi != nil && oi.isGCOrphan() {
-			origin = nil
-		}
-	}
-	if originRight != nil {
-		if ori := store.Find(*originRight); ori != nil && ori.isGCOrphan() {
-			originRight = nil
-		}
 	}
 
 	contentTag := contentTagOf(item.Content)
@@ -462,19 +453,13 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 			// Deferred parent-by-ID: decoded but not yet integrated (its container
 			// is in a later client group), so Parent is still nil while parentID
 			// holds the container's ID. Re-emit the explicit parent-by-ID so the
-			// receiver can defer and resolve it too, instead of falling through to
-			// the root-named branch and writing an empty name (silent data loss).
-			// Mirrors the V1 encodeItem fix. (#140)
+			// receiver can defer and resolve it too. Mirrors encodeItem.
 			enc.writeParentInfo(false)
 			enc.writeLeftID(*item.parentID)
 		} else {
-			// Root named type.
+			// Root named type; an item with no parent is a GC struct, written above.
 			enc.writeParentInfo(true)
-			name := ""
-			if item.Parent != nil {
-				name = item.Parent.name
-			}
-			enc.writeString(name)
+			enc.writeString(item.Parent.name)
 		}
 		if item.ParentSub != nil {
 			enc.writeString(*item.ParentSub)
@@ -534,10 +519,10 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 		enc.writeKey(ct.Key)
 		enc.restEnc.WriteAny(ct.Val)
 	case *ContentType:
-		tc, nodeName := typeClassOf(ct)
+		tc, name := typeClassOf(ct)
 		enc.writeTypeRef(tc)
-		if tc == 3 { // YXmlElement
-			enc.writeKey(nodeName)
+		if typeRefHasName(tc) {
+			enc.writeKey(name)
 		}
 	case *ContentAny:
 		vals := ct.Vals[offset:]
@@ -551,7 +536,7 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 			guid = ct.Doc.GUID()
 		}
 		enc.writeString(guid)
-		enc.restEnc.WriteAny(subdocOpts(ct.Doc))
+		writeSubdocOpts(enc.restEnc, ct.Doc)
 	case *ContentMove:
 		enc.restEnc.WriteVarUint(uint64(ct.Target.Client))
 		enc.restEnc.WriteVarUint(ct.Target.Clock)
@@ -777,6 +762,8 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 					item.Content = item.Content.Splice(offset)
 				}
 				txn.doc.store.Append(item)
+				// A deferred move whose target is in this GC struct stops waiting.
+				txn.doc.store.resolvePendingMoves(txn, item.ID.Client)
 				existingEnd = itemEnd
 				clock = itemEnd
 				continue
@@ -1181,15 +1168,14 @@ func decodeTypeContentV2(dec *v2Decoder, doc *Doc, typeRef byte) (*abstractType,
 		frag.owner = frag
 		return &frag.abstractType, nil
 
-	case 5: // YXmlHook — reads hook name via readKey (discard)
-		if _, err := dec.readKey(); err != nil {
+	case 5: // YXmlHook — reads hook name via readKey
+		hookName, err := dec.readKey()
+		if err != nil {
 			return nil, err
 		}
-		r := &rawType{}
-		r.doc = doc
-		r.itemMap = make(map[string]*Item)
-		r.owner = r
-		return &r.abstractType, nil
+		h := newYXmlHook(hookName)
+		h.doc = doc
+		return &h.abstractType, nil
 
 	case 6: // YXmlText
 		xt := NewYXmlText()

@@ -423,18 +423,21 @@ embedding the same `*Doc` a second time panics with `ErrSubdocAlreadyIntegrated`
 - **`Doc.Load()`** — signals that a subdocument's data should be synced now.
   A locally-created, locally-embedded subdoc loads immediately on integrate
   (`ShouldLoad()` defaults to `true`); a subdoc decoded off the wire starts
-  with `ShouldLoad() == false` until the receiving application decides to
-  page it in and calls `Load()`, which flips `ShouldLoad()` to `true` and
-  emits a `Loaded` event on the **parent**. `Load` opens a transaction on the
-  parent, so — like `GetText` — it must not be called from inside a `Transact`
-  closure.
+  with `ShouldLoad()` equal to its `AutoLoad()`, as in Yjs. One that does not
+  auto-load waits until the receiving application decides to page it in and
+  calls `Load()`, which flips `ShouldLoad()` to `true` and
+  emits a `Loaded` event on the **parent**. On an embedded subdoc, `Load`
+  opens a transaction on the parent, so — like `GetText` — it must not be
+  called from inside the parent's `Transact` closure.
 - **`crdt.WithAutoLoad(bool)`** — marks a subdocument so remote peers/providers
   auto-load it instead of waiting for an explicit `Load()` call. Default `false`.
 - **`crdt.WithShouldLoad(bool)`** — sets the initial `ShouldLoad()` value.
   Default `true` for a doc you create yourself; a doc materialized from a
-  decoded update starts `false` (derived from `autoLoad`) until `Load()`.
+  decoded update starts with its `AutoLoad()` value, as in Yjs.
 - **`crdt.WithCollectionID(string)`** — an optional grouping label
   (`Doc.CollectionID()`), e.g. to batch-load every subdoc in a collection.
+  As in Yjs, it is local: subdocument opts on the wire do not carry it, and a
+  subdocument without one takes its parent's when it is added.
 
 ```go
 child := crdt.New(

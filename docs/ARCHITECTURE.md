@@ -85,7 +85,7 @@ The fundamental unit of the CRDT. Each insertion creates one `Item`.
 
 When integrating a new item:
 
-1. Resolve `Right` from `OriginRight` via `getItemCleanStart` (splitting the target item if it contains the right-origin clock mid-content). The conflict-scan loop in step 3 uses `Right` as its upper bound — without this resolution the scan has no termination and can place items past their declared right boundary (fixed in v1.8.1, see #65/#68).
+1. Resolve `Right` from `OriginRight` via `getItemCleanStart`. It splits a non-GC target that contains the right-origin clock mid-content; a GC struct stays whole, as in Yjs. The conflict-scan loop in step 3 uses `Right` as its upper bound — without this resolution the scan has no termination and can place items past their declared right boundary (fixed in v1.8.1, see #65/#68).
 2. Locate the position immediately after `Origin` in the current list.
 3. Scan right past any concurrent items that have the same `Origin` and a **lower** `ClientID` (they win the tie-break). The scan terminates at `Right` (resolved in step 1).
 4. Insert the new item at the resolved position.
@@ -253,9 +253,9 @@ Callbacks cross the boundary as **interfaces** (`DocObserver`, `AwarenessObserve
 
 GC is on by default and is configured at construction — `crdt.New(crdt.WithGC(false))` preserves full history for snapshots and undo/redo. There is no settable `GC` field on `Doc`.
 
-**Automatic.** With GC enabled, each transaction frees the content of the items it deleted, at commit, after observer deltas have been computed and before the document lock is released — so no goroutine ever observes a partially collected state. Auto-GC is **suspended while any `UndoManager` is registered**: undoing a deletion re-inserts a copy of the deleted item's content, which requires that content still to be present. Yjs solves this with a per-item keep flag; ygo takes the conservative position of disabling automatic collection entirely for the lifetime of the undo manager.
+**Automatic.** With GC enabled, each transaction frees the content of the items it deleted, at commit, after observer deltas have been computed and before the document lock is released — so no goroutine ever observes a partially collected state. When a collected item holds a nested type, every item under that type, at any depth, becomes a GC struct, as in Yjs. Auto-GC is **suspended while any `UndoManager` is registered**: undoing a deletion re-inserts a copy of the deleted item's content, which requires that content still to be present. Yjs solves this with a per-item keep flag; ygo takes the conservative position of disabling automatic collection entirely for the lifetime of the undo manager.
 
-**Manual — tombstone reclamation.** `crdt.RunGC(doc)` is the explicit entry point, and remains available when auto-GC is suspended. It does two passes: it replaces deleted item content with lightweight `ContentDeleted` tombstones, then **merges adjacent tombstones from the same client into single nodes**, compacting the linked list so future origin lookups traverse fewer items. Both the structural position information CRDT correctness depends on and the tombstone lengths survive; only the content is discarded. `RunGC` is a no-op when GC is disabled.
+**Manual — tombstone reclamation.** `crdt.RunGC(doc)` is the explicit entry point, and remains available when auto-GC is suspended. It does two passes: it replaces deleted item content with lightweight `ContentDeleted` tombstones (and the items under a deleted nested type with GC structs), then **merges neighbouring GC structs, and adjacent tombstones, from the same client into single nodes**, compacting the linked list so future origin lookups traverse fewer items. Both the structural position information CRDT correctness depends on and the tombstone lengths survive; only the content is discarded. `RunGC` is a no-op when GC is disabled.
 
 Reclamation is destructive with respect to history: after `RunGC`, `RestoreDocument` can no longer reconstruct states that predate the collected deletions. Take any snapshots you need first.
 

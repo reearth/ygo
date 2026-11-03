@@ -1,3 +1,80 @@
+## v1.55.1
+
+**Who is affected: servers that receive GC structs, which Yjs peers send for
+the content of a deleted nested type.**
+
+Yjs stores an item as a GC struct when the struct to its left or to its right
+is a GC struct. ygo did so only when the item had no live neighbour. With one
+live neighbour, ygo put the item in that neighbour's type: at the wrong
+position, or stored but not linked. Two Yjs clients reach this when one
+inserts into a nested type that the other deletes, and the server gets that
+part of the type from the deleter as GC structs. There ygo kept the insert as
+a deleted item where Yjs keeps a GC struct. A GC struct next to live content,
+which no Yjs client sends, made ygo show text that Yjs does not: with a GC
+right origin the document showed the item, and with a GC origin a replica
+loaded from the document's encoded state showed it while the document did
+not, with the same state vector.
+
+Such an item now becomes a GC struct once both neighbours are present, as in
+Yjs, and ygo no longer splits a GC struct, as Yjs does not. Encoders now keep
+an origin that names a GC struct, as Yjs does. They dropped it, so
+`MergeUpdatesV1/V2`, `DiffUpdateV1/V2`, the update format converters, and an
+encoded state that holds a parked item produced an update that put the item
+into the text where applying the original updates makes it a GC struct. A
+state that an earlier ygo wrote carries no such origin and loads as before.
+No API or wire format changes.
+
+An array move whose target had not arrived waits until the target's client
+reaches that clock. A target that arrived as a GC struct did not release such
+a move until another struct of its client arrived, and every struct an update
+added rescanned all the moves that waited for its client. Waiting moves are
+now indexed by target clock, a move never claims a GC struct, and deleted
+waiting moves are dropped once they outnumber the live ones. So many moves for
+an absent target no longer cost time on every later struct, and deleted ones
+never hold more memory than the moves still waiting.
+
+When the GC collected a deleted nested type (a map entry, array element or XML
+node that holds a map, array, text or XML type), it kept the items under that
+type as deleted items, each with its parent and origins. Yjs turns them into
+GC structs. The GC at the end of a transaction and `RunGC` now do the same,
+and an item that arrives later in a collected type is stored as a GC struct,
+as in Yjs. `RunGC` also merges neighbouring GC structs of one client into
+one, as Yjs does at the end of a transaction. Content does not change, but
+encoded state does: after such a
+delete, the state that `EncodeStateAsUpdate` returns holds GC structs where it
+held deleted items, and is smaller. A write through a handle to a type inside
+a collected type no longer fires the deep observers of the types above it, as
+in Yjs. `Doc.Load` no longer races with the GC, with attaching a subdocument
+or with an undo that restores it, and a removed or destroyed subdocument no
+longer keeps its parent in memory. A state that an earlier version stored
+loads as before. Every peer
+that can process updates with a GC neighbour must upgrade to get the same
+materialized state.
+
+ygo decoded a Yjs `Y.XmlHook` (type ref 5) to an untyped placeholder and
+dropped its hook name. Every update ygo encoded from the document wrote the
+hook as an empty `YArray`: the state a server sends to a late joiner, the
+`OnUpdate` output it stores, `MergeUpdates` and `DiffUpdate` results. A Yjs
+client that loaded that state got an empty array without the hook's entries.
+ygo now keeps the hook and its name and writes them back byte for byte as Yjs
+does. `ToJSON`, `Entries`, `ToSlice` and observer values, which gave `null`
+for a hook, now give its entries as an object, as Yjs `toJSON` does.
+`YXmlFragment.Children()` now includes a hook, so its indexes match `Len()`,
+and `ToXML` renders the hook as `[object Object]`, as Yjs `toString` does.
+`YMap.Get` and `YArray.Get` return a hook as a `*YMap`. State that an older
+ygo already stored keeps the hook as an empty `YArray`.
+
+A subdocument's opts are now written as Yjs `ContentDoc` writes them:
+`gc: false`, `autoLoad: true` and `meta` only when set, so a subdocument with
+GC on writes `{}`. ygo always wrote `gc` and also wrote a `collectionId` key
+that Yjs ignores, so its bytes differed whenever GC was on, autoLoad was set
+or a collection ID was set. The collection ID is no longer sent to peers; as
+in Yjs, a subdocument without one takes its parent's when it is added. A
+`collectionId` key that an earlier ygo wrote still decodes, and a `meta` value
+from Yjs is kept and written back. A subdocument that an undo restores starts
+with `ShouldLoad()` equal to `AutoLoad()` and takes its parent's collection
+ID, as in Yjs.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
