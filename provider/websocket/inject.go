@@ -271,14 +271,9 @@ func (s *Server) broadcastUpdate(ctx context.Context, room string, update []byte
 // fn returns. The doc state will drift from live peers in the same
 // way an unapplied BroadcastUpdate does.
 //
-// ctx is checked once at entry and not re-checked after fn returns.
-// Once fn's transaction commits, the update has already been queued
-// to persistence via the existing OnUpdate hook. Aborting the
-// broadcast on late context cancellation would leave live peers out
-// of sync with persisted state — the same hazard warned about on
-// BroadcastUpdate. Context cancellation during fn is therefore a
-// best-effort signal; the transaction completes unless fn itself
-// observes ctx and returns early.
+// ctx bounds the wait for an existing room's load.
+// It does not interrupt a new room's persistence load or a running callback.
+// Once fn commits, persistence and broadcast complete even if ctx is cancelled.
 //
 // IMPORTANT: if fn calls doc.Transact directly (bypassing the supplied
 // transact helper), the delta is NOT captured and Apply returns
@@ -487,6 +482,16 @@ func encodeBroadcastWire(update []byte) []byte {
 // it; with RoomIdleTimeout > 0 the idle sweeper reclaims them once they
 // have been idle that long.
 func (s *Server) CloseRoom(name string, force bool) error {
+	return s.CloseRoomContext(context.Background(), name, force)
+}
+
+// CloseRoomContext is CloseRoom with a cancellable room-load wait.
+// Cancellation before close starts returns ctx.Err() without changing the room.
+// Once close starts, peer disconnection and persistence draining run to completion.
+func (s *Server) CloseRoomContext(ctx context.Context, name string, force bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case <-s.shutdownCh:
 		return ErrServerShutdown
@@ -507,6 +512,10 @@ func (s *Server) CloseRoom(name string, force bool) error {
 	s.rmu.Lock()
 	var rm *room
 	for {
+		if err := ctx.Err(); err != nil {
+			s.rmu.Unlock()
+			return err
+		}
 		r, ok := s.rooms[name]
 		if !ok {
 			s.rmu.Unlock()
@@ -517,7 +526,11 @@ func (s *Server) CloseRoom(name string, force bool) error {
 			rm = r
 		default:
 			s.rmu.Unlock()
-			<-r.ready
+			select {
+			case <-r.ready:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 			s.rmu.Lock()
 			continue
 		}
@@ -525,6 +538,11 @@ func (s *Server) CloseRoom(name string, force bool) error {
 	}
 
 	rm.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		rm.mu.Unlock()
+		s.rmu.Unlock()
+		return err
+	}
 	peerCount := len(rm.peers)
 	if peerCount > 0 && !force {
 		rm.mu.Unlock()
