@@ -146,10 +146,10 @@ func (a *YArray) computeDelta(txn *Transaction) []Delta {
 		}
 		switch {
 		case before && after:
-			retain += values.Content.Len()
+			retain += nativeContentLen(values.Content)
 		case before:
 			flushRetain()
-			ops = append(ops, Delta{Op: DeltaOpDelete, Delete: values.Content.Len()})
+			ops = append(ops, Delta{Op: DeltaOpDelete, Delete: nativeContentLen(values.Content)})
 		case after:
 			flushRetain()
 			ops = append(ops, Delta{Op: DeltaOpInsert, Insert: arrayValuesFromItem(values)})
@@ -213,6 +213,9 @@ func rejectSharedVals(vals []any) {
 
 // Insert inserts vals at logical position index (0 = prepend, Len() = append).
 func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
+	if len(vals) == 0 {
+		return // Yjs makes no item for no values.
+	}
 	for i, v := range vals {
 		checkAnyUTF8("YArray.Insert", fmt.Sprintf("value[%d]", i), v)
 	}
@@ -230,7 +233,7 @@ func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
 	t := &a.abstractType
 	left, offset := t.leftNeighbourAt(index)
 	if offset > 0 {
-		splitItem(txn, left, offset)
+		splitItem(txn, left, uint64(offset))
 		// left is now the left half; its Right points to the right half.
 	}
 	a.insertAfterItem(txn, left, vals, index)
@@ -255,7 +258,7 @@ func (a *YArray) insertContentAfterItem(txn *Transaction, left *Item, content Co
 	var origin *ID
 	var originRight *ID
 	if left != nil {
-		end := left.ID.Clock + uint64(left.Content.Len()) - 1
+		end := left.ID.Clock + left.Content.Len() - 1
 		origin = &ID{Client: left.ID.Client, Clock: end}
 		if left.Right != nil {
 			id := left.Right.ID
@@ -291,6 +294,9 @@ func (a *YArray) insertContentAfterItem(txn *Transaction, left *Item, content Co
 // a Yjs peer would order the two results differently — a convergence divergence
 // surfaced by the #70 cross-impl fuzz oracle.
 func (a *YArray) Push(txn *Transaction, vals []any) {
+	if len(vals) == 0 {
+		return // Yjs makes no item for no values.
+	}
 	for i, v := range vals {
 		checkAnyUTF8("YArray.Push", fmt.Sprintf("value[%d]", i), v)
 	}
@@ -669,7 +675,7 @@ func (a *YArray) Move(txn *Transaction, fromIndex, toIndex int) {
 
 	// Isolate the single element at targetOff so it occupies its own item.
 	if targetOff > 0 {
-		targetItem = splitItem(txn, targetItem, targetOff)
+		targetItem = splitItem(txn, targetItem, uint64(targetOff))
 	}
 	if targetItem.Content.Len() > 1 {
 		splitItem(txn, targetItem, 1)
@@ -694,14 +700,14 @@ func (a *YArray) Move(txn *Transaction, fromIndex, toIndex int) {
 
 	left, offset := t.leftNeighbourAt(physPos)
 	if offset > 0 {
-		splitItem(txn, left, offset)
+		splitItem(txn, left, uint64(offset))
 		// After split, left holds the [0,offset) part; its Right is the new right half.
 	}
 
 	var origin *ID
 	var originRight *ID
 	if left != nil {
-		end := left.ID.Clock + uint64(left.Content.Len()) - 1
+		end := left.ID.Clock + left.Content.Len() - 1
 		origin = &ID{Client: left.ID.Client, Clock: end}
 		if left.Right != nil {
 			id := left.Right.ID
@@ -826,10 +832,10 @@ func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 		if counted < index {
 			// index falls inside this item; split at the start of the deletion.
 			splitAt := index - counted
-			right := splitItem(txn, item, splitAt)
+			right := splitItem(txn, item, uint64(splitAt))
 			counted = index
 			item = right
-			n = right.Content.Len()
+			n = nativeContentLen(right.Content)
 		}
 		if n <= length {
 			item.delete(txn)
@@ -837,7 +843,7 @@ func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 			item = item.Right
 		} else {
 			// item extends past the end of the deletion range; split it first.
-			splitItem(txn, item, length)
+			splitItem(txn, item, uint64(length))
 			item.delete(txn)
 			length = 0
 		}

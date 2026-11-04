@@ -30,7 +30,7 @@ func pendingDiverseUpdate(version, n int, shape string) []byte {
 			parent.Client = 2
 		}
 		children[i] = &Item{ID: ID{Client: 1, Clock: clock}, parentID: &parent, ParentSub: &key, Content: content}
-		clock += uint64(content.Len())
+		clock += content.Len()
 		if shape == "cycle" {
 			child := children[i].ID
 			parents = append(parents, &Item{ID: ID{Client: 2, Clock: uint64(i)}, parentID: &child, ParentSub: &key, Content: NewContentAny(i)})
@@ -92,28 +92,30 @@ func TestUnit_PendingBudget_BoundsDiverseBytes(t *testing.T) {
 // must decode back to the struct the scan saw.
 func TestUnit_PendingSummary_RoundTrip(t *testing.T) {
 	type entry struct {
-		skip   bool
-		length uint64
-		deps   []ID
+		skip, gc bool
+		length   uint64
+		deps     []ID
 	}
 	top := ^uint64(0)
 	entries := []entry{
-		{false, 1, []ID{{Client: 1, Clock: 0}}},
-		{true, 1 << 40, nil},
-		{false, 0, nil},
-		{false, top >> 1, []ID{{Client: ClientID(top), Clock: top}, {Client: 127, Clock: 128}, {Client: 0, Clock: 1 << 35}}},
-		{false, 3, []ID{{Client: 9, Clock: 2}, {Client: 300, Clock: 0}}},
+		{false, false, 1, []ID{{Client: 1, Clock: 0}}},
+		{true, false, 1 << 40, nil},
+		{false, true, 0, nil},
+		{false, false, top >> 1, []ID{{Client: ClientID(top), Clock: top}, {Client: 127, Clock: 128}, {Client: 0, Clock: 1 << 35}}},
+		{false, true, 3, []ID{{Client: 9, Clock: 2}, {Client: 300, Clock: 0}}},
+		{false, false, 3, []ID{{Client: 9, Clock: 2}, {Client: 300, Clock: 0}, {Client: 1, Clock: 1}}},
 	}
 	sizing, fill := pendingCollector{}, pendingCollector{fill: true}
 	for _, e := range entries {
-		sizing.put(e.skip, e.length, e.deps)
-		fill.put(e.skip, e.length, e.deps)
+		sizing.put(e.skip, e.gc, e.length, e.deps)
+		fill.put(e.skip, e.gc, e.length, e.deps)
 	}
 	require.Len(t, fill.sum, sizing.size)
 	at := uint32(0)
 	for _, e := range entries {
-		skip, length, deps, n, next := pendingEntry(fill.sum, at)
+		skip, gc, length, deps, n, next := pendingEntry(fill.sum, at)
 		require.Equal(t, e.skip, skip)
+		require.Equal(t, e.gc, gc)
 		require.Equal(t, e.length, length)
 		require.Equal(t, len(e.deps), n)
 		for i := range e.deps {
@@ -167,8 +169,8 @@ func TestUnit_PendingBudget_OverlappingGroups(t *testing.T) {
 		data := pendingOverlappingGroups(version)
 		for _, cap := range []int{0, 1, 2} {
 			budget := pendingBudget{initial: StateVector{}, update: data, remaining: cap, v2: version == 2}
-			want := referencePendingBudgetCheck(budget, cap)
-			got := budget.check(cap)
+			want := referencePendingBudgetCheck(budget)
+			got := budget.check()
 			require.Equal(t, want == nil, got == nil, "V%d cap=%d want=%v got=%v", version, cap, want, got)
 		}
 		doc := New(WithMaxPendingItems(1))

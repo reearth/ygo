@@ -1,10 +1,12 @@
 package crdt
 
 import (
+	"cmp"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -81,22 +83,6 @@ func TestUnit_PendingResolver_MatchesFixedPoint(t *testing.T) {
 			})
 		}
 	}
-}
-
-func TestUnit_PendingResolver_ImmutableRanges(t *testing.T) {
-	items := []*Item{
-		{ID: ID{Client: 1, Clock: 1}, Content: NewContentDeleted(100), Deleted: true},
-		{ID: ID{Client: 1, Clock: 2}, Content: NewContentString("x")},
-		{ID: ID{Client: 2}, Content: NewContentString("abc")},
-	}
-	order := indexPendingProducers(items)
-	// Model GC integration trimming into the range. Search keys/ends stay frozen.
-	items[0].ID.Clock = 50
-	items[0].Content = items[0].Content.Splice(49)
-	require.Equal(t, 0, findPendingProducer(order, ID{Client: 1, Clock: 1}))
-	require.Equal(t, 2, findPendingProducer(order, ID{Client: 2, Clock: 2}))
-	require.Equal(t, -1, findPendingProducer(order, ID{Client: 2, Clock: 3}))
-	require.Equal(t, -1, findPendingProducer(order, ID{Client: 3}))
 }
 
 func TestUnit_PendingResolver_ReverseCheckpoint(t *testing.T) {
@@ -204,7 +190,7 @@ func referenceWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			for _, item := range remaining {
 				if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
 					if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
-						return wrapUpdateErr(ErrInvalidUpdate)
+						return ErrInvalidUpdate
 					}
 					if txn.doc.store.pending == nil {
 						txn.doc.store.pending = &pendingUpdate{
@@ -212,12 +198,32 @@ func referenceWithinUpdatePending(txn *Transaction, pending []*Item) error {
 						}
 					}
 					txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
+					txn.doc.store.pending.addCover([]*Item{item}, len(txn.doc.store.pending.items)-1)
 					mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
 				} else {
 					txn.doc.store.Append(item)
 				}
 			}
 			break
+		}
+		pending = remaining
+	}
+	return nil
+}
+
+// retryPassesWithinUpdatePending retries the whole queue through tryIntegrate
+// until a pass integrates nothing. Unlike referenceWithinUpdatePending it
+// trims overlapping ranges, so it is the reference for overlapping copies.
+func retryPassesWithinUpdatePending(txn *Transaction, pending []*Item) error {
+	for len(pending) > 0 {
+		var remaining []*Item
+		for _, item := range pending {
+			if ok, _, _ := tryIntegrate(txn, item); !ok {
+				remaining = append(remaining, item)
+			}
+		}
+		if len(remaining) == len(pending) {
+			return parkWithinUpdatePending(txn, remaining)
 		}
 		pending = remaining
 	}
@@ -316,7 +322,7 @@ func TestUnit_PendingResolver_ContiguousTailsMatchReference(t *testing.T) {
 					text.Observe(func(event YTextEvent) { events[which] = append(events[which], fmt.Sprintf("%#v", event.Delta)) })
 					pending := resolverTestItems(doc, n, shape)
 					for _, head := range append([]*Item(nil), pending...) {
-						length := uint64(head.Content.Len())
+						length := head.Content.Len()
 						pending = append(pending, &Item{ID: ID{Client: head.ID.Client, Clock: length}, Origin: &ID{Client: head.ID.Client, Clock: length - 1}, Content: NewContentEmbed(int(head.ID.Client))})
 					}
 					rand.New(rand.NewSource(seed)).Shuffle(len(pending), func(i, j int) { pending[i], pending[j] = pending[j], pending[i] })
@@ -384,7 +390,7 @@ func TestUnit_PendingResolver_PartialOverlapRetry(t *testing.T) {
 				var end uint64
 				for _, item := range doc.store.clients[1] {
 					require.Equal(t, end, item.ID.Clock, "stored ranges must stay contiguous without overlaps")
-					end += uint64(item.Content.Len())
+					end += item.Content.Len()
 				}
 				require.Equal(t, uint64(6), end)
 			}
@@ -431,7 +437,7 @@ func TestUnit_PendingResolver_OrphanPartialOverlapSurvivesRestore(t *testing.T) 
 			var end uint64
 			for _, item := range doc.store.clients[1] {
 				require.Equal(t, end, item.ID.Clock, "orphan ranges must stay contiguous without overlaps")
-				end += uint64(item.Content.Len())
+				end += item.Content.Len()
 			}
 			require.Equal(t, uint64(7), end)
 			for _, version := range []int{1, 2} {
@@ -486,15 +492,8 @@ func TestUnit_PendingResolver_OverlappingRangesMatchFixedPoint(t *testing.T) {
 				doc.Transact(func(txn *Transaction) {
 					if which == 0 {
 						err = resolveWithinUpdatePending(txn, pending)
-						return
-					}
-					for len(pending) > 0 {
-						remaining := retryWithinUpdatePending(txn, pending)
-						if len(remaining) == len(pending) {
-							err = parkWithinUpdatePending(txn, remaining)
-							return
-						}
-						pending = remaining
+					} else {
+						err = retryPassesWithinUpdatePending(txn, pending)
 					}
 				})
 				require.NoError(t, err)
@@ -531,11 +530,12 @@ func TestUnit_PendingResolver_SameStartCopies(t *testing.T) {
 		if longFirst {
 			pending = []*Item{consumer, long, short}
 		}
-		var remaining []*Item
+		var err error
 		doc.Transact(func(txn *Transaction) {
-			remaining = resolvePendingDependencies(txn, pending)
+			err = resolveWithinUpdatePending(txn, pending)
 		})
-		require.Empty(t, remaining)
+		require.NoError(t, err)
+		require.Zero(t, doc.PendingStats().Items)
 		require.Equal(t, "abcx", text.ToString())
 		doc.Destroy()
 	}
@@ -554,8 +554,219 @@ func TestUnit_TryIntegrate_FutureOriginWithKnownParent(t *testing.T) {
 		Content: NewContentString("x"),
 	}
 	doc.Transact(func(txn *Transaction) {
-		require.False(t, tryIntegrate(txn, item))
+		ok, waitsOn, err := tryIntegrate(txn, item)
+		require.False(t, ok)
+		require.Equal(t, ClientID(1), waitsOn)
+		require.NoError(t, err)
 	})
 	require.Equal(t, "abc", text.ToString())
 	require.Equal(t, uint64(0), doc.StateVector().Clock(2))
+}
+
+// A struct that cannot integrate yet names the client whose next clock it
+// waits on: its own past a gap, then its origin, its right origin, and its
+// parent last.
+func TestUnit_TryIntegrate_NamesTheClientItWaitsOn(t *testing.T) {
+	key := "k"
+	for _, tc := range []struct {
+		name    string
+		item    func(text *YText) *Item
+		waitsOn ClientID
+	}{
+		{"own gap", func(text *YText) *Item {
+			return &Item{ID: ID{Client: 5, Clock: 3}, Parent: &text.abstractType, Content: NewContentString("x")}
+		}, 5},
+		{"origin of a client with no structs", func(text *YText) *Item {
+			return &Item{ID: ID{Client: 5}, Parent: &text.abstractType, Origin: &ID{Client: 7}, Content: NewContentString("x")}
+		}, 7},
+		{"right origin past the known clock", func(text *YText) *Item {
+			return &Item{ID: ID{Client: 5}, Parent: &text.abstractType, Origin: &ID{Client: 1, Clock: 1}, OriginRight: &ID{Client: 1, Clock: 9}, Content: NewContentString("x")}
+		}, 1},
+		{"right origin with no parent", func(*YText) *Item {
+			return &Item{ID: ID{Client: 5}, OriginRight: &ID{Client: 8}, Content: NewContentString("x")}
+		}, 8},
+		{"right origin after an origin that gives the parent", func(*YText) *Item {
+			return &Item{ID: ID{Client: 5}, Origin: &ID{Client: 1}, OriginRight: &ID{Client: 8}, Content: NewContentString("x")}
+		}, 8},
+		{"parent", func(*YText) *Item {
+			return &Item{ID: ID{Client: 5}, parentID: &ID{Client: 9}, ParentSub: &key, Content: NewContentAny([]any{1})}
+		}, 9},
+		{"origin before parent", func(*YText) *Item {
+			return &Item{ID: ID{Client: 5}, Origin: &ID{Client: 7}, parentID: &ID{Client: 9}, Content: NewContentString("x")}
+		}, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := New(WithClientID(1))
+			defer doc.Destroy()
+			text := doc.GetText("t")
+			doc.Transact(func(txn *Transaction) { text.Insert(txn, 0, "abc", nil) })
+			item := tc.item(text)
+			doc.Transact(func(txn *Transaction) {
+				ok, waitsOn, err := tryIntegrate(txn, item)
+				require.False(t, ok)
+				require.NoError(t, err)
+				require.Equal(t, tc.waitsOn, waitsOn)
+			})
+			require.Equal(t, "abc", text.ToString())
+		})
+	}
+}
+
+// A decoded update's structs, one run per client in client order, ascending as
+// ygo writes them or descending as Yjs does, integrate without a group per
+// client when no struct waits on a client that still has structs to take.
+func TestUnit_PendingResolver_ClientRunsBuildNoGroups(t *testing.T) {
+	const n = 1000
+	for _, shape := range []string{"missing", "left"} {
+		for _, descending := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/descending=%t", shape, descending), func(t *testing.T) {
+				doc := New(WithClientID(100001))
+				defer doc.Destroy()
+				pending := resolverTestItems(doc, n, shape)
+				if descending {
+					slices.Reverse(pending)
+				}
+				done := make([]bool, n)
+				var allocs float64
+				doc.Transact(func(txn *Transaction) {
+					// The first run integrates "left"; the later ones find it done.
+					allocs = testing.AllocsPerRun(5, func() {
+						clear(done)
+						require.NoError(t, integratePending(txn, pending, done, nil))
+					})
+				})
+				require.Zero(t, allocs)
+			})
+		}
+	}
+}
+
+// Structs in one clock-ordered run per client, in either client order,
+// integrate in the order, and leave out the structs, that the same structs in
+// any other order do.
+func TestUnit_PendingResolver_ClientRunsIntegrateAsGroupsDo(t *testing.T) {
+	for seed := int64(0); seed < 300; seed++ {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			var got [3]string
+			for k := range got {
+				rng := rand.New(rand.NewSource(seed))
+				doc := New(WithClientID(100001))
+				text := doc.GetText("t")
+				pending := clientRunItems(rng, text)
+				switch k {
+				case 1: // descending runs, each still in clock order
+					slices.SortStableFunc(pending, func(a, b *Item) int { return cmp.Compare(b.ID.Client, a.ID.Client) })
+				case 2: // no order the runs can be read in
+					for readsAsClientRuns(pending) {
+						rng.Shuffle(len(pending), func(i, j int) { pending[i], pending[j] = pending[j], pending[i] })
+					}
+				}
+				var integrated, left []string
+				doc.Transact(func(txn *Transaction) {
+					done := make([]bool, len(pending))
+					require.NoError(t, integratePending(txn, pending, done, nil))
+					for _, it := range txn.newItems {
+						integrated = append(integrated, fmt.Sprint(it.ID))
+					}
+					for i, it := range pending {
+						if !done[i] {
+							left = append(left, fmt.Sprint(it.ID))
+						}
+					}
+				})
+				slices.Sort(left)
+				got[k] = fmt.Sprintf("integrated %v, left %v, text %q", integrated, left, text.ToString())
+				doc.Destroy()
+			}
+			require.Equal(t, got[2], got[0], "ascending runs")
+			require.Equal(t, got[2], got[1], "descending runs")
+		})
+	}
+}
+
+// clientRunItems is one run of one to three text structs for each of three to
+// ten clients, in ascending client order, whose origins name an earlier struct
+// of their own client, a struct of another client, a clock past another
+// client's run, or a client absent from the update.
+func clientRunItems(rng *rand.Rand, text *YText) []*Item {
+	clients := rng.Perm(30)[:3+rng.Intn(8)]
+	slices.Sort(clients)
+	lengths := make(map[ClientID]int, len(clients))
+	for _, c := range clients {
+		lengths[ClientID(c+1)] = 1 + rng.Intn(3)
+	}
+	var pending []*Item
+	for _, c := range clients {
+		client := ClientID(c + 1)
+		for clock := range lengths[client] {
+			item := &Item{ID: ID{Client: client, Clock: uint64(clock)}, Parent: &text.abstractType, Content: NewContentString("x")}
+			other := ClientID(clients[rng.Intn(len(clients))] + 1)
+			switch r := rng.Intn(10); {
+			case clock > 0 && r < 4:
+				item.Origin = &ID{Client: client, Clock: uint64(clock - 1)}
+			case r < 7 && other != client:
+				item.Origin = &ID{Client: other, Clock: uint64(rng.Intn(lengths[other] + 1))}
+			case r < 8:
+				item.Origin = &ID{Client: 40}
+			case clock > 0:
+				item.Origin = &ID{Client: client, Clock: uint64(clock - 1)}
+			}
+			pending = append(pending, item)
+		}
+	}
+	return pending
+}
+
+// readsAsClientRuns reports whether pending holds one clock-ordered run per
+// client, the runs in ascending or descending client order.
+func readsAsClientRuns(pending []*Item) bool {
+	up, down := true, true
+	for i := 1; i < len(pending); i++ {
+		a, b := pending[i-1].ID, pending[i].ID
+		switch {
+		case a.Client == b.Client:
+			if b.Clock <= a.Clock {
+				return false
+			}
+		case a.Client < b.Client:
+			down = false
+		default:
+			up = false
+		}
+	}
+	return up || down
+}
+
+// A client run stays one run when an earlier overlapping item is trimmed
+// before another client makes the resolver fall back to groups.
+func TestUnit_PendingResolver_RunFallbackKeepsUnrelatedParkedItem(t *testing.T) {
+	updates := []string{
+		"010109018407000961626364656667686900",
+		"01010903000100",
+		"0101090a840500017a00",
+		"01010500840700017100",
+		"01010300841400017200",
+		"020109000401017405313233343501070004010174014100",
+	}
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("V%d", version), func(t *testing.T) {
+			doc := New(WithClientID(100), WithGC(false))
+			defer doc.Destroy()
+			apply := ApplyUpdateV1
+			if version == 2 {
+				apply = ApplyUpdateV2
+			}
+			for i, text := range updates {
+				update, err := hex.DecodeString(text)
+				require.NoError(t, err)
+				if version == 2 {
+					update, err = UpdateV1ToV2(update)
+					require.NoError(t, err)
+				}
+				err = apply(doc, update, nil)
+				require.NoErrorf(t, err, "update %d", i)
+			}
+			require.Equal(t, PendingStats{Items: 1, MissingFor: []ClientID{20}}, doc.PendingStats())
+		})
+	}
 }

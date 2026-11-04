@@ -2,7 +2,7 @@ package crdt
 
 import (
 	"fmt"
-	"math"
+	"slices"
 	"sort"
 
 	"github.com/reearth/ygo/encoding"
@@ -89,8 +89,8 @@ func (e *v2Encoder) writeTypeRef(ref byte) {
 	e.typeRefEnc.Write(uint64(ref))
 }
 
-func (e *v2Encoder) writeLen(l int) {
-	e.lenEnc.Write(uint64(l))
+func (e *v2Encoder) writeLen(l uint64) {
+	e.lenEnc.Write(l)
 }
 
 // writeKey mirrors Yjs UpdateEncoderV2.writeKey EXACTLY — including its
@@ -237,7 +237,7 @@ func (d *v2Decoder) readLeftID() (ID, error) {
 	if err != nil {
 		return ID{}, err
 	}
-	return ID{Client: ClientID(client), Clock: uint64(clock)}, nil
+	return v2ID(client, clock)
 }
 
 func (d *v2Decoder) readRightID() (ID, error) {
@@ -248,6 +248,16 @@ func (d *v2Decoder) readRightID() (ID, error) {
 	clock, err := d.rightClockDec.Read()
 	if err != nil {
 		return ID{}, err
+	}
+	return v2ID(client, clock)
+}
+
+// v2ID is the ID the client and clock columns give, refused when the clock,
+// a running sum of diffs, is below 0 (as uint64 it would be past 2^63) or
+// past maxSafeInteger.
+func v2ID(client uint64, clock int64) (ID, error) {
+	if clock < 0 || clock > maxSafeInteger {
+		return ID{}, ErrInvalidUpdate
 	}
 	return ID{Client: ClientID(client), Clock: uint64(clock)}, nil
 }
@@ -263,21 +273,15 @@ func (d *v2Decoder) readString() (string, error) {
 
 func (d *v2Decoder) readTypeRef() (byte, error) {
 	v, err := d.typeRefDec.Read()
+	if err == nil && v > maxTypeRef {
+		// Checked before the byte conversion, so that 261 cannot read as 5.
+		return 0, typeRefError(v)
+	}
 	return byte(v), err
 }
 
-func (d *v2Decoder) readLen() (int, error) {
-	v, err := d.lenDec.Read()
-	if err != nil {
-		return 0, err
-	}
-	// Guard against silent wrap: uint64 values larger than MaxInt32 would
-	// produce a negative int on 32-bit platforms and a misleading huge value
-	// on 64-bit platforms that bypasses downstream bounds checks.
-	if v > math.MaxInt32 {
-		return 0, ErrInvalidUpdate
-	}
-	return int(v), nil
+func (d *v2Decoder) readLen() (uint64, error) {
+	return d.lenDec.Read()
 }
 
 func (d *v2Decoder) readKey() (string, error) {
@@ -285,12 +289,11 @@ func (d *v2Decoder) readKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	idx := int(keyClock)
-	if idx < 0 {
+	if keyClock < 0 {
 		return "", ErrInvalidUpdate
 	}
-	if idx < len(d.keys) {
-		return d.keys[idx], nil
+	if uint64(keyClock) < uint64(len(d.keys)) {
+		return d.keys[keyClock], nil
 	}
 	key, err := d.stringDec.Read()
 	if err != nil {
@@ -316,22 +319,33 @@ func (d *v2Decoder) readBuf() ([]byte, error) {
 
 func (d *v2Decoder) resetDsCurVal() { d.dsCurrVal = 0 }
 
+// readDsClock reads a delete range's clock, a diff from the end of the range
+// before, refused past maxSafeInteger.
 func (d *v2Decoder) readDsClock() (uint64, error) {
 	diff, err := d.restDec.ReadVarUint()
 	if err != nil {
 		return 0, err
 	}
-	d.dsCurrVal += diff
+	if d.dsCurrVal, err = structEnd(d.dsCurrVal, diff); err != nil {
+		return 0, err
+	}
+	if d.dsCurrVal > maxSafeInteger {
+		return 0, ErrInvalidUpdate
+	}
 	return d.dsCurrVal, nil
 }
 
+// readDsLen reads a delete range's length, refused when the range would reach
+// a clock past maxSafeInteger.
 func (d *v2Decoder) readDsLen() (uint64, error) {
 	v, err := d.restDec.ReadVarUint()
 	if err != nil {
 		return 0, err
 	}
 	l := v + 1
-	d.dsCurrVal += l
+	if d.dsCurrVal, err = structEnd(d.dsCurrVal, l); err != nil {
+		return 0, err
+	}
 	return l, nil
 }
 
@@ -351,7 +365,7 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 		svClock := sv.Clock(client)
 		var relevant []*Item
 		for _, item := range items {
-			if item.ID.Clock+uint64(item.Content.Len()) > svClock {
+			if item.ID.Clock+item.Content.Len() > svClock {
 				relevant = append(relevant, item)
 			}
 		}
@@ -368,9 +382,9 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 		enc.writeClient(g.client)
 		enc.restEnc.WriteVarUint(g.startClock)
 		for i, item := range g.items {
-			offset := 0
+			offset := uint64(0)
 			if i == 0 && g.startClock > item.ID.Clock {
-				offset = int(g.startClock - item.ID.Clock)
+				offset = g.startClock - item.ID.Clock
 			}
 			encodeItemV2(enc, item, offset, doc.store)
 		}
@@ -380,7 +394,7 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 	return enc.toBytes()
 }
 
-func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
+func encodeItemV2(enc *v2Encoder, item *Item, offset uint64, store *StructStore) {
 	// Orphaned items (no parent) came from GC wire format where the parent
 	// type name is lost. Encode as GC struct for valid clock accounting.
 	//
@@ -407,7 +421,7 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 
 	var origin, originRight *ID
 	if offset > 0 {
-		oc := ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset) - 1}
+		oc := ID{Client: item.ID.Client, Clock: item.ID.Clock + offset - 1}
 		origin = &oc
 		originRight = item.OriginRight
 	} else {
@@ -511,13 +525,13 @@ func contentTagOf(c Content) byte {
 	}
 }
 
-func encodeContentV2(enc *v2Encoder, c Content, offset int) {
+func encodeContentV2(enc *v2Encoder, c Content, offset uint64) {
 	switch ct := c.(type) {
 	case *ContentDeleted:
 		enc.writeLen(ct.length - offset)
 	case *ContentJSON:
 		vals := ct.Vals[offset:]
-		enc.writeLen(len(vals))
+		enc.writeLen(uint64(len(vals)))
 		for _, v := range vals {
 			enc.writeString(fmtValToJSON(v))
 		}
@@ -526,7 +540,7 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 	case *ContentString:
 		// Emit only the tail from `offset`. splitUTF16 emits a leading U+FFFD
 		// when offset bisects a surrogate pair, matching Yjs's mid-surrogate slice.
-		_, tail := splitUTF16(ct.Str, offset)
+		_, tail := splitUTF16(ct.Str, int(min(offset, uint64(ct.utf16Len))))
 		enc.writeString(tail)
 	case *ContentEmbed:
 		enc.restEnc.WriteAny(ct.Val)
@@ -541,7 +555,7 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 		}
 	case *ContentAny:
 		vals := ct.Vals[offset:]
-		enc.writeLen(len(vals))
+		enc.writeLen(uint64(len(vals)))
 		for _, v := range vals {
 			enc.restEnc.WriteAny(v)
 		}
@@ -555,7 +569,7 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 	case *ContentMove:
 		enc.restEnc.WriteVarUint(uint64(ct.Target.Client))
 		enc.restEnc.WriteVarUint(ct.Target.Clock)
-		enc.restEnc.WriteVarUint(uint64(ct.TargetLen))
+		enc.restEnc.WriteVarUint(ct.TargetLen)
 	}
 }
 
@@ -606,9 +620,15 @@ func nonEmptyRanges(ranges []DeleteRange) []DeleteRange {
 func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	// Same panic recovery as applyV1Txn — guard against crafted V2 updates
 	// that force a Splice on non-splittable content types.
+	applying := false
 	defer func() {
 		if r := recover(); r != nil {
-			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+			retErr = integrationPanicErr(r)
+		}
+		// An apply that fails before it began to integrate must tell no observer.
+		txn.refused = retErr != nil && !applying
+		if applying {
+			retErr = drainAfterApply(txn, retErr)
 		}
 	}()
 
@@ -622,8 +642,9 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	budget := newPendingBudget(txn.doc, sv, update, true)
 	budget.v2Start = &initialV2
 	budget.v2Rest = *dec.restDec
-
-	numClients, err := dec.restDec.ReadVarUint()
+	// Peek on a copy, since the pending-cap check reads from the apply's start.
+	peek := budget.v2Rest
+	numClients, err := peek.ReadVarUint()
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
@@ -634,16 +655,34 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 
 	var pending []*Item
-	var superseded groupSet
 	if numClients > 1 {
 		// Fail before integrating anything: a later malformed group must not
-		// leave earlier, superseded groups applied.
-		if superseded, err = supersededGroups(update, &initialV2, budget.v2Rest); err != nil {
+		// leave earlier, superseded groups applied; the walk also counts the
+		// structs, bounding the cap check.
+		if err := budget.knowSuperseded(); err != nil {
 			return wrapUpdateErr(err)
 		}
+	} else {
+		budget.setSuperseded(nil)
 	}
-	budget.setSuperseded(superseded)
+	superseded := budget.superseded
+	// The pending cap refuses an update before the apply changes anything, for
+	// its items (checkBeforeApply) or its delete ranges (checkParkedDeletes),
+	// both reading the update through the apply's one budget.
+	if err := budget.checkBeforeApply(len(update)); err != nil {
+		return err
+	}
+	if err := checkParkedDeletes(txn.doc, &budget); err != nil {
+		return err
+	}
+	*dec.restDec = peek
 
+	// Every struct decodes before one integrates, as Yjs reads them all first,
+	// so a struct that does not decode leaves the document unchanged; a
+	// keystroke's few structs stay on the stack (see decodeStructs).
+	var buf [8]*Item
+	group := buf[:0]
+	var groupClient ClientID
 	totalStructs := uint64(0)
 	for i := uint64(0); i < numClients; i++ {
 		numStructs, err := dec.restDec.ReadVarUint()
@@ -662,160 +701,90 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		if err != nil {
 			return wrapUpdateErr(err)
 		}
+		groupClient = client
 
 		existingEnd := sv.Clock(client)
 		drop := superseded.has(i)
+		if numClients == 1 {
+			// Reserve the list up front instead of regrowing it each time it fills,
+			// with the requested capacity bounded by the input length for a false count.
+			group = slices.Grow(group, int(min(numStructs, uint64(len(update)))))
+		}
 
+		kept := false // Yjs's rest takes a client's structs from one that waits
 		for j := uint64(0); j < numStructs; j++ {
 			info, err := dec.readInfo()
 			if err != nil {
 				return wrapUpdateErr(err)
 			}
 
-			contentType := info & 0x1F
-
 			var item *Item
-			var contentLen int
+			var contentLen uint64
 
-			switch contentType {
+			switch info & 0x1F {
 			case 0: // GC (garbage collected)
 				l, err := dec.readLen()
 				if err != nil {
 					return wrapUpdateErr(err)
 				}
-				if drop {
-					continue
-				}
-				length := uint64(l)
-				itemEnd := clock + length
-				if itemEnd > existingEnd {
-					// Record the range in the transaction's delete set: items we
-					// already hold here get tombstoned, and items we have never
-					// seen (GC'd before they reached us) are parked in pendingDs
-					// via applyToPartial and retried on later applies.
-					effectiveStart := clock
-					if effectiveStart < existingEnd {
-						effectiveStart = existingEnd
-					}
-					gcLen := int(itemEnd - effectiveStart)
-					if gcLen > 0 {
-						txn.deleteSet.add(ID{Client: client, Clock: effectiveStart}, gcLen)
-					}
-				}
 				// Decode the GC struct into the same placeholder Item the V1
 				// decoder builds (update.go decodeItem, tag 0), so it flows
 				// through the identical clock-accounting, park and offset logic
-				// below instead of short-circuiting past it.
-				//
-				// Short-circuiting is what caused #231. The delete-set entry
-				// above records that the range was deleted, but nothing occupied
-				// the range in the client's struct list and existingEnd never
-				// advanced, so every later struct from this client looked like a
-				// same-client clock gap and was parked in the permanent pending
-				// queue — waiting for a predecessor that was already in this
-				// same update. The V1 path has always appended the placeholder,
-				// and its comment names this exact failure ("so subsequent items
-				// in the group are not falsely gapped").
+				// instead of short-circuiting past it, which left every later
+				// struct of the client falsely gapped. As in Yjs, a GC struct
+				// adds nothing to the transaction's delete set.
 				item = &Item{
 					ID:      ID{Client: client, Clock: clock},
-					Content: NewContentDeleted(int(length)),
+					Content: NewContentDeleted(l),
 					Deleted: true,
 				}
-				contentLen = int(length)
+				contentLen = l
 
-			case 10: // Skip struct: withheld clocks; advance the cursor only (see V1 decodeAndPark)
+			case 10: // Skip struct: withheld clocks; advance the cursor only (see V1 decodeStructs)
 				l, err := dec.restDec.ReadVarUint()
 				if err != nil {
 					return wrapUpdateErr(err)
 				}
-				clock += l
+				if clock, err = structEnd(clock, l); err != nil {
+					return err
+				}
 				continue
 
 			default:
-				// Regular item
 				var derr error
 				item, contentLen, derr = decodeItemV2(dec, txn.doc, client, clock, info)
 				if derr != nil {
 					return wrapUpdateErr(derr)
 				}
-				if drop {
-					continue
+			}
+
+			// Every struct is bounded, a replaced group's too, so apply refuses
+			// what the merge decoders refuse.
+			itemEnd, err := structEnd(clock, contentLen)
+			if err != nil {
+				return err
+			}
+			if itemEnd == clock {
+				return wrapUpdateErr(errZeroLengthStruct)
+			}
+			switch {
+			case drop:
+			case numClients > 1:
+				// Several clients' structs integrate in Yjs's order once all
+				// are decoded, as in the V1 decoder.
+				if kept || itemEnd > existingEnd || hasMissingDep(txn.doc.store, item) || namesFutureOwn(item, existingEnd) {
+					pending, kept = append(pending, item), true
 				}
+			default:
+				group = append(group, item)
 			}
-
-			itemEnd := clock + uint64(contentLen)
-			if itemEnd <= existingEnd {
-				clock = itemEnd
-				continue
-			}
-
-			offset := 0
-			if clock < existingEnd {
-				offset = int(existingEnd - clock)
-			}
-
-			// A predecessor may be deferred until a later client group in this
-			// same message. Resolve the bounded update before charging items to
-			// the cross-update pending limit.
-			if clock > existingEnd {
-				pending = append(pending, item)
-				if err := budget.check(len(pending)); err != nil {
-					return err
-				}
-				clock = itemEnd
-				continue
-			}
-
-			// GC placeholders have no parent — add them straight to the store
-			// without linked-list integration, and advance existingEnd so the
-			// following structs in this group are not falsely gapped. Mirrors
-			// the V1 decoder (update.go). This is the half of #231's fix that
-			// keeps the client's struct list contiguous.
-			if item.Parent == nil && item.Deleted {
-				if offset > 0 {
-					item.ID.Clock += uint64(offset)
-					item.Content = item.Content.Splice(offset)
-				}
-				txn.doc.store.Append(item)
-				existingEnd = itemEnd
-				clock = itemEnd
-				continue
-			}
-
-			// Items whose parent can't be resolved yet (cross-client
-			// reference to a group not yet decoded) are deferred.
-			if item.Parent == nil {
-				pending = append(pending, item)
-				if err := budget.check(len(pending)); err != nil {
-					return err
-				}
-				clock = itemEnd
-				continue
-			}
-
-			// Defer if the right origin references a not-yet-integrated clock:
-			// V2 decodes client groups descending, so a higher-clientID item can
-			// reach here before its lower-clientID right neighbour exists. Without
-			// this the item integrates at the wrong position (permanent
-			// divergence, review finding C-2). Mirrors the V1 guard in update.go;
-			// only at offset==0 (a split's origins are necessarily satisfied).
-			if offset == 0 && item.OriginRight != nil &&
-				item.OriginRight.Clock >= txn.doc.store.NextClock(item.OriginRight.Client) {
-				pending = append(pending, item)
-				if err := budget.check(len(pending)); err != nil {
-					return err
-				}
-				clock = itemEnd
-				continue
-			}
-
-			if offset == 0 && item.Origin != nil {
-				item.Left = txn.doc.store.getItemCleanEnd(txn, item.Origin.Client, item.Origin.Clock)
-			}
-
-			item.integrate(txn, offset)
-			existingEnd = itemEnd // track progress so subsequent items in the group are not falsely gapped
 			clock = itemEnd
+		}
+	}
+	applying = true
+	if numClients == 1 {
+		if pending, err = integrateGroup(txn, group, sv.Clock(groupClient), pending); err != nil {
+			return wrapUpdateErr(err)
 		}
 	}
 
@@ -823,90 +792,19 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		return err
 	}
 
-	// Decode delete set
-	ds, err := decodeDeleteSetV2(dec)
-	if err != nil {
-		return wrapUpdateErr(err)
+	// Decode delete set, unless the parked-range check read it whole.
+	ds, dsErr := budget.deleteSet, error(nil)
+	if !budget.deleteSetRead {
+		ds, dsErr = decodeDeleteSetV2(dec)
 	}
-	unresolvableDs := ds.applyToPartial(txn)
-	if len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
-	}
-
-	// pendingDs may be drainable even if pending items aren't — integrated
-	// items from this update might be targets of previously-parked deletes.
-	if len(txn.doc.store.pendingDs.clients) > 0 {
-		retryPendingDs(txn)
-	}
-
-	// Drain pending items whose dependencies have been satisfied by
-	// this update. Inline rather than recursive (Go's sync.Mutex is not
-	// reentrant; ApplyUpdateV2 is already under d.mu via doc.Transact).
-	//
-	// Loop until no progress to handle chained dependencies:
-	//   A arriving satisfies B; B (now integrated) satisfies C; etc.
-	//
-	// Matches yrs' apply_update retry gate and Yjs JS's readUpdateV2
-	// recursion, but executed inline so everything integrated during
-	// this call surfaces in a single OnUpdate notification.
-	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
-		items := txn.doc.store.pending.items
-		txn.doc.store.pending = nil
-
-		var stillPending []*Item
-		stillMissing := make(StateVector)
-		progressed := false
-
-		// Process items with panic-safety: if tryIntegrate panics, re-park
-		// unprocessed items and stillPending back into store.pending so a
-		// subsequent ApplyUpdate can retry them. The outer applyV2Txn recover
-		// (v1.1.1) then converts the panic to an error for the caller.
-		idx := 0
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Restore: anything already re-parked + the unprocessed tail.
-					restore := append(stillPending, items[idx:]...)
-					if len(restore) > 0 {
-						txn.doc.store.pending = &pendingUpdate{items: restore, missing: stillMissing}
-					}
-					panic(r) // re-raise for outer recover
-				}
-			}()
-			for idx = 0; idx < len(items); idx++ {
-				item := items[idx]
-				if tryIntegrate(txn, item) {
-					progressed = true
-				} else {
-					stillPending = append(stillPending, item)
-					if client, parkedAt, isFuture := itemFutureDep(item, txn.doc.store); isFuture {
-						mergePendingMissing(stillMissing, client, parkedAt)
-					} else if item.ID.Clock > txn.doc.store.NextClock(item.ID.Client) {
-						// Same-client gap still blocks it.
-						mergePendingMissing(stillMissing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
-					}
-				}
-			}
-		}()
-
-		if len(stillPending) > 0 {
-			txn.doc.store.pending = &pendingUpdate{items: stillPending, missing: stillMissing}
-		}
-		// Retry pendingDs — freshly-integrated items may now be targets
-		// of previously-parked delete entries.
-		if progressed && len(txn.doc.store.pendingDs.clients) > 0 {
-			retryPendingDs(txn)
-		}
-		if !progressed {
-			// No progress this pass — infinite-loop guard. Items remain parked.
-			break
-		}
+	if err := applyDecodedDeleteSet(txn, ds, dsErr); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info byte) (*Item, int, error) {
+func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info byte) (*Item, uint64, error) {
 	hasOrigin := info&flagHasOrigin != 0
 	hasRightOrigin := info&flagHasRightOrigin != 0
 	hasParentSub := info&flagHasParentSub != 0
@@ -1034,7 +932,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		if l < 0 || l > int(maxV2Items) {
+		if l > maxV2Items {
 			return nil, ErrInvalidUpdate
 		}
 		vals := make([]any, l)
@@ -1097,7 +995,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		if l < 0 || l > int(maxV2Items) {
+		if l > maxV2Items {
 			return nil, ErrInvalidUpdate
 		}
 		vals := make([]any, l)
@@ -1126,7 +1024,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		clock, err := dec.restDec.ReadVarUint()
+		clock, err := readClock(dec.restDec)
 		if err != nil {
 			return nil, err
 		}
@@ -1135,10 +1033,10 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 			return nil, err
 		}
 		target := &ID{Client: ClientID(clientU), Clock: clock}
-		return NewContentMove(target, int(targetLen)), nil
+		return NewContentMove(target, targetLen), nil
 
 	default:
-		return nil, fmt.Errorf("unknown V2 content tag: %d", tag)
+		return nil, unknownTagErr(true, tag)
 	}
 }
 
@@ -1197,54 +1095,61 @@ func decodeTypeContentV2(dec *v2Decoder, doc *Doc, typeRef byte) (*abstractType,
 		return &xt.abstractType, nil
 
 	default:
-		r := &rawType{}
-		r.doc = doc
-		r.itemMap = make(map[string]*Item)
-		r.owner = r
-		return &r.abstractType, nil
+		return nil, typeRefError(typeRef)
 	}
 }
 
-func decodeDeleteSetV2(dec *v2Decoder) (DeleteSet, error) {
-	ds := newOrderedDeleteSet()
+// decodeDeleteSetV2 is decodeDeleteSet for V2, with the same result after an error.
+func decodeDeleteSetV2(dec *v2Decoder) (ds DeleteSet, err error) {
+	defer func() {
+		for c := range ds.clients {
+			ds.sortAndCompact(c)
+		}
+	}()
 	n, err := dec.restDec.ReadVarUint()
 	if err != nil {
-		return ds, err
+		return newOrderedDeleteSet(), err
 	}
-	if n > maxV2Items {
-		return ds, ErrInvalidUpdate
+	// A counting first pass sizes every list once, as in decodeDeleteSet; it reads
+	// the rest decoder, which is restored after it unless the pass added nothing.
+	rest, cur := *dec.restDec, dec.dsCurrVal
+	tally := rangeTally{room: int(min(n, uint64(dec.restDec.Remaining()/4)))}
+	scanErr := readDeleteSetV2(dec, n, tally.count)
+	if len(tally.clients) == 0 {
+		return newOrderedDeleteSet(), scanErr
 	}
-	for i := uint64(0); i < n; i++ {
+	*dec.restDec, dec.dsCurrVal = rest, cur
+	tally.merge()
+	ds = tally.deleteSet()
+	err = readDeleteSetV2(dec, n, func(client ClientID, r DeleteRange, _ bool) {
+		ds.appendDecoded(client, r, &tally)
+	})
+	return ds, err
+}
+
+// readDeleteSetV2 is readDeleteSet for V2.
+func readDeleteSetV2(dec *v2Decoder, n uint64, add func(client ClientID, r DeleteRange, first bool)) error {
+	for range n {
 		dec.resetDsCurVal()
 		clientU, err := dec.restDec.ReadVarUint()
 		if err != nil {
-			return ds, err
+			return err
 		}
 		numRanges, err := dec.restDec.ReadVarUint()
 		if err != nil {
-			return ds, err
+			return err
 		}
-		if numRanges > maxV2Items {
-			return ds, ErrInvalidUpdate
-		}
-		client := ClientID(clientU)
-		for j := uint64(0); j < numRanges; j++ {
+		for j := range numRanges {
 			clock, err := dec.readDsClock()
 			if err != nil {
-				return ds, err
+				return err
 			}
 			length, err := dec.readDsLen()
 			if err != nil {
-				return ds, err
+				return err
 			}
-			if _, seen := ds.clients[client]; !seen {
-				ds.order = append(ds.order, client) // Yjs applies a delete set in its encoded order
-			}
-			ds.clients[client] = append(ds.clients[client], DeleteRange{Clock: clock, Len: length})
+			add(ClientID(clientU), DeleteRange{Clock: clock, Len: length}, j == 0)
 		}
 	}
-	for c := range ds.clients {
-		ds.sortAndCompact(c)
-	}
-	return ds, nil
+	return nil
 }

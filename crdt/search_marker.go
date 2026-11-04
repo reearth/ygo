@@ -61,7 +61,7 @@ func (t *abstractType) renderedStep(item *Item) (countable bool, n int, renderAt
 		if target == nil || target.MovedBy != item || target.Deleted {
 			return false, 0, nil
 		}
-		return true, target.Content.Len(), target
+		return true, nativeContentLen(target.Content), target
 	}
 	if !item.Content.IsCountable() {
 		return false, 0, nil
@@ -70,7 +70,7 @@ func (t *abstractType) renderedStep(item *Item) (countable bool, n int, renderAt
 		// Moved away — rendered at its ContentMove's position, not here.
 		return false, 0, nil
 	}
-	return true, item.Content.Len(), nil
+	return true, nativeContentLen(item.Content), nil
 }
 
 // findMarkerRO returns the item spanning the rendered position index, along
@@ -235,7 +235,7 @@ func (t *abstractType) markPositionAt(index int) {
 	// pindex adjustment uses renderedStep so it stays the rendered start of p.
 	for p.Left != nil &&
 		p.Left.ID.Client == p.ID.Client &&
-		p.Left.ID.Clock+uint64(p.Left.Content.Len()) == p.ID.Clock {
+		p.Left.ID.Clock+p.Left.Content.Len() == p.ID.Clock {
 		p = p.Left
 		if countable, n, _ := t.renderedStep(p); countable {
 			pindex -= n

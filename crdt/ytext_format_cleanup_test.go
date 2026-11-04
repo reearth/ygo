@@ -277,7 +277,7 @@ func TestUnit_YText_FormatCleanup_PendingDeleteOrder(t *testing.T) {
 	x := rec(peer(1), func(t *YText, txn *Transaction) { t.Insert(txn, 1, "x", nil) })
 	ds := newDeleteSet()
 	ds.add(ID{1, 0}, 1)
-	ds.add(ID{3, 0}, int(c.StateVector()[3]))
+	ds.add(ID{3, 0}, c.StateVector()[3])
 	enc := encoding.NewEncoder()
 	enc.WriteVarUint(0)
 	encodeDeleteSet(enc, ds)
@@ -298,6 +298,50 @@ func TestUnit_YText_FormatCleanup_PendingDeleteOrder(t *testing.T) {
 	require.Empty(t, r.store.pendingDs.clients)
 	assert.Equal(t, 0, cleanups)
 	assert.Equal(t, 4, countLiveContentFormat(r))
+}
+
+// The cleanup visits deleted clients in the order they joined the remote
+// transaction's delete set. An item that arrives with deleted content joins
+// when it integrates, as in Yjs's ContentDeleted.integrate, so here client
+// 10's deleted "e" is visited first and its gap cleanup deletes 11:5. A GC
+// struct in its place joins nothing, so client 11's marker deletion comes
+// first and the full cleanup keeps 11:5. The prior state and the deleted
+// item's update are Yjs's; the GC update swaps that item for a GC struct.
+func TestUnit_YText_FormatCleanup_ArrivedDeletionOrder(t *testing.T) {
+	const (
+		priorV1   = "02060b0006010174066974616c69630474727565840b000164860b01066974616c6963046e756c6c440a00026465c60a000a01066974616c696303227822c60a010b00066974616c6963046e756c6c020a00040101740164840a00016500"
+		priorV2   = "0003000301074b014a020b4a00050002420242030002420d0600840086004400c601040084291f746974616c6963646974616c696364656974616c69636974616c696374646501060106024600410101010000020600787e7701787e020000"
+		deletedV1 = "01010a02410a0001020b0100030a010102"
+		deletedV2 = "0000024a000001000141010000000101010102020b0100020a010101"
+		gcV1      = "01010a020001020b0100030a010102"
+		gcV2      = "0000010a00000100010000000101010102020b0100020a010101"
+	)
+	for _, tc := range []struct {
+		name          string
+		apply         func(*Doc, []byte, any) error
+		prior, update string
+		want          []ID
+	}{
+		{"deleted_v1", ApplyUpdateV1, priorV1, deletedV1, []ID{{11, 6}}},
+		{"deleted_v2", ApplyUpdateV2, priorV2, deletedV2, []ID{{11, 6}}},
+		{"gc_v1", ApplyUpdateV1, priorV1, gcV1, []ID{{11, 5}, {11, 6}}},
+		{"gc_v2", ApplyUpdateV2, priorV2, gcV2, []ID{{11, 5}, {11, 6}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := newTestDoc(2)
+			txt := doc.GetText("t")
+			for _, u := range []string{tc.prior, tc.update} {
+				require.NoError(t, tc.apply(doc, mustHex(t, u), nil))
+			}
+			var live []ID
+			for it := txt.start; it != nil; it = it.Right {
+				if _, ok := it.Content.(*ContentFormat); ok && !it.Deleted {
+					live = append(live, it.ID)
+				}
+			}
+			assert.Equal(t, tc.want, live)
+		})
+	}
 }
 
 // Attribute values compare as JavaScript's === does: scalars by value, and a

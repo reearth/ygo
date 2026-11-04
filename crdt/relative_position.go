@@ -91,7 +91,7 @@ func CreateRelativePositionFromIndex(t sharedType, index int, assoc int) Relativ
 		if item.Deleted || !item.Content.IsCountable() {
 			continue
 		}
-		n := item.Content.Len()
+		n := nativeContentLen(item.Content)
 		if n > remaining {
 			// Anchor to the specific clock within this item.
 			id := ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(remaining)}
@@ -100,7 +100,7 @@ func CreateRelativePositionFromIndex(t sharedType, index int, assoc int) Relativ
 		remaining -= n
 		// For assoc < 0 at the last item: anchor to that item's last clock.
 		if item.Right == nil && assoc < 0 {
-			lastClock := item.ID.Clock + uint64(item.Content.Len()) - 1
+			lastClock := item.ID.Clock + item.Content.Len() - 1
 			return RelativePosition{Item: &ID{Client: item.ID.Client, Clock: lastClock}, Assoc: assoc}
 		}
 	}
@@ -158,9 +158,16 @@ func ToAbsolutePosition(doc *Doc, rp RelativePosition) (AbsolutePosition, bool) 
 	// diff is the 0-based offset of the anchor clock within the item.
 	// For assoc < 0 we add 1 so that the resolved index is to the LEFT of the
 	// anchor character (i.e. includes the anchor in the count).
-	diff := int(rp.Item.Clock - item.ID.Clock)
-	if rp.Assoc < 0 {
-		diff++
+	diff := 0
+	if !item.Deleted && item.Content.IsCountable() {
+		offset := rp.Item.Clock - item.ID.Clock
+		if rp.Assoc < 0 {
+			offset++
+		}
+		if offset > uint64(nativeContentLen(item.Content)) {
+			return AbsolutePosition{}, false
+		}
+		diff = int(offset)
 	}
 
 	// Count all non-deleted countable items that come before anchor_item in the
@@ -171,7 +178,7 @@ func ToAbsolutePosition(doc *Doc, rp RelativePosition) (AbsolutePosition, bool) 
 			break
 		}
 		if !cur.Deleted && cur.Content.IsCountable() {
-			index += cur.Content.Len()
+			index += nativeContentLen(cur.Content)
 		}
 	}
 	index += diff

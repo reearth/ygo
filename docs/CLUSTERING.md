@@ -116,7 +116,9 @@ http.Handle("/yjs/{room}", srv)
 When a remote change arrives, the relay calls `srv.Inject(ctx, Inbound)`:
 
 - `KindSync` → applied to the room's doc with the relay sentinel origin, then
-  rebroadcast to local peers via `BroadcastUpdate`.
+  rebroadcast to local peers via `BroadcastUpdate`. An update that fails
+  partway rebroadcasts only what it left in the room, the structs that
+  integrated and those that parked, and `Inject` returns the apply's error.
 - `KindAwareness` → merged into the room's `awareness.Awareness` with the
   sentinel origin, then fanned out to local peers (as sent when the room
   applied it exactly, otherwise the room's state for the clients it applied).

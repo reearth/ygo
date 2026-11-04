@@ -19,7 +19,7 @@ func contentIDsFromStructs(perClient map[ClientID][]*Item, ds DeleteSet) Content
 	inserts := NewIDSet()
 	for client, items := range perClient {
 		for _, it := range items {
-			inserts.Add(client, it.ID.Clock, uint64(it.Content.Len()))
+			inserts.Add(client, it.ID.Clock, it.Content.Len())
 		}
 	}
 	deletes := NewIDSet()
@@ -66,10 +66,10 @@ func InsertSetFromDoc(doc *Doc, filterDeleted bool) *IDSet {
 				continue
 			}
 			clock := it.ID.Clock
-			length := uint64(it.Content.Len())
+			length := it.Content.Len()
 			for i+1 < len(items) && (!filterDeleted || !items[i+1].Deleted) {
 				i++
-				length += uint64(items[i].Content.Len())
+				length += items[i].Content.Len()
 			}
 			out.Add(client, clock, length)
 		}

@@ -1,278 +1,292 @@
 package crdt
 
 import (
+	"cmp"
 	"slices"
-	"sort"
 )
 
-// Small queues cost less to retry directly than to index.
-const pendingScheduleThreshold = 32
-
-// retryWithinUpdatePending preserves wire order and reuses the queue's storage.
-func retryWithinUpdatePending(txn *Transaction, pending []*Item) []*Item {
-	remaining := pending[:0]
-	for _, item := range pending {
-		if !tryIntegrate(txn, item) {
-			remaining = append(remaining, item)
-		}
-	}
-	return remaining
+// structRefs is one client's structs in clock order, as an entry of Yjs's
+// clientsStructRefs: positions [next, end) of the grouped queue are left.
+type structRefs struct {
+	client    ClientID
+	next, end int
 }
 
-// pendingProducer freezes a wire range even if integration trims its Item.
-type pendingProducer struct {
-	id    ID
-	end   uint64
-	index int
-}
-
-// indexPendingProducers builds one sorted array without per-client maps.
-func indexPendingProducers(pending []*Item) []pendingProducer {
-	order := make([]pendingProducer, len(pending))
+// countStructRefs counts pending's runs, each one client's structs in rising
+// clocks, and gives in step whether the runs' clients rise (1), as ygo writes
+// an update's, fall (-1), as Yjs writes them, or neither (0).
+func countStructRefs(pending []*Item) (runs, step int) {
+	monotone := true
+	var prev ID
 	for i, item := range pending {
-		order[i] = pendingProducer{item.ID, item.ID.Clock + uint64(item.Content.Len()), i}
+		id := item.ID
+		if i > 0 && id.Client == prev.Client && id.Clock > prev.Clock {
+			prev = id
+			continue
+		}
+		runs++
+		if i > 0 && monotone {
+			if c := cmp.Compare(id.Client, prev.Client); c == 0 || (step != 0 && c != step) {
+				monotone = false
+			} else {
+				step = c
+			}
+		}
+		prev = id
 	}
-	slices.SortFunc(order, func(a, b pendingProducer) int {
-		if a.id.Client < b.id.Client {
-			return -1
+	switch {
+	case !monotone:
+		return runs, 0
+	case step == 0:
+		return runs, 1 // one run, or none
+	}
+	return runs, step
+}
+
+// groupStructRefs groups pending by client, each in clock order, ascending by
+// client, appending the groups to into; runs and step are countStructRefs's.
+// It returns the queue positions the groups index, or nil when pending already
+// holds one strictly clock-ordered run per client, as a decoded update does.
+func groupStructRefs(pending []*Item, runs, step int, into []structRefs) ([]structRefs, []int) {
+	groups := slices.Grow(into[:0], runs)
+	for i, item := range pending {
+		// An ordered run's clocks may change when an overlapping item trims,
+		// but its client boundary stays valid for a fallback.
+		if i == 0 || item.ID.Client != pending[i-1].ID.Client || (step == 0 && item.ID.Clock <= pending[i-1].ID.Clock) {
+			groups = append(groups, structRefs{client: item.ID.Client, next: i})
 		}
-		if a.id.Client > b.id.Client {
-			return 1
+		groups[len(groups)-1].end = i + 1
+	}
+	switch step {
+	case 1:
+		return groups, nil
+	case -1:
+		slices.Reverse(groups)
+		return groups, nil
+	}
+	slices.SortFunc(groups, func(a, b structRefs) int { return cmp.Compare(a.client, b.client) })
+	unique := true
+	for i := 1; i < len(groups) && unique; i++ {
+		unique = groups[i].client != groups[i-1].client
+	}
+	if unique {
+		return groups, nil
+	}
+	order := make([]int, len(pending))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int {
+		if c := cmp.Compare(pending[a].ID.Client, pending[b].ID.Client); c != 0 {
+			return c
 		}
-		if a.id.Clock < b.id.Clock {
-			return -1
-		}
-		if a.id.Clock > b.id.Clock {
-			return 1
-		}
-		return 0
+		return cmp.Compare(pending[a].ID.Clock, pending[b].ID.Clock)
 	})
-	return order
-}
-
-// findPendingProducer returns a candidate from the sorted producer coverage index.
-func findPendingProducer(order []pendingProducer, id ID) int {
-	i := sort.Search(len(order), func(i int) bool {
-		return order[i].id.Client > id.Client || order[i].id.Client == id.Client && order[i].id.Clock > id.Clock
-	}) - 1
-	if i >= 0 && order[i].id.Client == id.Client && id.Clock < order[i].end {
-		return order[i].index
+	groups = groups[:0]
+	for i, p := range order {
+		if i == 0 || pending[p].ID.Client != pending[order[i-1]].ID.Client {
+			groups = append(groups, structRefs{client: pending[p].ID.Client, next: i})
+		}
+		groups[len(groups)-1].end = i + 1
 	}
-	return -1
+	return groups, order
 }
 
-// pendingClientSuccessors links contiguous ranges in the same client. Single-
-// struct client queues need no additional storage or successor lookup.
-func pendingClientSuccessors(order []pendingProducer) []int {
-	var next []int
-	for i := 1; i < len(order); i++ {
-		left, right := order[i-1], order[i]
-		if left.id.Client == right.id.Client && left.end == right.id.Clock {
-			if next == nil {
-				next = make([]int, len(order))
+// integratePending integrates pending in Yjs's integrateStructs order (highest
+// client first, each in clock order, a blocked struct first taking the client
+// it waits on), marks in done what leaves the queue, and, within an update (nil
+// dropped), returns at the first refusal, as Yjs stops when a struct throws,
+// where a drain drops it and goes on.
+func integratePending(txn *Transaction, pending []*Item, done []bool, dropped *error) error {
+	runs, step := countStructRefs(pending)
+	at := len(pending)
+	if step != 0 {
+		var err error
+		if at, err = integrateClientRuns(txn, pending, step, done, dropped); at < 0 {
+			return err
+		}
+	}
+	var buf [4]structRefs // a keystroke's groups need no allocation
+	groups, order := groupStructRefs(pending, runs, step, buf[:0])
+	if at < len(pending) {
+		// The runs above at's client are taken, and at's run goes on from at.
+		client := pending[at].ID.Client
+		for i := len(groups) - 1; i >= 0 && groups[i].client >= client; i-- {
+			groups[i].next = groups[i].end
+			if groups[i].client == client {
+				groups[i].next = at
 			}
-			next[left.index] = right.index + 1
 		}
 	}
-	return next
-}
-
-// resolvePendingDependencies walks producers before their dependents. Immutable
-// ranges keep searches valid when integration trims an Item. Remaining blocked
-// items are retained for the ordinary fixed-point resolver.
-func resolvePendingDependencies(txn *Transaction, pending []*Item) []*Item {
-	order := indexPendingProducers(pending)
-	successors := pendingClientSuccessors(order)
-	// Keep the original successor links, then reuse the index for prefix coverage.
-	// A shorter overlapping range must not hide an earlier covering producer.
-	for i := 1; i < len(order); i++ {
-		previous, current := order[i-1], &order[i]
-		if previous.id.Client == current.id.Client && previous.end > current.end {
-			current.end, current.index = previous.end, previous.index
+	take := func(g *structRefs) int {
+		p := g.next
+		g.next++
+		if order != nil {
+			return order[p]
 		}
+		return p
 	}
-	state := make([]byte, len(pending))
-	stack := make([]int, 0, len(pending))
-	for start := range pending {
-		if state[start] != 0 {
-			continue
+	current := len(groups) - 1
+	find := func(client ClientID) *structRefs {
+		if current >= 0 && groups[current].client == client {
+			return &groups[current] // most lookups are for the group being drained
 		}
-		stack = append(stack, start)
-		for len(stack) > 0 {
-			index := stack[len(stack)-1]
-			item := pending[index]
-			state[index] = 1
-			if tryIntegrate(txn, item) {
-				state[index] = 2
-				stack = stack[:len(stack)-1]
-				// Complete a contiguous client tail before returning to consumers.
-				// Otherwise deferred tails may scan a growing set of descendants.
-				if successors != nil {
-					if next := successors[index]; next > 0 && state[next-1] == 0 && pending[next-1].ID.Clock == txn.doc.store.NextClock(item.ID.Client) {
-						stack = append(stack, next-1)
-					}
+		lo, hi := 0, len(groups)
+		for lo < hi {
+			m := int(uint(lo+hi) >> 1)
+			if groups[m].client < client {
+				lo = m + 1
+			} else {
+				hi = m
+			}
+		}
+		if lo < len(groups) && groups[lo].client == client {
+			return &groups[lo]
+		}
+		return nil
+	}
+	var stackBuf [8]int
+	stack := stackBuf[:0]
+	for {
+		var head int
+		if n := len(stack); n > 0 {
+			head, stack = stack[n-1], stack[:n-1]
+		} else {
+			for current >= 0 && groups[current].next == groups[current].end {
+				current--
+			}
+			if current < 0 {
+				return nil
+			}
+			head = take(&groups[current])
+		}
+		for {
+			item := pending[head]
+			ok, waitsOn, err := tryIntegrateOrDrop(txn, item, dropped)
+			if err != nil && dropped == nil {
+				done[head] = true
+				return err
+			}
+			if ok {
+				done[head] = true
+				break
+			}
+			if waitsOn != item.ID.Client {
+				if g := find(waitsOn); g != nil && g.next < g.end {
+					stack = append(stack, head)
+					head = take(g)
+					continue
 				}
-				continue
 			}
-			var deps [4]ID
-			n := 0
-			if end := txn.doc.store.NextClock(item.ID.Client); item.ID.Clock > end {
-				deps[n] = ID{Client: item.ID.Client, Clock: end}
-				n++
+			stack = append(stack, head)
+			for _, blocked := range stack {
+				g := find(pending[blocked].ID.Client)
+				g.next = g.end
 			}
-			for _, dep := range []*ID{item.Origin, item.OriginRight, item.parentID} {
-				if dep != nil && dep.Clock >= txn.doc.store.NextClock(dep.Client) {
-					deps[n] = *dep
-					n++
-				}
-			}
-			pushed := false
-			for _, dep := range deps[:n] {
-				if next := findPendingProducer(order, dep); next >= 0 && state[next] == 0 {
-					stack = append(stack, next)
-					pushed = true
-					break
-				}
-			}
-			if !pushed {
-				state[index] = 3
-				stack = stack[:len(stack)-1]
-			}
-		}
-	}
-	remaining := pending[:0]
-	for i, item := range pending {
-		if state[i] != 2 {
-			remaining = append(remaining, item)
-		}
-	}
-	return remaining
-}
-
-// pendingWaiter parks a queue index until its client's clock passes clock.
-type pendingWaiter struct {
-	clock uint64
-	index int
-}
-
-// pendingBlocker returns the first unmet clock dependency of an item that
-// tryIntegrate rejected; the item can integrate only once NextClock(client)
-// exceeds clock. Same-client gaps, origins and right origins always block, so
-// the parent ID is reported only when none of them does.
-func pendingBlocker(item *Item, store *StructStore) (ClientID, uint64, bool) {
-	if item.ID.Clock > store.NextClock(item.ID.Client) {
-		return item.ID.Client, item.ID.Clock - 1, true
-	}
-	for _, dep := range []*ID{item.Origin, item.OriginRight} {
-		if dep != nil && dep.Clock >= store.NextClock(dep.Client) {
-			return dep.Client, dep.Clock, true
-		}
-	}
-	if item.Parent == nil && item.parentID != nil && item.parentID.Clock >= store.NextClock(item.parentID.Client) {
-		return item.parentID.Client, item.parentID.Clock, true
-	}
-	return 0, 0, false
-}
-
-// integratePending integrates pending items in dependency order. A rejected
-// item waits on its blocking client and is retried once that client's clock
-// passes the dependency, so each item is retried at most once per dependency.
-// Integrated items are marked in done.
-func integratePending(txn *Transaction, pending []*Item, done []bool) {
-	store := txn.doc.store
-	var waiters map[ClientID][]pendingWaiter
-	stack := make([]int, len(pending))
-	for i := range stack {
-		stack[i] = len(pending) - 1 - i
-	}
-	for len(stack) > 0 {
-		index := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		item := pending[index]
-		if !tryIntegrate(txn, item) {
-			if client, clock, ok := pendingBlocker(item, store); ok {
-				if waiters == nil {
-					waiters = make(map[ClientID][]pendingWaiter)
-				}
-				waiters[client] = pushPendingWaiter(waiters[client], pendingWaiter{clock, index})
-			}
-			continue
-		}
-		done[index] = true
-		heap := waiters[item.ID.Client]
-		if len(heap) == 0 {
-			continue
-		}
-		end := store.NextClock(item.ID.Client)
-		for len(heap) > 0 && heap[0].clock < end {
-			stack = append(stack, heap[0].index)
-			heap = popPendingWaiter(heap)
-		}
-		waiters[item.ID.Client] = heap
-	}
-}
-
-func pushPendingWaiter(heap []pendingWaiter, w pendingWaiter) []pendingWaiter {
-	heap = append(heap, w)
-	for i := len(heap) - 1; i > 0; {
-		parent := (i - 1) / 2
-		if heap[parent].clock <= heap[i].clock {
+			stack = stack[:0]
 			break
 		}
-		heap[parent], heap[i] = heap[i], heap[parent]
-		i = parent
-	}
-	return heap
-}
-
-func popPendingWaiter(heap []pendingWaiter) []pendingWaiter {
-	last := len(heap) - 1
-	heap[0] = heap[last]
-	heap = heap[:last]
-	for i := 0; ; {
-		least, left, right := i, 2*i+1, 2*i+2
-		if left < len(heap) && heap[left].clock < heap[least].clock {
-			least = left
-		}
-		if right < len(heap) && heap[right].clock < heap[least].clock {
-			least = right
-		}
-		if least == i {
-			return heap
-		}
-		heap[i], heap[least] = heap[least], heap[i]
-		i = least
 	}
 }
 
-// resolvePendingWaiters integrates what the dependency walk left and returns
-// the remaining items in queue order.
-func resolvePendingWaiters(txn *Transaction, pending []*Item) []*Item {
-	done := make([]bool, len(pending))
-	integratePending(txn, pending, done)
-	remaining := pending[:0]
-	for i, item := range pending {
-		if !done[i] {
-			remaining = append(remaining, item)
-		}
-	}
-	return remaining
-}
-
-// parkWithinUpdatePending charges only unresolved items to the persistent cap.
-func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
-	for _, item := range pending {
-		if txn.doc.store.pending != nil && len(txn.doc.store.pending.items) >= txn.doc.maxPendingItemsLimit() {
-			return wrapUpdateErr(ErrInvalidUpdate)
-		}
-		if txn.doc.store.pending == nil {
-			txn.doc.store.pending = &pendingUpdate{missing: make(StateVector)}
-		}
-		txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
-		if client, parkedAt, future := itemFutureDep(item, txn.doc.store); future {
-			mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
+// integrateClientRuns avoids groups for a decoded update's client-ordered
+// runs, step as countStructRefs gives it. It returns -1 once every run is
+// taken, else the first struct that waits on a client still to take, where
+// integratePending's groups go on.
+func integrateClientRuns(txn *Transaction, pending []*Item, step int, done []bool, dropped *error) (int, error) {
+	lo, hi := 0, len(pending) // the runs not yet taken
+	var absent ClientID       // a client with no struct in [lo, hi), once known
+	absentKnown := false
+	for lo < hi {
+		s, e := lo, hi
+		if step > 0 {
+			for s = hi - 1; s > lo && pending[s-1].ID.Client == pending[s].ID.Client; s-- {
+			}
+			hi = s
 		} else {
-			mergePendingMissing(txn.doc.store.pending.missing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
+			for e = lo + 1; e < hi && pending[e].ID.Client == pending[lo].ID.Client; e++ {
+			}
+			lo = e
+		}
+		client := pending[s].ID.Client
+		for i := s; i < e; i++ {
+			ok, waitsOn, err := tryIntegrateOrDrop(txn, pending[i], dropped)
+			if err != nil && dropped == nil {
+				done[i] = true
+				return -1, err
+			}
+			if ok {
+				done[i] = true
+				continue
+			}
+			if waitsOn != client && (!absentKnown || waitsOn != absent) {
+				if _, found := slices.BinarySearchFunc(pending[lo:hi], waitsOn, func(it *Item, c ClientID) int {
+					return step * cmp.Compare(it.ID.Client, c)
+				}); found {
+					return i, nil
+				}
+				absent, absentKnown = waitsOn, true
+			}
+			break // the rest of the run waits behind it
+		}
+	}
+	return -1, nil
+}
+
+// tryIntegrateOrDrop marks a panicking item done while a drain continues.
+func tryIntegrateOrDrop(txn *Transaction, item *Item, dropped *error) (ok bool, waitsOn ClientID, err error) {
+	if dropped == nil {
+		return tryIntegrate(txn, item)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			*dropped = integrationPanicErr(r)
+			ok, waitsOn, err = true, 0, nil
+		}
+	}()
+	return tryIntegrate(txn, item)
+}
+
+// parkWithinUpdatePending parks what the update could not integrate, merged
+// into the queue as Yjs merges an update's rest into its pending update, and
+// checks the persistent cap as a last guard behind the apply's check, which
+// lets a queue above a lowered cap stay there but not grow.
+func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
+	s := txn.doc.store
+	limit := max(txn.doc.maxPendingItemsLimit(), s.pending.heldStructs())
+	if s.pending.heldStructs() > 0 && !s.pending.tailAppends(pending) && s.pending.mergesAny(pending) {
+		pl := s.pending.plan(refsOf(pending))
+		if s.pending.heldStructs()+pl.growth() > limit {
+			return ErrInvalidUpdate
+		}
+		pending = s.pending.apply(pl, pending, s.parked != nil && len(s.parked.items) > 0)
+	}
+	from := 0
+	if s.pending != nil {
+		from = len(s.pending.items)
+	}
+	defer func() {
+		// The run this park appended, also when the cap stops it partway.
+		if s.pending != nil && len(s.pending.items) > from {
+			n := len(s.pending.items)
+			run := s.pending.items[from:n:n]
+			s.pending.addCover(run, from)
+			txn.noteParked(run)
+		}
+	}()
+	for _, item := range pending {
+		if s.pending.heldStructs() >= limit {
+			return ErrInvalidUpdate
+		}
+		if s.pending == nil {
+			s.pending = &pendingUpdate{missing: make(StateVector), tailClient: item.ID.Client, tailValid: true}
+		}
+		s.pending.items = append(s.pending.items, item)
+		s.pending.noteTail(item)
+		if client, parkedAt, future := itemFutureDep(item, s); future {
+			mergePendingMissing(s.pending.missing, client, parkedAt)
+		} else {
+			mergePendingMissing(s.pending.missing, item.ID.Client, s.NextClock(item.ID.Client))
 		}
 	}
 	return nil

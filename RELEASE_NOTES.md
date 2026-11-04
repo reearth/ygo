@@ -1,3 +1,76 @@
+## v1.56.0
+
+**Who is affected: servers that apply updates from peers they do not trust,
+every relay or cluster that forwards updates, and code that builds a document
+with `WithClientID` and re-applies its own updates.** A refused, cut-off or
+reordered update now leaves the server and the peers it relays to holding
+the same document.
+
+- Breaking: `Content.Len()` returns `uint64`, and `Content.Splice` takes a
+  `uint64` offset. Custom implementations must change both signatures.
+  `NewContentDeleted`, `NewContentMove`, and `ContentMove.TargetLen` also use
+  `uint64` lengths. Check string and slice bounds before conversion to `int`.
+  Rendered text and array positions remain `int`.
+- Logical spans retain their lengths on 32-bit builds, including coalesced
+  deleted and GC spans. V1 and V2 support the same wide spans and offsets.
+  String, list, allocation, and struct-count limits remain in force.
+- Breaking: a document takes a new random client ID when a remote update
+  changes its own client's clock, as in Yjs. A document built with
+  `WithClientID` that re-applies its own updates gets a new ID too: read
+  `ClientID()` again after the apply if you track writes by client ID.
+- An update that would park past `MaxPendingItems` (`WithMaxPendingItems`) is
+  refused before it changes the document. Before, part of it stayed and its
+  observers were told.
+- Parked delete ranges count against the same cap, separately, and are
+  retried only when they can apply. `Doc.SetMaxPendingItems` sets the cap
+  after construction.
+- A struct sent again merges into the pending queue as Yjs merges its pending
+  update, so the queue holds what Yjs's pending update holds. Each struct a
+  park adds, cuts or drops costs, on average, time logarithmic in the queue.
+- An update decides whether to retry parked structs from the clocks it
+  advances, without scanning all clients that the queue waits on.
+- A struct the document already holds waits on another client's struct it
+  names and the document lacks, as in Yjs.
+- An item next to a GC struct integrates as a GC struct, as in Yjs.
+- An item that names a struct of its own client past that client's clock is
+  refused, as Yjs throws for it.
+- Clocks past 2^53-1, and struct, origin and parent clients past 2^55-1, are
+  refused. The attribution decoders (`DecodeIDSet`, `DecodeIDMap`,
+  `DecodeContentIDs`, `DecodeContentMap`) refuse a range whose running clock
+  would pass 2^64-1, and an `IDMap` client past 2^55-1.
+- `ApplyUpdateV1Landed`, which the websocket provider relays after a partial
+  apply, carries the structs the apply parked.
+- `Server.Inject` relays to local peers what a partly applied update left.
+- A parked struct that panics in the drain is dropped, not the structs after
+  it.
+- An item that continues its client's GC struct is refused, as in Yjs.
+- The deletions read before a cut in the delete set, or before a range that
+  reaches a clock past 2^53-1, stay applied, as in Yjs for a cut, whatever the
+  pending cap, and `ApplyUpdateV1Landed` carries them.
+- An item that arrives with deleted content is deleted when it integrates, as
+  in Yjs.
+- `EncodeStateVectorFromUpdate` and its V2 form return the state vector Yjs
+  returns, and a subdocument guid that is not UTF-8 is an error, not a panic.
+- An update's structs integrate in Yjs's order, and the integration stops at
+  the first refused struct, as Yjs stops.
+- Every struct of an update decodes before one integrates, so a struct that
+  does not decode changes nothing.
+- `WithClientID` panics for a client ID past 2^55-1.
+- `ApplyUpdateV1Landed` also carries the delete ranges a failed apply parked.
+- A type ref Yjs has no type for is refused before any change.
+- `YArray.Insert` and `YArray.Push` with no values make no item, as in Yjs.
+- An item or GC struct of length zero is refused before any change, also in
+  an update from an older ygo. ygo 1.55.0 and earlier stored one when it
+  parked one, and when `YArray.Insert` or `Push` had no values. The bundled
+  persistence adapters merge a room's records on load, and the merge drops
+  such a struct, so that state still loads. If you apply a stored state
+  without a merge, for example a snapshot from `RestoreSnapshot` or an
+  adapter's own blob, pass it through `crdt.MergeUpdatesV1` first.
+- A delete set read from an update allocates in proportion to its bytes. In
+  tests with crafted delete sets of about 1 MiB, an apply allocates at most
+  17.2 times their bytes at the default cap, where 1.55.0 allocated up to
+  137.3.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

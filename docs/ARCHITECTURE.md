@@ -111,11 +111,11 @@ This guarantees identical final state on all replicas regardless of message arri
 
 ### Pending-structs queue
 
-When an update references an item whose dependency hasn't arrived yet — a same-client clock gap or a cross-update Origin reference — the item is parked in a per-doc pending queue rather than silently orphaned. The queue drains automatically on each subsequent `ApplyUpdate` when the missing predecessors arrive. This mirrors Yjs JS's `pendingStructs` and yrs's `Store.pending`. See the v1.2.0 CHANGELOG entry for the design.
+When an update references an item whose dependency hasn't arrived yet — a same-client clock gap or a cross-update Origin reference — the item is parked in a per-doc pending queue rather than silently orphaned. The queue drains automatically on each subsequent `ApplyUpdate` when the missing predecessors arrive. A struct that arrives again while the queue holds it, as a reconnecting peer re-sends what it has not seen acknowledged, is not parked again: the queue holds each clock once, as Yjs's merged `pendingStructs` does. This mirrors Yjs JS's `pendingStructs` and yrs's `Store.pending`. See the v1.2.0 CHANGELOG entry for the design.
 
 The same machinery handles delete-set entries that target not-yet-integrated items (`pendingDs`). State-vector computation is unaffected — pending items don't appear in `StateVector()` until they're integrated, so peers correctly retry the missing dependencies.
 
-The queue is bounded (default 100,000 parked items; configurable via `crdt.WithMaxPendingItems` or `Server.MaxPendingItems`). Updates that would push past the cap return `ErrInvalidUpdate` — see the v1.8.0 CHANGELOG and #46 for the security rationale.
+The queue is bounded (default 100,000 parked items; configurable via `crdt.WithMaxPendingItems` or `Server.MaxPendingItems`). An update that would push past the cap returns `ErrInvalidUpdate` and leaves the document unchanged: the apply checks the whole update against the cap before it integrates any of it (`pendingBudget.checkBeforeApply`). See the v1.8.0 CHANGELOG and #46 for the security rationale. The same cap bounds, separately, the delete ranges parked waiting for the structs they delete, also checked before the apply integrates anything (`checkParkedDeletes`); a client's parked ranges are retried only once its structs have moved past the lowest of them, so an apply that brings nothing for that client costs nothing for them.
 
 ### DeleteSet
 

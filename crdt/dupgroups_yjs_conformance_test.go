@@ -111,7 +111,7 @@ func TestConformance_RepeatedClientGroups_MatchYjs(t *testing.T) {
 					for c, items := range doc.store.clients {
 						var ranges [][2]uint64
 						for _, it := range items {
-							end := it.ID.Clock + uint64(it.Content.Len())
+							end := it.ID.Clock + it.Content.Len()
 							if n := len(ranges); n > 0 && ranges[n-1][1] == it.ID.Clock {
 								ranges[n-1][1] = end
 							} else {

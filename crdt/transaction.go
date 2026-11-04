@@ -63,9 +63,49 @@ type Transaction struct {
 	// once its observers have fired; afterTypeObservers, when set, decides
 	// it after the type observers (typeObserved: there are some), where
 	// Yjs does.
-	formatCleanup      bool
-	typeObserved       bool
+	formatCleanup bool
+	typeObserved  bool
+	// refused marks a remote apply that failed before integrating, so the
+	// commit fires nothing.
+	refused            bool
 	afterTypeObservers func()
+}
+
+// transactionParked is what one transaction parked, which a failed apply's
+// landed update carries (encodeTxnV1Locked); each document keeps one, since
+// its transactions run one at a time.
+type transactionParked struct {
+	items   []*Item     // the first run is a view of the pending queue
+	deletes []DeleteSet // sharing ranges that nothing changes
+	// left is what a drain took out of the queue after the park, so the
+	// structs still parked are found without a pass over the queue; a merge
+	// runs before the transaction's one park and cannot take them.
+	left []*Item
+}
+
+// parkRecord allocates the document's record only when a transaction parks.
+func (t *Transaction) parkRecord() *transactionParked {
+	s := t.doc.store
+	if s.parked == nil {
+		s.parked = &transactionParked{}
+	}
+	return s.parked
+}
+
+// noteParked keeps the first appended run as a queue view to avoid copying it.
+func (t *Transaction) noteParked(run []*Item) {
+	p := t.parkRecord()
+	if p.items == nil {
+		p.items = run
+		return
+	}
+	p.items = append(p.items, run...)
+}
+
+// noteParkedDeletes records ds, which this transaction parked.
+func (t *Transaction) noteParkedDeletes(ds DeleteSet) {
+	p := t.parkRecord()
+	p.deletes = append(p.deletes, ds)
 }
 
 // Ctx returns the context associated with this transaction. Transactions
@@ -209,7 +249,7 @@ func squashRuns(txn *Transaction) {
 			// current merged item, updated with each absorbed right item's
 			// original Len() — avoiding a call to left.Content.Len() (which is
 			// O(string length) and would make the loop O(n²)).
-			expectedClock := left.ID.Clock + uint64(left.Content.Len())
+			expectedClock := left.ID.Clock + left.Content.Len()
 			var sb strings.Builder
 			sb.WriteString(left.Content.(*ContentString).Str)
 
@@ -234,7 +274,7 @@ func squashRuns(txn *Transaction) {
 					break
 				}
 				// right is directly adjacent and clock-contiguous: absorb it.
-				rightLen := uint64(right.Content.Len()) // O(1) for single-char items
+				rightLen := right.Content.Len() // O(1) for single-char items
 				expectedClock = right.ID.Clock + rightLen
 
 				// Rewire linked list: splice right out.
@@ -380,7 +420,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if left.Right != item {
 		return false
 	}
-	if left.ID.Clock+uint64(left.Content.Len()) != item.ID.Clock {
+	if left.ID.Clock+left.Content.Len() != item.ID.Clock {
 		return false
 	}
 	if left.Deleted != item.Deleted {
@@ -405,7 +445,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if item.Origin == nil {
 		return false
 	}
-	expectedLast := left.ID.Clock + uint64(left.Content.Len()) - 1
+	expectedLast := left.ID.Clock + left.Content.Len() - 1
 	if item.Origin.Client != left.ID.Client || item.Origin.Clock != expectedLast {
 		return false
 	}

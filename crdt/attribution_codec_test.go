@@ -1,9 +1,15 @@
 package crdt
 
 import (
+	"bytes"
+	"encoding/hex"
+	"errors"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/reearth/ygo/encoding"
 )
 
 // A single range carrying more attributes than maxPreallocAttrs must still
@@ -133,6 +139,123 @@ func TestDecodeIDMap_Malformed(t *testing.T) {
 		if _, err := DecodeIDMap(data); err == nil {
 			t.Errorf("%s: expected error, got nil", name)
 		}
+	}
+}
+
+// attrWords is words as varuints, the raw form of an IdSet or IdMap.
+func attrWords(words ...uint64) []byte {
+	enc := encoding.NewEncoder()
+	for _, w := range words {
+		enc.WriteVarUint(w)
+	}
+	return enc.Bytes()
+}
+
+// rangeWords is one client's ranges, each given as its clock diff and length
+// minus one, with an IdMap range's attribute count of zero after each pair.
+func rangeWords(idMap bool, pairs ...uint64) []uint64 {
+	words := []uint64{1, 1, uint64(len(pairs) / 2)}
+	for i := 0; i < len(pairs); i += 2 {
+		words = append(words, pairs[i], pairs[i+1])
+		if idMap {
+			words = append(words, 0)
+		}
+	}
+	return words
+}
+
+// runningPairs is 2,048 one-clock ranges whose running clock ends at 2^64-1
+// or, with wrap, 2,049 whose clock would pass it and come back to clock 1.
+func runningPairs(wrap bool) []uint64 {
+	var pairs []uint64
+	for range 2047 {
+		pairs = append(pairs, maxSafeInteger, 0) // each moves the clock by 2^53
+	}
+	if wrap {
+		return append(pairs, maxSafeInteger, 0, 1, 0)
+	}
+	return append(pairs, maxSafeInteger-1, 0)
+}
+
+// The attribution decoders read a range's clock as a running sum and refuse
+// one that would pass 2^64-1, so it cannot wrap back onto a low clock, and
+// an IdMap's client sum past 2^55-1; clocks Yjs v14 holds past 2^53 decode.
+func TestUnit_DecodeAttribution_RefusesARunningClockPast2To64(t *testing.T) {
+	idSet := func(data []byte) error { _, err := DecodeIDSet(data); return err }
+	idMap := func(data []byte) error { _, err := DecodeIDMap(data); return err }
+	contentIDs := func(data []byte) error { _, err := DecodeContentIDs(data); return err }
+	contentMap := func(data []byte) error { _, err := DecodeContentMap(data); return err }
+	type decodeCase struct {
+		name   string
+		decode func([]byte) error
+		data   []byte
+		ok     bool
+	}
+	var cases []decodeCase
+	for _, kind := range []struct {
+		name   string
+		idMap  bool
+		decode func([]byte) error
+	}{{"IdSet", false, idSet}, {"IdMap", true, idMap}} {
+		ranges := func(pairs ...uint64) []byte { return attrWords(rangeWords(kind.idMap, pairs...)...) }
+		cases = append(cases,
+			decodeCase{kind.name + " range of 2 at 2^53", kind.decode, ranges(1<<53, 1), true},
+			decodeCase{kind.name + " range ending past 2^53", kind.decode, ranges(maxSafeInteger, 1), true},
+			decodeCase{kind.name + " running clock ending at 2^64-1", kind.decode, ranges(runningPairs(false)...), true},
+			decodeCase{kind.name + " running clock past 2^64-1", kind.decode, ranges(runningPairs(true)...), false},
+		)
+	}
+	wrapped := func(idMap bool) []byte {
+		return append([]byte{0}, attrWords(rangeWords(idMap, runningPairs(true)...)...)...)
+	}
+	cases = append(cases,
+		decodeCase{"IdMap client 2^55-1", idMap, attrWords(1, maxClient, 1, 0, 0, 0), true},
+		decodeCase{"IdMap client sum 2^55", idMap, attrWords(2, maxClient, 1, 0, 0, 0, 1, 1, 0, 0, 0), false},
+		decodeCase{"ContentIDs deletes past 2^64-1", contentIDs, wrapped(false), false},
+		decodeCase{"ContentMap deletes past 2^64-1", contentMap, wrapped(true), false},
+	)
+	for _, c := range cases {
+		err := c.decode(c.data)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err %v, want accepted %v", c.name, err, c.ok)
+		}
+		if err != nil && (!errors.Is(err, ErrAttributionDecode) || !strings.Contains(err.Error(), "past 2^")) {
+			t.Errorf("%s: err %v is not ErrAttributionDecode for a bound", c.name, err)
+		}
+	}
+}
+
+// Ranges at and past 2^53, which Yjs v14 writes and reads, round-trip through
+// the encoders and match Yjs v14's bytes.
+func TestUnit_AttributionCodecs_RoundTripClocksPast2To53(t *testing.T) {
+	set := NewIDSet()
+	set.Add(1, 1<<53, 2)
+	set.Add(2, maxSafeInteger, 3)
+	// Yjs 14.0.0-16 writeIdSet of the same set.
+	yjs, err := hex.DecodeString("020201ffffffffffffff0f020101808080808080801001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := EncodeIDSet(set); !bytes.Equal(got, yjs) {
+		t.Errorf("EncodeIDSet: %x, want Yjs v14's %x", got, yjs)
+	}
+	back, err := DecodeIDSet(yjs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []ClientID{1, 2} {
+		if !reflect.DeepEqual(back.Ranges(c), set.Ranges(c)) {
+			t.Errorf("IdSet client %d: %v, want %v", c, back.Ranges(c), set.Ranges(c))
+		}
+	}
+	m := NewIDMap()
+	m.Add(1, 1<<53, 2, attrs(t, "user", "alice"))
+	mb, err := DecodeIDMap(EncodeIDMap(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mb.Ranges(1); len(got) != 1 || got[0].Clock != 1<<53 || got[0].Len != 2 {
+		t.Errorf("IdMap client 1: %+v, want one range of 2 at 2^53", got)
 	}
 }
 
