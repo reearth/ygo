@@ -497,7 +497,7 @@ func encodeBroadcastWire(update []byte) []byte {
 // it; with RoomIdleTimeout > 0 the idle sweeper reclaims them once they
 // have been idle that long.
 func (s *Server) CloseRoom(name string, force bool) error {
-	return s.closeRoom(name, force, nil)
+	return s.closeRoom(context.Background(), name, force, nil)
 }
 
 // CloseRoomWithin is CloseRoom for a caller inside its own Apply on the room,
@@ -511,10 +511,20 @@ func (s *Server) CloseRoom(name string, force bool) error {
 // for each peer's read loop, which needs the document lock transact holds, and
 // later mutations go to a document the server no longer holds.
 func (s *Server) CloseRoomWithin(name string, doc *crdt.Doc, force bool) error {
+	return s.CloseRoomWithinContext(context.Background(), name, doc, force)
+}
+
+// CloseRoomWithinContext is CloseRoomWithin with a cancellable room-load wait.
+// Cancellation before close starts returns ctx.Err() without changing the room.
+// Once close starts, peer disconnection and persistence draining run to completion.
+func (s *Server) CloseRoomWithinContext(ctx context.Context, name string, doc *crdt.Doc, force bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if doc == nil {
 		return ErrNotInApply
 	}
-	return s.closeRoom(name, force, doc)
+	return s.closeRoom(ctx, name, force, doc)
 }
 
 // closeInUseErr returns the error a close gets from the room's in-flight count,
@@ -533,8 +543,8 @@ func (rm *room) closeInUseErr(within *crdt.Doc) error {
 	return nil
 }
 
-// closeRoom implements CloseRoom, and CloseRoomWithin when within is the calling Apply's doc.
-func (s *Server) closeRoom(name string, force bool, within *crdt.Doc) error {
+// closeRoom shares close admission and teardown between the public close methods.
+func (s *Server) closeRoom(ctx context.Context, name string, force bool, within *crdt.Doc) error {
 	select {
 	case <-s.shutdownCh:
 		return ErrServerShutdown
@@ -555,6 +565,10 @@ func (s *Server) closeRoom(name string, force bool, within *crdt.Doc) error {
 	s.rmu.Lock()
 	var rm *room
 	for {
+		if err := ctx.Err(); err != nil {
+			s.rmu.Unlock()
+			return err
+		}
 		r, ok := s.rooms[name]
 		if !ok {
 			s.rmu.Unlock()
@@ -565,7 +579,11 @@ func (s *Server) closeRoom(name string, force bool, within *crdt.Doc) error {
 			rm = r
 		default:
 			s.rmu.Unlock()
-			<-r.ready
+			select {
+			case <-r.ready:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 			s.rmu.Lock()
 			continue
 		}
@@ -573,6 +591,11 @@ func (s *Server) closeRoom(name string, force bool, within *crdt.Doc) error {
 	}
 
 	rm.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		rm.mu.Unlock()
+		s.rmu.Unlock()
+		return err
+	}
 	if within != nil && rm.doc != within {
 		// The name holds another room instance than the one the calling Apply writes.
 		rm.mu.Unlock()

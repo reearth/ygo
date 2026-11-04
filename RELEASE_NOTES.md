@@ -3,6 +3,10 @@
 **Who is affected: every `provider/websocket` server.** No wire format
 changes.
 
+- `CloseRoomWithinContext(ctx, name, doc, force)` can cancel a room-load wait
+  without closing the room. `CloseRoomWithin` retains its signature and uses
+  a background context. Once close starts, teardown runs to completion.
+
 - **`Server.PeerWriteQueueBytes` bounds the bytes waiting for a peer.** A
   peer's write queue is bounded in frames (`PeerWriteQueueSize`, 512 by
   default), not in bytes, and the server answers each SyncStep1 with the

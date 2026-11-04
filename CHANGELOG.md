@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `provider/websocket`: add `Server.CloseRoomWithinContext` to cancel a room-load
+  wait without closing the room. `CloseRoomWithin` retains its signature and
+  uses a background context. Once close starts, teardown runs to completion.
+
 - **`provider/websocket`: `Server.PeerWriteQueueBytes` bounds the bytes
   waiting in a peer's write queue.** `PeerWriteQueueSize` bounds that queue
   in frames only, and the server answers each SyncStep1 with the room's full
