@@ -67,6 +67,7 @@ fixtures:
 	node testutil/gen_fixtures_svfromupdate.js
 	node testutil/gen_fixtures_integrateorder.js
 	node testutil/gen_fixtures_structdecode.js
+	node testutil/gen_fixtures_deleted.js
 
 # mobile/ is its own module (see mobile/README.md); these need Go 1.26+.
 mobile-test:
