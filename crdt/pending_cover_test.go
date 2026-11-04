@@ -96,7 +96,7 @@ func TestUnit_PendingQueue_AResendLongerThanTheParkedTailParksItsNewClocks(t *te
 // A resent deleted struct whose first clocks the queue holds is sliced like any other struct.
 func TestUnit_PendingQueue_ASlicedDeletedStructContinuesTheParkedOne(t *testing.T) {
 	craft := func(n int) []byte {
-		it := &Item{ID: ID{Client: 2, Clock: 0}, Origin: &ID{Client: 9, Clock: 1}, Content: NewContentDeleted(n), Deleted: true}
+		it := &Item{ID: ID{Client: 2, Clock: 0}, Origin: &ID{Client: 9, Clock: 1}, Content: NewContentDeleted(uint64(n)), Deleted: true}
 		return encodeStructStoreV1(map[ClientID][]*Item{2: {it}}, newDeleteSet(), nil, newStructStore())
 	}
 	other := New(WithClientID(9))
@@ -139,11 +139,11 @@ func TestUnit_PendingQueue_AResendWhoseTailIsParkedParksItsHead(t *testing.T) {
 		room := New(WithClientID(1), WithMaxPendingItems(math.MaxInt))
 		require.NoError(t, applyVersioned(t, room, v2, end), "v2=%v", v2)
 		require.NoError(t, applyVersioned(t, room, v2, long), "v2=%v", v2)
-		held := 0
+		var held uint64
 		for _, it := range room.store.pending.heldItems() {
 			held += it.Content.Len()
 		}
-		require.Equal(t, 6, held, "v2=%v: each parked clock is held once", v2)
+		require.Equal(t, uint64(6), held, "v2=%v: each parked clock is held once", v2)
 		require.NoError(t, applyVersioned(t, room, v2, ab), "v2=%v", v2)
 		require.Equal(t, writer.GetText("t").ToString(), room.GetText("t").ToString(), "v2=%v", v2)
 		require.Zero(t, room.PendingStats().Items, "v2=%v", v2)
@@ -275,7 +275,7 @@ func structsV1(m map[ClientID][]*Item) []byte {
 }
 
 func gcStruct(client ClientID, clock uint64, n int) *Item {
-	return &Item{ID: ID{Client: client, Clock: clock}, Content: NewContentDeleted(n), Deleted: true}
+	return &Item{ID: ID{Client: client, Clock: clock}, Content: NewContentDeleted(uint64(n)), Deleted: true}
 }
 
 // waitingFor9 is a deleted item of client 2 at clock that waits for client 9.
@@ -387,7 +387,7 @@ func coverSpans(c *pendingCover) map[ClientID][]clockSpan {
 // scratch, and the batch joins the spans it touches.
 func TestUnit_PendingCover_ABatchParkJoinsTheSpanItTouches(t *testing.T) {
 	item := func(clock uint64, n int) *Item {
-		return &Item{ID: ID{Client: 2, Clock: clock}, Content: NewContentDeleted(n)}
+		return &Item{ID: ID{Client: 2, Clock: clock}, Content: NewContentDeleted(uint64(n))}
 	}
 	const spans = 10_000
 	for _, tc := range []struct {
@@ -425,7 +425,7 @@ func TestUnit_PendingCover_ABatchParkJoinsTheSpanItTouches(t *testing.T) {
 // short list or a long one.
 func TestUnit_PendingCover_ASingleSpanBatchJoinsTheLastSpan(t *testing.T) {
 	item := func(clock uint64, n int) *Item {
-		return &Item{ID: ID{Client: 2, Clock: clock}, Content: NewContentDeleted(n)}
+		return &Item{ID: ID{Client: 2, Clock: clock}, Content: NewContentDeleted(uint64(n))}
 	}
 	for _, spans := range []int{seqFlat / 2, 10_000} {
 		p := &pendingUpdate{missing: make(StateVector)}
@@ -471,7 +471,7 @@ func TestUnit_PendingCover_SortedSpansMatchesASortAndMerge(t *testing.T) {
 		n := rng.IntN(40)
 		items := make([]*Item, 0, n)
 		for range n {
-			it := &Item{ID: ID{Client: ClientID(rng.IntN(3)), Clock: uint64(rng.IntN(60))}, Content: NewContentDeleted(1 + rng.IntN(4))}
+			it := &Item{ID: ID{Client: ClientID(rng.IntN(3)), Clock: uint64(rng.IntN(60))}, Content: NewContentDeleted(uint64(1 + rng.IntN(4)))}
 			if rng.IntN(2) == 0 {
 				it.Deleted = true
 			} else {
@@ -484,7 +484,7 @@ func TestUnit_PendingCover_SortedSpansMatchesASortAndMerge(t *testing.T) {
 		}
 		want := make(map[ClientID][]clockSpan)
 		for _, it := range items {
-			want[it.ID.Client] = append(want[it.ID.Client], clockSpan{it.ID.Clock, it.ID.Clock + uint64(it.Content.Len())})
+			want[it.ID.Client] = append(want[it.ID.Client], clockSpan{it.ID.Clock, it.ID.Clock + it.Content.Len()})
 		}
 		for c, list := range want {
 			want[c] = coalesce(list)
@@ -495,7 +495,7 @@ func TestUnit_PendingCover_SortedSpansMatchesASortAndMerge(t *testing.T) {
 
 func TestUnit_PendingCover_Spans(t *testing.T) {
 	item := func(clock uint64, n int) *Item {
-		return &Item{ID: ID{Client: 1, Clock: clock}, Content: NewContentDeleted(n)}
+		return &Item{ID: ID{Client: 1, Clock: clock}, Content: NewContentDeleted(uint64(n))}
 	}
 	p := &pendingUpdate{missing: make(StateVector)}
 	add := func(it *Item) {

@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`crdt` (breaking): `Content.Len()` returns `uint64`, and
+  `Content.Splice(offset)` takes `uint64`.** Custom content implementations
+  must change both method signatures. Callers that use these lengths as
+  string or slice indices must check their bounds before conversion to `int`.
+  `NewContentDeleted`, `NewContentMove`, and `ContentMove.TargetLen` also use
+  `uint64` lengths. Rendered text and array positions remain `int`.
+
 - **`crdt` (breaking): a document whose own client's clock is advanced by a
   non-local transaction takes a new random client ID when that transaction
   commits.** Anyone who sets `WithClientID` and re-applies their own updates
@@ -26,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release's clock bound refuses that state.
 
 ### Fixed
+
+- **`crdt`: logical span lengths and offsets do not depend on the build's
+  integer width.** Coalesced GC and deleted spans retain their lengths on
+  32-bit builds. V1 and V2 accept the same wide spans, including offsets
+  inside them. String and list allocation limits remain in force.
 
 - **`crdt`: an update that would park past `WithMaxPendingItems` is refused
   before it changes anything.** The cap was checked while the apply

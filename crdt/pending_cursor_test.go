@@ -157,7 +157,7 @@ func pendingBombShape(version int, shape string, m int) []byte {
 	}
 	const x = ClientID(1 << 40)
 	gc := func(clock, length uint64) *Item {
-		return &Item{ID: ID{Client: x, Clock: clock}, Content: NewContentDeleted(int(length)), Deleted: true}
+		return &Item{ID: ID{Client: x, Clock: clock}, Content: NewContentDeleted(length), Deleted: true}
 	}
 	switch shape {
 	case "decoy":

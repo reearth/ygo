@@ -62,7 +62,7 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 						Deleted: true,
 					})
 				}
-				if clock, err = structEnd(clock, uint64(l)); err != nil {
+				if clock, err = structEnd(clock, l); err != nil {
 					return nil, DeleteSet{}, err
 				}
 			case 10: // skip struct: a clock-range placeholder, not content.
@@ -83,7 +83,7 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 				if contentLen > 0 { // dropped at length zero, as in decodeStructsV1
 					structs = append(structs, item)
 				}
-				if clock, err = structEnd(clock, uint64(contentLen)); err != nil {
+				if clock, err = structEnd(clock, contentLen); err != nil {
 					return nil, DeleteSet{}, err
 				}
 			}
@@ -113,7 +113,7 @@ func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 
 	type entry struct {
 		item   *Item // nil => skip struct
-		offset int
+		offset uint64
 		skip   uint64
 	}
 	type group struct {
@@ -128,14 +128,14 @@ func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 		var startClock, expected uint64
 		started := false
 		for _, it := range perClient[c] {
-			end := it.ID.Clock + uint64(it.Content.Len())
+			end := it.ID.Clock + it.Content.Len()
 			if end <= svClock {
 				continue
 			}
-			offset := 0
+			offset := uint64(0)
 			clk := it.ID.Clock
 			if clk < svClock {
-				offset = int(svClock - clk)
+				offset = svClock - clk
 				clk = svClock
 			}
 			if !started {

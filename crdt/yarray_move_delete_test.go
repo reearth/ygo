@@ -233,7 +233,7 @@ func TestUnit_YArray_DeleteMoved_MultiWidthTargetGuardClamps(t *testing.T) {
 		arr.Push(txn, []any{"x", "y"}) // single ContentAny item, width 2
 		item1 = t2.start
 	})
-	require.Equal(t, 2, item1.Content.Len(), "single Push of 2 values is one width-2 item")
+	require.Equal(t, uint64(2), item1.Content.Len(), "single Push of 2 values is one width-2 item")
 
 	doc.Transact(func(txn *Transaction) {
 		targetID := item1.ID

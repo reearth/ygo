@@ -9,7 +9,7 @@ import (
 // panicContent panics when the integration reads its length.
 type panicContent struct{ Content }
 
-func (panicContent) Len() int { panic("parked content panicked") }
+func (panicContent) Len() uint64 { panic("parked content panicked") }
 
 // drainPanicUpdates returns V1 updates "a", "b" and "c" typed by client 13 in
 // turn, and "x" typed by client 20 after "a".

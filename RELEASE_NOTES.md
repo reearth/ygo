@@ -6,6 +6,14 @@ with `WithClientID` and re-applies its own updates.** A refused, cut-off or
 reordered update now leaves the server and the peers it relays to holding
 the same document.
 
+- Breaking: `Content.Len()` returns `uint64`, and `Content.Splice` takes a
+  `uint64` offset. Custom implementations must change both signatures.
+  `NewContentDeleted`, `NewContentMove`, and `ContentMove.TargetLen` also use
+  `uint64` lengths. Check string and slice bounds before conversion to `int`.
+  Rendered text and array positions remain `int`.
+- Logical spans retain their lengths on 32-bit builds, including coalesced
+  deleted and GC spans. V1 and V2 support the same wide spans and offsets.
+  String, list, allocation, and struct-count limits remain in force.
 - Breaking: a document takes a new random client ID when a remote update
   changes its own client's clock, as in Yjs. A document built with
   `WithClientID` that re-applies its own updates gets a new ID too: read

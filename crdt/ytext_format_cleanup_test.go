@@ -277,7 +277,7 @@ func TestUnit_YText_FormatCleanup_PendingDeleteOrder(t *testing.T) {
 	x := rec(peer(1), func(t *YText, txn *Transaction) { t.Insert(txn, 1, "x", nil) })
 	ds := newDeleteSet()
 	ds.add(ID{1, 0}, 1)
-	ds.add(ID{3, 0}, int(c.StateVector()[3]))
+	ds.add(ID{3, 0}, c.StateVector()[3])
 	enc := encoding.NewEncoder()
 	enc.WriteVarUint(0)
 	encodeDeleteSet(enc, ds)

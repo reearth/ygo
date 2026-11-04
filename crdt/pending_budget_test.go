@@ -143,7 +143,7 @@ func TestUnit_PendingScanner_ContentCursor(t *testing.T) {
 	for i, content := range contents {
 		name := fmt.Sprint(i)
 		items = append(items, &Item{ID: ID{Client: 1, Clock: clock}, parentID: &parent, ParentSub: &name, Content: content})
-		clock += uint64(content.Len())
+		clock += content.Len()
 	}
 	// An internal gap exercises skip structs as well as every content tag.
 	items = append(items, &Item{ID: ID{Client: 1, Clock: clock + 4}, Content: NewContentDeleted(2), Deleted: true})
@@ -161,7 +161,7 @@ func TestUnit_PendingScanner_ContentCursor(t *testing.T) {
 		for _, content := range contents {
 			length, skip, deps, count := s.item()
 			require.NoError(t, s.err)
-			require.EqualValues(t, content.Len(), length)
+			require.Equal(t, content.Len(), length)
 			require.False(t, skip)
 			require.Equal(t, 1, count)
 			require.Equal(t, parent, deps[0])
@@ -292,7 +292,7 @@ func TestUnit_PendingBudget_GroupHeadsMatchFixedPoint(t *testing.T) {
 					item.OriginRight = &ID{Client: ClientID(1 + rng.Intn(10)), Clock: uint64(rng.Intn(12))}
 				}
 				groups[client] = append(groups[client], item)
-				clock += uint64(content.Len() + rng.Intn(3))
+				clock += content.Len() + uint64(rng.Intn(3))
 			}
 		}
 		for _, version := range []int{1, 2} {

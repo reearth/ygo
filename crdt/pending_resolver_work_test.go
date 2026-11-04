@@ -19,7 +19,7 @@ type resolverWork struct {
 	lengths int
 }
 
-func (c *resolverWorkContent) Len() int {
+func (c *resolverWorkContent) Len() uint64 {
 	c.work.lengths++
 	return c.Content.Len()
 }

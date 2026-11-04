@@ -663,7 +663,7 @@ func (s *pendingScanner) length() uint64 {
 	}
 	v, err := s.v2.readLen()
 	s.err = err
-	return uint64(v)
+	return v
 }
 func (s *pendingScanner) bytes() {
 	if s.err == nil {

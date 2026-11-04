@@ -52,7 +52,7 @@ func sortedSpans(items []*Item) map[ClientID][]clockSpan {
 	have := false
 	for _, it := range items {
 		start := it.ID.Clock
-		end := start + uint64(it.Content.Len())
+		end := start + it.Content.Len()
 		if end <= start {
 			continue
 		}
@@ -110,7 +110,7 @@ func (p *pendingUpdate) tailAppends(items []*Item) bool {
 		if isGCStruct(it) || it.ID.Client != p.tailClient || it.ID.Clock < tail {
 			return false
 		}
-		tail = it.ID.Clock + uint64(it.Content.Len())
+		tail = it.ID.Clock + it.Content.Len()
 	}
 	return true
 }
@@ -124,7 +124,7 @@ func (p *pendingUpdate) noteTail(item *Item) {
 		p.tailValid = false
 		return
 	}
-	p.tail = max(p.tail, item.ID.Clock+uint64(item.Content.Len()))
+	p.tail = max(p.tail, item.ID.Clock+item.Content.Len())
 }
 
 // addCover adds the clocks of items, just parked in p from slot from, to p's
@@ -290,7 +290,7 @@ func (c *pendingCover) holdsBetween(lo, hi ClientID) bool {
 // insertSpan adds its clocks to the cover.
 func (c *pendingCover) insertSpan(it *Item) {
 	start := it.ID.Clock
-	end := start + uint64(it.Content.Len())
+	end := start + it.Content.Len()
 	if end <= start {
 		return
 	}
@@ -338,7 +338,7 @@ func mergeSpans(a, b []clockSpan) []clockSpan {
 // mergesAny reports whether any of items merges with p's queue.
 func (p *pendingUpdate) mergesAny(items []*Item) bool {
 	for _, it := range items {
-		if p.merges(it.ID.Client, it.ID.Clock, it.ID.Clock+uint64(it.Content.Len()), isGCStruct(it)) {
+		if p.merges(it.ID.Client, it.ID.Clock, it.ID.Clock+it.Content.Len(), isGCStruct(it)) {
 			return true
 		}
 	}

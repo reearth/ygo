@@ -364,7 +364,7 @@ func walkCorpus(t testing.TB, rng *rand.Rand) (updates [][]byte, v2 []bool) {
 					key := fmt.Sprint("k", (i+j)%5)
 					content := contents[rng.IntN(len(contents))]
 					groups[i] = append(groups[i], &Item{ID: ID{Client: c, Clock: clock}, parentID: &parent, ParentSub: &key, Content: content})
-					clock += uint64(content.Len())
+					clock += content.Len()
 				}
 				if rng.IntN(4) == 0 {
 					skips[i] = 1 + uint64(rng.IntN(5))
@@ -372,7 +372,7 @@ func walkCorpus(t testing.TB, rng *rand.Rand) (updates [][]byte, v2 []bool) {
 			}
 			ds := newDeleteSet()
 			for range rng.IntN(6) {
-				ds.add(ID{Client: ClientID(1 + rng.IntN(6)), Clock: uint64(rng.IntN(40))}, 1+rng.IntN(5))
+				ds.add(ID{Client: ClientID(1 + rng.IntN(6)), Clock: uint64(rng.IntN(40))}, uint64(1+rng.IntN(5)))
 			}
 			for _, version := range []int{1, 2} {
 				add(groupsUpdate(source, groups, skips, ds, version), version == 2)

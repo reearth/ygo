@@ -19,7 +19,7 @@ func coldLeftNeighbour(t *abstractType, index int) (*Item, int) {
 		if item.Deleted || !item.Content.IsCountable() {
 			continue
 		}
-		n := item.Content.Len()
+		n := int(item.Content.Len())
 		if counted+n >= index {
 			return item, counted
 		}

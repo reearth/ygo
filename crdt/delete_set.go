@@ -78,7 +78,7 @@ func (t *rangeTally) deleteSet() DeleteSet {
 
 // add records that item (client, clock) with the given length has been deleted.
 // Adjacent ranges are merged eagerly to keep the set compact.
-func (ds *DeleteSet) add(id ID, length int) {
+func (ds *DeleteSet) add(id ID, length uint64) {
 	ranges, seen := ds.clients[id.Client]
 	if !seen && ds.order != nil {
 		ds.order = append(ds.order, id.Client)
@@ -86,14 +86,14 @@ func (ds *DeleteSet) add(id ID, length int) {
 	if len(ranges) > 0 {
 		last := &ranges[len(ranges)-1]
 		if last.Clock+last.Len == id.Clock {
-			last.Len += uint64(length)
+			last.Len += length
 			ds.clients[id.Client] = ranges
 			return
 		}
 	}
 	ds.clients[id.Client] = append(ranges, DeleteRange{
 		Clock: id.Clock,
-		Len:   uint64(length),
+		Len:   length,
 	})
 }
 
@@ -277,7 +277,7 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 
 			// Binary search: first item whose end > r.Clock.
 			lo := sort.Search(len(items), func(i int) bool {
-				return items[i].ID.Clock+uint64(items[i].Content.Len()) > r.Clock
+				return items[i].ID.Clock+items[i].Content.Len() > r.Clock
 			})
 			applied := uint64(0)
 			for i := lo; i < len(items); i++ {
@@ -287,7 +287,7 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 				}
 				// After our boundary splits, item is entirely inside the range.
 				end := r.Clock + r.Len
-				itemEnd := item.ID.Clock + uint64(item.Content.Len())
+				itemEnd := item.ID.Clock + item.Content.Len()
 				if itemEnd < end {
 					end = itemEnd
 				}

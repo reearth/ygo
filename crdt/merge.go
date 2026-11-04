@@ -56,7 +56,7 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 			if err != nil {
 				return nil, DeleteSet{}, wrapUpdateErr(err)
 			}
-			if clock, err = structEnd(clock, uint64(item.Content.Len())); err != nil {
+			if clock, err = structEnd(clock, item.Content.Len()); err != nil {
 				return nil, DeleteSet{}, err
 			}
 			// Skip structs are clock-range placeholders, not content. Drop them
@@ -80,11 +80,11 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 }
 
 // sliceItemFront drops item's first offset clocks, as Yjs sliceStruct does.
-func sliceItemFront(item *Item, offset int) {
+func sliceItemFront(item *Item, offset uint64) {
 	// A GC placeholder keeps no origin so it re-encodes as a GC struct.
 	hadAnchor := !item.isGCOrphan()
 	suffix := item.Content.Splice(offset)
-	item.ID.Clock += uint64(offset)
+	item.ID.Clock += offset
 	if hadAnchor {
 		item.Origin = &ID{Client: item.ID.Client, Clock: item.ID.Clock - 1}
 	}
@@ -108,12 +108,12 @@ func dedupClientStructs(items []*Item) []*Item {
 	var covEnd uint64
 	hasCov := false
 	for _, it := range items {
-		end := it.ID.Clock + uint64(it.Content.Len())
+		end := it.ID.Clock + it.Content.Len()
 		if hasCov && end <= covEnd {
 			continue // fully covered by an earlier struct
 		}
 		if hasCov && it.ID.Clock < covEnd {
-			sliceItemFront(it, int(covEnd-it.ID.Clock))
+			sliceItemFront(it, covEnd-it.ID.Clock)
 		}
 		out = append(out, it)
 		covEnd = end
@@ -141,7 +141,7 @@ func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 		// items above sv) so we can write the exact struct count up front.
 		type entry struct {
 			item   *Item // nil => skip struct
-			offset int
+			offset uint64
 			skip   uint64
 		}
 		type group struct {
@@ -158,14 +158,14 @@ func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 			started := false
 			expected := uint64(0)
 			for _, it := range items {
-				end := it.ID.Clock + uint64(it.Content.Len())
+				end := it.ID.Clock + it.Content.Len()
 				if end <= svClock {
 					continue // already known to the receiver
 				}
-				offset := 0
+				offset := uint64(0)
 				clk := it.ID.Clock
 				if clk < svClock {
-					offset = int(svClock - clk)
+					offset = svClock - clk
 					clk = svClock
 				}
 				if !started {

@@ -163,9 +163,9 @@ func (txt *YText) computeDelta(txn *Transaction) []Delta {
 				// new + immediately deleted → net no-op; skip
 			} else if txn.deleteSet.IsDeleted(item.ID) {
 				flushRetain()
-				ops = append(ops, Delta{Op: DeltaOpDelete, Delete: c.Len()})
+				ops = append(ops, Delta{Op: DeltaOpDelete, Delete: c.utf16Len})
 			} else if !item.Deleted {
-				retain += c.Len()
+				retain += c.utf16Len
 			}
 
 		case *ContentEmbed:
@@ -332,7 +332,7 @@ func (txt *YText) Insert(txn *Transaction, index int, text string, attrs Attribu
 	// needed — skipping that O(n) walk keeps typing in a long doc near O(1).
 	left, offset := t.leftNeighbourAt(index)
 	if offset > 0 {
-		splitItem(txn, left, offset)
+		splitItem(txn, left, uint64(offset))
 		// left is now the left half; left.Right is the right half.
 	}
 	// Anchor after any adjacent tombstones (Yjs text-insert parity, #160).
@@ -609,10 +609,10 @@ func (t *abstractType) applyFormatAtPos(txn *Transaction, pos *itemTextPos, leng
 				}
 			} else {
 				// Countable text/embed item.
-				n := pos.right.Content.Len()
+				n := nativeContentLen(pos.right.Content)
 				if remaining < n {
-					splitItem(txn, pos.right, remaining) // clean boundary at index+length
-					n = pos.right.Content.Len()          // now == remaining
+					splitItem(txn, pos.right, uint64(remaining)) // clean boundary at index+length
+					n = nativeContentLen(pos.right.Content)      // now == remaining
 				}
 				remaining -= n
 			}
@@ -716,7 +716,7 @@ func (p *itemTextPos) forward() {
 			p.cur.apply(cf)
 		}
 	} else if !p.right.Deleted {
-		p.index += p.right.Content.Len()
+		p.index += nativeContentLen(p.right.Content)
 	}
 	p.left = p.right
 	p.right = p.right.Right
@@ -738,10 +738,10 @@ func (p *itemTextPos) advance(txn *Transaction, n int) {
 				p.cur.apply(cf)
 			}
 		} else if !p.right.Deleted {
-			itemLen := p.right.Content.Len()
+			itemLen := nativeContentLen(p.right.Content)
 			if count < itemLen {
-				splitItem(txn, p.right, count) // clean boundary mid-item
-				itemLen = p.right.Content.Len()
+				splitItem(txn, p.right, uint64(count)) // clean boundary mid-item
+				itemLen = nativeContentLen(p.right.Content)
 			}
 			p.index += itemLen
 			count -= itemLen
@@ -821,7 +821,7 @@ type attrsAfterCache struct {
 func (t *abstractType) cachedAttrsAfter(item *Item) (attrState, bool) {
 	c := &t.attrCache
 	if item == nil || !c.ok || c.gen != t.fmtGen || c.id.Client != item.ID.Client ||
-		c.id.Clock < item.ID.Clock || c.id.Clock >= item.ID.Clock+uint64(item.Content.Len()) {
+		c.id.Clock < item.ID.Clock || c.id.Clock >= item.ID.Clock+item.Content.Len() {
 		return attrState{}, false
 	}
 	return c.attrs.clone(), true
@@ -877,7 +877,7 @@ func (t *abstractType) findTextPos(txn *Transaction, index int) *itemTextPos {
 		}
 		left, offset := t.leftNeighbourAt(index)
 		if offset > 0 {
-			splitItem(txn, left, offset)
+			splitItem(txn, left, uint64(offset))
 		}
 		pidx := index
 		if pidx > t.length {
@@ -896,7 +896,7 @@ func (t *abstractType) findTextPos(txn *Transaction, index int) *itemTextPos {
 		left, offset := t.leftNeighbourAt(index)
 		if cur, ok := t.cachedAttrsAfter(left); ok {
 			if offset > 0 {
-				splitItem(txn, left, offset)
+				splitItem(txn, left, uint64(offset))
 			}
 			return &itemTextPos{left: left, right: left.Right, index: index, cur: cur}
 		}
@@ -1044,7 +1044,7 @@ func itemOrigins(left *Item, t *abstractType) (origin, originRight *ID) {
 		n := left.Content.Len()
 		var clock uint64
 		if n > 0 {
-			clock = left.ID.Clock + uint64(n) - 1
+			clock = left.ID.Clock + n - 1
 		} else {
 			clock = left.ID.Clock
 		}
@@ -1309,12 +1309,12 @@ func (t *abstractType) applyDeltaDelete(txn *Transaction, pos *itemTextPos, leng
 			if cf, ok := item.Content.(*ContentFormat); ok {
 				pos.cur.apply(cf)
 			} else if item.Content.IsCountable() {
-				n := item.Content.Len()
+				n := nativeContentLen(item.Content)
 				if n <= length {
 					item.delete(txn)
 					length -= n
 				} else {
-					splitItem(txn, item, length)
+					splitItem(txn, item, uint64(length))
 					item.delete(txn)
 					length = 0
 				}

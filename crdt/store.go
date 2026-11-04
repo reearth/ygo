@@ -82,7 +82,7 @@ func (s *StructStore) Append(item *Item) {
 // noteAppend keeps parked-clock bookkeeping out of Append's inlined fast path.
 func (s *StructStore) noteAppend(item *Item) {
 	if p := s.pending; p != nil && !p.ready {
-		if parkedAt, waits := p.missing[item.ID.Client]; waits && item.ID.Clock+uint64(item.Content.Len()) > parkedAt {
+		if parkedAt, waits := p.missing[item.ID.Client]; waits && item.ID.Clock+item.Content.Len() > parkedAt {
 			p.ready = true
 		}
 	}
@@ -149,7 +149,7 @@ func (s *StructStore) Find(id ID) *Item {
 		return nil
 	}
 	item := items[idx]
-	if item.ID.Clock+uint64(item.Content.Len()) > id.Clock {
+	if item.ID.Clock+item.Content.Len() > id.Clock {
 		return item
 	}
 	return nil
@@ -164,7 +164,7 @@ func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock u
 	if item == nil {
 		return nil
 	}
-	end := item.ID.Clock + uint64(item.Content.Len()) - 1
+	end := item.ID.Clock + item.Content.Len() - 1
 	if end == clock {
 		return item
 	}
@@ -175,7 +175,7 @@ func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock u
 		return item
 	}
 	// Split so the left half ends exactly at clock.
-	splitAt := int(clock - item.ID.Clock + 1)
+	splitAt := clock - item.ID.Clock + 1
 	splitItem(txn, item, splitAt)
 	return item // item is now the left half, ending at clock
 }
@@ -206,7 +206,7 @@ func (s *StructStore) getItemCleanStart(txn *Transaction, id ID) *Item {
 		return item
 	}
 	// Split so the right half starts exactly at id.Clock.
-	splitAt := int(id.Clock - item.ID.Clock)
+	splitAt := id.Clock - item.ID.Clock
 	return splitItem(txn, item, splitAt)
 }
 
@@ -267,7 +267,7 @@ func (s *StructStore) StateVector() StateVector {
 	for client, items := range s.clients {
 		if len(items) > 0 {
 			last := items[len(items)-1]
-			sv[client] = last.ID.Clock + uint64(last.Content.Len())
+			sv[client] = last.ID.Clock + last.Content.Len()
 		}
 	}
 	return sv
@@ -280,7 +280,7 @@ func (s *StructStore) NextClock(client ClientID) uint64 {
 		return 0
 	}
 	last := items[len(items)-1]
-	return last.ID.Clock + uint64(last.Content.Len())
+	return last.ID.Clock + last.Content.Len()
 }
 
 // insertItem inserts item into the per-client slice at the correct clock position.

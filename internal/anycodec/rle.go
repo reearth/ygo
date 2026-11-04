@@ -210,7 +210,7 @@ func (d *StringDecoder) ReadUnits() (uint64, error) {
 		return 0, err
 	}
 	// The same walk as AdvanceUTF16, with ASCII taken a byte at a time.
-	units, pos, counted := int(l), d.bytePos, 0
+	units, pos, counted := int(min(l, uint64(len(d.str)-d.bytePos))), d.bytePos, 0
 	for counted < units && pos < len(d.str) {
 		if d.str[pos] < utf8.RuneSelf {
 			pos++
@@ -232,7 +232,7 @@ func (d *StringDecoder) ReadUnits() (uint64, error) {
 // ReadStringChunk advances a pool cursor by UTF-16 units without copying data.
 func ReadStringChunk(str string, bytePos *int, units uint64) string {
 	start := *bytePos
-	end := AdvanceUTF16(str, start, int(units))
+	end := AdvanceUTF16(str, start, int(min(units, uint64(len(str)-start))))
 	*bytePos = end
 	return str[start:end]
 }

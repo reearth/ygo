@@ -18,7 +18,7 @@ type mergeRef struct {
 }
 
 func refOf(it *Item) mergeRef {
-	return mergeRef{client: it.ID.Client, clock: it.ID.Clock, end: it.ID.Clock + uint64(it.Content.Len()), gc: isGCStruct(it)}
+	return mergeRef{client: it.ID.Client, clock: it.ID.Clock, end: it.ID.Clock + it.Content.Len(), gc: isGCStruct(it)}
 }
 
 // mergeKeep is the clocks [start, end) the merge keeps of a struct, or none.
@@ -224,7 +224,7 @@ func gcChain(list seq[queued], to int) bool {
 	}
 	if q := list.at(to); isGCStruct(q.Item) {
 		prev := list.at(to - 1)
-		return q.ID.Clock <= prev.ID.Clock+uint64(prev.Content.Len())
+		return q.ID.Clock <= prev.ID.Clock+prev.Content.Len()
 	}
 	return false
 }
@@ -244,7 +244,7 @@ func (c *pendingCover) planChains(in []mergeRef, ao []int, whole map[*Item]bool)
 		list := c.structs[client]
 		for k := i; k < j; {
 			lo, hi := in[k].clock, in[k].end
-			from := list.search(func(q queued) bool { return q.ID.Clock+uint64(q.Content.Len()) >= lo })
+			from := list.search(func(q queued) bool { return q.ID.Clock+q.Content.Len() >= lo })
 			to, chain := -1, 0
 			var start *Item
 			// Arrivals whose structs a window shares join it; a window only
@@ -264,7 +264,7 @@ func (c *pendingCover) planChains(in []mergeRef, ao []int, whole map[*Item]bool)
 					break
 				}
 				at := in[m].clock
-				next := list.search(func(q queued) bool { return q.ID.Clock+uint64(q.Content.Len()) >= at })
+				next := list.search(func(q queued) bool { return q.ID.Clock+q.Content.Len() >= at })
 				if max(next, 1)-1 >= to {
 					k = m
 					break
@@ -370,13 +370,13 @@ func keep(item *Item, k mergeKeep) bool {
 		return false
 	}
 	if k.start > item.ID.Clock {
-		sliceItemFront(item, int(k.start-item.ID.Clock))
+		sliceItemFront(item, k.start-item.ID.Clock)
 		if !isGCStruct(item) {
 			// Yjs writes no parent for a cut struct, which then takes its origin's.
 			item.Parent, item.ParentSub, item.parentID = nil, nil, nil
 		}
 	}
-	if n := int(k.end - k.start); n > item.Content.Len() {
+	if n := k.end - k.start; n > item.Content.Len() {
 		// GC structs after it merged into this GC struct.
 		item.Content = NewContentDeleted(n)
 	}
@@ -404,7 +404,7 @@ func (p *pendingUpdate) apply(pl mergePlan, arrived []*Item, viewed bool) []*Ite
 		held, pl.keepHeld = held[n:], pl.keepHeld[n:]
 		kept, changed := make([]queued, 0, n), false
 		for i, q := range win {
-			k, end := keeps[i], q.ID.Clock+uint64(q.Content.Len())
+			k, end := keeps[i], q.ID.Clock+q.Content.Len()
 			switch {
 			case k == mergeKeep{start: q.ID.Clock, end: end}:
 				kept = append(kept, q)

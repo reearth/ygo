@@ -562,7 +562,7 @@ func makeRange(n int) []int {
 
 func TestUnit_ContentString_Len_Unicode(t *testing.T) {
 	c := NewContentString("héllo") // é is 2 bytes in UTF-8 but 1 rune
-	assert.Equal(t, 5, c.Len())
+	assert.Equal(t, uint64(5), c.Len())
 }
 
 func TestUnit_ContentString_Splice(t *testing.T) {
@@ -581,13 +581,13 @@ func TestUnit_ContentAny_Splice(t *testing.T) {
 
 func TestUnit_ContentDeleted_IsNotCountable(t *testing.T) {
 	c := NewContentDeleted(5)
-	assert.Equal(t, 5, c.Len())
+	assert.Equal(t, uint64(5), c.Len())
 	assert.False(t, c.IsCountable())
 }
 
 func TestUnit_ContentFormat_IsNotCountable(t *testing.T) {
 	c := NewContentFormat("bold", true)
-	assert.Equal(t, 1, c.Len())
+	assert.Equal(t, uint64(1), c.Len())
 	assert.False(t, c.IsCountable())
 }
 

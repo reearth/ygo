@@ -14,7 +14,7 @@ func v1DeleteSetUpdate(clock uint64, length int) []byte {
 	enc := encoding.NewEncoder()
 	enc.WriteVarUint(0)
 	ds := newDeleteSet()
-	ds.add(ID{Client: 3, Clock: clock}, length)
+	ds.add(ID{Client: 3, Clock: clock}, uint64(length))
 	encodeDeleteSet(enc, ds)
 	return enc.Bytes()
 }
@@ -24,7 +24,7 @@ func v2DeleteSetUpdate(clock uint64, length int) []byte {
 	enc := newV2Encoder()
 	enc.restEnc.WriteVarUint(0)
 	ds := newDeleteSet()
-	ds.add(ID{Client: 3, Clock: clock}, length)
+	ds.add(ID{Client: 3, Clock: clock}, uint64(length))
 	encodeDeleteSetV2(enc, ds)
 	return enc.toBytes()
 }
@@ -116,7 +116,7 @@ func v1Move(clock uint64) []byte {
 
 // v2GC is a V2 update of a GC struct of client 30 at clock, length long.
 func v2GC(clock uint64, length int) []byte {
-	gc := &Item{ID: ID{Client: 30, Clock: clock}, Content: NewContentDeleted(length), Deleted: true}
+	gc := &Item{ID: ID{Client: 30, Clock: clock}, Content: NewContentDeleted(uint64(length)), Deleted: true}
 	return encodeStructStoreV2(map[ClientID][]*Item{30: {gc}}, newDeleteSet(), nil, New().store)
 }
 

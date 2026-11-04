@@ -118,7 +118,7 @@ func TestTryIntegrate_GCPlaceholderPartialOverlapIsTrimmed(t *testing.T) {
 			t.Fatalf("struct %d starts at clock %d, overlapping the previous struct which ends at %d",
 				i, it.ID.Clock, prevEnd)
 		}
-		prevEnd = it.ID.Clock + uint64(it.Content.Len())
+		prevEnd = it.ID.Clock + it.Content.Len()
 	}
 	if got := d.store.NextClock(client); got != end+4 {
 		t.Errorf("NextClock = %d, want %d (the placeholder's 4 un-integrated clocks appended)", got, end+4)

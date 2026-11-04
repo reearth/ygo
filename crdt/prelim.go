@@ -101,7 +101,7 @@ func (a *YArray) PushType(txn *Transaction, st sharedType) {
 	// empty.
 	var origin *ID
 	if last != nil {
-		end := last.ID.Clock + uint64(last.Content.Len()) - 1
+		end := last.ID.Clock + last.Content.Len() - 1
 		origin = &ID{Client: last.ID.Client, Clock: end}
 	}
 
@@ -214,7 +214,7 @@ func (a *YArray) InsertType(txn *Transaction, index int, st sharedType) {
 	claimForAttach(t, bt, "InsertType")
 	left, offset := t.leftNeighbourAt(index)
 	if offset > 0 {
-		splitItem(txn, left, offset)
+		splitItem(txn, left, uint64(offset))
 		// left now holds the [0,offset) part; its Right is the new right half.
 	}
 	// Same anchor as Insert, differing only in the Content carried. integrate

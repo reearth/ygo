@@ -199,8 +199,8 @@ func TestUnit_ApplyUpdateLanded_RelaysAParkedStructWhole(t *testing.T) {
 // fails the apply after the drain has integrated other structs.
 type panicSplice struct{ Content }
 
-func (p panicSplice) Splice(int) Content { panic("panicSplice") }
-func (p panicSplice) Copy() Content      { return p }
+func (p panicSplice) Splice(uint64) Content { panic("panicSplice") }
+func (p panicSplice) Copy() Content         { return p }
 
 // A struct the failed apply parked and its drain then integrated, before a
 // later struct of the drain failed, is relayed once, as an added struct.

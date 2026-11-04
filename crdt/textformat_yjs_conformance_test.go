@@ -208,9 +208,9 @@ func textFormatUnits(t *testing.T, u []byte) []string {
 				for k := range cd.Len() {
 					origin := it.Origin
 					if k > 0 {
-						origin = &ID{Client: c, Clock: it.ID.Clock + uint64(k) - 1}
+						origin = &ID{Client: c, Clock: it.ID.Clock + k - 1}
 					}
-					out = append(out, fmt.Sprintf("%d:%d o=%s r=%s deleted", c, it.ID.Clock+uint64(k), id(origin), id(it.OriginRight)))
+					out = append(out, fmt.Sprintf("%d:%d o=%s r=%s deleted", c, it.ID.Clock+k, id(origin), id(it.OriginRight)))
 				}
 				continue
 			}

@@ -322,7 +322,7 @@ func TestUnit_PendingResolver_ContiguousTailsMatchReference(t *testing.T) {
 					text.Observe(func(event YTextEvent) { events[which] = append(events[which], fmt.Sprintf("%#v", event.Delta)) })
 					pending := resolverTestItems(doc, n, shape)
 					for _, head := range append([]*Item(nil), pending...) {
-						length := uint64(head.Content.Len())
+						length := head.Content.Len()
 						pending = append(pending, &Item{ID: ID{Client: head.ID.Client, Clock: length}, Origin: &ID{Client: head.ID.Client, Clock: length - 1}, Content: NewContentEmbed(int(head.ID.Client))})
 					}
 					rand.New(rand.NewSource(seed)).Shuffle(len(pending), func(i, j int) { pending[i], pending[j] = pending[j], pending[i] })
@@ -390,7 +390,7 @@ func TestUnit_PendingResolver_PartialOverlapRetry(t *testing.T) {
 				var end uint64
 				for _, item := range doc.store.clients[1] {
 					require.Equal(t, end, item.ID.Clock, "stored ranges must stay contiguous without overlaps")
-					end += uint64(item.Content.Len())
+					end += item.Content.Len()
 				}
 				require.Equal(t, uint64(6), end)
 			}
@@ -437,7 +437,7 @@ func TestUnit_PendingResolver_OrphanPartialOverlapSurvivesRestore(t *testing.T) 
 			var end uint64
 			for _, item := range doc.store.clients[1] {
 				require.Equal(t, end, item.ID.Clock, "orphan ranges must stay contiguous without overlaps")
-				end += uint64(item.Content.Len())
+				end += item.Content.Len()
 			}
 			require.Equal(t, uint64(7), end)
 			for _, version := range []int{1, 2} {

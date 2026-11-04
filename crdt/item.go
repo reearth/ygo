@@ -78,12 +78,16 @@ func strPtr(s string) *string { return &s }
 //
 // offset skips an already integrated prefix when the item's range partially
 // overlaps the store, either during decoding or when retrying a parked item.
-func (item *Item) integrate(txn *Transaction, offset int) {
+func (item *Item) integrate(txn *Transaction, offset uint64) {
+	if item.Parent != nil && !item.Deleted && item.Content.IsCountable() &&
+		item.Content.Len()-offset > uint64(int(^uint(0)>>1)-item.Parent.length) {
+		panic("crdt: content length exceeds native positions")
+	}
 	if offset > 0 {
-		item.ID.Clock += uint64(offset)
+		item.ID.Clock += offset
 		item.Left = txn.doc.store.getItemCleanEnd(txn, item.ID.Client, item.ID.Clock-1)
 		if item.Left != nil {
-			last := item.Left.ID.Clock + uint64(item.Left.Content.Len()) - 1
+			last := item.Left.ID.Clock + item.Left.Content.Len() - 1
 			item.Origin = &ID{Client: item.Left.ID.Client, Clock: last}
 		}
 		item.Content = item.Content.Splice(offset)
@@ -220,13 +224,14 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	hint := item.Parent.insertHint
 	item.Parent.insertHint = 0
 	if !item.Deleted && item.Content.IsCountable() {
-		item.Parent.length += item.Content.Len()
+		length := nativeContentLen(item.Content)
+		item.Parent.length += length
 		if item.Right != nil {
 			if hint > 0 {
 				if l := item.Left; l != nil && (l.Deleted || !l.Content.IsCountable()) {
 					item.Parent.dropUncountedMarkersAt(hint)
 				}
-				item.Parent.updateMarkerChanges(hint, item.Content.Len())
+				item.Parent.updateMarkerChanges(hint, length)
 			} else {
 				item.Parent.clearMarkers()
 			}
@@ -240,7 +245,7 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// content is deleted here, so a move that splits it below keeps every part
 	// deleted, and its range joins the delete set after the map block, where Yjs
 	// has already deleted a key's previous winner.
-	arrivedDeleted := 0
+	var arrivedDeleted uint64
 	if _, ok := item.Content.(*ContentDeleted); ok && !item.Deleted {
 		item.Deleted = true
 		arrivedDeleted = item.Content.Len()
@@ -409,7 +414,7 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 func (item *Item) lastID() ID {
 	id := item.ID
 	if n := item.Content.Len(); n > 0 {
-		id.Clock += uint64(n) - 1
+		id.Clock += n - 1
 	}
 	return id
 }
@@ -447,7 +452,7 @@ func (item *Item) delete(txn *Transaction) {
 			current.Parent.fmtGen++
 		}
 		if current.Parent != nil && current.Content.IsCountable() {
-			current.Parent.length -= current.Content.Len()
+			current.Parent.length -= nativeContentLen(current.Content)
 			if !txn.Local {
 				current.Parent.clearMarkers()
 			}
@@ -519,11 +524,11 @@ func nextDeleteItem(current, root *Item) *Item {
 // splitItem splits item at offset, returning the new right half.
 // item.Content is mutated to hold [0, offset); the returned item holds [offset, end).
 // Both halves are registered in the store. The linked-list pointers are updated.
-func splitItem(txn *Transaction, item *Item, offset int) *Item {
+func splitItem(txn *Transaction, item *Item, offset uint64) *Item {
 	rightContent := item.Content.Splice(offset) // mutates item.Content → [0, offset)
 	right := &Item{
-		ID:          ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset)},
-		Origin:      &ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset) - 1},
+		ID:          ID{Client: item.ID.Client, Clock: item.ID.Clock + offset},
+		Origin:      &ID{Client: item.ID.Client, Clock: item.ID.Clock + offset - 1},
 		OriginRight: item.OriginRight,
 		Left:        item,
 		Right:       item.Right,
@@ -533,7 +538,7 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 		Deleted:     item.Deleted,
 	}
 	if item.redone != nil {
-		right.redone = &ID{Client: item.redone.Client, Clock: item.redone.Clock + uint64(offset)}
+		right.redone = &ID{Client: item.redone.Client, Clock: item.redone.Clock + offset}
 	}
 	if right.Right != nil {
 		right.Right.Left = right
@@ -656,14 +661,14 @@ func rearbitrateMoves(txn *Transaction) {
 // a larger multi-value ContentAny (common when a delta update arrives without
 // the local splits a sender performed during Move()), splitItem is called to
 // carve out the exact boundary. Returns nil when no item contains targetID.
-func resolveMovedItem(txn *Transaction, targetID *ID, targetLen int) *Item {
+func resolveMovedItem(txn *Transaction, targetID *ID, targetLen uint64) *Item {
 	si := txn.doc.store.Find(*targetID)
 	if si == nil {
 		return nil
 	}
 	// Trim leading prefix: ensure si starts exactly at targetID.Clock.
 	if si.ID.Clock < targetID.Clock {
-		prefix := int(targetID.Clock - si.ID.Clock)
+		prefix := targetID.Clock - si.ID.Clock
 		si = splitItem(txn, si, prefix) // si is now the right half
 	}
 	// Trim trailing suffix: ensure si covers no more than targetLen units.

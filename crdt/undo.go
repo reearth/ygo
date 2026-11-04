@@ -564,10 +564,10 @@ func (u *UndoManager) redoItem(txn *Transaction, item *Item, rest []*Item, p *re
 	}
 	nid := ni.ID
 	item.redone = &nid
-	off := uint64(item.Content.Len())
+	off := item.Content.Len()
 	for _, r := range rest {
 		r.redone = &ID{Client: nid.Client, Clock: nid.Clock + off}
-		off += uint64(r.Content.Len())
+		off += r.Content.Len()
 	}
 	ni.integrate(txn, 0)
 	if item.MovedBy != nil && item.Parent == parent {
@@ -638,10 +638,10 @@ func (u *UndoManager) redoMove(txn *Transaction, mv, target *Item) {
 func yjsMergeable(left, right *Item) bool {
 	n := left.Content.Len()
 	if left.Right != right || left.ID.Client != right.ID.Client || n == 0 ||
-		left.ID.Clock+uint64(n) != right.ID.Clock || left.Deleted != right.Deleted ||
+		left.ID.Clock+n != right.ID.Clock || left.Deleted != right.Deleted ||
 		left.redone != nil || right.redone != nil || left.MovedBy != nil || right.MovedBy != nil ||
 		left.ParentSub != nil || right.ParentSub != nil ||
-		!originIDEquals(right.Origin, &ID{Client: left.ID.Client, Clock: left.ID.Clock + uint64(n) - 1}) ||
+		!originIDEquals(right.Origin, &ID{Client: left.ID.Client, Clock: left.ID.Clock + n - 1}) ||
 		!originIDEquals(left.OriginRight, right.OriginRight) {
 		return false
 	}
@@ -774,7 +774,7 @@ func insertedRanges(before, after StateVector) DeleteSet {
 	ds := newDeleteSet()
 	for client, end := range after {
 		if start := before.Clock(client); end > start {
-			ds.add(ID{Client: client, Clock: start}, int(end-start))
+			ds.add(ID{Client: client, Clock: start}, end-start)
 		}
 	}
 	return ds

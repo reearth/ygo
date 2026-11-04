@@ -59,3 +59,24 @@ func TestUnit_StringDecoder_ReadUnitsCountsWhatReadDecodes(t *testing.T) {
 		})
 	}
 }
+
+func TestUnit_StringDecoder_WideLengthConsumesOnlyThePool(t *testing.T) {
+	for _, length := range []uint64{1 << 31, 1<<32 + 1, 1 << 53} {
+		enc := encoding.NewEncoder()
+		enc.WriteVarString("ab😀")
+		var lens encoding.UintOptRleEncoder
+		lens.Write(length)
+		data := append(enc.Bytes(), lens.Bytes()...)
+		read, err := anycodec.NewStringDecoder(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		units := read
+		if got, err := read.Read(); err != nil || got != "ab😀" {
+			t.Fatalf("length %d: Read = %q, %v", length, got, err)
+		}
+		if got, err := units.ReadUnits(); err != nil || got != 4 {
+			t.Fatalf("length %d: ReadUnits = %d, %v", length, got, err)
+		}
+	}
+}

@@ -249,7 +249,7 @@ func squashRuns(txn *Transaction) {
 			// current merged item, updated with each absorbed right item's
 			// original Len() — avoiding a call to left.Content.Len() (which is
 			// O(string length) and would make the loop O(n²)).
-			expectedClock := left.ID.Clock + uint64(left.Content.Len())
+			expectedClock := left.ID.Clock + left.Content.Len()
 			var sb strings.Builder
 			sb.WriteString(left.Content.(*ContentString).Str)
 
@@ -274,7 +274,7 @@ func squashRuns(txn *Transaction) {
 					break
 				}
 				// right is directly adjacent and clock-contiguous: absorb it.
-				rightLen := uint64(right.Content.Len()) // O(1) for single-char items
+				rightLen := right.Content.Len() // O(1) for single-char items
 				expectedClock = right.ID.Clock + rightLen
 
 				// Rewire linked list: splice right out.
@@ -420,7 +420,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if left.Right != item {
 		return false
 	}
-	if left.ID.Clock+uint64(left.Content.Len()) != item.ID.Clock {
+	if left.ID.Clock+left.Content.Len() != item.ID.Clock {
 		return false
 	}
 	if left.Deleted != item.Deleted {
@@ -445,7 +445,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if item.Origin == nil {
 		return false
 	}
-	expectedLast := left.ID.Clock + uint64(left.Content.Len()) - 1
+	expectedLast := left.ID.Clock + left.Content.Len() - 1
 	if item.Origin.Client != left.ID.Client || item.Origin.Clock != expectedLast {
 		return false
 	}

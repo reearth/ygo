@@ -30,7 +30,7 @@ func pendingDiverseUpdate(version, n int, shape string) []byte {
 			parent.Client = 2
 		}
 		children[i] = &Item{ID: ID{Client: 1, Clock: clock}, parentID: &parent, ParentSub: &key, Content: content}
-		clock += uint64(content.Len())
+		clock += content.Len()
 		if shape == "cycle" {
 			child := children[i].ID
 			parents = append(parents, &Item{ID: ID{Client: 2, Clock: uint64(i)}, parentID: &child, ParentSub: &key, Content: NewContentAny(i)})

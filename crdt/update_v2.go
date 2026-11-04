@@ -2,7 +2,6 @@ package crdt
 
 import (
 	"fmt"
-	"math"
 	"slices"
 	"sort"
 
@@ -90,8 +89,8 @@ func (e *v2Encoder) writeTypeRef(ref byte) {
 	e.typeRefEnc.Write(uint64(ref))
 }
 
-func (e *v2Encoder) writeLen(l int) {
-	e.lenEnc.Write(uint64(l))
+func (e *v2Encoder) writeLen(l uint64) {
+	e.lenEnc.Write(l)
 }
 
 // writeKey mirrors Yjs UpdateEncoderV2.writeKey EXACTLY — including its
@@ -281,18 +280,8 @@ func (d *v2Decoder) readTypeRef() (byte, error) {
 	return byte(v), err
 }
 
-func (d *v2Decoder) readLen() (int, error) {
-	v, err := d.lenDec.Read()
-	if err != nil {
-		return 0, err
-	}
-	// Guard against silent wrap: uint64 values larger than MaxInt32 would
-	// produce a negative int on 32-bit platforms and a misleading huge value
-	// on 64-bit platforms that bypasses downstream bounds checks.
-	if v > math.MaxInt32 {
-		return 0, ErrInvalidUpdate
-	}
-	return int(v), nil
+func (d *v2Decoder) readLen() (uint64, error) {
+	return d.lenDec.Read()
 }
 
 func (d *v2Decoder) readKey() (string, error) {
@@ -300,12 +289,11 @@ func (d *v2Decoder) readKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	idx := int(keyClock)
-	if idx < 0 {
+	if keyClock < 0 {
 		return "", ErrInvalidUpdate
 	}
-	if idx < len(d.keys) {
-		return d.keys[idx], nil
+	if uint64(keyClock) < uint64(len(d.keys)) {
+		return d.keys[keyClock], nil
 	}
 	key, err := d.stringDec.Read()
 	if err != nil {
@@ -377,7 +365,7 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 		svClock := sv.Clock(client)
 		var relevant []*Item
 		for _, item := range items {
-			if item.ID.Clock+uint64(item.Content.Len()) > svClock {
+			if item.ID.Clock+item.Content.Len() > svClock {
 				relevant = append(relevant, item)
 			}
 		}
@@ -394,9 +382,9 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 		enc.writeClient(g.client)
 		enc.restEnc.WriteVarUint(g.startClock)
 		for i, item := range g.items {
-			offset := 0
+			offset := uint64(0)
 			if i == 0 && g.startClock > item.ID.Clock {
-				offset = int(g.startClock - item.ID.Clock)
+				offset = g.startClock - item.ID.Clock
 			}
 			encodeItemV2(enc, item, offset, doc.store)
 		}
@@ -406,7 +394,7 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 	return enc.toBytes()
 }
 
-func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
+func encodeItemV2(enc *v2Encoder, item *Item, offset uint64, store *StructStore) {
 	// Orphaned items (no parent) came from GC wire format where the parent
 	// type name is lost. Encode as GC struct for valid clock accounting.
 	//
@@ -433,7 +421,7 @@ func encodeItemV2(enc *v2Encoder, item *Item, offset int, store *StructStore) {
 
 	var origin, originRight *ID
 	if offset > 0 {
-		oc := ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset) - 1}
+		oc := ID{Client: item.ID.Client, Clock: item.ID.Clock + offset - 1}
 		origin = &oc
 		originRight = item.OriginRight
 	} else {
@@ -537,13 +525,13 @@ func contentTagOf(c Content) byte {
 	}
 }
 
-func encodeContentV2(enc *v2Encoder, c Content, offset int) {
+func encodeContentV2(enc *v2Encoder, c Content, offset uint64) {
 	switch ct := c.(type) {
 	case *ContentDeleted:
 		enc.writeLen(ct.length - offset)
 	case *ContentJSON:
 		vals := ct.Vals[offset:]
-		enc.writeLen(len(vals))
+		enc.writeLen(uint64(len(vals)))
 		for _, v := range vals {
 			enc.writeString(fmtValToJSON(v))
 		}
@@ -552,7 +540,7 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 	case *ContentString:
 		// Emit only the tail from `offset`. splitUTF16 emits a leading U+FFFD
 		// when offset bisects a surrogate pair, matching Yjs's mid-surrogate slice.
-		_, tail := splitUTF16(ct.Str, offset)
+		_, tail := splitUTF16(ct.Str, int(min(offset, uint64(ct.utf16Len))))
 		enc.writeString(tail)
 	case *ContentEmbed:
 		enc.restEnc.WriteAny(ct.Val)
@@ -567,7 +555,7 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 		}
 	case *ContentAny:
 		vals := ct.Vals[offset:]
-		enc.writeLen(len(vals))
+		enc.writeLen(uint64(len(vals)))
 		for _, v := range vals {
 			enc.restEnc.WriteAny(v)
 		}
@@ -581,7 +569,7 @@ func encodeContentV2(enc *v2Encoder, c Content, offset int) {
 	case *ContentMove:
 		enc.restEnc.WriteVarUint(uint64(ct.Target.Client))
 		enc.restEnc.WriteVarUint(ct.Target.Clock)
-		enc.restEnc.WriteVarUint(uint64(ct.TargetLen))
+		enc.restEnc.WriteVarUint(ct.TargetLen)
 	}
 }
 
@@ -731,7 +719,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			}
 
 			var item *Item
-			var contentLen int
+			var contentLen uint64
 
 			switch info & 0x1F {
 			case 0: // GC (garbage collected)
@@ -772,7 +760,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 
 			// Every struct is bounded, a replaced group's too, so apply refuses
 			// what the merge decoders refuse.
-			itemEnd, err := structEnd(clock, uint64(contentLen))
+			itemEnd, err := structEnd(clock, contentLen)
 			if err != nil {
 				return err
 			}
@@ -816,7 +804,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	return nil
 }
 
-func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info byte) (*Item, int, error) {
+func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info byte) (*Item, uint64, error) {
 	hasOrigin := info&flagHasOrigin != 0
 	hasRightOrigin := info&flagHasRightOrigin != 0
 	hasParentSub := info&flagHasParentSub != 0
@@ -944,7 +932,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		if l < 0 || l > int(maxV2Items) {
+		if l > maxV2Items {
 			return nil, ErrInvalidUpdate
 		}
 		vals := make([]any, l)
@@ -1007,7 +995,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		if l < 0 || l > int(maxV2Items) {
+		if l > maxV2Items {
 			return nil, ErrInvalidUpdate
 		}
 		vals := make([]any, l)
@@ -1045,7 +1033,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 			return nil, err
 		}
 		target := &ID{Client: ClientID(clientU), Clock: clock}
-		return NewContentMove(target, int(targetLen)), nil
+		return NewContentMove(target, targetLen), nil
 
 	default:
 		return nil, unknownTagErr(true, tag)

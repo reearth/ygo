@@ -281,9 +281,9 @@ func TestUnit_PendingMerge_AWindowKeepsWhatTheWholeQueueKeeps(t *testing.T) {
 		for range n {
 			clock += uint64(rng.IntN(gap + 1))
 			l := 1 + rng.IntN(maxLen)
-			it := &Item{ID: ID{Client: c, Clock: clock}, Content: NewContentDeleted(l), Deleted: true}
+			it := &Item{ID: ID{Client: c, Clock: clock}, Content: NewContentDeleted(uint64(l)), Deleted: true}
 			if rng.IntN(2) == 0 {
-				it = &Item{ID: ID{Client: c, Clock: clock}, Origin: &ID{Client: 99}, Content: NewContentDeleted(l)}
+				it = &Item{ID: ID{Client: c, Clock: clock}, Origin: &ID{Client: 99}, Content: NewContentDeleted(uint64(l))}
 			}
 			items = append(items, it)
 			clock += uint64(l)
@@ -336,7 +336,7 @@ func TestUnit_PendingMerge_AWindowKeepsWhatTheWholeQueueKeeps(t *testing.T) {
 			it := held[q]
 			got, ok := gotHeld[it]
 			if !ok {
-				got = mergeKeep{start: it.ID.Clock, end: it.ID.Clock + uint64(it.Content.Len())}
+				got = mergeKeep{start: it.ID.Clock, end: it.ID.Clock + it.Content.Len()}
 			}
 			if got != wantHeld[i] {
 				t.Fatalf("case %d: queue struct %d@%d kept %+v, the whole queue keeps %+v", n, it.ID.Client, it.ID.Clock, got, wantHeld[i])

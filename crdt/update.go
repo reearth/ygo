@@ -90,7 +90,7 @@ func encodeTxnV1Locked(txn *Transaction) []byte {
 	for client, items := range store.clients {
 		from := txn.beforeState.Clock(client)
 		i := sort.Search(len(items), func(i int) bool {
-			return items[i].ID.Clock+uint64(items[i].Content.Len()) > from
+			return items[i].ID.Clock+items[i].Content.Len() > from
 		})
 		if i < len(items) {
 			perClient[client] = items[i:]
@@ -299,7 +299,7 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 		svClock := sv.Clock(client)
 		var relevant []*Item
 		for _, item := range items {
-			if item.ID.Clock+uint64(item.Content.Len()) > svClock {
+			if item.ID.Clock+item.Content.Len() > svClock {
 				relevant = append(relevant, item)
 			}
 		}
@@ -318,9 +318,9 @@ func encodeV1Locked(doc *Doc, sv StateVector) []byte {
 			enc.WriteVarUint(uint64(g.client))
 			enc.WriteVarUint(g.startClock)
 			for i, item := range g.items {
-				offset := 0
+				offset := uint64(0)
 				if i == 0 && g.startClock > item.ID.Clock {
-					offset = int(g.startClock - item.ID.Clock)
+					offset = g.startClock - item.ID.Clock
 				}
 				encodeItem(enc, item, offset, doc.store)
 			}
@@ -356,7 +356,7 @@ func (item *Item) markGCOrphan() {
 	item.OriginRight = nil
 }
 
-func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStore) {
+func encodeItem(enc *encoding.Encoder, item *Item, offset uint64, store *StructStore) {
 	// Orphaned items (no parent) came from GC wire format where the parent
 	// type name is lost. Encode them as GC structs so receivers get valid
 	// clock accounting instead of corrupt data.
@@ -379,7 +379,7 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 			length -= offset
 		}
 		enc.WriteUint8(0) // GC struct info byte
-		enc.WriteVarUint(uint64(length))
+		enc.WriteVarUint(length)
 		return
 	}
 
@@ -412,7 +412,7 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 	// Effective origins for this encoded slice.
 	var origin, originRight *ID
 	if offset > 0 {
-		oc := item.ID.Clock + uint64(offset) - 1
+		oc := item.ID.Clock + offset - 1
 		origin = &ID{Client: item.ID.Client, Clock: oc}
 		originRight = item.OriginRight
 	} else {
@@ -498,10 +498,10 @@ func encodeItem(enc *encoding.Encoder, item *Item, offset int, store *StructStor
 	encodeContent(enc, item.Content, offset)
 }
 
-func encodeContent(enc *encoding.Encoder, c Content, offset int) {
+func encodeContent(enc *encoding.Encoder, c Content, offset uint64) {
 	switch ct := c.(type) {
 	case *ContentDeleted:
-		enc.WriteVarUint(uint64(ct.length - offset))
+		enc.WriteVarUint(ct.length - offset)
 	case *ContentJSON:
 		vals := ct.Vals[offset:]
 		enc.WriteVarUint(uint64(len(vals)))
@@ -514,7 +514,7 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 	case *ContentString:
 		// Emit only the tail from `offset`. splitUTF16 emits a leading U+FFFD
 		// when offset bisects a surrogate pair, matching Yjs's mid-surrogate slice.
-		_, tail := splitUTF16(ct.Str, offset)
+		_, tail := splitUTF16(ct.Str, int(min(offset, uint64(ct.utf16Len))))
 		enc.WriteVarString(tail)
 	case *ContentEmbed:
 		// Yjs V1 encodes the embed via writeJSON = writeVarString(JSON.stringify).
@@ -547,7 +547,7 @@ func encodeContent(enc *encoding.Encoder, c Content, offset int) {
 	case *ContentMove:
 		enc.WriteVarUint(uint64(ct.Target.Client))
 		enc.WriteVarUint(ct.Target.Clock)
-		enc.WriteVarUint(uint64(ct.TargetLen))
+		enc.WriteVarUint(ct.TargetLen)
 	}
 }
 
@@ -768,7 +768,7 @@ func decodeStructs(txn *Transaction, dec *encoding.Decoder, sv StateVector, numC
 			}
 			// Every struct is bounded, a replaced group's too, so apply refuses
 			// what the merge decoders refuse.
-			itemEnd, err := structEnd(clock, uint64(item.Content.Len()))
+			itemEnd, err := structEnd(clock, item.Content.Len())
 			if err != nil {
 				return nil, nil, 0, err
 			}
@@ -815,7 +815,7 @@ func integrateGroup(txn *Transaction, group []*Item, existingEnd uint64, pending
 			continue
 		}
 		clock := item.ID.Clock
-		itemEnd := clock + uint64(item.Content.Len())
+		itemEnd := clock + item.Content.Len()
 		if itemEnd <= existingEnd {
 			// Already integrated, unless it names a struct the store lacks,
 			// which Yjs looks for first.
@@ -828,10 +828,10 @@ func integrateGroup(txn *Transaction, group []*Item, existingEnd uint64, pending
 			continue
 		}
 
-		offset := 0
+		offset := uint64(0)
 		if clock < existingEnd {
 			// Partially integrated — integrate only the new suffix.
-			offset = int(existingEnd - clock)
+			offset = existingEnd - clock
 		}
 
 		// A predecessor this update withheld waits in the pending queue.
@@ -844,7 +844,7 @@ func integrateGroup(txn *Transaction, group []*Item, existingEnd uint64, pending
 		// without linked-list integration.
 		if item.Parent == nil && item.Deleted {
 			if offset > 0 {
-				item.ID.Clock += uint64(offset)
+				item.ID.Clock += offset
 				item.Content = item.Content.Splice(offset)
 			}
 			txn.doc.store.Append(item)
@@ -1051,7 +1051,7 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 		}
 		return &Item{
 			ID:      ID{Client: client, Clock: clock},
-			Content: NewContentDeleted(int(length)),
+			Content: NewContentDeleted(length),
 			Deleted: true,
 		}, nil
 	}
@@ -1065,7 +1065,7 @@ func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) 
 		}
 		return &Item{
 			ID:      ID{Client: client, Clock: clock},
-			Content: &contentSkip{length: int(length)},
+			Content: &contentSkip{length: length},
 		}, nil
 	}
 
@@ -1203,7 +1203,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
-		return NewContentDeleted(int(n)), nil
+		return NewContentDeleted(n), nil
 
 	case wireJSON:
 		n, err := dec.ReadVarUint()
@@ -1334,7 +1334,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 			return nil, err
 		}
 		target := &ID{Client: ClientID(clientU), Clock: clock}
-		return NewContentMove(target, int(targetLen)), nil
+		return NewContentMove(target, targetLen), nil
 
 	default:
 		return nil, unknownTagErr(false, tag)
@@ -1653,8 +1653,8 @@ func jsonNumbers(v any) any {
 // store already has for its client. existingEnd must be at least the item's
 // clock.
 func appendTrimmed(store *StructStore, item *Item, existingEnd uint64) {
-	if offset := int(existingEnd - item.ID.Clock); offset > 0 {
-		item.ID.Clock += uint64(offset)
+	if offset := existingEnd - item.ID.Clock; offset > 0 {
+		item.ID.Clock += offset
 		item.Content = item.Content.Splice(offset)
 	}
 	store.Append(item)
@@ -1667,7 +1667,7 @@ var errGCContinuation = errors.New("item continues its client's GC struct")
 // continuesGC reports whether item, integrated past offset, would take its
 // client's GC struct as its left neighbour, which Yjs throws on unless an
 // origin of the item is a GC struct.
-func continuesGC(store *StructStore, item *Item, offset int) bool {
+func continuesGC(store *StructStore, item *Item, offset uint64) bool {
 	if offset == 0 {
 		return false
 	}
@@ -1746,7 +1746,7 @@ func rightIsGC(txn *Transaction, item *Item) bool {
 		return true
 	}
 	if c := item.OriginRight.Clock; c > r.ID.Clock {
-		r = splitItem(txn, r, int(c-r.ID.Clock))
+		r = splitItem(txn, r, c-r.ID.Clock)
 	}
 	item.Right = r
 	return false
@@ -1772,7 +1772,7 @@ func tryIntegrate(txn *Transaction, item *Item) (ok bool, waitsOn ClientID, err 
 	existingEnd := uint64(0)
 	if items := store.clients[item.ID.Client]; len(items) > 0 {
 		last := items[len(items)-1]
-		existingEnd = last.ID.Clock + uint64(last.Content.Len())
+		existingEnd = last.ID.Clock + last.Content.Len()
 	}
 
 	// A same-client clock gap is blocked regardless of content length.
@@ -1788,7 +1788,7 @@ func tryIntegrate(txn *Transaction, item *Item) (ok bool, waitsOn ClientID, err 
 		}
 		return true, 0, wrapUpdateErr(errFutureOwnRef)
 	}
-	if item.ID.Clock+uint64(item.Content.Len()) <= existingEnd {
+	if item.ID.Clock+item.Content.Len() <= existingEnd {
 		if client, ok := missingDep(store, item); ok {
 			return false, client, nil
 		}
@@ -1877,7 +1877,7 @@ func tryIntegrate(txn *Transaction, item *Item) (ok bool, waitsOn ClientID, err 
 			return false, item.Origin.Client, nil
 		}
 		last := items[len(items)-1]
-		if item.Origin.Clock >= last.ID.Clock+uint64(last.Content.Len()) {
+		if item.Origin.Clock >= last.ID.Clock+last.Content.Len() {
 			return false, item.Origin.Client, nil
 		}
 	}
@@ -1896,12 +1896,12 @@ func tryIntegrate(txn *Transaction, item *Item) (ok bool, waitsOn ClientID, err 
 			return false, item.OriginRight.Client, nil
 		}
 		last := items[len(items)-1]
-		if item.OriginRight.Clock >= last.ID.Clock+uint64(last.Content.Len()) {
+		if item.OriginRight.Clock >= last.ID.Clock+last.Content.Len() {
 			return false, item.OriginRight.Client, nil
 		}
 	}
 
-	offset := int(existingEnd - item.ID.Clock)
+	offset := existingEnd - item.ID.Clock
 	if continuesGC(store, item, offset) {
 		return true, 0, wrapUpdateErr(errGCContinuation)
 	}

@@ -196,7 +196,7 @@ func storeRange(store *StructStore, client ClientID, from, to uint64, fn func(*I
 		i = 0
 	}
 	for ; i < len(items) && items[i].ID.Clock < to; i++ {
-		if it := items[i]; it.ID.Clock+uint64(it.Content.Len()) > from {
+		if it := items[i]; it.ID.Clock+it.Content.Len() > from {
 			fn(it)
 		}
 	}
