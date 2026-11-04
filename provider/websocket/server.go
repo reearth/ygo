@@ -1736,8 +1736,15 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, bool,
 			s.relay.RoomActivated(name)
 		}
 	} else {
-		// Someone else is (or was) loading this room; wait for the barrier.
-		<-r.ready
+		// Cancelling one waiter must not cancel the shared room load.
+		select {
+		case <-r.ready:
+		case <-ctx.Done():
+		}
+		if err := ctx.Err(); err != nil {
+			s.releaseInflight(r)
+			return nil, false, err
+		}
 	}
 	if r.loadErr != nil {
 		return nil, false, r.loadErr

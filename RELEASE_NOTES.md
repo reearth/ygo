@@ -1,3 +1,17 @@
+## v1.56.0
+
+`Server.CloseRoomContext(ctx, name, force)` can cancel a room-load wait without
+closing the room. `CloseRoom(name, force)` keeps its signature and uses a
+background context. Once close starts, teardown runs to completion.
+
+`Server.Apply` now honours its context while it waits for an existing room to
+load. Cancellation returns the context error without invoking the callback or
+cancelling the shared load. Another waiter can still use that room.
+
+Cancellation does not interrupt the caller that loads a new room from
+persistence. An `Apply` callback that starts still completes persistence and
+broadcast after a transaction commits.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

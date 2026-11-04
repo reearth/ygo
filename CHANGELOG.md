@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.0] — 2026-11-04
+
+### Added
+
+- `provider/websocket`: add `Server.CloseRoomContext` to cancel a room-load
+  wait without closing the room. `CloseRoom` keeps its signature and uses a
+  background context. Once close starts, teardown runs to completion.
+
+### Fixed
+
+- `provider/websocket`: `Server.Apply` honours context cancellation while it
+  waits for an existing room to load. A cancelled waiter releases its in-flight
+  reference without invoking the callback or cancelling the shared load.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added
