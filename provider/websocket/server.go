@@ -2082,18 +2082,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rm.peerSem != nil && !rm.peerSem.TryAcquire(1) {
 		s.log().Debug("MaxPeersPerRoom cap reached", "room", name)
 		http.Error(w, "room full", http.StatusServiceUnavailable)
-		// Release OUR inflight-join count BEFORE evicting: this request is
-		// leaving, so its own inflight must not block its own reap. A
-		// concurrent joiner's inflight (still > 0) correctly blocks the
-		// reap (#193 review).
+		// Release this join before checking whether the room is unused.
 		s.releaseInflight(rm)
-		if created {
-			// #192: same orphan-reap as the other pre-registration failure
-			// paths — a room this request created but no peer will join.
-			// No semaphore to release here: TryAcquire failed, so nothing
-			// was acquired. evictIdleRoom no-ops safely if a concurrent
-			// request already joined the room (peers>0) or is still
-			// mid-join (inflight>0).
+		if created || s.RoomIdleTimeout <= 0 {
+			// A last peer may have left while this failed join held the room.
 			s.evictIdleRoom(name, rm, time.Time{})
 		}
 		return
@@ -2104,14 +2096,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log().Debug("MaxConnections cap reached")
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
-		// Release OUR inflight-join count BEFORE evicting; see the peerSem
-		// denial path above (#193 review).
+		// Release this join before checking whether the room is unused.
 		s.releaseInflight(rm)
-		if created {
-			// #192: this request created the room but no peer will register. Tear it
-			// down (flush-before-evict + delete + awareness/relay/worker teardown).
-			// evictIdleRoom no-ops safely if a concurrent request already joined
-			// the room (peers>0) or is still mid-join (inflight>0).
+		if created || s.RoomIdleTimeout <= 0 {
 			s.evictIdleRoom(name, rm, time.Time{})
 		}
 		return
@@ -2125,14 +2112,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if sem := s.connSemaphore(); sem != nil {
 			sem.Release(1)
 		}
-		// Release OUR inflight-join count BEFORE evicting; see the peerSem
-		// denial path above (#193 review).
+		// Release this join before checking whether the room is unused.
 		s.releaseInflight(rm)
-		if created {
-			// #192: this request created the room but no peer will register. Tear it
-			// down (flush-before-evict + delete + awareness/relay/worker teardown).
-			// evictIdleRoom no-ops safely if a concurrent request already joined
-			// the room (peers>0) or is still mid-join (inflight>0).
+		if created || s.RoomIdleTimeout <= 0 {
 			s.evictIdleRoom(name, rm, time.Time{})
 		}
 		return

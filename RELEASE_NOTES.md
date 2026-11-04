@@ -62,6 +62,10 @@ changes.
 - **A queue close is logged once.** A peer closed for a full write queue or
   for its byte budget logged a Warn for each frame that reached it before its
   teardown. It now logs one.
+- A failed join now reclaims an existing empty room in eager eviction mode
+  when its last peer left during the join. Idle-resident rooms and rooms
+  with another caller remain resident. Rejected joins do not force a
+  persistence flush for an active room.
 - **The last peer's leave no longer evicts a room an `Apply` is inside.**
   With the default `RoomIdleTimeout == 0`, such a room now stays resident,
   as a room `Apply` created does, until a later last-peer leave or

@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `provider/websocket`: a failed join reclaims an existing empty room in eager
+  eviction mode when its last peer left during the join. Idle-resident rooms
+  and rooms with another caller remain resident. Rejected joins do not force
+  a persistence flush for an active room.
+
 - **`provider/websocket`: a failed write closes the peer's connection.** When
   a write to a peer failed, for example because its 10-second write deadline
   expired, the peer's writer stopped but the connection stayed open. A peer
