@@ -72,7 +72,7 @@ Then open `http://localhost:8080` in two browser tabs. Both tabs edit the same d
 **Key concepts:**
 - `provider/websocket.NewServer()` — a single `http.Handler` that manages all rooms and peers
 - Uses [y-websocket](https://github.com/yjs/y-websocket) JS client for the browser side (loaded from CDN)
-- Three-message handshake on connect: server sends `SyncStep1` + `SyncStep2` (full state) + current `Awareness`
+- Handshake on connect: server sends `SyncStep1`, plus current `Awareness` when anyone is present, and answers the client's `SyncStep1` with `SyncStep2` (full state)
 - Awareness protocol: cursors, user presence, and custom ephemeral state (e.g. `{cursor: 42, color: "blue"}`)
 - Rooms are isolated: `#room-a` and `#room-b` in the URL hash map to separate documents
 

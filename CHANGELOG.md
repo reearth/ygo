@@ -5,6 +5,119 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.0] — 2026-10-31
+
+### Added
+
+- `provider/websocket`: add `Server.CloseRoomWithinContext` to cancel a room-load
+  wait without closing the room. `CloseRoomWithin` retains its signature and
+  uses a background context. Once close starts, teardown runs to completion.
+
+- **`provider/websocket`: `Server.PeerWriteQueueBytes` bounds the bytes
+  waiting in a peer's write queue.** `PeerWriteQueueSize` bounds that queue
+  in frames only, and the server answers each SyncStep1 with the room's full
+  state on the sender's own queue. So a peer that sends SyncStep1 and does not
+  read made the server keep one copy of the document for each message, up to
+  512 copies, while the connection stayed open. With the budget set, when the
+  frames that wait for a peer reach it, the next frame closes the peer, on
+  every enqueue path and whatever `SlowPeerPolicy` is set, and the read loop
+  drops the input the peer already sent. The close is logged at Warn as
+  `peer queued bytes over budget`. The frame that crosses the budget is
+  queued whatever its size, and the connect handshake is not counted. A frame
+  that arrives while the budget or more waits closes even a peer that reads,
+  so set the budget above the largest room state. Zero, the default, or a
+  negative value means no budget.
+- **`provider/websocket`: `ErrRoomInUse`, `ErrNotInApply` and
+  `Server.CloseRoomWithin`.** `CloseRoom` returns `ErrRoomInUse` when a caller
+  is inside the room — an `Apply` callback, a relay `Inject`, or a websocket
+  join between the room lookup and peer registration — and keeps the room
+  resident. `CloseRoomWithin(name, doc, force)` is the close a caller makes
+  from inside its own `Apply` on the room, which is how a room is closed
+  without the idle sweeper retiring it in between: `doc` is the document that
+  `Apply` passed to the callback, naming the room instance it is writing, and
+  the one in-flight caller discounted is that `Apply`. It returns
+  `ErrRoomNotFound` when the name holds a different instance by then, and
+  `ErrNotInApply` when nobody is inside the room at all.
+
+### Fixed
+
+- `provider/websocket`: a failed join reclaims an existing empty room in eager
+  eviction mode when its last peer left during the join. Idle-resident rooms
+  and rooms with another caller remain resident. Rejected joins do not force
+  a persistence flush for an active room.
+
+- **`provider/websocket`: a failed write closes the peer's connection.** When
+  a write to a peer failed, for example because its 10-second write deadline
+  expired, the peer's writer stopped but the connection stayed open. A peer
+  that kept sending stayed in its room, `OnLastPeer` did not fire, and its
+  replies queued with no writer until the queue overflowed. The writer now
+  closes the connection, and the read loop removes the peer without handling
+  the frames left in its read buffer.
+- **`provider/websocket`: when the server closes a peer while its read loop
+  runs, the loop drops the input it has not handled.** This applies to a full
+  write queue (on a direct send, or on a broadcast under
+  `SlowPeerDisconnect`), a Hocuspocus close message, a cancelled request
+  context without a close code, `Shutdown` and `CloseRoom(name, true)`.
+  Before, the read loop still handled the messages in its read buffer (up to
+  about 4 KiB): it encoded the room's full state for each buffered SyncStep1,
+  and it applied each buffered update after the close, and stored it too after
+  `Shutdown` or `CloseRoom`. Updates that the server had not read when it
+  closed the connection are not saved. A client that reconnects sends them
+  again.
+- **`provider/websocket`: a joining peer receives the room's state once.** On
+  connect the server sent SyncStep1, a SyncStep2 with the room's full state
+  and awareness, then answered the peer's own SyncStep1 with a second full
+  SyncStep2, so every join downloaded the document twice. The server now
+  sends SyncStep1 on connect, awareness only when the room holds awareness
+  states, and the room's state only in answer to the peer's SyncStep1, as the
+  y-websocket and Hocuspocus servers do. This holds on both framings and for
+  read-only peers. A client that never sends SyncStep1 now gets no snapshot
+  of the room's state, only the updates broadcast after it joins. A client
+  that sends a Hocuspocus token `OnTokenAuth` rejects before its SyncStep1 no
+  longer gets the snapshot either, but updates broadcast before the rejection
+  can still reach it: withhold content with `AuthFunc` or `Authorize`.
+- **`provider/websocket`: `Shutdown` waits for the connections it serves.**
+  Its doc said it waits for the peers' goroutines to exit, but it closed each
+  connection and waited only for the persistence workers, stranded writes and
+  relay workers. A hook on a connection's read loop (`OnTokenAuth`,
+  `OnPeerUpdate`) or in its teardown (`OnLastPeer`, `OnUnloadDocument`) could
+  still run after `Shutdown` returned `nil`. `Shutdown` now also waits, bounded
+  by its `ctx`, until every `ServeHTTP` call in progress has returned, its
+  teardown included. A hook that does not return holds `Shutdown` until `ctx`
+  expires, and `Shutdown` then returns `ctx.Err()`. A hook that calls
+  `Shutdown` must pass a `ctx` that expires, because `Shutdown` waits for that
+  hook's own connection. Once `Shutdown` has begun, the server makes no relay
+  `RoomActivated` or `RoomDeactivated` call, because a relay may wait on the
+  relay context, which `Shutdown` cancels only after this wait.
+- **`provider/websocket`: a peer closed for a full write queue or its byte
+  budget is logged once.** Each frame that reached the peer before its
+  teardown logged the Warn again and closed the connection again. Those frames
+  are now dropped without a log, the writer's failed write after a close the
+  server made is logged at Debug, and no full-state resync is built for the
+  peer.
+- **`provider/websocket`: the last peer's leave no longer evicts a room an
+  `Apply` is inside.** With the default `RoomIdleTimeout == 0`, the room was
+  evicted as soon as its last peer left, also while an `Apply` callback, a
+  relay `Inject` or a join was inside it, so the callback's later writes went
+  to a document the server no longer held. The room now stays resident until
+  a later last-peer leave or `CloseRoom` evicts it, and `OnUnloadDocument`
+  fires then, not with `OnLastPeer`.
+- **`provider/websocket`: `CloseRoom` no longer evicts a room an `Apply` is
+  writing.** `Apply` holds the room's inflight count for the whole of its
+  callback, and the idle sweeper has honoured it since #193, but `CloseRoom`
+  removed the room regardless. Every mutation the callback made after that
+  landed on a document the server no longer held: it reached the adapter only
+  through the retiring worker's stranded-write path, and with no persistence
+  adapter it was lost outright, while `GetDoc` and the next `Apply` saw a room
+  without it. `CloseRoom` now returns `ErrRoomInUse` instead, with `force=true`
+  as well as `force=false` — `force` closes connected peers, which is not the
+  same as interrupting a server-side writer. When the caller is inside before
+  the call, no peer is closed; one that enters while `force` closes the peers
+  leaves those peers closed. The refusal is transient, and the call never
+  waits on the count, so it cannot deadlock. A caller that is itself inside
+  an `Apply` on the room, and so is the writer rather than a racer, calls
+  `CloseRoomWithin`.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

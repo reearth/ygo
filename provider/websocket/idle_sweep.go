@@ -157,6 +157,13 @@ func (s *Server) sweepIdleRooms(now time.Time) {
 // the retained batch is retried on the next sweep / teardown, and a reconnect
 // meanwhile finds the warm in-memory doc rather than reloading a stale store.
 func (s *Server) evictIdleRoom(name string, rm *room, expectIdle time.Time) bool {
+	// A rejected join must not flush a room that still has peers or callers.
+	rm.mu.Lock()
+	eligible := len(rm.peers) == 0 && rm.inflight == 0 && rm.idleSince.Equal(expectIdle)
+	rm.mu.Unlock()
+	if !eligible {
+		return false
+	}
 	// FLUSH-BEFORE-EVICT (#175 follow-up). Make the pending coalesced batch
 	// durable while rm is still in s.rooms and the worker is still alive. No lock
 	// is held across the send/ack; the ack is buffered (cap 1) so the worker

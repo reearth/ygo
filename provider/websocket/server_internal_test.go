@@ -6,14 +6,19 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/awareness"
+	"github.com/reearth/ygo/crdt"
 )
 
 // captureDebugLogger returns a logger writing Debug-level (and above) text logs
@@ -107,6 +112,7 @@ func TestPeer_Broadcast_ResyncPolicy_FlagsSlowPeerWithoutClosing(t *testing.T) {
 
 	assert.True(t, needsResync, "overflow under SlowPeerResync should flag the peer for resync")
 	assert.False(t, closed, "overflow under SlowPeerResync must not disconnect the peer")
+	assert.False(t, target.inputClosed.Load(), "overflow under SlowPeerResync must not drop the peer's input")
 	assert.Len(t, target.writeCh, 1, "the stale delta is dropped, not enqueued")
 	assert.Contains(t, buf.String(), "in-place resync", "expected a resync-scheduling log line")
 }
@@ -136,12 +142,117 @@ func TestPeer_MaybeResync_GatingWithoutConn(t *testing.T) {
 	})
 }
 
+// serverConn returns the server side of a real WebSocket connection.
+func serverConn(t *testing.T) *gws.Conn {
+	t.Helper()
+	conns := make(chan *gws.Conn, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := (&gws.Upgrader{}).Upgrade(w, r, nil)
+		if err == nil {
+			conns <- c
+		}
+	}))
+	t.Cleanup(ts.Close)
+	client, _, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	c := <-conns
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
 func TestPeer_Broadcast_DisconnectsSlowPeer(t *testing.T) {
-	// Integration-level coverage lives in TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow
-	// in server_test.go, which uses net.Pipe() connections to make the overflow deterministic.
-	// A unit-level version here would require a fakeConn that makes WriteMessage block
-	// without depending on OS TCP buffers.
-	t.Skip("TODO: unit version needs a fake conn; integration coverage in TestServer_SlowPeer_GetsDisconnectedOnQueueOverflow")
+	// Under SlowPeerDisconnect a full write queue closes the peer, and the read
+	// loop must drop what the peer already sent.
+	var buf bytes.Buffer
+	srv := &Server{SlowPeerPolicy: SlowPeerDisconnect, Logger: captureDebugLogger(&buf)}
+	rm := &room{peers: map[*peer]struct{}{}}
+	target := &peer{server: srv, roomName: "r", conn: serverConn(t), writeCh: make(chan []byte, 1)}
+	target.writeCh <- []byte{0x00} // fill to capacity
+	src := &peer{server: srv, room: rm}
+	rm.peers[target] = struct{}{}
+	rm.peers[src] = struct{}{}
+
+	src.broadcast([]byte{0x01}, true)
+
+	assert.True(t, target.inputClosed.Load(), "the read loop must drop what the closed peer already sent")
+	assert.False(t, src.inputClosed.Load(), "the sender is not closed")
+	assert.Contains(t, buf.String(), "closing slow peer")
+}
+
+func TestPeer_Write_FullQueueDisconnectsPeer(t *testing.T) {
+	// A full write queue on a direct send closes the peer, and the read loop
+	// must drop what the peer already sent.
+	var buf bytes.Buffer
+	p := &peer{server: &Server{Logger: captureDebugLogger(&buf)}, roomName: "r",
+		conn: serverConn(t), writeCh: make(chan []byte, 1)}
+	p.writeCh <- []byte{0x00} // fill to capacity
+
+	p.write([]byte{0x01})
+
+	assert.True(t, p.inputClosed.Load(), "the read loop must drop what the closed peer already sent")
+	assert.Contains(t, buf.String(), "queue full during direct send")
+}
+
+func TestUnit_Peer_QueueCloseWarnsOnce(t *testing.T) {
+	// The frames that reach a peer between its queue close and its teardown
+	// are dropped without another Warn and without being queued.
+	direct := func(target *peer) { target.write([]byte{0x01}) }
+	broadcast := func(target *peer) {
+		(&peer{server: target.server, room: target.room}).broadcast([]byte{0x01}, false)
+	}
+	tests := []struct {
+		name     string
+		capacity int
+		budget   int64
+		send     func(target *peer)
+	}{
+		{name: "frame cap on a direct send", capacity: 1, send: direct},
+		{name: "frame cap on a broadcast", capacity: 1, send: broadcast},
+		{name: "byte budget on a direct send", capacity: 8, budget: 1, send: direct},
+		{name: "byte budget on a broadcast", capacity: 8, budget: 1, send: broadcast},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			srv := &Server{SlowPeerPolicy: SlowPeerDisconnect, Logger: captureDebugLogger(&buf)}
+			target := &peer{server: srv, roomName: "r", conn: serverConn(t),
+				writeCh: make(chan []byte, tt.capacity), writeBudget: tt.budget}
+			target.room = &room{peers: map[*peer]struct{}{target: {}}}
+			target.write([]byte{0x00}) // fills the queue, or reaches the budget
+
+			for range 3 {
+				tt.send(target)
+			}
+
+			assert.Equal(t, 1, strings.Count(buf.String(), "level=WARN"), "one Warn for the close:\n%s", buf.String())
+			assert.Len(t, target.writeCh, 1, "nothing is queued after the close")
+			assert.True(t, target.inputClosed.Load())
+		})
+	}
+}
+
+func TestUnit_Peer_WriteAfterServerCloseLogsNoWarn(t *testing.T) {
+	// The writer's failed write after the server closed the connection is
+	// expected, so the close keeps its single Warn.
+	var buf bytes.Buffer
+	p := &peer{server: &Server{Logger: captureDebugLogger(&buf)}, roomName: "r", conn: serverConn(t)}
+	p.closeConn()
+
+	assert.False(t, p.writeToConn([]byte{0x00}), "the writer stops on a failed write")
+	assert.Zero(t, strings.Count(buf.String(), "level=WARN"), "no Warn after the server's own close:\n%s", buf.String())
+	assert.Contains(t, buf.String(), "write to peer failed")
+}
+
+func TestUnit_Peer_MaybeResync_SkipsAQueueClosedPeer(t *testing.T) {
+	// On a connection that still takes writes, a queue-closed peer gets no
+	// full-state resync, and the writer stops.
+	p := &peer{server: &Server{}, roomName: "r", conn: serverConn(t), writeCh: make(chan []byte, 1),
+		room: &room{doc: crdt.New(), awareness: awareness.New(1)}, needsResync: true, queueClosed: true}
+	assert.False(t, p.maybeResync(), "the writer stops for a queue-closed peer")
+	p.wmu.Lock()
+	defer p.wmu.Unlock()
+	assert.True(t, p.needsResync, "no resync was sent")
 }
 
 func TestPeer_RunWriter_ExitsOnChannelClose(t *testing.T) {
@@ -191,6 +302,8 @@ func TestServer_AwarenessExpiry_GoroutineStoppedOnEvict(t *testing.T) {
 	if rm.awareness == nil {
 		t.Fatal("room has no awareness")
 	}
+	// Release the count getOrCreateRoom took, since CloseRoom refuses a room a caller is inside.
+	s.releaseInflight(rm)
 	if err := s.CloseRoom("room", true); err != nil {
 		t.Fatalf("CloseRoom: %v", err)
 	}

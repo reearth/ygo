@@ -1,3 +1,106 @@
+## v1.56.0
+
+**Who is affected: every `provider/websocket` server.** No wire format
+changes.
+
+- `CloseRoomWithinContext(ctx, name, doc, force)` can cancel a room-load wait
+  without closing the room. `CloseRoomWithin` retains its signature and uses
+  a background context. Once close starts, teardown runs to completion.
+
+- **`Server.PeerWriteQueueBytes` bounds the bytes waiting for a peer.** A
+  peer's write queue is bounded in frames (`PeerWriteQueueSize`, 512 by
+  default), not in bytes, and the server answers each SyncStep1 with the
+  room's full state on the sender's own queue. A peer that never reads could
+  make the server keep 512 copies of the document. Set a budget above the
+  largest room state:
+
+  ```go
+  srv := ygws.NewServer()
+  srv.PeerWriteQueueBytes = 64 << 20 // 64 MiB waiting per peer
+  ```
+
+  When the frames that wait for a peer reach the budget, the next frame
+  closes the peer, whatever `SlowPeerPolicy` is set, and the close is logged
+  at Warn as `peer queued bytes over budget`. A frame that arrives while the
+  budget or more waits closes even a peer that reads. Zero, the default,
+  changes nothing.
+- **A failed write closes the connection.** Each write to a peer has a
+  10-second deadline. When a write failed, the peer's writer stopped but the
+  connection stayed open, so a peer that kept sending stayed in its room and
+  `OnLastPeer` did not fire. The server now closes the connection and removes
+  the peer.
+- **A peer that the server closes has its unread input dropped.** When the
+  server closed a connection itself (a full write queue, a Hocuspocus close
+  message, a cancelled request context without a close code, `Shutdown` or
+  `CloseRoom(name, true)`), the read loop still handled the messages in its
+  read buffer, and applied and stored the updates among them. It now drops
+  them. Updates the server had not read when it closed the connection are not
+  saved. A client that reconnects sends them again in the sync exchange.
+- **A joining peer receives the room's state once.** The server sent the
+  room's full state on connect and again in its answer to the peer's
+  SyncStep1. It now sends the state only in that answer, and awareness on
+  connect only when the room holds awareness states, as the y-websocket and
+  Hocuspocus servers do. `y-websocket`, `@hocuspocus/provider` and ygo's
+  `provider/client` send SyncStep1 on connect and need no change. **A custom
+  client that waits for the server's state without sending SyncStep1 now
+  receives no snapshot**, only the updates broadcast after it joins. A client
+  whose Hocuspocus token `OnTokenAuth` rejects, and that sends the token
+  before its SyncStep1, no longer receives the snapshot either, but updates
+  broadcast before the rejection can still reach it: withhold content with
+  `AuthFunc` or `Authorize`.
+- **`Shutdown` waits for the connections it serves.** A hook that ran on a
+  connection, or that its teardown fires, could still run after `Shutdown`
+  returned `nil`, so the usual `srv.Shutdown(ctx); return` could exit the
+  process with a hook half done. `Shutdown` now waits, bounded by `ctx`, until
+  every `ServeHTTP` call in progress has returned. **A hook that does not
+  return now holds `Shutdown` until `ctx` expires**, and `Shutdown` then
+  returns `ctx.Err()` where it returned `nil` before. Pass a `ctx` with a
+  deadline, and stop accepting connections before you call `Shutdown`. Once
+  `Shutdown` has begun, the server no longer calls a relay's `RoomActivated` or
+  `RoomDeactivated`, so a room still active then gets no `RoomDeactivated`:
+  release per-room relay state in `Close`.
+- **A queue close is logged once.** A peer closed for a full write queue or
+  for its byte budget logged a Warn for each frame that reached it before its
+  teardown. It now logs one.
+- A failed join now reclaims an existing empty room in eager eviction mode
+  when its last peer left during the join. Idle-resident rooms and rooms
+  with another caller remain resident. Rejected joins do not force a
+  persistence flush for an active room.
+- **The last peer's leave no longer evicts a room an `Apply` is inside.**
+  With the default `RoomIdleTimeout == 0`, such a room now stays resident,
+  as a room `Apply` created does, until a later last-peer leave or
+  `CloseRoom` evicts it.
+- **`CloseRoom` no longer evicts a room an `Apply` is inside.** It evicted
+  a room even while an `Apply` callback was inside it, so whatever the
+  callback wrote afterwards landed on a document the server no longer held,
+  and with no persistence adapter it was lost. `CloseRoom` now returns the new
+  `ErrRoomInUse` and keeps the room resident while a caller is inside it: an
+  `Apply` callback, a relay `Inject`, or a websocket join between the room
+  lookup and peer registration. `force=true` refuses as well. When the caller
+  is inside before the call, no peer is closed; one that enters while `force`
+  closes the peers leaves those peers closed. The refusal is transient, so a
+  closer that treats `ErrRoomInUse` like `ErrRoomHasPeers` and retries will
+  succeed.
+
+  Code that closes a room from inside its own `Apply` on that room calls the
+  new `Server.CloseRoomWithin(name, doc, force)`, as the callback's last act:
+
+  ```go
+  err := server.Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+      // ... decide to close ...
+      closeErr = server.CloseRoomWithin(room, doc, true)
+  })
+  ```
+
+  `doc` names the room instance the callback is writing. If the name holds a
+  different instance by then, nothing is closed and the call returns
+  `ErrRoomNotFound`. A second `Apply`, a relay `Inject` or a joining peer still
+  gives `ErrRoomInUse`. Called with nobody inside the room, it closes nothing
+  and returns the new `ErrNotInApply`. **What to change:** an admin path that
+  treats a non-nil `CloseRoom` error as fatal should retry on `ErrRoomInUse`,
+  and a caller that closed a room from inside its own `Apply` switches that
+  call to `CloseRoomWithin`, passing the callback's `doc`.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

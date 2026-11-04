@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/reearth/ygo/awareness"
+	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 )
 
@@ -635,18 +636,13 @@ func TestConnAwarenessCap_DisconnectRemovesOnlyLiveIDs(t *testing.T) {
 	require.False(t, removed[idB], "disconnect re-removed an already-removed client")
 }
 
-// drainHandshakeFrames reads the three frames the server sends on connect
-// (step-1, step-2, awareness state), so the next frame read is a broadcast.
-// The awareness state carries existing tombstones, which would otherwise be
-// mistaken for a removal broadcast.
+// drainHandshakeFrames completes the connect handshake (step-1, the awareness
+// state when the room has one, and the step-2 answer to this peer's step-1),
+// so the next frame read is a broadcast. The awareness state carries existing
+// tombstones, which would otherwise be mistaken for a removal broadcast.
 func drainHandshakeFrames(t *testing.T, conn *gws.Conn) {
 	t.Helper()
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
-	for i := 0; i < 3; i++ {
-		_, _, err := conn.ReadMessage()
-		require.NoError(t, err)
-	}
+	require.NoError(t, drainConnErr(conn, crdt.New()))
 }
 
 // readRemovalBroadcast reads frames until an awareness update carrying null
