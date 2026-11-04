@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pending cap counts what the park adds after the merge, and a queue above a
   lowered cap does not grow. Each struct a park adds, cuts or drops costs, on
   average, time logarithmic in the queue.
+- **`crdt`: an update checks only the clients whose clocks it advances when
+  deciding whether to retry parked structs.** An update that wakes nothing
+  no longer scans every client that the queue waits on.
 - **`crdt`: a struct the document already holds waits on an origin, right
   origin or parent of another client that the document lacks, as Yjs
   `getMissing` does,** and parks with every struct of its client after it.

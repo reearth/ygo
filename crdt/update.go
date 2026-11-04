@@ -978,7 +978,7 @@ func drainPending(txn *Transaction) error {
 	// everything integrated during this call surfaces in a single OnUpdate
 	// notification.
 	var dropped error
-	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
+	for txn.doc.store.retryable() {
 		items := txn.doc.store.pending.heldItems()
 		txn.doc.store.pending = nil
 

@@ -1134,21 +1134,24 @@ func TestUnit_StructStore_Retryable_WatermarkSemantic(t *testing.T) {
 	doc := New()
 	store := doc.store
 
-	// Missing empty -> not retryable (nothing to retry).
-	missing := StateVector{}
-	assert.False(t, store.retryable(missing))
+	assert.False(t, store.retryable())
+	store.pending = &pendingUpdate{missing: StateVector{42: 5}}
+	assert.False(t, store.retryable(), "a missing client has not passed its watermark")
 
-	// Missing records client 42 at clock 5; store has no items for 42 yet.
-	missing[42] = 5
-	assert.False(t, store.retryable(missing), "store.Clock(42) == 0 <= 5, not retryable")
+	store.Append(&Item{ID: ID{Client: 7}, Content: NewContentDeleted(9)})
+	assert.False(t, store.retryable(), "a client outside the missing map cannot wake the queue")
+	store.Append(&Item{ID: ID{Client: 42}, Content: NewContentDeleted(3)})
+	assert.False(t, store.retryable(), "clock 3 has not passed watermark 5")
+	store.Append(&Item{ID: ID{Client: 42, Clock: 3}, Content: NewContentDeleted(2)})
+	assert.False(t, store.retryable(), "clock 5 has not passed watermark 5")
+	store.Append(&Item{ID: ID{Client: 42, Clock: 5}, Content: NewContentDeleted(1)})
+	assert.True(t, store.retryable(), "clock 6 has passed watermark 5")
+	assert.True(t, store.retryable(), "checking does not consume a wake before the drain")
 
-	// Simulate integration of client 42 up to clock 3: still not past watermark.
-	store.clients[42] = []*Item{{ID: ID{Client: 42, Clock: 0}, Content: &ContentAny{Vals: []any{nil, nil, nil}}}}
-	assert.False(t, store.retryable(missing), "store.Clock(42) == 3, 3 <= 5, not retryable")
-
-	// Advance past the watermark.
-	store.clients[42] = append(store.clients[42], &Item{ID: ID{Client: 42, Clock: 3}, Content: &ContentAny{Vals: []any{nil, nil, nil}}})
-	assert.True(t, store.retryable(missing), "store.Clock(42) == 6 > 5, retryable")
+	store.pending = &pendingUpdate{missing: StateVector{42: 6}}
+	assert.False(t, store.retryable(), "a replacement queue waits on its own watermark")
+	store.Append(&Item{ID: ID{Client: 42, Clock: 6}, Content: NewContentDeleted(1)})
+	assert.True(t, store.retryable())
 }
 
 func TestUnit_ApplyV1_ParksItemsWithFutureOriginClock(t *testing.T) {

@@ -62,6 +62,8 @@ type pendingUpdate struct {
 	tailClient ClientID
 	tail       uint64
 	tailValid  bool
+	// ready latches a clock past missing until the drain replaces this queue.
+	ready bool
 }
 
 func newStructStore() *StructStore {
@@ -74,6 +76,16 @@ func newStructStore() *StructStore {
 // Append adds item to the store. Items must be appended in Clock order per client.
 func (s *StructStore) Append(item *Item) {
 	s.clients[item.ID.Client] = append(s.clients[item.ID.Client], item)
+	s.noteAppend(item)
+}
+
+// noteAppend keeps parked-clock bookkeeping out of Append's inlined fast path.
+func (s *StructStore) noteAppend(item *Item) {
+	if p := s.pending; p != nil && !p.ready {
+		if parkedAt, waits := p.missing[item.ID.Client]; waits && item.ID.Clock+uint64(item.Content.Len()) > parkedAt {
+			p.ready = true
+		}
+	}
 	if _, parked := s.pendingDs.clients[item.ID.Client]; parked {
 		if s.pendingDsMoved == nil {
 			s.pendingDsMoved = make(map[ClientID]struct{})
@@ -297,22 +309,9 @@ func (s *StructStore) IterateFrom(sv StateVector, fn func(*Item)) {
 	}
 }
 
-// retryable reports whether the pending queue has any chance of draining
-// given the store's current integrated clocks. It returns true when the
-// store's clock for any client in `missing` has advanced past the
-// watermark recorded at park time. When true, the caller should drain
-// pending items through tryIntegrate.
-//
-// Matches yrs' `for (client, &clock) in pending.missing.iter()
-// { if clock < store.blocks.get_clock(client) { retry = true; break; } }`
-// and Yjs JS's equivalent gate in readUpdateV2.
-func (s *StructStore) retryable(missing StateVector) bool {
-	for client, parkedAt := range missing {
-		if s.NextClock(client) > parkedAt {
-			return true
-		}
-	}
-	return false
+// retryable reports whether an append advanced a clock the pending queue waits on.
+func (s *StructStore) retryable() bool {
+	return s.pending != nil && s.pending.ready
 }
 
 // mergePendingMissing sets missing[client] to the minimum of its
