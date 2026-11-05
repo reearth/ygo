@@ -400,6 +400,13 @@ func TestIntegration_StreamReader_AwarenessIsNotReplayed(t *testing.T) {
 		if cmd == "XREAD" && sink.payloadSeen("pre-start-edit") {
 			boundary.Do(func() {
 				// One room contributes sync/awareness keys followed by their IDs.
+				// Rewrite ONLY while the cursor is still the tail sentinel. A
+				// reader that resolves awareness from anywhere else keeps the
+				// position it chose, so a replaying one still delivers the stale
+				// entry and fails below. The hook also cannot fire before sync
+				// replay reaches the sink, and readBatch reads sync and awareness
+				// in one command, so an unmodified awareness read always precedes
+				// this boundary.
 				if args[len(args)-1] == tailID {
 					args[len(args)-1] = stale[0].ID
 				}
