@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2/server"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
@@ -356,9 +357,9 @@ func TestIntegration_StreamReader_CatchUpMergedIntoSingleInject(t *testing.T) {
 // Asserting only the stale payload's absence would pass even if the reader
 // never ran, or never read awareness streams at all. Two positive witnesses
 // make it non-vacuous: a sync entry published before start MUST be replayed
-// (the reader reached this room), and an awareness entry published after start
-// MUST arrive (awareness delivery works at all), so the absence below is about
-// replay policy rather than a dead code path.
+// (the reader reached this room), and an awareness entry published after its
+// read position is established MUST arrive (awareness delivery works at all).
+// The stale payload's absence then tests replay policy, not a dead code path.
 func TestIntegration_StreamReader_AwarenessIsNotReplayed(t *testing.T) {
 	mr := newMiniRedis(t)
 	b, err := New(newClient(t, mr), readerConfig(nodeB))
@@ -372,6 +373,10 @@ func TestIntegration_StreamReader_AwarenessIsNotReplayed(t *testing.T) {
 	require.NoError(t, b.Publish(context.Background(), cluster.Outbound{
 		Room: "room1", Kind: cluster.KindSync, Data: v1Update(t, "pre-start-edit"),
 	}))
+	awKey := b.scfg.awKey("room1")
+	stale, err := mr.Stream(awKey)
+	require.NoError(t, err)
+	require.Len(t, stale, 1)
 
 	sink := &recordingSink{}
 	a, err := New(newClient(t, mr), readerConfig(nodeA))
@@ -380,6 +385,30 @@ func TestIntegration_StreamReader_AwarenessIsNotReplayed(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Once sync replay has arrived, resolve this room's next awareness "$"
+	// to its existing tail before signalling readiness. Hold that command
+	// until the witness is in Redis: observing XREAD before Redis resolves
+	// "$" still leaves the publish gap. Only this test server's command is
+	// changed; real readers still use "$".
+	readReady := make(chan struct{})
+	witnessPublished := make(chan struct{})
+	releaseRead := sync.OnceFunc(func() { close(witnessPublished) })
+	defer releaseRead() // also unblock Redis if an assertion fails
+	var boundary sync.Once
+	mr.Server().SetPreHook(func(_ *server.Peer, cmd string, args ...string) bool {
+		if cmd == "XREAD" && sink.payloadSeen("pre-start-edit") {
+			boundary.Do(func() {
+				// One room contributes sync/awareness keys followed by their IDs.
+				if args[len(args)-1] == tailID {
+					args[len(args)-1] = stale[0].ID
+				}
+				close(readReady)
+				<-witnessPublished
+			})
+		}
+		return false
+	})
 	require.NoError(t, a.Start(ctx, sink))
 	a.RoomActivated("room1")
 
@@ -387,13 +416,18 @@ func TestIntegration_StreamReader_AwarenessIsNotReplayed(t *testing.T) {
 	require.Eventually(t, func() bool { return sink.payloadSeen("pre-start-edit") },
 		5*time.Second, 10*time.Millisecond, "sync published before start must be replayed")
 
-	// Witness 2: awareness published while the reader is up DOES arrive, so
-	// the awareness half of the read is live rather than silently broken.
+	// Witness 2: publish only after the awareness read's position is fixed.
+	select {
+	case <-readReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reader did not establish its awareness read position")
+	}
 	require.NoError(t, b.Publish(ctx, cluster.Outbound{
 		Room: "room1", Kind: cluster.KindAwareness, Data: []byte("live-presence"),
 	}))
+	releaseRead()
 	require.Eventually(t, func() bool { return sink.payloadSeen("live-presence") },
-		5*time.Second, 10*time.Millisecond, "awareness published after start must arrive")
+		5*time.Second, 10*time.Millisecond, "awareness published after the read boundary must arrive")
 
 	require.False(t, sink.payloadSeen("stale-presence"),
 		"awareness published before the reader started must NOT be replayed")
