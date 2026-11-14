@@ -1,3 +1,27 @@
+## v1.55.1
+
+**Who is affected: servers that call `CloseRoom` on a room that peers can
+still connect to.**
+
+`CloseRoom` takes the room's list of peers, closes those peers and waits for
+them, makes the room's pending writes durable while the room can still be
+found, and then removes the room. A peer that connected after that list was
+taken and before the room was removed joined the room all the same.
+`CloseRoom` never closed that peer, so it stayed connected to a room the
+server no longer had. No later update from `Apply`, `BroadcastUpdate`,
+another peer or the cluster relay reached it, and no other peer received its
+edits, until it reconnected for some other reason. Without `force`, such a
+peer also made `CloseRoom` remove a room that had a peer.
+
+`CloseRoom(name, true)` now closes that peer as well before it returns, so
+the client's usual reconnect takes it to a live room. `CloseRoom(name, false)`
+now returns `ErrRoomHasPeers` in that case and leaves the room open. It does
+the same while a peer is still joining the room, or an `Apply` or `Inject` call
+is still running on it, as the idle sweeper does. A closed peer's disconnect
+handler still runs on its own goroutine, so `OnLastPeer` can fire after
+`OnUnloadDocument` for a peer `CloseRoom` closed; `OnUnloadDocument` still
+fires exactly once. No API or wire format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
