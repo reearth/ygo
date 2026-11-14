@@ -1056,7 +1056,7 @@ type Server struct {
 	// waits only for that peer's read loop, so a peer's disconnect handler,
 	// and this hook with it, can run after CloseRoom has removed the room
 	// and fired OnUnloadDocument. ctx is context.Background() — the WS
-	// request that owned the peer has already terminated by this point. (#60)
+	// request that owned the peer has already terminated by this point.
 	OnLastPeer func(ctx context.Context, room string)
 
 	// MaxUpdateBytes is the maximum size of a single V1 update that

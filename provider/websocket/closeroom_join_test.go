@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -52,18 +53,27 @@ func insertText(t *testing.T, srv *ygws.Server, text string) {
 		}))
 }
 
-// A peer can join a room while CloseRoom closes it: after CloseRoom has taken
-// the room's peer list and before it removes the room from the server's map.
-// With force, that peer must be disconnected before CloseRoom returns, like
-// every other peer of the room. Left connected, it stays on the room CloseRoom
-// removed and never receives another update. Without force, the room has a
-// peer again, so CloseRoom must leave it open and return ErrRoomHasPeers.
+// requireClosedByServer requires that the server has already closed conn: the
+// read ends with the connection, not at its deadline.
+func requireClosedByServer(t *testing.T, conn *gws.Conn, msg string) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := conn.ReadMessage()
+	require.Error(t, err)
+	var netErr net.Error
+	assert.False(t, errors.As(err, &netErr) && netErr.Timeout(), msg)
+}
+
+// The peer joins during CloseRoom's flush, after CloseRoom took the room's
+// peer list and before it removes the room from the server's map.
 func TestUnit_CloseRoom_PeerJoinsWhileClosing(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		force bool
+		name        string
+		force       bool
+		initialPeer bool
 	}{
 		{name: "force", force: true},
+		{name: "force with initial peer", force: true, initialPeer: true},
 		{name: "no force", force: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,8 +85,13 @@ func TestUnit_CloseRoom_PeerJoinsWhileClosing(t *testing.T) {
 			ts := httptest.NewServer(srv)
 			t.Cleanup(ts.Close)
 
-			// A room with no peer and an edit that is not stored yet.
+			// A room with an edit that is not stored yet.
 			insertText(t, srv, "before")
+			var initial *gws.Conn
+			if tc.initialPeer {
+				initial = dial(t, ts, "room")
+				drainHandshake(t, initial, crdt.New())
+			}
 
 			closed := make(chan error, 1)
 			go func() { closed <- srv.CloseRoom("room", tc.force) }()
@@ -112,14 +127,11 @@ func TestUnit_CloseRoom_PeerJoinsWhileClosing(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Nil(t, srv.GetDoc("room"), "CloseRoom must remove the room")
-			// CloseRoom has returned, so the server has closed the peer's
-			// connection already: the read ends with the connection, not at
-			// its deadline.
-			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-			_, _, readErr := conn.ReadMessage()
-			require.Error(t, readErr)
-			var netErr net.Error
-			assert.False(t, errors.As(readErr, &netErr) && netErr.Timeout(),
+			if initial != nil {
+				requireClosedByServer(t, initial,
+					"the peer connected before CloseRoom ran is still connected to the room CloseRoom removed")
+			}
+			requireClosedByServer(t, conn,
 				"the peer that joined while CloseRoom ran is still connected to the room CloseRoom removed")
 		})
 	}

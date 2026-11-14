@@ -15,10 +15,12 @@ peer also made `CloseRoom` remove a room that had a peer.
 
 `CloseRoom(name, true)` now closes that peer as well before it returns, so
 the client's usual reconnect takes it to a live room. `CloseRoom(name, false)`
-now returns `ErrRoomHasPeers` in that case and leaves the room open. A closed
-peer's disconnect handler still runs on its own goroutine, so `OnLastPeer` can
-fire after `OnUnloadDocument` for a peer `CloseRoom` closed; `OnUnloadDocument`
-still fires exactly once. No API or wire format changes.
+now returns `ErrRoomHasPeers` in that case and leaves the room open. It does
+the same while a peer is still joining the room, or an `Apply` or `Inject` call
+is still running on it, as the idle sweeper does. A closed peer's disconnect
+handler still runs on its own goroutine, so `OnLastPeer` can fire after
+`OnUnloadDocument` for a peer `CloseRoom` closed; `OnUnloadDocument` still
+fires exactly once. No API or wire format changes.
 
 ## v1.55.0
 

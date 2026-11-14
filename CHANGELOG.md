@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OnLastPeer` with it, may still run after `OnUnloadDocument`. Without
   `force`, `CloseRoom` removed a room that had such a peer and returned nil;
   it now returns `ErrRoomHasPeers` and leaves the room open, as its doc says.
+  It does the same while a peer is still joining the room, or an `Apply` or
+  `Inject` call is still running on it, as the idle sweeper does.
 
 ## [1.55.0] — 2026-10-31
 

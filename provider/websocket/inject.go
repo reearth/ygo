@@ -129,7 +129,8 @@ var (
 	// should treat this as non-fatal.
 	ErrRoomNotFound = errors.New("ygo/websocket: room not found")
 	// ErrRoomHasPeers is returned by CloseRoom when called with force=false
-	// on a room that still has connected peers.
+	// on a room that still has connected peers, or a join, Apply or Inject
+	// in progress.
 	ErrRoomHasPeers = errors.New("ygo/websocket: room has connected peers")
 	// ErrInvalidUpdate is returned when BroadcastUpdate cannot parse the
 	// caller-supplied update bytes as a V1 update.
@@ -478,7 +479,9 @@ func encodeBroadcastWire(update []byte) []byte {
 //
 // If peers are connected:
 //   - force=false: returns ErrRoomHasPeers without modifying state. A peer
-//     that joins while CloseRoom runs counts too.
+//     that joins while CloseRoom runs counts too, and so does a join, Apply
+//     or Inject that is still in progress when CloseRoom checks the room a
+//     last time.
 //   - force=true:  closes each peer connection and waits for its read loop
 //     to exit, then deletes the room. A peer that joins while CloseRoom runs
 //     is closed the same way before the CloseRoom call that deletes the room
@@ -589,17 +592,11 @@ func (s *Server) CloseRoom(name string, force bool) error {
 		// OnUnloadDocument; nothing more for CloseRoom to do here.
 		return nil
 	}
-	// A peer can join rm after the peer list above was taken: ServeHTTP
-	// admits a peer while s.rooms[name] is still rm, and rm stayed in
-	// s.rooms through the wait and the flush above. Such a peer is in
-	// rm.peers now. rm.peers may also still hold a peer closed above whose
-	// disconnect handler has not removed it yet. Without force, a room with a
-	// peer stays open. With force, rm leaves s.rooms here, under s.rmu, which
-	// a join holds while it checks s.rooms and adds itself: no join reaches rm
-	// after this, so the peers taken here are the last. Closing a peer closed
-	// above again is harmless.
+	// A peer may have joined, or be joining, during the wait or flush, since
+	// rm stayed in s.rooms. Without force, keep the room; with force, rm
+	// leaves s.rooms under s.rmu, so these are the last peers.
 	rm.mu.Lock()
-	if len(rm.peers) > 0 && !force {
+	if !force && (len(rm.peers) > 0 || rm.inflight > 0) {
 		rm.mu.Unlock()
 		s.rmu.Unlock()
 		return ErrRoomHasPeers
