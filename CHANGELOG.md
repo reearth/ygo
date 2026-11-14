@@ -19,8 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`reflect.DeepEqual`). The panic also escaped with the document lock held,
   because the commit built observer events unguarded when the `Transact`
   callback had returned normally, so every later call on the document blocked
-  forever. A panic there now releases the lock first, as one in the callback
-  does, and reaches the caller; no observer fires.
+  forever. Now a type whose observer event cannot be built skips only its own
+  observers: the lock is released, every other observer fires (`OnUpdate`,
+  `OnAfterTransaction`, deep, subdoc and other types' observers), and then
+  the panic reaches the caller.
 
 ## [1.55.0] — 2026-10-31
 

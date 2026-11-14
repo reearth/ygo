@@ -13,9 +13,10 @@ edit was enough to hang a server's room.
 - The delta now compares format values with `reflect.DeepEqual`, as the rest
   of the formatting code does, so a map- or slice-valued format diffs like
   any other.
-- A panic while a committed transaction's observer events are built now
-  releases the document lock before it reaches the caller, as a panic in the
-  `Transact` callback already did. No observer fires for that transaction.
+- When one type's observer event cannot be built, only that type's observers
+  are skipped. The document lock is released, every other observer fires,
+  `OnUpdate` and `OnAfterTransaction` included, and then the panic reaches
+  the caller, as a panic in the `Transact` callback already did.
 
 No API or wire format changes.
 
