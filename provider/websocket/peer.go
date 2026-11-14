@@ -108,14 +108,20 @@ func (p *peer) handleMessage(data []byte) {
 				"room", p.roomName, "err", err)
 			return
 		}
-		p.trackAwarenessClients(awBytes)
-		if err := p.room.awareness.ApplyUpdate(awBytes, p); err != nil {
+		res, err := p.applyAwareness(awBytes)
+		if err != nil {
 			// Drop invalid awareness updates; do not broadcast.
 			p.server.log().Debug("discarded unappliable awareness update",
 				"room", p.roomName, "err", err)
 			return
 		}
-		p.broadcastAwareness(awBytes)
+		if res.Refused {
+			p.server.log().Debug("refused awareness entries past a cap",
+				"room", p.roomName)
+		}
+		if out := awarenessFanout(p.room.awareness, awBytes, res); out != nil {
+			p.broadcastAwareness(out)
+		}
 
 	case msgAuth:
 		p.handleAuth(dec)
@@ -458,33 +464,83 @@ func (p *peer) sendCloseFrame() {
 	_ = p.conn.Close()
 }
 
-// trackAwarenessClients records which awareness clientIDs this peer owns
-// so they can be removed when the peer disconnects.
-func (p *peer) trackAwarenessClients(payload []byte) {
-	dec := encoding.NewDecoder(payload)
-	n, err := dec.ReadVarUint()
-	if err != nil {
-		return
+// applyAwareness applies an awareness frame from this peer, recording which
+// client IDs it owns so they can be removed when it disconnects. Each entry is
+// judged against Server.MaxAwarenessClientsPerConn as the room applies it,
+// under the awareness lock, so the verdict uses the outcome the entry really
+// has. An entry asserting state for a client that is not live, on behalf of a
+// connection that does not already own it, is an introduction: it takes a
+// slot, and is refused when none is free. A client that stops being live
+// releases its slot.
+func (p *peer) applyAwareness(payload []byte) (awareness.ApplyResult, error) {
+	limit := p.server.maxAwarenessClientsPerConn()
+	localID := p.room.awareness.ClientID()
+	pruned := false
+	admit := func(e awareness.AdmitEntry, isLive func(uint64) bool) bool {
+		p.cidMu.Lock()
+		defer p.cidMu.Unlock()
+		_, owned := p.clientIDs[e.ClientID]
+		if limit < 0 {
+			// Gate disabled: track every ID applied, up to the ceiling that
+			// bounds the removal slice handleDisconnect builds.
+			if !owned && len(p.clientIDs) < maxAwarenessClientsPerPeer {
+				p.clientIDs[e.ClientID] = struct{}{}
+			}
+			return true
+		}
+		switch {
+		case !e.Live:
+			delete(p.clientIDs, e.ClientID)
+		case e.ClientID == localID:
+			// The room's own client cannot be removed from the wire, so a
+			// peer claiming it would leave presence nobody can retire.
+			return false
+		case e.WasLive || owned:
+			// Updating a live client, or re-asserting one this connection
+			// already answers for, introduces nothing.
+		default:
+			if len(p.clientIDs) >= limit && !pruned {
+				// Owned clients can stop being live without this connection's
+				// say (expiry, another peer's null); drop those before refusing.
+				// Within one frame only its own entries change liveness, and
+				// they release their slots above, so once per frame suffices.
+				pruned = true
+				for id := range p.clientIDs {
+					if !isLive(id) {
+						delete(p.clientIDs, id)
+					}
+				}
+			}
+			if len(p.clientIDs) >= limit {
+				return false
+			}
+			p.clientIDs[e.ClientID] = struct{}{}
+		}
+		return true
 	}
-	p.cidMu.Lock()
-	defer p.cidMu.Unlock()
-	for i := uint64(0); i < n; i++ {
-		clientID, err := dec.ReadVarUint()
-		if err != nil {
-			return
-		}
-		if _, err = dec.ReadVarUint(); err != nil { // clock
-			return
-		}
-		if _, err = dec.ReadVarString(); err != nil { // state JSON
-			return
-		}
-		// Cap the number of clientIDs a single peer may claim to prevent OOM
-		// when handleDisconnect builds the removal slice (N-H4).
-		if len(p.clientIDs) < maxAwarenessClientsPerPeer {
-			p.clientIDs[clientID] = struct{}{}
+	return p.room.awareness.ApplyUpdateWith(payload, p, awareness.ApplyOptions{Admit: admit})
+}
+
+// awarenessFanout returns what to forward of an applied awareness frame: the
+// frame itself when the room applied it exactly as sent, otherwise the room's
+// state for only the clients it applied, so nothing the room refused or
+// dropped reaches anyone. Nil means there is nothing to forward.
+func awarenessFanout(aw *awareness.Awareness, frame []byte, res awareness.ApplyResult) []byte {
+	if !res.Refused && !res.Altered {
+		return frame
+	}
+	if len(res.Applied) == 0 {
+		return nil
+	}
+	seen := make(map[uint64]struct{}, len(res.Applied))
+	ids := make([]uint64, 0, len(res.Applied))
+	for _, id := range res.Applied {
+		if _, dup := seen[id]; !dup {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
 		}
 	}
+	return aw.EncodeUpdate(ids)
 }
 
 // handleDisconnect removes the peer from the room and broadcasts awareness
