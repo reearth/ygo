@@ -271,11 +271,13 @@ func (txt *YText) computeDelta(txn *Transaction) []Delta {
 // attrDiff returns the attribute changes needed to go from old to current.
 // Keys present in current with a different value use the new value.
 // Keys present in old but absent from current map to nil (removal signal).
-// Returns nil when the two maps are equal.
+// Returns nil when the two maps are equal. Values compare with attrEqual: a
+// format value can be a map or a slice (a link mark's attributes), which !=
+// cannot compare without panicking.
 func attrDiff(current, old Attributes) Attributes {
 	var diff Attributes
 	for k, v := range current {
-		if oldV, exists := old[k]; !exists || oldV != v {
+		if oldV, exists := old[k]; !exists || !attrEqual(oldV, v) {
 			if diff == nil {
 				diff = make(Attributes)
 			}

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-11-14
+
+### Fixed
+
+- **`crdt`: an observed `YText` whose format value is a map no longer panics
+  and locks its document for good.** A `YText.Observe` observer makes the
+  commit build a delta, and `attrDiff` compared format values with `!=`, so a
+  format whose value is a map or a slice (a link mark's attributes, as
+  y-prosemirror and Quill write them) panicked with "comparing uncomparable
+  type map[string]interface {}" on the next local or remote edit of that text.
+  It now compares them as the rest of the formatting code does
+  (`reflect.DeepEqual`). The panic also escaped with the document lock held,
+  because the commit built observer events unguarded when the `Transact`
+  callback had returned normally, so every later call on the document blocked
+  forever. Now a type whose observer event cannot be built skips only its own
+  observers: the lock is released, every other observer fires (`OnUpdate`,
+  `OnAfterTransaction`, deep, subdoc and other types' observers), and then
+  the panic reaches the caller.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

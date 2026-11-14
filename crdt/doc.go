@@ -474,7 +474,9 @@ func (d *Doc) GetText(name string) *YText {
 // methods that acquire d.mu, which would deadlock under the lock.
 //
 // Returns nil only if there is nothing to fire (no observers of any kind).
-func buildPhase2(d *Doc, txn *Transaction) func() {
+// A type whose prepareFire panics is skipped, and that panic is returned so
+// the caller can re-raise it once the other observers have fired.
+func buildPhase2(d *Doc, txn *Transaction) (phase2 func(), panicked any) {
 	// Encode the incremental update and snapshot observer slices while still
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
@@ -489,7 +491,11 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 	fireFns := make([]func(), 0, len(txn.changed))
 	for t, keys := range txn.changed {
 		if t.owner != nil {
-			if fn := t.owner.prepareFire(txn, keys); fn != nil {
+			fn, p := prepareFireRecovered(t.owner, txn, keys)
+			if p != nil && panicked == nil {
+				panicked = p
+			}
+			if fn != nil {
 				fireFns = append(fireFns, fn)
 			}
 		}
@@ -559,7 +565,7 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 
 	if len(fireFns) == 0 && len(deepSnap) == 0 && len(onUpdateSnap) == 0 &&
 		len(onAfterTxnSnap) == 0 && (!hasSubdocs || len(onSubdocsSnap) == 0) {
-		return nil
+		return nil, panicked
 	}
 
 	return func() {
@@ -585,7 +591,14 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 				fn(subdocsEv)
 			}
 		}
-	}
+	}, panicked
+}
+
+// prepareFireRecovered returns t's fire function, or the panic its
+// prepareFire raised, so that one type's failure skips only its own observers.
+func prepareFireRecovered(t sharedType, txn *Transaction, keys map[string]struct{}) (fn func(), panicked any) {
+	defer func() { panicked = recover() }()
+	return t.prepareFire(txn, keys), nil
 }
 
 // transactInternal is the shared transaction entry point that Transact,
@@ -637,15 +650,18 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			}()
 		}
 
+		// A panic while the events are built must not escape with d.mu held,
+		// so it is re-raised only after the other observers have fired.
 		var phase2 func()
-		if r != nil {
-			func() {
-				defer func() { _ = recover() }()
-				phase2 = buildPhase2(d, txn)
+		var buildPanic any
+		func() {
+			defer func() {
+				if p := recover(); p != nil {
+					buildPanic = p
+				}
 			}()
-		} else {
-			phase2 = buildPhase2(d, txn)
-		}
+			phase2, buildPanic = buildPhase2(d, txn)
+		}()
 
 		// Yjs cleans up the format markers a remote change left redundant
 		// after the change's observers, in a follow-up local transaction,
@@ -697,6 +713,9 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 
 		if r != nil {
 			panic(r)
+		}
+		if buildPanic != nil {
+			panic(buildPanic)
 		}
 	}()
 
@@ -772,6 +791,10 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 //   - If fn panics and an observer callback also panics during the partial
 //     firing, the observer's panic reaches the caller and the original
 //     fn panic value is lost.
+//   - If a type's observer event cannot be built (its event preparation
+//     panics under the lock), d.mu is released too and only that type's
+//     observers are skipped. Every other observer fires, and then that
+//     panic reaches the caller, unless fn panicked too: then fn's does.
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {
 	_ = d.transactInternal(context.Background(), func(t *Transaction) error {
 		fn(t)

@@ -105,7 +105,11 @@ func (d *Doc) formattingCleanupLocked(remote *Transaction) (phase2 func(), panic
 		if panicked != nil {
 			defer func() { _ = recover() }()
 		}
-		phase2 = buildPhase2(d, txn)
+		var buildPanic any
+		phase2, buildPanic = buildPhase2(d, txn)
+		if panicked == nil {
+			panicked = buildPanic
+		}
 	}()
 	if d.gc && d.undoManagerCount == 0 {
 		gcTxnDeleteSet(d, txn)
