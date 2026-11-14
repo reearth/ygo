@@ -25,8 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each update's `Update` and `Parked` holds the document as it stood after
   each commit, what it holds parked included. A remote update's format cleanup is a commit of its own
   and is logged like one. `Drain`, `Pending`, `Reset` (start again from a
-  fresh base) and `Close` complete it. Without an open log nothing changes: a
-  commit encodes its update only for OnUpdate observers, as before.
+  fresh base) and `Close` complete it, and `Destroy` closes every open log.
+  Neither an observer nor a reader may modify a logged `Update`. Without an
+  open log nothing changes: a commit encodes its update only for OnUpdate
+  observers, as before.
 
 ## [1.54.0] — 2026-10-22
 

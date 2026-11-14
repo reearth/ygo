@@ -16,7 +16,8 @@ first, or whether a later observer has already caught its copy up.
 and origin while the document lock is still held. An observer that calls
 `Drain` therefore finds its own transaction's update, after every update
 committed before it, whatever order the observers run in. `Update` is the
-very slice its `OnUpdate` observers are handed. `Parked` is a V1 update of
+very slice its `OnUpdate` observers are handed, so neither they nor a reader
+may modify it. `Parked` is a V1 update of
 what the transaction parked, nil when it parked nothing: structs and
 deletions that wait for something the document lacks, which `OnUpdate` leaves
 out, as Yjs does. The first transaction to commit after the log opens also
@@ -29,6 +30,7 @@ the document does. The format cleanup a remote update can trigger is a commit
 of its own and is logged like one. `Pending` counts what no `Drain` has
 taken, `Reset` hands that over and starts again from a fresh base (for a
 reader whose copy failed to apply an update), and `Close` stops logging.
+`Destroy` closes every open log.
 
 A log keeps everything until it is drained, so drain it (from an `OnUpdate`
 observer, typically) or close it.

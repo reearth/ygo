@@ -1044,13 +1044,17 @@ func (d *Doc) PendingStats() PendingStats {
 	return stats
 }
 
-// Destroy detaches all observers and clears internal state, releasing
-// references held by the document. After Destroy the document must not be used.
+// Destroy detaches all observers, closes the open update logs and clears
+// internal state, releasing references held by the document. After Destroy
+// the document must not be used.
 func (d *Doc) Destroy() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onUpdate = nil
 	d.onAfterTxn = nil
+	for _, l := range d.updateLogs {
+		l.Close()
+	}
 	d.updateLogs = nil
 	d.share = make(map[string]sharedType)
 	d.store = newStructStore()

@@ -10,11 +10,12 @@ import (
 // origin.
 //
 // Update is the V1 update the transaction's OnUpdate observers are handed,
-// the very slice. Like Yjs's update event, it leaves out structs and
-// deletions the transaction parked because they wait for something the
-// document lacks. Parked is a V1 update of those, nil when the transaction
-// parked nothing. A reader that keeps a copy of the document applies Update
-// and then Parked; one that only follows what integrated reads Update alone.
+// the very slice, so neither an observer nor a reader may modify it. Like
+// Yjs's update event, it leaves out structs and deletions the transaction
+// parked because they wait for something the document lacks. Parked is a V1
+// update of those, nil when the transaction parked nothing. A reader that
+// keeps a copy of the document applies Update and then Parked; one that only
+// follows what integrated reads Update alone.
 type LoggedUpdate struct {
 	Update []byte
 	Parked []byte

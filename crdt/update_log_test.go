@@ -308,6 +308,24 @@ func TestUnit_UpdateLog_Reset(t *testing.T) {
 	assert.Equal(t, "abcdef", replay(t, base, updates).GetText("t").ToString())
 }
 
+// Destroy closes the document's open logs: they hand over nothing, and Reset
+// asks for no base, which the destroyed document would never record.
+func TestUnit_UpdateLog_DestroyClosesOpenLogs(t *testing.T) {
+	doc := New(WithClientID(1))
+	txt := doc.GetText("t")
+	log := doc.OpenUpdateLog()
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "a", nil) })
+	require.Equal(t, 1, log.Pending())
+
+	doc.Destroy()
+	assert.Zero(t, log.Pending())
+	base, updates := log.Drain()
+	assert.Nil(t, base)
+	assert.Empty(t, updates)
+	assert.Empty(t, log.Reset())
+	assert.False(t, log.needsBase(), "Reset on a destroyed document's log waits for a base")
+}
+
 // Commits that run concurrently with Reset each land once: in an update
 // Reset or Drain hands over before the Reset, or after the fresh base it
 // asks for. A base recorded by a commit that raced other writers, and the
