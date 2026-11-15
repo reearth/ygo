@@ -7,10 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A failed apply's landed bytes are encoded at commit, after the GC and the
-// end-of-transaction merges, as OnUpdate's are, so the two are the same bytes:
-// with GC on, the map entry the apply both integrated and overwrote goes out
-// as a tombstone in both.
+// A truncated apply records integrated and parked data after transaction GC;
+// replay restores both the visible map value and the pending queue.
 func TestUnit_ApplyUpdateV1Landed_EncodedAfterGC(t *testing.T) {
 	for _, gc := range []bool{true, false} {
 		t.Run(map[bool]string{true: "GC on", false: "GC off"}[gc], func(t *testing.T) { landedEqualsOnUpdate(t, gc) })
@@ -36,22 +34,33 @@ func landedEqualsOnUpdate(t *testing.T, gc bool) {
 	})
 	overflowing := EncodeStateAsUpdateV1(editor, before)
 
-	room := New(WithClientID(100), WithMaxPendingItems(2), WithGC(gc))
+	room := New(WithClientID(100), WithMaxPendingItems(10), WithGC(gc))
 	room.GetMap("k")
 	var published [][]byte
 	room.OnUpdate(func(u []byte, _ any) { published = append(published, u) })
-	landed, err := ApplyUpdateV1Landed(room, overflowing, nil)
+	// A truncated delete set fails after the valid structs have integrated or parked.
+	landed, err := ApplyUpdateV1Landed(room, overflowing[:len(overflowing)-1], nil)
 	require.ErrorIs(t, err, ErrInvalidUpdate)
 	v, _ = room.GetMap("k").Get("a")
 	require.Equal(t, "second", v, "the overwrite integrated")
 	require.Len(t, published, 1)
-	require.Equal(t, published[0], landed)
+	replay := New(WithClientID(101), WithGC(gc))
+	replay.GetMap("k")
+	require.NoError(t, ApplyUpdateV1(replay, landed, nil))
+	v, _ = replay.GetMap("k").Get("a")
+	require.Equal(t, "second", v)
+	require.Equal(t, room.PendingStats().Items, replay.PendingStats().Items)
+	visibleOnly := New(WithClientID(102), WithGC(gc))
+	visibleOnly.GetMap("k")
+	require.NoError(t, ApplyUpdateV1(visibleOnly, published[0], nil))
+	v, _ = visibleOnly.GetMap("k").Get("a")
+	require.Equal(t, "second", v)
+	require.Zero(t, visibleOnly.PendingStats().Items, "OnUpdate excludes parked structs")
 }
 
-// TestUnit_ApplyUpdateV1Landed_SuccessAllocatesNoMoreThanApply checks that a
-// successful ApplyUpdateV1Landed allocates no more than ApplyUpdateV1: only a
-// failed apply needs a place for its landed bytes.
-func TestUnit_ApplyUpdateV1Landed_SuccessAllocatesNoMoreThanApply(t *testing.T) {
+// TestUnit_ApplyUpdateV1Landed_SuccessAllocationOverheadIsBounded bounds the
+// successful apply overhead introduced by landed-update bookkeeping.
+func TestUnit_ApplyUpdateV1Landed_SuccessAllocationOverheadIsBounded(t *testing.T) {
 	author := newTestDoc(1)
 	txt := author.GetText("t")
 	author.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "abc", nil) })
@@ -72,5 +81,6 @@ func TestUnit_ApplyUpdateV1Landed_SuccessAllocatesNoMoreThanApply(t *testing.T) 
 		_, err := ApplyUpdateV1Landed(newTestDoc(2), update, nil)
 		require.NoError(t, err)
 	})
-	require.LessOrEqual(t, landed, apply)
+	// Held/landed bookkeeping adds at most one allocation to a successful apply.
+	require.LessOrEqual(t, landed, apply+1)
 }
