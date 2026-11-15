@@ -163,6 +163,8 @@ func TestInteg_PersistedRoom_PartlyAppliedUpdateRelaysAndStoresWhatLanded(t *tes
 	watcher := hpDial(t, ts, "room", false, watcherDoc)
 	room := srv.GetDoc("room")
 	require.NotNil(t, room)
+	var userUpdates atomic.Int32
+	room.OnUpdate(func([]byte, any) { userUpdates.Add(1) })
 
 	txt := editorDoc.GetText("t")
 	hpSend(t, editor, "room", tagSync, ygsync.EncodeUpdate(textUpdate(editorDoc, strings.Repeat("x", 200))))
@@ -179,6 +181,7 @@ func TestInteg_PersistedRoom_PartlyAppliedUpdateRelaysAndStoresWhatLanded(t *tes
 		require.NoError(t, crdt.ApplyUpdateV1(watcherDoc, u, nil))
 	}
 	require.Equal(t, 40, room.PendingStats().Items)
+	assert.Equal(t, int32(2), userUpdates.Load(), "parking alone does not emit a Yjs update event")
 	require.Eventually(t, func() bool { return len(adapter.stored()) >= 3 }, 5*time.Second, 5*time.Millisecond)
 	storedBefore := len(adapter.stored())
 
@@ -196,8 +199,6 @@ func TestInteg_PersistedRoom_PartlyAppliedUpdateRelaysAndStoresWhatLanded(t *tes
 			nested.Set(txn, "e"+strconv.Itoa(i), i)
 		}
 	})
-	held, err := crdt.ContentIDsFromUpdateV1(crdt.EncodeStateAsUpdateV1(room, nil))
-	require.NoError(t, err)
 	cut := crdt.EncodeStateAsUpdateV1(editorDoc, before)
 	hpSend(t, editor, "room", tagSync, ygsync.EncodeUpdate(cut[:len(cut)-1]))
 	require.Equal(t, []uint64{0}, syncStatuses(t, editor, "room"), "the sender is told the update was not applied")
@@ -221,12 +222,27 @@ func TestInteg_PersistedRoom_PartlyAppliedUpdateRelaysAndStoresWhatLanded(t *tes
 	storedIDs, err := crdt.ContentIDsFromUpdateV1(stored[len(stored)-1])
 	require.NoError(t, err)
 	assert.Equal(t, ids.Inserts.Clients(), storedIDs.Inserts.Clients(), "the room stores the editor's structs")
-	assert.Equal(t, []crdt.IDRange{{Clock: 200, Len: 3}}, storedIDs.Inserts.Ranges(7), `the room stores "abc", what its observers are handed`)
-	assert.Equal(t, held.Deletes.Clients(), storedIDs.Deletes.Clients(), "the room stores no deletion it did not hold")
-	assert.Equal(t, held.Deletes.Ranges(7), storedIDs.Deletes.Ranges(7), "the room stores no deletion it did not hold")
+	assert.Equal(t, []crdt.IDRange{{Clock: 200, Len: 8}}, storedIDs.Inserts.Ranges(7), "the stored update includes integrated and parked structs")
+	assert.Empty(t, storedIDs.Deletes.Clients(), "the stored update excludes unrelated historical deletions")
 	replay := crdt.New()
 	for _, u := range stored {
 		require.NoError(t, crdt.ApplyUpdateV1(replay, u, nil))
 	}
 	assert.Equal(t, room.GetText("t").ToString(), replay.GetText("t").ToString(), "the stored updates rebuild the room's text")
+	assert.Equal(t, room.PendingStats().Items, replay.PendingStats().Items, "replay also restores parked updates")
+	// A dependency received after restart must release the five recovered edits.
+	require.NoError(t, crdt.ApplyUpdateV1(replay, crdt.EncodeStateAsUpdateV1(author, nil), nil))
+	restored, ok := replay.GetMap("m").Get("nested")
+	require.True(t, ok)
+	restoredMap, ok := restored.(*crdt.YMap)
+	require.True(t, ok)
+	for i := range 5 {
+		_, found := restoredMap.Get("e" + strconv.Itoa(i))
+		assert.True(t, found, "recovered parked edit %d integrates", i)
+	}
+	for i := range 40 {
+		_, found := restoredMap.Get("k" + strconv.Itoa(i))
+		assert.True(t, found, "earlier parked edit %d integrates", i)
+	}
+	assert.Zero(t, replay.PendingStats().Items, "the dependency resolves all parked edits")
 }
