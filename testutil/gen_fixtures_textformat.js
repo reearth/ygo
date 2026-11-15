@@ -140,6 +140,26 @@ const singles = [
 	single('delta_clears_two_keys_effect_order', [{ k: 'ins', i: 0, s: 'hello', a: { italic: true } }, { k: 'fmt', i: 1, n: 3, a: B }, { k: 'delta', d: [{ retain: 2 }, { insert: 'x' }] }]),
 	single('format_restores_in_negation_order', [{ k: 'ins', i: 0, s: 'hello' }, { k: 'fmt', i: 0, n: 2, a: B }, { k: 'fmt', i: 1, n: 3, a: { bold: true, italic: true } }]),
 	single('delete_formatted_run', [{ k: 'ins', i: 0, s: 'ab' }, { k: 'ins', i: 1, s: 'xy', a: B }, { k: 'del', i: 1, n: 2 }, { k: 'ins', i: 1, s: 'z' }]),
+	// A local delete then deletes the markers in the gap it leaves, as Yjs's
+	// deleteText does: those a later marker of the same key overrides, and
+	// those that restate the attributes before the deleted range. Markers
+	// past the next character stay.
+	single('delete_overridden_marker', [{ k: 'ins', i: 0, s: 'abcdef' }, { k: 'ins', i: 2, s: 'x', a: { c: 'x' } }, { k: 'fmt', i: 5, n: 2, a: { c: true } }, { k: 'del', i: 3, n: 2 }]),
+	single('delete_restating_marker', [{ k: 'ins', i: 0, s: 'abcdef' }, { k: 'fmt', i: 0, n: 2, a: B }, { k: 'fmt', i: 0, n: 1, a: { italic: true } }, { k: 'fmt', i: 4, n: 2, a: B }, { k: 'del', i: 2, n: 2 }]),
+	single('delete_keeps_markers_past_gap', [{ k: 'emb', i: 0, v: { img: 1 } }, { k: 'fmt', i: 0, n: 1, a: { bold: 'x' } }, { k: 'ins', i: 1, s: 'g', a: B }, { k: 'del', i: 0, n: 1 }]),
+	// The marker that restores an object value holds the object of the marker
+	// it restores, so Yjs's === finds it restates the value before the range.
+	single('delete_restoring_object_marker', [{ k: 'ins', i: 0, s: 'abcd', a: { link: { href: 'x' } } }, { k: 'fmt', i: 2, n: 1, a: { link: null } }, { k: 'del', i: 2, n: 1 }]),
+	single('delta_delete_restoring_object_marker', [{ k: 'ins', i: 0, s: 'abcd', a: { link: { href: 'x' } } }, { k: 'fmt', i: 2, n: 1, a: { link: null } }, { k: 'delta', d: [{ retain: 2 }, { delete: 1 }] }]),
+	single('delete_restoring_empty_array_marker', [{ k: 'ins', i: 0, s: 'abcd', a: { tags: [] } }, { k: 'fmt', i: 2, n: 1, a: { tags: null } }, { k: 'del', i: 2, n: 1 }]),
+	single('delta_delete_restoring_empty_array_marker', [{ k: 'ins', i: 0, s: 'abcd', a: { tags: [] } }, { k: 'fmt', i: 2, n: 1, a: { tags: null } }, { k: 'delta', d: [{ retain: 2 }, { delete: 1 }] }]),
+	// A retain of 0 still runs formatText: it steps past null markers, so the
+	// delete's gap starts after them, and it inserts its attributes' markers.
+	single('delta_retain0_then_delete', [{ k: 'ins', i: 0, s: 'cde' }, { k: 'fmt', i: 0, n: 1, a: B }, { k: 'fmt', i: 1, n: 1, a: { bold: null } }, { k: 'fmt', i: 2, n: 1, a: B }, { k: 'delta', d: [{ retain: 1 }, { retain: 0 }, { delete: 1 }] }]),
+	single('delta_retain0_with_attributes', [{ k: 'ins', i: 0, s: 'abc' }, { k: 'delta', d: [{ retain: 1 }, { retain: 0, attributes: B }] }]),
+	single('delta_delete_formatted_run', [{ k: 'ins', i: 0, s: 'b' }, { k: 'fmt', i: 0, n: 1, a: { italic: true } }, { k: 'delta', d: [{ delete: 1 }] }]),
+	// The delta's insert sees the attributes the cleanup left at its cursor.
+	single('delta_insert_after_delete_cleanup', [{ k: 'ins', i: 0, s: 'abc' }, { k: 'fmt', i: 1, n: 1, a: { italic: true } }, { k: 'delta', d: [{ retain: 1 }, { delete: 1 }, { insert: 'z' }] }]),
 ]
 
 // A empties the text while B bolds its tail; B's markers must be cleaned

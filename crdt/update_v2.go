@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"sort"
@@ -363,12 +364,11 @@ func encodeV2Locked(doc *Doc, sv StateVector) []byte {
 	var groups []clientGroup
 	for client, items := range doc.store.clients {
 		svClock := sv.Clock(client)
-		var relevant []*Item
-		for _, item := range items {
-			if item.ID.Clock+item.Content.Len() > svClock {
-				relevant = append(relevant, item)
-			}
-		}
+		// A client's items are clock-sorted and disjoint, so the ones the peer
+		// lacks are a suffix, found by binary search as Yjs writeStructs does.
+		relevant := items[sort.Search(len(items), func(i int) bool {
+			return items[i].ID.Clock+items[i].Content.Len() > svClock
+		}):]
 		if len(relevant) > 0 {
 			groups = append(groups, clientGroup{client, relevant, svClock})
 		}
@@ -581,7 +581,7 @@ func encodeDeleteSetV2(enc *v2Encoder, ds DeleteSet) {
 		}
 	}
 	// Yjs V2 writes delete set clients in DESCENDING order.
-	sort.Slice(clients, func(i, j int) bool { return clients[i] > clients[j] })
+	slices.SortFunc(clients, func(a, b ClientID) int { return cmp.Compare(b, a) })
 
 	enc.restEnc.WriteVarUint(uint64(len(clients)))
 	for _, c := range clients {

@@ -36,7 +36,8 @@ type PersistenceAdapter interface {
 `LoadDoc` is called once when the first peer connects to a room.  The returned
 bytes are passed to `crdt.ApplyUpdateV1` to seed the in-memory document.
 
-`StoreUpdate` is called on every committed transaction via `doc.OnUpdate`.
+`StoreUpdate` is called on every committed transaction that changes the doc,
+via `doc.OnUpdate`.
 For durability the implementation should write to stable storage before
 returning; the server does not retry failed writes.
 
@@ -580,9 +581,10 @@ srv := websocket.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
 
 The mapping: `LoadDoc` → `Load().Update` (materialised head), `StoreUpdate` →
 `AppendUpdate` (the assigned `Version` is dropped). Because the provider calls
-`StoreUpdate` once per committed transaction, **every transaction becomes one
-version** — you get the full history for free. `LegacyAdapter` also implements
-the optional `StoreUpdateContext` (see below), and `NewLegacyAdapterContext`
+`StoreUpdate` once per committed transaction that changes the doc, **every
+such transaction becomes one version** — you get the full history for free.
+`LegacyAdapter` also implements the optional `StoreUpdateContext` (see
+below), and `NewLegacyAdapterContext`
 threads a shutdown context through every store call. Reach the versioned API
 (history, snapshots, prune) via `adapter.Store()` or by keeping a reference to
 the underlying store.

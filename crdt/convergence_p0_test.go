@@ -148,37 +148,37 @@ func TestP0_C2_MissingRightOriginParks(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// C-3 — a full-state encode where a lower-clientID peer wrote into a
-// higher-clientID peer's nested type must decode/apply cleanly (the child's
+// C-3 — a full-state encode where a higher-clientID peer wrote into a
+// lower-clientID peer's nested type must decode/apply cleanly (the child's
 // parent-by-ID reference must be queued, not hard-rejected).
 // ---------------------------------------------------------------------------
 
 func TestP0_C3_SelfEncodeReloads(t *testing.T) {
-	// Client 200 creates an XML element; client 100 (after syncing) sets an
-	// attribute on it. The attribute item (client 100) references the element
-	// (client 200) as its parent-by-ID. EncodeStateAsUpdate sorts groups
-	// ascending by client, so the attribute decodes before its parent.
-	d200 := New(WithClientID(200))
-	frag := d200.GetXmlFragment("f")
-	el := NewYXmlElement("div")
-	d200.Transact(func(txn *Transaction) { frag.InsertElement(txn, 0, el) })
-
+	// Client 100 creates an XML element; client 200 (after syncing) sets an
+	// attribute on it. The attribute item (client 200) references the element
+	// (client 100) as its parent-by-ID. EncodeStateAsUpdate writes groups
+	// descending by client, so the attribute decodes before its parent.
 	d100 := New(WithClientID(100))
-	if err := ApplyUpdateV1(d100, fullState(d200), nil); err != nil {
-		t.Fatalf("d100 seed: %v", err)
-	}
-	children := d100.GetXmlFragment("f").Children()
-	if len(children) != 1 {
-		t.Fatalf("d100 expected 1 child, got %d", len(children))
-	}
-	el100, ok := children[0].(*YXmlElement)
-	if !ok {
-		t.Fatalf("d100 child is not *YXmlElement: %T", children[0])
-	}
-	d100.Transact(func(txn *Transaction) { el100.SetAttribute(txn, "class", "hello") })
+	frag := d100.GetXmlFragment("f")
+	el := NewYXmlElement("div")
+	d100.Transact(func(txn *Transaction) { frag.InsertElement(txn, 0, el) })
 
-	// d100's full state contains both client groups (100 attr + 200 element).
-	full := fullState(d100)
+	d200 := New(WithClientID(200))
+	if err := ApplyUpdateV1(d200, fullState(d100), nil); err != nil {
+		t.Fatalf("d200 seed: %v", err)
+	}
+	children := d200.GetXmlFragment("f").Children()
+	if len(children) != 1 {
+		t.Fatalf("d200 expected 1 child, got %d", len(children))
+	}
+	el200, ok := children[0].(*YXmlElement)
+	if !ok {
+		t.Fatalf("d200 child is not *YXmlElement: %T", children[0])
+	}
+	d200.Transact(func(txn *Transaction) { el200.SetAttribute(txn, "class", "hello") })
+
+	// d200's full state contains both client groups (200 attr + 100 element).
+	full := fullState(d200)
 
 	fresh := New()
 	if err := ApplyUpdateV1(fresh, full, nil); err != nil {

@@ -143,7 +143,6 @@ func (ds *DeleteSet) Merge(other DeleteSet) {
 
 func (ds *DeleteSet) sortAndCompact(client ClientID) {
 	ranges := ds.clients[client]
-	// The sort allocates nothing, since a set of many clients sorts once per client.
 	slices.SortFunc(ranges, func(a, b DeleteRange) int { return cmp.Compare(a.Clock, b.Clock) })
 	compacted := ranges[:0]
 	for _, r := range ranges {

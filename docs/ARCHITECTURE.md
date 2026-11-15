@@ -129,10 +129,10 @@ Lifecycle:
 1. Collect all inserts and deletes.
 2. Squash consecutive same-client items (run-length optimisation).
 3. Fire `beforeObserverCalls`.
-4. Fire `observe()` on each changed type.
-5. Fire `observeDeep()` recursively.
+4. Fire `observe()` on each changed type, in the order the transaction first changed it.
+5. Fire `observeDeep()` on each changed type and then its ancestors, in that order.
 6. Fire `afterTransaction`.
-7. Emit the binary update event for the transport layer.
+7. Emit the binary update event for the transport layer, only for a transaction that adds or deletes something.
 
 ### Doc
 
@@ -253,7 +253,7 @@ Callbacks cross the boundary as **interfaces** (`DocObserver`, `AwarenessObserve
 
 GC is on by default and is configured at construction — `crdt.New(crdt.WithGC(false))` preserves full history for snapshots and undo/redo. There is no settable `GC` field on `Doc`.
 
-**Automatic.** With GC enabled, each transaction frees the content of the items it deleted, at commit, after observer deltas have been computed and before the document lock is released — so no goroutine ever observes a partially collected state. Auto-GC is **suspended while any `UndoManager` is registered**: undoing a deletion re-inserts a copy of the deleted item's content, which requires that content still to be present. Yjs solves this with a per-item keep flag; ygo takes the conservative position of disabling automatic collection entirely for the lifetime of the undo manager.
+**Automatic.** With GC enabled, each transaction frees the content of the items it deleted, at commit, after observer deltas have been computed and before the document lock is released — so no goroutine ever observes a partially collected state. The update `OnUpdate` receives is encoded after this collection, as in Yjs, so content that one transaction both inserts and deletes is sent as a `ContentDeleted` tombstone. Auto-GC is **suspended while any `UndoManager` is registered**: undoing a deletion re-inserts a copy of the deleted item's content, which requires that content still to be present. Yjs solves this with a per-item keep flag; ygo takes the conservative position of disabling automatic collection entirely for the lifetime of the undo manager.
 
 **Manual — tombstone reclamation.** `crdt.RunGC(doc)` is the explicit entry point, and remains available when auto-GC is suspended. It does two passes: it replaces deleted item content with lightweight `ContentDeleted` tombstones, then **merges adjacent tombstones from the same client into single nodes**, compacting the linked list so future origin lookups traverse fewer items. Both the structural position information CRDT correctness depends on and the tombstone lengths survive; only the content is discarded. `RunGC` is a no-op when GC is disabled.
 
