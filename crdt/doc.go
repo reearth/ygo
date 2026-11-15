@@ -190,6 +190,9 @@ type Doc struct {
 	// transaction origin.
 	onUpdate []updateSub
 
+	// onPersistUpdate includes newly parked data needed for durable replay.
+	onPersistUpdate []updateSub
+
 	// onAfterTxn observers fire after each committed transaction with the full
 	// Transaction, which carries beforeState, afterState, deleteSet and Local.
 	// Used by UndoManager; also available to application code that needs
@@ -565,6 +568,10 @@ func buildPhase2(d *Doc, txn *Transaction) func(update []byte) {
 	for i, s := range d.onUpdate {
 		onUpdateSnap[i] = s.fn
 	}
+	onPersistSnap := make([]func([]byte, any), len(d.onPersistUpdate))
+	for i, sub := range d.onPersistUpdate {
+		onPersistSnap[i] = sub.fn
+	}
 	onAfterTxnSnap := make([]func(*Transaction), len(d.onAfterTxn))
 	for i, s := range d.onAfterTxn {
 		onAfterTxnSnap[i] = s.fn
@@ -594,7 +601,7 @@ func buildPhase2(d *Doc, txn *Transaction) func(update []byte) {
 	}
 
 	if len(fireFns) == 0 && len(deepSnap) == 0 && len(onUpdateSnap) == 0 &&
-		len(onAfterTxnSnap) == 0 && (!hasSubdocs || len(onSubdocsSnap) == 0) {
+		len(onPersistSnap) == 0 && len(onAfterTxnSnap) == 0 && (!hasSubdocs || len(onSubdocsSnap) == 0) {
 		return nil
 	}
 
@@ -604,6 +611,9 @@ func buildPhase2(d *Doc, txn *Transaction) func(update []byte) {
 		// earlier one panics, as Yjs runs its type and deep observers.
 		if hasSubdocs {
 			defer callAll(onSubdocsSnap, func(fn func(SubdocsEvent)) { fn(subdocsEv) })
+		}
+		if txn.persistUpdate != nil {
+			defer callAll(onPersistSnap, func(fn func([]byte, any)) { fn(txn.persistUpdate, txn.Origin) })
 		}
 		if update != nil {
 			defer callAll(onUpdateSnap, func(fn func([]byte, any)) { fn(update, txn.Origin) })
@@ -654,8 +664,14 @@ func collectAndEncodeLocked(d *Doc, txn *Transaction) (update []byte) {
 	if d.gc && d.undoManagerCount == 0 {
 		gcTxnDeleteSet(d, txn)
 	}
-	if len(d.onUpdate) > 0 && txn.changesDoc() {
+	if (len(d.onUpdate) > 0 || len(d.onPersistUpdate) > 0) && txn.changesDoc() {
 		update = encodeV1Locked(d, txn.beforeState, cloneDeleteSet(txn.deleteSet))
+	}
+	if !txn.refused && len(d.onPersistUpdate) > 0 {
+		txn.persistUpdate = update
+		if p := d.store.parked; p != nil && (len(p.items) > 0 || len(p.deletes) > 0) {
+			txn.persistUpdate = encodeTxnV1Locked(txn)
+		}
 	}
 	if txn.landed != nil {
 		*txn.landed = encodeTxnV1Locked(txn)
@@ -911,6 +927,27 @@ func (d *Doc) OnUpdate(fn func(update []byte, origin any)) func() {
 	}
 }
 
+// OnPersistUpdate registers an incremental V1 observer for durable replay.
+// Unlike OnUpdate, it includes newly parked structs and delete ranges. A
+// callback only queues a write; it does not itself guarantee durability.
+func (d *Doc) OnPersistUpdate(fn func(update []byte, origin any)) func() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.subIDGen++
+	id := d.subIDGen
+	d.onPersistUpdate = append(d.onPersistUpdate, updateSub{id: id, fn: fn})
+	return func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		for i, sub := range d.onPersistUpdate {
+			if sub.id == id {
+				d.onPersistUpdate = append(d.onPersistUpdate[:i], d.onPersistUpdate[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
 // OnAfterTransaction registers a callback that fires after every committed
 // transaction, receiving the full Transaction object. This provides richer
 // change metadata than OnUpdate (beforeState, afterState, deleteSet, Local
@@ -1140,6 +1177,7 @@ func (d *Doc) Destroy() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onUpdate = nil
+	d.onPersistUpdate = nil
 	d.onAfterTxn = nil
 	d.share = make(map[string]sharedType)
 	d.store = newStructStore()

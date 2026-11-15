@@ -72,8 +72,9 @@ type Transaction struct {
 	cleanupSkipped map[*abstractType]struct{}
 	// landed, when set, receives ApplyUpdateV1Landed's update of what this
 	// failed apply integrated, encoded after the GC as OnUpdate's update is.
-	refused bool
-	landed  *[]byte
+	refused       bool
+	landed        *[]byte
+	persistUpdate []byte
 	// deletedFormats holds, per client and sorted, the clocks of the format
 	// markers this remote transaction deleted, recorded for the format
 	// cleanup before the GC.

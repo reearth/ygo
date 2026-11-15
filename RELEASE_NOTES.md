@@ -1,5 +1,9 @@
 ## v1.56.0
 
+- **Durable replay of parked updates.** `crdt.Doc.OnPersistUpdate` reports
+  newly parked structs and deletions in addition to integrated changes. The
+  WebSocket server uses it for persistence while `OnUpdate` retains Yjs event
+  semantics. Notification is not a durable-write acknowledgement.
 - **New: `crdt.ApplyUpdateV1Held`.** It applies a V1 update as
   `ApplyUpdateV1Landed` does and also reports whether the document already
   held all of it, so a peer that holds the same document needs none of it.

@@ -85,7 +85,7 @@ func (s *Server) waitStranded(ctx context.Context) {
 }
 
 // persistStranded is the durable destination for updates a room's persistence
-// worker can no longer take (#229). It is called from the doc.OnUpdate observer
+// worker can no longer take (#229). It is called from the doc.OnPersistUpdate observer
 // registered in loadRoom, on the two paths where the worker has begun retiring:
 // an update that could not be enqueued at all (passed as extra), and updates
 // that were enqueued but may have missed the worker's final drain.
@@ -113,13 +113,9 @@ func (s *Server) waitStranded(ctx context.Context) {
 // alternative — the pre-#229 behaviour — was silent data loss. Two consequences
 // worth stating rather than discovering:
 //
-//   - crdt.buildPhase2 fires OnUpdate observers in registration order and
-//     loadRoom registers persistence BEFORE the relay observers, so a stranded
-//     write delays that update's cluster fan-out for as long as the adapter
-//     takes. Bounded to room retirement, and a publish onto an already-retired
-//     lane is counted in RelayStats().Dropped rather than lost silently — but
-//     it does stretch the "no blocking I/O on the commit path" convention
-//     further than the rest of the package does.
+//   - A stranded write delays completion of the committing call for as long as
+//     the adapter takes. This stretches the "no blocking I/O on the commit
+//     path" convention further than the rest of the package does.
 //   - It writes for a room name the server may already consider gone, and can
 //     do so indefinitely if a caller retains the *crdt.Doc. See
 //     CompactableAdapter's godoc for what that means for adapters.
@@ -177,7 +173,7 @@ func (s *Server) persistStranded(r *room, name string, extra []byte) {
 // committing throughout Shutdown, and Shutdown closes shutdownCh long before it
 // closes the peer connections. So the FIRST act of every exit path is to close
 // r.persistRetire, publishing "I am leaving" before the final drain rather than
-// after it. loadRoom's doc.OnUpdate observer reads that latch and either relies
+// after it. loadRoom's doc.OnPersistUpdate observer reads that latch and either relies
 // on the final drain (its send completed while the latch was open, so the drain
 // necessarily follows it) or performs the write itself via persistStranded.
 // Without the latch, everything committed after the drain landed in an unread
@@ -233,7 +229,7 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 	go func() {
 		defer close(r.persistDone)
 
-		// retire publishes "this worker is leaving" to the doc.OnUpdate producer
+		// retire publishes "this worker is leaving" to the doc.OnPersistUpdate producer
 		// (#229). Ordering is load-bearing in two directions:
 		//
 		//   - it must run BEFORE the final drain, so a send that completed while
@@ -484,7 +480,7 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 			}
 		}
 		// exit runs the shared retire-then-drain-then-flush sequence for both
-		// exit triggers. retire() must come FIRST so the doc.OnUpdate producer
+		// exit triggers. retire() must come FIRST so the doc.OnPersistUpdate producer
 		// can never hand an update to a channel this worker has already swept
 		// for the last time (#229); the flush uses a background ctx so the last
 		// batched write survives the very signal that triggered the exit.

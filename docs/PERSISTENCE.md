@@ -36,8 +36,12 @@ type PersistenceAdapter interface {
 `LoadDoc` is called once when the first peer connects to a room.  The returned
 bytes are passed to `crdt.ApplyUpdateV1` to seed the in-memory document.
 
-`StoreUpdate` is called on every committed transaction that changes the doc,
-via `doc.OnUpdate`.
+The server subscribes to `doc.OnPersistUpdate`, which includes newly parked
+updates needed for replay as well as integrated changes. It does not change
+the Yjs-compatible `OnUpdate` event. By default the persistence worker batches
+updates with a 2-second debounce and a 10-second maximum wait; setting a
+negative `PersistCoalesceWindow` writes each update separately. A queued
+notification is not a durable-write acknowledgement.
 For durability the implementation should write to stable storage before
 returning; the server does not retry failed writes.
 

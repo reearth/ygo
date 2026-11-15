@@ -1896,7 +1896,7 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 		r.persistRetire = make(chan struct{})
 		r.flushReq = make(chan chan bool)
 		s.startPersistenceWorker(r, name)
-		r.doc.OnUpdate(func(update []byte, _ any) {
+		r.doc.OnPersistUpdate(func(update []byte, _ any) {
 			// #229 — handing the update to persistCh is only safe while the
 			// worker is still reading it. The worker publishes its retirement
 			// by closing persistRetire BEFORE its final drain, which gives this

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`crdt.Doc.OnPersistUpdate`** reports newly parked changes as well as
+  integrated changes, so persistence can replay pending updates without
+  changing Yjs-compatible `OnUpdate` events. A callback queues a write; it
+  does not acknowledge durable storage.
+
 - **`crdt.ApplyUpdateV1Held(doc, update, origin)`** applies a V1 update as
   `ApplyUpdateV1Landed` does and also reports whether the document already
   held all of it, so that the apply changed and parked nothing. It decides
