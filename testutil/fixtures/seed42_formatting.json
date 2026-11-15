@@ -1,0 +1,192 @@
+[
+  {
+    "steps": [
+      {
+        "op": "insert",
+        "peer": 0,
+        "pos": 0,
+        "text": "abcdef",
+        "attrs": {}
+      },
+      {
+        "op": "sync",
+        "peer": 0,
+        "to": 1
+      },
+      {
+        "op": "insert",
+        "peer": 1,
+        "pos": 1,
+        "n": 3,
+        "text": "yz",
+        "attrs": {
+          "italic": true
+        }
+      },
+      {
+        "op": "delete",
+        "peer": 1,
+        "pos": 3,
+        "n": 3,
+        "text": "ABC",
+        "attrs": {
+          "bold": true
+        }
+      },
+      {
+        "op": "sync",
+        "peer": 1,
+        "pos": 5,
+        "n": 2,
+        "text": "x",
+        "attrs": {
+          "italic": true
+        },
+        "to": 2
+      },
+      {
+        "op": "insert",
+        "peer": 0,
+        "pos": 5,
+        "n": 3,
+        "text": "x",
+        "attrs": {
+          "bold": true
+        }
+      },
+      {
+        "op": "sync",
+        "peer": 0,
+        "pos": 11,
+        "n": 4,
+        "text": "x",
+        "attrs": {
+          "italic": null
+        },
+        "to": 1
+      },
+      {
+        "op": "insert",
+        "peer": 0,
+        "pos": 3,
+        "n": 2,
+        "text": "ABC",
+        "attrs": {
+          "italic": true
+        }
+      },
+      {
+        "op": "insert",
+        "peer": 0,
+        "pos": 4,
+        "n": 2,
+        "text": "x",
+        "attrs": {
+          "bold": null
+        }
+      },
+      {
+        "op": "insert",
+        "peer": 0,
+        "pos": 9,
+        "n": 4,
+        "text": "ABC",
+        "attrs": {
+          "bold": true
+        }
+      },
+      {
+        "op": "sync",
+        "peer": 0,
+        "pos": 13,
+        "n": 2,
+        "text": "x",
+        "attrs": {
+          "bold": true
+        },
+        "to": 2
+      },
+      {
+        "op": "insert",
+        "peer": 2,
+        "pos": 3,
+        "n": 1,
+        "text": "ABC",
+        "attrs": {
+          "bold": null
+        }
+      },
+      {
+        "op": "sync",
+        "peer": 2,
+        "pos": 8,
+        "n": 3,
+        "text": "yz",
+        "attrs": {
+          "bold": null
+        },
+        "to": 0
+      },
+      {
+        "op": "delete",
+        "peer": 1,
+        "pos": 2,
+        "n": 3,
+        "text": "yz",
+        "attrs": {
+          "italic": true
+        }
+      },
+      {
+        "op": "format",
+        "peer": 2,
+        "pos": 11,
+        "n": 3,
+        "text": "ABC",
+        "attrs": {
+          "bold": null
+        }
+      },
+      {
+        "op": "insert",
+        "peer": 0,
+        "pos": 4,
+        "n": 1,
+        "text": "x",
+        "attrs": {
+          "bold": null
+        }
+      },
+      {
+        "op": "delete",
+        "peer": 0,
+        "pos": 1,
+        "n": 4,
+        "text": "yz",
+        "attrs": {
+          "bold": true
+        }
+      },
+      {
+        "op": "delete",
+        "peer": 0,
+        "pos": 10,
+        "n": 3,
+        "text": "x",
+        "attrs": {
+          "italic": null
+        }
+      },
+      {
+        "op": "insert",
+        "peer": 1,
+        "pos": 5,
+        "n": 3,
+        "text": "x",
+        "attrs": {
+          "italic": null
+        }
+      }
+    ]
+  }
+]
