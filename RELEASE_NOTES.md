@@ -8,11 +8,21 @@ with whatever names the connection's user, and `Server.OnPeerUpdate` receives
 it as `PeerUpdateInfo.Identity` with every update that connection sends. ygo
 never reads the value.
 
+**It identifies the sender, not the author.** A reconnecting client answers
+sync step-1 with a step-2 carrying everything it holds, items other users
+authored included, and that frame reaches the hook under the reconnecting
+connection's identity. `OnPeerUpdate` also fires only for peers on this node:
+updates relayed from other cluster nodes, and `Server.Apply`, bypass it. An
+audit log built on `Identity` alone will therefore both misattribute and miss
+edits; for per-item authorship read the client IDs in `PeerUpdateInfo.Update`,
+which are the CRDT's own and are not an authenticated identity either.
+
 `Server.OnTokenAuth` replaces the connection's whole `ConnectionConfig` when it
 accepts a token, as it already did for `ReadOnly`. A hook that returns no
-`Identity` therefore clears the one `Authorize` attached, so return the
-identity the token names. Connections accepted by `AuthFunc`, or with no auth
-hook, carry a nil `Identity`.
+`Identity` therefore clears the one `Authorize` attached, and one that returns
+only an `Identity` clears `ReadOnly` — making a read-only connection
+read-write. Return both. Connections accepted by `AuthFunc`, or with no auth
+hook, carry a nil `Identity` until an accepted token supplies one.
 
 ## v1.55.0
 

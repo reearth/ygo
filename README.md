@@ -570,7 +570,7 @@ server.Authorize = func(r *http.Request) (ygws.ConnectionConfig, bool) {
 }
 ```
 
-`ConnectionConfig.Identity` (v1.56.0) attaches whatever names the connection's user, a user ID or a session. ygo never reads it; `Server.OnPeerUpdate` receives it as `PeerUpdateInfo.Identity` with each update the connection sends, so the hook can tell who wrote what:
+`ConnectionConfig.Identity` (v1.56.0) attaches whatever names the connection's user, a user ID or a session. ygo never reads it; `Server.OnPeerUpdate` receives it as `PeerUpdateInfo.Identity` with each update that connection sends, so the hook can tell which authenticated connection a frame arrived on:
 
 ```go
 server.Authorize = func(r *http.Request) (ygws.ConnectionConfig, bool) {
@@ -585,12 +585,14 @@ server.OnPeerUpdate = func(info ygws.PeerUpdateInfo, apply func() error) error {
         return err
     }
     userID, _ := info.Identity.(string)
-    recordEdit(info.Room, userID)
+    rateLimitWrites(userID)
     return nil
 }
 ```
 
-An in-band token accepted by `Server.OnTokenAuth` replaces the connection's `ConnectionConfig` whole, its `Identity` included.
+**`Identity` names the connection that transmitted the update, not the author of the items inside it.** A reconnecting client answers sync step-1 with a step-2 carrying everything it holds, including items other users authored, and that frame reaches the hook under the reconnecting connection's identity. Treat it as "this connection sent these bytes" — for per-item authorship, read the client IDs in `info.Update`, which are the CRDT's own and are not an authenticated identity either.
+
+Two more limits worth knowing. `OnPeerUpdate` fires only for peers connected to this node: updates relayed in from other cluster nodes, and `Server.Apply`, bypass the hook and carry no identity, so what a single node records is not the whole document's history. And an in-band token accepted by `Server.OnTokenAuth` replaces the connection's `ConnectionConfig` whole — its `Identity`, and also its `ReadOnly`, which reverts to false unless the hook sets it.
 
 ### Graceful shutdown
 

@@ -806,7 +806,10 @@ type ConnectionConfig struct {
 	// connection: a user ID, a session, a claims struct. ygo never reads it;
 	// it hands it back as PeerUpdateInfo.Identity with each update the
 	// connection sends, so an OnPeerUpdate hook can tell which authenticated
-	// user wrote it. Nil (the default) attaches nothing.
+	// connection sent it. Nil (the default) attaches nothing.
+	//
+	// It identifies the sender of an update, not the author of the items in
+	// it: see PeerUpdateInfo.Identity.
 	Identity any
 }
 
@@ -1011,7 +1014,9 @@ type Server struct {
 	// When nil, tag-2 frames are silently ignored (unchanged legacy behavior).
 	// An accepted token replaces the connection's ConnectionConfig whole, as
 	// Authorize set it: its ReadOnly and its Identity, a nil Identity included,
-	// so the hook returns the identity the token names.
+	// so the hook returns the identity the token names. A hook that returns
+	// only an Identity therefore clears ReadOnly, making a read-only
+	// connection read-write; return both.
 	//
 	// OnTokenAuth complements the HTTP-boundary AuthFunc/Authorize; it does not
 	// replace them. IMPORTANT: it is NOT a document-confidentiality gate — the

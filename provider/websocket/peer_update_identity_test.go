@@ -1,10 +1,13 @@
 package websocket_test
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	gws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
@@ -172,4 +175,113 @@ func TestInteg_OnPeerUpdate_IdentityFromOnTokenAuth(t *testing.T) {
 
 		assert.Equal(t, []any{nil}, rec.identities())
 	})
+}
+
+// A denied token leaves no identity behind: the connection closes 4401 and
+// nothing it sent after the token reaches the hook, even when the hook
+// returned a populated ConnectionConfig alongside its error.
+//
+// This pins the observable behaviour, not handleAuth's assignment order:
+// the close drops all later input, so applying a denied cfg early would not
+// change what the hook sees.
+func TestInteg_OnPeerUpdate_IdentityNotSetByDeniedToken(t *testing.T) {
+	t.Parallel()
+	var rec identityRecorder
+	_, ts := hocuspocusServer(t, func(srv *ygws.Server) {
+		srv.Authorize = userByHeader
+		srv.OnTokenAuth = func(string, string) (ygws.ConnectionConfig, error) {
+			// A populated config next to an error must not be applied.
+			return ygws.ConnectionConfig{Identity: testUser{ID: "admin"}}, errors.New("denied")
+		}
+		srv.OnPeerUpdate = rec.hook
+	})
+	doc := crdt.New(crdt.WithClientID(7))
+	conn := hpDialAs(t, ts, "room", "http-user", doc)
+
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(textUpdate(doc, "before")))
+	require.Equal(t, []uint64{1}, syncStatuses(t, conn, "room"))
+
+	sendTokenAuth(t, conn, "room", "bad")
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(textUpdate(doc, "after")))
+
+	// Read to the close so the server has processed both frames.
+	var closeErr error
+	for closeErr == nil {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _, closeErr = conn.ReadMessage()
+	}
+	assert.True(t, gws.IsCloseError(closeErr, 4401), "want 4401 close, got %v", closeErr)
+	assert.Equal(t, []any{testUser{ID: "http-user"}}, rec.identities(),
+		"the update after a denied token must not reach the hook, under any identity")
+}
+
+// Updates sent concurrently by many connections in one room each reach the
+// hook under their own sender's identity, with no cross-talk. This is the
+// case that puts several read loops in one room under -race.
+func TestInteg_OnPeerUpdate_IdentityConcurrentConnections(t *testing.T) {
+	t.Parallel()
+	const (
+		conns          = 8
+		updatesPerConn = 10
+	)
+	var rec identityRecorder
+	_, ts := hocuspocusServer(t, func(srv *ygws.Server) {
+		srv.Authorize = userByHeader
+		srv.OnPeerUpdate = rec.hook
+	})
+
+	// Dial on this goroutine: the helpers assert with require.
+	type client struct {
+		conn *gws.Conn
+		doc  *crdt.Doc
+		user string
+	}
+	clients := make([]client, conns)
+	for i := range clients {
+		user := fmt.Sprintf("user-%d", i)
+		doc := crdt.New(crdt.WithClientID(crdt.ClientID(100 + i)))
+		clients[i] = client{conn: hpDialAs(t, ts, "room", user, doc), doc: doc, user: user}
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, conns)
+	for i := range clients {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c := clients[i]
+			for n := 0; n < updatesPerConn; n++ {
+				frame := encoding.EncodeBytes(func(enc *encoding.Encoder) {
+					enc.WriteVarString("room")
+					enc.WriteVarUint(tagSync)
+					enc.WriteRaw(ygsync.EncodeUpdate(textUpdate(c.doc, "x")))
+				})
+				if err := c.conn.WriteMessage(gws.BinaryMessage, frame); err != nil {
+					errs[i] = err
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		require.NoError(t, err, "connection %d", i)
+	}
+
+	// Drain each connection's answers so every update has been applied.
+	for _, c := range clients {
+		require.Len(t, syncStatuses(t, c.conn, "room"), updatesPerConn)
+	}
+
+	counts := map[string]int{}
+	for _, id := range rec.identities() {
+		user, ok := id.(testUser)
+		require.True(t, ok, "every update must carry an identity, got %#v", id)
+		counts[user.ID]++
+	}
+	want := map[string]int{}
+	for _, c := range clients {
+		want[c.user] = updatesPerConn
+	}
+	assert.Equal(t, want, counts, "each update must carry its own sender's identity")
 }

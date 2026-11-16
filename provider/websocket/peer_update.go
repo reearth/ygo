@@ -25,6 +25,12 @@ type PeerUpdateInfo struct {
 	// Identity is the ConnectionConfig.Identity of the connection that sent
 	// the update: from Server.Authorize, or from Server.OnTokenAuth once a
 	// token is accepted. Nil when neither set one.
+	//
+	// It names the connection that transmitted the update, not the author of
+	// the items inside it: a reconnecting client's SyncStep2 re-sends items
+	// other users authored under its own identity. For per-item authorship
+	// read the client IDs in Update, which are not an authenticated identity
+	// either.
 	Identity any
 }
 

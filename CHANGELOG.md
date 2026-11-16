@@ -13,12 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PeerUpdateInfo.Identity` say which authenticated user sent an update.**
   `Server.Authorize` can attach any value naming the connection's user (a user
   ID, a session); ygo never reads it and hands it to `Server.OnPeerUpdate` with
-  each update the connection sends, so an embedder can record who edited a
-  document. An in-band token accepted by `Server.OnTokenAuth` replaces the
-  connection's `ConnectionConfig` whole, as it already did for `ReadOnly`, so
-  its `Identity` replaces the one `Authorize` attached, a nil one included.
-  Connections accepted by `AuthFunc`, or with no auth hook, carry a nil
-  `Identity`.
+  each update the connection sends. It names the connection that transmitted
+  the update, not the author of the items in it: a reconnecting client's
+  `SyncStep2` re-sends items other users authored under its own identity, and
+  updates relayed from other cluster nodes or applied with `Server.Apply` never
+  reach the hook at all. An in-band token accepted by `Server.OnTokenAuth`
+  replaces the connection's `ConnectionConfig` whole, as it already did for
+  `ReadOnly`, so its `Identity` replaces the one `Authorize` attached, a nil one
+  included. Connections accepted by `AuthFunc`, or with no auth hook, carry a
+  nil `Identity` until an accepted token supplies one.
 
 ## [1.55.0] — 2026-10-31
 
