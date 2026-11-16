@@ -117,6 +117,35 @@ func WithMaxPendingItems(n int) DocOption {
 	return func(d *Doc) { d.maxPendingItems = n }
 }
 
+// WithIntegrateScanBudget bounds the items the conflict scans of one remote
+// apply (ApplyUpdate and its V1 and V2 forms) may pass, by origin, so a server
+// can bound a connected client's updates and not those it relays from another
+// node or loads from storage: budget gets the apply's origin before the apply
+// takes the document's lock, so applies on several goroutines may call it at
+// once, and zero or negative sets no bound.
+//
+// An apply that would pass the bound aborts partway with
+// ErrIntegrateScanBudget, and the drain of the parked queue that ends an
+// apply, past what the apply left of the bound, parks the rest without failing
+// the apply, for a later apply, from any sender, to try again when its drain
+// has more of its bound left than the scan that tripped had, or no bound; each
+// keeps what it integrated, or nothing on a document with
+// WithWholeOrNothingApplies.
+func WithIntegrateScanBudget(budget func(origin any) int) DocOption {
+	return func(d *Doc) { d.integrateScanBudget = budget }
+}
+
+// WithWholeOrNothingApplies, when on, rolls back before it commits a remote
+// apply that fails, by tripping the scan bound or for any other reason, so the
+// document is left as it was, no observer fires and ApplyUpdateV1Landed
+// reports nothing, while a drain of the parked queue that trips what the apply
+// left of the bound is rolled back alone and the apply stands. Such a document
+// refuses every remote update that carries a move or a subdocument, and each
+// remote apply on it allocates at least 208 bytes to record what it changes.
+func WithWholeOrNothingApplies(on bool) DocOption {
+	return func(d *Doc) { d.wholeOrNothing = on }
+}
+
 // updateSub pairs a unique subscription ID with its callback so that
 // unsubscribe closures can find and remove the right entry even when
 // callbacks are removed out-of-order.
@@ -153,11 +182,17 @@ type Doc struct {
 	guid            string // guid identifies this document (for subdocument embedding). Defaults to a random uuidv4 (see New) unless set with WithGUID.
 	shouldLoad      bool
 	autoLoad        bool
+	wholeOrNothing  bool // see WithWholeOrNothingApplies
 	collectionID    string
 	item            *Item // set on integrate when this Doc is embedded as a subdocument (#63)
 	subdocs         map[string]*Doc
 	onSubdocs       []subdocsSub
 	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
+	// integrateScanBudget is the bound of WithIntegrateScanBudget, or nil.
+	integrateScanBudget func(origin any) int
+	// applying is the journal of the remote apply in progress on a document
+	// with whole-or-nothing applies, or nil.
+	applying *applyJournal
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -256,6 +291,15 @@ func (d *Doc) maxPendingItemsLimit() int {
 	return d.maxPendingItems
 }
 
+// scanBudget is the bound WithIntegrateScanBudget sets for a remote apply with
+// origin, or 0 for none.
+func (d *Doc) scanBudget(origin any) int {
+	if d.integrateScanBudget == nil {
+		return 0
+	}
+	return d.integrateScanBudget(origin)
+}
+
 // uuidV4 returns a random RFC-4122 v4 UUID string. Used as the default document
 // guid so every Doc has a stable unique id for subdocument embedding (Yjs
 // parity: Yjs defaults guid to uuidv4()). No external dependency.
@@ -328,6 +372,9 @@ func (d *Doc) getOrCreateType(name string) *abstractType {
 	r.owner = r
 	r.name = name
 	d.share[name] = r
+	if d.applying != nil {
+		d.applying.named = append(d.applying.named, name)
+	}
 	return &r.abstractType
 }
 
@@ -475,6 +522,10 @@ func (d *Doc) GetText(name string) *YText {
 //
 // Returns nil only if there is nothing to fire (no observers of any kind).
 func buildPhase2(d *Doc, txn *Transaction) func() {
+	// A rolled-back apply left the document as it was, so there is nothing to fire.
+	if txn.rolledBack {
+		return nil
+	}
 	// Encode the incremental update and snapshot observer slices while still
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
@@ -701,6 +752,8 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 	}()
 
 	retErr = fn(txn)
+	// An observer that keeps the *Transaction must not keep the scans' marks.
+	txn.scanMarks = nil
 
 	rearbitrateMoves(txn)
 	txn.afterState = d.store.StateVector()

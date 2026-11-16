@@ -36,6 +36,20 @@ const (
 // ErrInvalidUpdate is returned when a binary update cannot be decoded.
 var ErrInvalidUpdate = errors.New("crdt: invalid update")
 
+// ErrIntegrateScanBudget, which wraps ErrInvalidUpdate as the pending cap's
+// error does, is returned by a remote apply whose conflict scans would pass the
+// bound WithIntegrateScanBudget set for its origin. The apply aborted partway
+// and the document keeps what it integrated, which ApplyUpdateV1Landed reports,
+// and the same update sent again carries on from there until an item whose
+// scan alone passes the bound, where each send from then on stops with nothing
+// landed; a document with WithWholeOrNothingApplies keeps nothing of the apply.
+var ErrIntegrateScanBudget = fmt.Errorf("%w: its conflict scans pass the document's bound", ErrInvalidUpdate)
+
+// integrateScanBudgetExceeded is the panic Item.integrate raises when a
+// bounded apply's scans reach the bound. left is what the bound left the scan
+// that tripped when it began: the item needs more than that.
+type integrateScanBudgetExceeded struct{ left uint32 }
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 // EncodeStateAsUpdateV1 encodes the part of doc newer than sv as a V1 binary
@@ -51,9 +65,11 @@ func EncodeStateAsUpdateV1(doc *Doc, sv StateVector) []byte {
 // follow it, once its observers have fired, to clean up the format markers it
 // left redundant, as in Yjs, with its own update and observer callbacks.
 func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
+	bound := doc.scanBudget(origin)
 	var applyErr error
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
+		txn.boundScans(bound)
 		applyErr = applyV1Txn(txn, update)
 	}, origin)
 	return applyErr
@@ -61,14 +77,17 @@ func ApplyUpdateV1(doc *Doc, update []byte, origin any) error {
 
 // ApplyUpdateV1Landed is ApplyUpdateV1 for a caller that must forward what
 // a failed apply left behind. ApplyUpdateV1 integrates an update item by item,
-// so one it rejects (an update that overflows the pending cap, say) can leave
-// part of itself in doc. When the apply fails, landed is a V1 update of exactly
-// what this call integrated: the structs it added to doc's store and the
-// deletions it made, not structs still parked, nor the rest of the document.
-// landed is nil when the apply succeeds or when nothing integrated.
+// so one it rejects (an update that overflows the pending cap or passes the
+// scan bound, say) can leave part of itself in doc. When the apply fails,
+// landed is a V1 update of exactly what this call integrated: the structs it
+// added to doc's store and the deletions it made, not structs still parked,
+// nor the rest of the document. landed is nil when the apply succeeds or when
+// nothing integrated, as on a document with WithWholeOrNothingApplies.
 func ApplyUpdateV1Landed(doc *Doc, update []byte, origin any) (landed []byte, err error) {
+	bound := doc.scanBudget(origin)
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
+		txn.boundScans(bound)
 		if err = applyV1Txn(txn, update); err != nil {
 			landed = encodeTxnV1Locked(txn)
 		}
@@ -143,9 +162,11 @@ func withParked(doc *Doc, sv StateVector, state []byte,
 // follow it, once its observers have fired, to clean up the format markers it
 // left redundant, as in Yjs, with its own update and observer callbacks.
 func ApplyUpdateV2(doc *Doc, update []byte, origin any) error {
+	bound := doc.scanBudget(origin)
 	var applyErr error
 	doc.Transact(func(txn *Transaction) {
 		txn.Local = false // Yjs readUpdate: transact(..., local=false)
+		txn.boundScans(bound)
 		applyErr = applyV2Txn(txn, update)
 	}, origin)
 	return applyErr
@@ -551,14 +572,16 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	// a split; without recovery the server would crash instead of returning an error.
 	defer func() {
 		if r := recover(); r != nil {
-			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+			retErr = recoveredApplyErr(r)
 		}
+		endRemoteApply(txn, retErr != nil)
 	}()
 
 	dec := encoding.NewDecoder(update)
 
 	// Snapshot state vector before applying anything (used for skip/offset logic).
 	sv := txn.doc.store.StateVector()
+	beginRemoteApply(txn, sv)
 
 	numClients, err := dec.ReadVarUint()
 	if err != nil {
@@ -587,10 +610,10 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 	}
 	unresolvableDs := ds.applyToPartial(txn)
 	if len(unresolvableDs.clients) > 0 {
-		txn.doc.store.pendingDs.Merge(unresolvableDs)
+		parkDeletes(txn, unresolvableDs)
 	}
 
-	drainPending(txn)
+	drainParked(txn, drainPending)
 
 	return nil
 }
@@ -803,7 +826,7 @@ func drainPending(txn *Transaction) {
 	// Matches yrs' apply_update retry gate and Yjs JS's readUpdateV2
 	// recursion, but executed inline so everything integrated during
 	// this call surfaces in a single OnUpdate notification.
-	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
+	for txn.drainable() {
 		items := txn.doc.store.pending.items
 		txn.doc.store.pending = nil
 
@@ -859,6 +882,86 @@ func unresolvedPending(store *StructStore, items []*Item, done []bool) ([]*Item,
 		}
 	}
 	return remaining, missing
+}
+
+// drainable reports whether txn's drain should try the parked queue: a clock
+// the queue waits on has advanced, or the bound tripped in the drain that last
+// tried it and txn's drain has more of the bound left than the scan that
+// tripped had, or no bound. A drain with no more left would trip at the same
+// item again, so an item whose scan alone passes the bound costs the applies
+// after it nothing until one with a larger bound, or none, tries it.
+func (txn *Transaction) drainable() bool {
+	p := txn.doc.store.pending
+	if p == nil {
+		return false
+	}
+	if p.tripped && (!txn.scanBounded || txn.scanLeft > p.scanLeft) {
+		return true
+	}
+	return txn.doc.store.retryable(p.missing)
+}
+
+// drainParked runs drain, the drain of the parked queue that ends an apply,
+// and raises again every panic but the bound's, after rolling the drain back
+// on a document with whole-or-nothing applies. When the drain's scans reach
+// what the apply left of the bound, the drain keeps what it integrated, or on
+// such a document is rolled back to where it began, and parks the rest again
+// without failing the apply, whose sender did not send the parked items; a
+// later apply, from any sender, tries them again (drainable).
+func drainParked(txn *Transaction, drain func(*Transaction)) {
+	s := txn.doc.store
+	j := txn.doc.applying
+	// Only a drain that tries the parked items can change them or trip the bound.
+	journaled := j != nil && txn.drainable()
+	from := txn.scanLeft
+	if journaled {
+		j.beginDrain(txn)
+	}
+	defer func() {
+		r := recover()
+		if journaled {
+			if r != nil {
+				j.takeBackDrain(txn)
+			} else {
+				j.endDrain()
+			}
+		}
+		if r == nil {
+			return
+		}
+		trip, ok := r.(integrateScanBudgetExceeded)
+		if !ok {
+			panic(r)
+		}
+		if journaled {
+			// Rolled back whole, the drain needs more than it began with.
+			trip.left = from
+		}
+		// The drain tripped the bound, so an item may wait on nothing but a
+		// drain with more of the bound left: nothing tells the parked items'
+		// sender to send them again. missing keeps what they do wait on.
+		missing := make(StateVector)
+		for _, item := range s.pending.items {
+			if client, parkedAt, future := itemFutureDep(item, s); future {
+				mergePendingMissing(missing, client, parkedAt)
+			} else if item.ID.Clock > s.NextClock(item.ID.Client) {
+				mergePendingMissing(missing, item.ID.Client, s.NextClock(item.ID.Client))
+			}
+		}
+		s.pending.missing, s.pending.tripped, s.pending.scanLeft = missing, true, trip.left
+		if len(s.pendingDs.clients) > 0 {
+			retryPendingDs(txn)
+		}
+	}()
+	drain(txn)
+}
+
+// recoveredApplyErr is the error an apply returns for a panic it recovered.
+func recoveredApplyErr(r any) error {
+	if _, ok := r.(integrateScanBudgetExceeded); ok {
+		return ErrIntegrateScanBudget
+	}
+	return fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
 }
 
 func decodeItem(dec *encoding.Decoder, doc *Doc, client ClientID, clock uint64) (*Item, error) {
@@ -1148,6 +1251,9 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentAny(vals...), nil
 
 	case wireDoc:
+		if doc.wholeOrNothing {
+			return nil, errWholeOrNothingContent
+		}
 		guidBytes, err := dec.ReadVarBytes()
 		if err != nil {
 			return nil, err
@@ -1159,6 +1265,9 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentDoc(newSubdocFromOpts(string(guidBytes), optsAny)), nil
 
 	case wireMove:
+		if doc.wholeOrNothing {
+			return nil, errWholeOrNothingContent
+		}
 		clientU, err := dec.ReadVarUint()
 		if err != nil {
 			return nil, err
@@ -1467,6 +1576,11 @@ func tryIntegrate(txn *Transaction, item *Item) bool {
 	// Fully covered ranges need no further integration.
 	if item.ID.Clock+uint64(item.Content.Len()) <= existingEnd {
 		return true
+	}
+
+	// From here a drain changes the parked item in place.
+	if j := txn.doc.applying; j != nil {
+		j.keepParked(item)
 	}
 
 	// GC-orphan path (no parent, deleted): store without integration, trimmed

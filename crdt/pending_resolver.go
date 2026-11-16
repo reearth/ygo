@@ -270,9 +270,9 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 		}
 		txn.doc.store.pending.items = append(txn.doc.store.pending.items, item)
 		if client, parkedAt, future := itemFutureDep(item, txn.doc.store); future {
-			mergePendingMissing(txn.doc.store.pending.missing, client, parkedAt)
+			mergePendingMissing(parkedMissing(txn), client, parkedAt)
 		} else {
-			mergePendingMissing(txn.doc.store.pending.missing, item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
+			mergePendingMissing(parkedMissing(txn), item.ID.Client, txn.doc.store.NextClock(item.ID.Client))
 		}
 	}
 	return nil

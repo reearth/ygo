@@ -126,32 +126,42 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 		// against). beforeOrigin tracks every item we have scanned past, so we
 		// can detect whether a later item's origin lies inside the conflict zone.
 		//
-		// Both maps are allocated here rather than unconditionally so that the
-		// common (no-conflict) case pays zero allocation cost.
-		conflicting := make(map[*Item]struct{})
-		beforeOrigin := make(map[*Item]struct{})
+		// Both sets are one map of marks that the transaction's scans share and
+		// never clear: an item is in beforeOrigin when it holds this scan's
+		// mark, and in conflicting when that mark's step is also at or past
+		// groupFrom.
+		marks := txn.scanMarkMap()
+		txn.scanSerial++
+		scan, step, groupFrom := txn.scanSerial, uint32(0), uint32(1)
 
 		// Scan right until we hit our right origin (item.Right) or the end.
+		scanFrom := txn.scanLeft
 		for o != nil && o != item.Right {
+			// A bounded apply aborts before its scans pass one item more than
+			// the bound, and before this item is linked.
+			if txn.scanBounded {
+				if txn.scanLeft == 0 {
+					// A parked item tried again resolves its neighbours again.
+					item.Left, item.Right = nil, nil
+					panic(integrateScanBudgetExceeded{left: scanFrom})
+				}
+				txn.scanLeft--
+			}
 			// Children and keyed attributes have independent conflict orders.
 			if !parentSubEqual(item.ParentSub, o.ParentSub) {
 				o = o.Right
 				continue
 			}
-			beforeOrigin[o] = struct{}{}
-			conflicting[o] = struct{}{}
+			step++
+			marks[o] = scanMark{scan: scan, step: step}
 
 			if originIDEquals(item.Origin, o.Origin) {
 				// Case 1: o has the same left origin as us — concurrent insert at
 				// the same position. Lower ClientID wins (placed to the left).
 				if o.ID.Client < item.ID.Client {
 					left = o
-					// Reuse the map instead of reallocating (Yjs does
-					// conflictingItems.clear() here). Under high same-position
-					// contention this fires O(group size) times per integrate, so
-					// a fresh make() each time made conflict-scan allocation
-					// quadratic in the conflict-group size (#54-C).
-					clear(conflicting)
+					// Yjs clears conflictingItems here; the group restarts after o.
+					groupFrom = step + 1
 				} else if originIDEquals(item.OriginRight, o.OriginRight) {
 					// Same left and right origin — truly symmetric; stop.
 					break
@@ -164,10 +174,10 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 				if oOriginItem == nil {
 					break
 				}
-				if _, inBefore := beforeOrigin[oOriginItem]; inBefore {
-					if _, inConflict := conflicting[oOriginItem]; !inConflict {
+				if mark, seen := marks[oOriginItem]; seen && mark.scan == scan {
+					if mark.step < groupFrom {
 						left = o
-						clear(conflicting) // reuse the map, not realloc (see above / Yjs parity)
+						groupFrom = step + 1
 					}
 				} else {
 					break
@@ -311,6 +321,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// the contextless cleanup walk. Plain-text types never set this flag,
 	// so their deletes skip the walk entirely (#86 final fix).
 	if _, ok := item.Content.(*ContentFormat); ok && item.Parent != nil {
+		if j := txn.doc.applying; j != nil {
+			j.keepFormatting(item.Parent)
+		}
 		item.Parent.hasFormatting = true
 		item.Parent.fmtGen++
 		item.Parent.cleanFormatting = true
@@ -374,6 +387,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 			if existing, ok := item.Parent.itemMap[key]; ok && existing != item && !existing.Deleted {
 				existing.delete(txn)
 			}
+			if j := txn.doc.applying; j != nil {
+				j.tookMapKey(item.Parent, key)
+			}
 			item.Parent.itemMap[key] = item
 		}
 	}
@@ -430,6 +446,9 @@ func (item *Item) delete(txn *Transaction) {
 
 		current.Deleted = true
 		if _, ok := current.Content.(*ContentFormat); ok && current.Parent != nil {
+			if j := txn.doc.applying; j != nil {
+				j.keepFormatting(current.Parent)
+			}
 			current.Parent.fmtGen++
 		}
 		if current.Parent != nil && current.Content.IsCountable() {

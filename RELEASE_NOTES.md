@@ -1,3 +1,70 @@
+## v1.56.0
+
+**Who is affected:** servers that apply updates from clients they do not
+control. Nothing changes unless you set one of the new options.
+
+**A bound on the conflict scans of one remote apply, set per origin.** YATA
+places an item by scanning right from its left origin. An item that names an
+early left origin and no right origin scans to the end of the list, so an
+update of a few KB can hold the document's lock for seconds.
+`crdt.WithIntegrateScanBudget(func(origin any) int)` bounds the items one
+apply's scans pass, by the origin the apply is given: a server bounds the
+origin it applies a connected client's updates with, and returns 0 for updates
+it relays from another node or loads from storage.
+
+An apply that passes the bound aborts partway and returns
+`crdt.ErrIntegrateScanBudget`, which wraps `crdt.ErrInvalidUpdate`. The
+document keeps what the apply integrated, as it does for an update that
+overflows the pending cap, and `ApplyUpdateV1Landed` returns that part for
+relay. The same update sent again carries on from there. An update with an
+item whose scan alone passes the bound integrates nothing from that item on,
+so each later send returns the error with no landed part: a resend under the
+same bound cannot progress, and the server can close the sender or apply the
+update under a larger bound. When the drain of the parked queue passes the
+bound, it keeps what it integrated and parks the rest, and the apply that
+filled the gap still succeeds. A later apply, from any sender, tries the rest
+again when its drain has more of its bound left than the scan that tripped
+had. Remote moves and subdocuments work under a bound.
+
+**Whole-or-nothing applies, as a document option.**
+`crdt.WithWholeOrNothingApplies(true)` refuses a remote apply that fails, by
+tripping the bound or for any other reason: it is rolled back before it
+commits, so where an apply without the option is not fully applied, this one
+keeps nothing. The document is left byte for byte as it was, no observer
+fires, and `ApplyUpdateV1Landed` returns nothing, so a server can tell the
+sender that none of its update was kept. A drain of the parked queue that
+trips the bound is rolled back on its own, the apply that filled the gap still
+succeeds, and a later apply tries the queue again when its drain has more of
+its bound left than that drain began with. Such a document refuses every
+remote update that carries a move or a subdocument, with
+`crdt.ErrInvalidUpdate`. Each remote apply on it allocates at least 208 bytes
+to record what it changes.
+
+**Upgrading.** No change is needed.
+
+## v1.55.1
+
+**Who is affected:** servers that apply updates from peers, where one update
+places many items among the ones a document holds.
+
+**Split runs merge back at commit in linear time.** When a transaction splits
+a run of text and nothing is inserted between the halves, the halves are
+joined again at commit. Each join copied the whole run, so an update that split
+one run n times copied it n times: 20,000 items that each split one
+40,000-character run allocated 420 MiB in one apply. The same apply now
+allocates 12 MiB. The merged items and the encoded state are as before.
+
+**An update's conflict scans share one map.** YATA places an item by scanning
+right from its left origin, and each scan built two new sets of the items it
+passed. An item that names an early left origin and no right origin scans to
+the end of the list, so an update of many such items allocated the list's size
+once per item: 2,000 of them into a 40,000-item list allocated 4,511 MiB. The
+scans of one transaction now mark the items they pass in one map, so the same
+update allocates 2.7 MiB and takes less than half the time. Placement is
+unchanged.
+
+**Upgrading.** No API change.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
