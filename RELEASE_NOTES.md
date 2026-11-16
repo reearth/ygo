@@ -1,3 +1,22 @@
+## v1.55.1
+
+**Who is affected: code that merges, diffs or converts updates, as the
+persistence adapters and the cluster relay do, and servers that encode a
+document that holds a parked item.** Everyone else sees no change.
+
+When a Yjs client deletes a nested type, its encoded state carries the type's
+content as GC structs. An edit that another client made in that type at the
+same time has its origin inside one of those GC structs. ygo's encoders
+dropped such an origin and wrote the item's parent in its place, or the root
+name `""` when the item had none. A receiver then showed content that Yjs,
+given the same updates, stores as a GC struct: `MergeUpdatesV1` of the two
+clients' updates put the edit into a root type named `""`.
+
+`MergeUpdatesV1/V2`, `DiffUpdateV1/V2`, `UpdateV1ToV2`, `UpdateV2ToV1` and
+`EncodeStateAsUpdateV1/V2` now keep every origin, as Yjs's `Item.write` does.
+A state that an earlier ygo wrote carries no such origin and loads as before.
+No API or wire format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

@@ -34,9 +34,9 @@ func pendingCursorBomb(version, m int) []byte {
 		groups[c] = []*Item{head, tail}
 	}
 	if version == 2 {
-		return encodeStructStoreV2(groups, newDeleteSet(), nil, doc.store)
+		return encodeStructStoreV2(groups, newDeleteSet(), nil)
 	}
-	return encodeStructStoreV1(groups, newDeleteSet(), nil, doc.store)
+	return encodeStructStoreV1(groups, newDeleteSet(), nil)
 }
 
 // A head in a superseded group must not count, even when its client's last
@@ -266,7 +266,7 @@ func TestUnit_PendingBudget_WireBoundsMatchReference(t *testing.T) {
 				if version == 2 {
 					encode = encodeStructStoreV2
 				}
-				update := encode(groups, newDeleteSet(), nil, source.store)
+				update := encode(groups, newDeleteSet(), nil)
 				for _, cap := range []int{0, 1, 2} {
 					b := pendingBudget{initial: initial, update: update, v2: version == 2, remaining: cap}
 					if want, got := referencePendingBudgetCheck(b, cap), b.check(cap); (want == nil) != (got == nil) {
@@ -388,9 +388,9 @@ func pendingGuardUpdate(source *Doc, groups [][]*Item, skips map[int]uint64, ver
 		enc.WriteVarUint(items[0].ID.Clock)
 		for j, item := range items {
 			if v2 == nil {
-				encodeItem(enc, item, 0, source.store)
+				encodeItem(enc, item, 0)
 			} else {
-				encodeItemV2(v2, item, 0, source.store)
+				encodeItemV2(v2, item, 0)
 			}
 			if j == 0 && skips[i] > 0 {
 				if v2 == nil {

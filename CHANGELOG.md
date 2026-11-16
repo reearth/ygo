@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.55.1] — 2026-11-14
+
+### Fixed
+
+- **`crdt`: encoders keep an origin that names a GC struct, as Yjs does.**
+  They dropped it and wrote the item's parent instead, or the root name `""`
+  when the item had none, so a receiver showed content that Yjs stores as a
+  GC struct. This affected `MergeUpdatesV1/V2`, `DiffUpdateV1/V2`,
+  `UpdateV1ToV2`, `UpdateV2ToV1`, and `EncodeStateAsUpdateV1/V2` of a document
+  that holds a parked item.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

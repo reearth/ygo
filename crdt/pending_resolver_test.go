@@ -125,7 +125,7 @@ func TestUnit_PendingResolver_ReverseCheckpoint(t *testing.T) {
 		if version == 2 {
 			encode, apply = encodeStructStoreV2, ApplyUpdateV2
 		}
-		data := encode(groups, newDeleteSet(), nil, source.store)
+		data := encode(groups, newDeleteSet(), nil)
 		source.Destroy()
 		target := New(WithMaxPendingItems(16))
 		require.NoError(t, apply(target, data, nil))
@@ -269,9 +269,9 @@ func resolverMultiStructUpdate(version, n int) []byte {
 		}
 	}
 	if version == 2 {
-		return encodeStructStoreV2(groups, newDeleteSet(), nil, source.store)
+		return encodeStructStoreV2(groups, newDeleteSet(), nil)
 	}
-	return encodeStructStoreV1(groups, newDeleteSet(), nil, source.store)
+	return encodeStructStoreV1(groups, newDeleteSet(), nil)
 }
 
 func TestUnit_PendingResolver_MultiStructCheckpoint(t *testing.T) {

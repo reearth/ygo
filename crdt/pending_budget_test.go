@@ -27,7 +27,7 @@ func pendingBudgetUpdate(version, n int, dependency string) (update, parentUpdat
 	if version == 2 {
 		encode = encodeStructStoreV2
 	}
-	parentUpdate = encode(map[ClientID][]*Item{parentClient: {container}}, newDeleteSet(), nil, doc.store)
+	parentUpdate = encode(map[ClientID][]*Item{parentClient: {container}}, newDeleteSet(), nil)
 	items := make([]*Item, n)
 	for i := range items {
 		name := fmt.Sprint(i)
@@ -51,7 +51,7 @@ func pendingBudgetUpdate(version, n int, dependency string) (update, parentUpdat
 		}
 		groups[parentClient] = []*Item{container}
 	}
-	return encode(groups, newDeleteSet(), nil, doc.store), parentUpdate
+	return encode(groups, newDeleteSet(), nil), parentUpdate
 }
 
 func TestUnit_PendingBudget_BoundsIncompleteAllocations(t *testing.T) {
@@ -146,7 +146,7 @@ func TestUnit_PendingScanner_ContentCursor(t *testing.T) {
 		if version == 2 {
 			encode = encodeStructStoreV2
 		}
-		data := encode(map[ClientID][]*Item{1: items}, newDeleteSet(), nil, doc.store)
+		data := encode(map[ClientID][]*Item{1: items}, newDeleteSet(), nil)
 		s := newPendingScanner(data, version == 2)
 		require.EqualValues(t, 1, s.uint())
 		require.EqualValues(t, len(contents)+2, s.uint())
@@ -233,7 +233,7 @@ func TestUnit_PendingBudget_SkipsDoNotSatisfyDependencies(t *testing.T) {
 			if version == 2 {
 				encode, apply = encodeStructStoreV2, ApplyUpdateV2
 			}
-			update := encode(groups, newDeleteSet(), nil, source.store)
+			update := encode(groups, newDeleteSet(), nil)
 			target := New(WithMaxPendingItems(1))
 			defer target.Destroy()
 			budget := newPendingBudget(target, target.StateVector(), update, version == 2)
@@ -295,7 +295,7 @@ func TestUnit_PendingBudget_GroupHeadsMatchFixedPoint(t *testing.T) {
 			if version == 2 {
 				encode = encodeStructStoreV2
 			}
-			update := encode(groups, newDeleteSet(), nil, source.store)
+			update := encode(groups, newDeleteSet(), nil)
 			for _, cap := range []int{0, 1, 4, 100} {
 				budget := pendingBudget{initial: initial, update: update, remaining: cap, v2: version == 2}
 				want := referencePendingBudgetCheck(budget, cap)
@@ -430,7 +430,7 @@ func pendingReverseChain(version, n int) []byte {
 		groups[client] = []*Item{{ID: ID{Client: client}, Parent: &text.abstractType, Origin: origin, Content: NewContentString("x")}}
 	}
 	if version == 2 {
-		return encodeStructStoreV2(groups, newDeleteSet(), nil, doc.store)
+		return encodeStructStoreV2(groups, newDeleteSet(), nil)
 	}
-	return encodeStructStoreV1(groups, newDeleteSet(), nil, doc.store)
+	return encodeStructStoreV1(groups, newDeleteSet(), nil)
 }

@@ -131,9 +131,8 @@ func dedupClientStructs(items []*Item) []*Item {
 // encodeStructStoreV1 encodes per-client struct slices (clock-ordered,
 // non-overlapping) plus a delete set into a V1 update. Clock gaps within a
 // client are filled with skip structs (info tag 10). sv filters out structs
-// fully below the receiver's state. store provides origin look-ups for
-// encodeItem's GC-placeholder check.
-func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateVector, store *StructStore) []byte {
+// fully below the receiver's state.
+func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateVector) []byte {
 	clients := make([]ClientID, 0, len(perClient))
 	for c, items := range perClient {
 		if len(items) > 0 {
@@ -201,7 +200,7 @@ func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 					enc.WriteVarUint(e.skip)
 					continue
 				}
-				encodeItem(enc, e.item, e.offset, store)
+				encodeItem(enc, e.item, e.offset)
 			}
 		}
 		encodeDeleteSet(enc, ds)
@@ -209,101 +208,25 @@ func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 }
 
 // buildMergeStore decodes every update into one merged set of per-client struct
-// slices (deduped/sliced, gaps preserved) and the union of their delete sets,
-// plus a StructStore holding every struct for origin look-ups during encode.
-func buildMergeStore(updates [][]byte, decode func(*Doc, []byte) (map[ClientID][]*Item, DeleteSet, error)) (map[ClientID][]*Item, DeleteSet, *StructStore, error) {
+// slices (deduped/sliced, gaps preserved) and the union of their delete sets.
+func buildMergeStore(updates [][]byte, decode func(*Doc, []byte) (map[ClientID][]*Item, DeleteSet, error)) (map[ClientID][]*Item, DeleteSet, error) {
 	scratch := New()
 	perClient := make(map[ClientID][]*Item)
 	mergedDS := newDeleteSet()
 	for _, u := range updates {
 		structs, ds, err := decode(scratch, u)
 		if err != nil {
-			return nil, DeleteSet{}, nil, err
+			return nil, DeleteSet{}, err
 		}
 		for c, items := range structs {
 			perClient[c] = append(perClient[c], items...)
 		}
 		mergedDS.Merge(ds)
 	}
-	store := &StructStore{clients: make(map[ClientID][]*Item, len(perClient))}
 	for c, items := range perClient {
-		deduped := dedupClientStructs(items)
-		perClient[c] = deduped
-		store.clients[c] = deduped
+		perClient[c] = dedupClientStructs(items)
 	}
-	resolveParents(store)
-	return perClient, mergedDS, store, nil
-}
-
-// resolveParents fills in Parent (and inherited ParentSub) for origin-inferred
-// structs whose origin item is present in the merged set. decodeItem leaves
-// these nil because the structs are never integrated, but encodeItem treats a
-// nil-Parent origin item as a GC placeholder and would clear the dependent's
-// origin — breaking e.g. a YMap key's origin chain (#125). Resolving here
-// (mirroring decodeItem's origin inheritance, against the full struct set)
-// keeps the chain intact. Structs whose origin is NOT present (a diff that
-// references prior state) keep a nil Parent and their origin on the wire, so
-// the receiver infers the parent once it has the dependency.
-func resolveParents(store *StructStore) {
-	// Follow each origin chain once. Structs on a chain that reaches no parent
-	// are marked so later walks stop there. Origin cycles are caught with
-	// Brent's algorithm, which keeps each walk linear in the chain's length.
-	var unresolved map[*Item]bool
-	var chain []*Item
-	for _, items := range store.clients {
-		for _, it := range items {
-			if it.Parent != nil {
-				continue
-			}
-			ref := parentRef(store, it)
-			if ref != nil && ref.Parent != nil {
-				inheritParent(it, ref)
-				continue
-			}
-			chain = append(chain[:0], it)
-			mark, next := it, 2
-			for ref != nil && ref.Parent == nil {
-				if ref == mark || unresolved[ref] {
-					ref = nil
-					break
-				}
-				chain = append(chain, ref)
-				if len(chain) == next {
-					mark, next = ref, 2*next
-				}
-				ref = parentRef(store, ref)
-			}
-			for i := len(chain) - 1; i >= 0; i-- {
-				if ref == nil {
-					if unresolved == nil {
-						unresolved = make(map[*Item]bool)
-					}
-					unresolved[chain[i]] = true
-					continue
-				}
-				inheritParent(chain[i], ref)
-				ref = chain[i]
-			}
-		}
-	}
-}
-
-// parentRef returns the struct whose parent it would inherit.
-func parentRef(store *StructStore, it *Item) *Item {
-	switch {
-	case it.Origin != nil:
-		return store.Find(*it.Origin)
-	case it.OriginRight != nil:
-		return store.Find(*it.OriginRight)
-	}
-	return nil
-}
-
-func inheritParent(it, ref *Item) {
-	it.Parent = ref.Parent
-	if it.ParentSub == nil {
-		it.ParentSub = ref.ParentSub
-	}
+	return perClient, mergedDS, nil
 }
 
 // MergeUpdatesV1 merges several V1 updates into one. Structs are merged at the
@@ -311,11 +234,11 @@ func inheritParent(it, ref *Item) {
 // sets are unioned — matching Yjs mergeUpdates. (Previously this applied to a
 // temp Doc and re-encoded, silently dropping parked structs; #125.)
 func MergeUpdatesV1(updates ...[]byte) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore(updates, decodeStructsV1)
+	perClient, ds, err := buildMergeStore(updates, decodeStructsV1)
 	if err != nil {
 		return nil, err
 	}
-	return encodeStructStoreV1(perClient, ds, StateVector{}, store), nil
+	return encodeStructStoreV1(perClient, ds, StateVector{}), nil
 }
 
 // DiffUpdateV1 returns the portion of update that a peer with state vector sv is
@@ -324,18 +247,18 @@ func MergeUpdatesV1(updates ...[]byte) ([]byte, error) {
 // idempotent — matching Yjs diffUpdate). (Previously this dropped parked
 // structs; #125.)
 func DiffUpdateV1(update []byte, sv StateVector) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore([][]byte{update}, decodeStructsV1)
+	perClient, ds, err := buildMergeStore([][]byte{update}, decodeStructsV1)
 	if err != nil {
 		return nil, err
 	}
-	return encodeStructStoreV1(perClient, ds, sv, store), nil
+	return encodeStructStoreV1(perClient, ds, sv), nil
 }
 
 // EncodeStateVectorFromUpdate extracts the state vector described by a V1 update
 // — the next clock per client (max struct end) — without integrating it. Useful
 // for computing what a peer is missing directly from an update. (#57)
 func EncodeStateVectorFromUpdate(update []byte) ([]byte, error) {
-	perClient, _, _, err := buildMergeStore([][]byte{update}, decodeStructsV1)
+	perClient, _, err := buildMergeStore([][]byte{update}, decodeStructsV1)
 	if err != nil {
 		return nil, err
 	}

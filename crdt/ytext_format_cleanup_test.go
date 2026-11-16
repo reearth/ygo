@@ -255,7 +255,9 @@ func TestUnit_YText_FormatCleanup_LazyRoot(t *testing.T) {
 // Parked deletions are retried clients descending, as Yjs re-reads its
 // encoded pending delete set. Here the higher client's marker deletions are
 // visited first and queue the full cleanup, which skips the contextless
-// cleanup the lower client's character deletion would otherwise run.
+// cleanup the lower client's character deletion would otherwise run. With the
+// character typed by a client above the markers' client, its deletion is
+// visited first and that contextless cleanup runs, deleting one opener.
 func TestUnit_YText_FormatCleanup_PendingDeleteOrder(t *testing.T) {
 	rec := func(d *Doc, fn func(*YText, *Transaction)) []byte {
 		sv := d.StateVector()
@@ -274,30 +276,39 @@ func TestUnit_YText_FormatCleanup_PendingDeleteOrder(t *testing.T) {
 	fb, fd := rec(peer(2), bold), rec(peer(5), bold) // duplicate openers before "a"
 	c := peer(3)
 	fc := rec(c, bold)
-	x := rec(peer(1), func(t *YText, txn *Transaction) { t.Insert(txn, 1, "x", nil) })
-	ds := newDeleteSet()
-	ds.add(ID{1, 0}, 1)
-	ds.add(ID{3, 0}, int(c.StateVector()[3]))
-	enc := encoding.NewEncoder()
-	enc.WriteVarUint(0)
-	encodeDeleteSet(enc, ds)
-	late, err := MergeUpdatesV1(fc, x)
-	require.NoError(t, err)
 
-	r := newTestDoc(9)
-	r.GetText("t")
-	cleanups := 0
-	r.OnUpdate(func(_ []byte, origin any) {
-		if origin == nil {
-			cleanups++
+	// deliver has client typist type x and delivers the updates with a parked
+	// delete set naming x and client 3's markers; it returns the cleanups and
+	// the live markers.
+	deliver := func(typist ClientID) (cleanups, live int) {
+		x := rec(peer(uint64(typist)), func(t *YText, txn *Transaction) { t.Insert(txn, 1, "x", nil) })
+		ds := newDeleteSet()
+		ds.add(ID{typist, 0}, 1)
+		ds.add(ID{3, 0}, int(c.StateVector()[3]))
+		enc := encoding.NewEncoder()
+		enc.WriteVarUint(0)
+		encodeDeleteSet(enc, ds)
+		late, err := MergeUpdatesV1(fc, x)
+		require.NoError(t, err)
+		r := newTestDoc(9)
+		r.GetText("t")
+		r.OnUpdate(func(_ []byte, origin any) {
+			if origin == nil {
+				cleanups++
+			}
+		})
+		for _, u := range [][]byte{base, fb, fd, enc.Bytes(), late} {
+			require.NoError(t, ApplyUpdateV1(r, u, "remote"))
 		}
-	})
-	for _, u := range [][]byte{base, fb, fd, enc.Bytes(), late} {
-		require.NoError(t, ApplyUpdateV1(r, u, "remote"))
+		require.Empty(t, r.store.pendingDs.clients)
+		return cleanups, countLiveContentFormat(r)
 	}
-	require.Empty(t, r.store.pendingDs.clients)
+	cleanups, live := deliver(1)
 	assert.Equal(t, 0, cleanups)
-	assert.Equal(t, 4, countLiveContentFormat(r))
+	assert.Equal(t, 4, live)
+	cleanups, live = deliver(6)
+	assert.Equal(t, 1, cleanups, "the contextless cleanup ran when the character's deletion came first")
+	assert.Equal(t, 3, live)
 }
 
 // Attribute values compare as JavaScript's === does: scalars by value, and a

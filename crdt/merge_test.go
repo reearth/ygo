@@ -67,13 +67,12 @@ func TestUnit_MergeUpdatesV1_HandlesSkipStructs(t *testing.T) {
 	a := &Item{ID: ID{Client: 1, Clock: 0}, Parent: parent, Content: NewContentString("A")}
 	f := &Item{ID: ID{Client: 1, Clock: 5}, Origin: &ID{Client: 1, Clock: 4}, Parent: parent, Content: NewContentString("F")}
 	items := []*Item{a, f}
-	gappy := encodeStructStoreV1(map[ClientID][]*Item{1: items}, newDeleteSet(), StateVector{},
-		&StructStore{clients: map[ClientID][]*Item{1: items}})
+	gappy := encodeStructStoreV1(map[ClientID][]*Item{1: items}, newDeleteSet(), StateVector{})
 
 	merged, err := MergeUpdatesV1(gappy)
 	require.NoError(t, err)
 
-	per2, _, _, err := buildMergeStore([][]byte{merged}, decodeStructsV1)
+	per2, _, err := buildMergeStore([][]byte{merged}, decodeStructsV1)
 	require.NoError(t, err)
 	got := map[uint64]string{}
 	for _, it := range per2[1] {

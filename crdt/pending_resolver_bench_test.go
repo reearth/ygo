@@ -30,7 +30,7 @@ func pendingLinearClientQueue(version, n int, complete bool) []byte {
 	if version == 2 {
 		encode = encodeStructStoreV2
 	}
-	return encode(groups, newDeleteSet(), nil, source.store)
+	return encode(groups, newDeleteSet(), nil)
 }
 
 func BenchmarkPendingLinearClientQueue(b *testing.B) {
