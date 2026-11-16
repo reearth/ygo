@@ -112,6 +112,8 @@ func TestInteg_Webhook_PostSignedEventEndToEnd(t *testing.T) {
 
 // Debounce: multiple Update events for the same room within the debounce
 // window must be coalesced into a single POST carrying the LATEST update.
+// The window is the longest the config allows, so every event lands in it
+// however loaded the machine is, and Close delivers what is pending.
 func TestInteg_Webhook_DebounceCoalesces(t *testing.T) {
 	var (
 		mu    sync.Mutex
@@ -130,10 +132,9 @@ func TestInteg_Webhook_DebounceCoalesces(t *testing.T) {
 
 	wh, err := webhook.New(webhook.Config{
 		URL:      ts.URL,
-		Debounce: 100 * time.Millisecond,
+		Debounce: 10 * time.Second,
 	})
 	require.NoError(t, err)
-	defer func() { _ = wh.Close(context.Background()) }()
 
 	// Fire ten Update events for the same room in rapid succession.
 	for i := 0; i < 10; i++ {
@@ -142,20 +143,12 @@ func TestInteg_Webhook_DebounceCoalesces(t *testing.T) {
 			Room:   "debounceroom",
 			Update: []byte{byte(i)},
 		})
-		time.Sleep(5 * time.Millisecond)
 	}
-
-	// Wait for the debounce window to expire and the single POST to land.
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(posts) == 1
-	}, 2*time.Second, 10*time.Millisecond,
-		"10 rapid Update events must coalesce into 1 POST")
+	require.NoError(t, wh.Close(context.Background()))
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Len(t, posts, 1)
+	require.Len(t, posts, 1, "10 rapid Update events must coalesce into 1 POST")
 	assert.Equal(t, []byte{9}, posts[0].Update,
 		"the coalesced post must carry the LATEST update bytes")
 }

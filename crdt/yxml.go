@@ -179,7 +179,7 @@ func (f *YXmlFragment) Len() int {
 	count := 0
 	for item := f.start; item != nil; item = item.Right {
 		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == nil {
-			count += item.Content.Len()
+			count += nativeContentLen(item.Content)
 		}
 	}
 	return count
@@ -211,7 +211,7 @@ func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 	}
 	left, offset := leftChildAt(t, index)
 	if offset > 0 {
-		splitItem(txn, left, offset)
+		splitItem(txn, left, uint64(offset))
 	}
 
 	for _, node := range nodes {
@@ -223,7 +223,7 @@ func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 		var origin *ID
 		var originRight *ID
 		if left != nil {
-			end := left.ID.Clock + uint64(left.Content.Len()) - 1
+			end := left.ID.Clock + left.Content.Len() - 1
 			origin = &ID{Client: left.ID.Client, Clock: end}
 			// originRight is the next child item (skip attribute items).
 			for r := left.Right; r != nil; r = r.Right {
@@ -725,7 +725,7 @@ func leftChildAt(t *abstractType, index int) (*Item, int) {
 	var lastItem *Item
 	for item := t.start; item != nil; item = item.Right {
 		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == nil {
-			n := item.Content.Len()
+			n := nativeContentLen(item.Content)
 			if counted+n >= index {
 				offset := index - counted
 				if offset == n {
@@ -753,24 +753,24 @@ func deleteChildRange(t *abstractType, txn *Transaction, index, length int) {
 			item = item.Right
 			continue
 		}
-		n := item.Content.Len()
+		n := nativeContentLen(item.Content)
 		if counted+n <= index {
 			counted += n
 			item = item.Right
 			continue
 		}
 		if counted < index {
-			right := splitItem(txn, item, index-counted)
+			right := splitItem(txn, item, uint64(index-counted))
 			counted = index
 			item = right
-			n = right.Content.Len()
+			n = nativeContentLen(right.Content)
 		}
 		if n <= length {
 			item.delete(txn)
 			length -= n
 			item = item.Right
 		} else {
-			splitItem(txn, item, length)
+			splitItem(txn, item, uint64(length))
 			item.delete(txn)
 			length = 0
 		}

@@ -106,8 +106,14 @@ func TestUnit_PendingBudget_CompleteAndRetry(t *testing.T) {
 			defer retry.Destroy()
 			require.NoError(t, apply(retry, missing, nil))
 			require.Equal(t, 3, retry.PendingStats().Items)
-			// The budget includes pending items from earlier messages.
-			require.ErrorIs(t, apply(retry, missing, nil), ErrInvalidUpdate)
+			// The same update again parks nothing new, so the full budget
+			// does not refuse it (Yjs holds each pending clock once).
+			require.NoError(t, apply(retry, missing, nil))
+			require.Equal(t, 3, retry.PendingStats().Items)
+			// The budget includes pending items from earlier messages: an
+			// update that would park a fourth item is refused.
+			longer, _ := pendingBudgetUpdate(version, 4, "missing")
+			require.ErrorIs(t, apply(retry, longer, nil), ErrInvalidUpdate)
 			require.Equal(t, 3, retry.PendingStats().Items)
 			require.NoError(t, apply(retry, parent, nil))
 			require.Zero(t, retry.PendingStats().Items)
@@ -137,7 +143,7 @@ func TestUnit_PendingScanner_ContentCursor(t *testing.T) {
 	for i, content := range contents {
 		name := fmt.Sprint(i)
 		items = append(items, &Item{ID: ID{Client: 1, Clock: clock}, parentID: &parent, ParentSub: &name, Content: content})
-		clock += uint64(content.Len())
+		clock += content.Len()
 	}
 	// An internal gap exercises skip structs as well as every content tag.
 	items = append(items, &Item{ID: ID{Client: 1, Clock: clock + 4}, Content: NewContentDeleted(2), Deleted: true})
@@ -155,7 +161,7 @@ func TestUnit_PendingScanner_ContentCursor(t *testing.T) {
 		for _, content := range contents {
 			length, skip, deps, count := s.item()
 			require.NoError(t, s.err)
-			require.EqualValues(t, content.Len(), length)
+			require.Equal(t, content.Len(), length)
 			require.False(t, skip)
 			require.Equal(t, 1, count)
 			require.Equal(t, parent, deps[0])
@@ -237,8 +243,7 @@ func TestUnit_PendingBudget_SkipsDoNotSatisfyDependencies(t *testing.T) {
 			target := New(WithMaxPendingItems(1))
 			defer target.Destroy()
 			budget := newPendingBudget(target, target.StateVector(), update, version == 2)
-			require.ErrorIs(t, budget.check(1), ErrInvalidUpdate)
-			require.False(t, budget.checked)
+			require.ErrorIs(t, budget.check(), ErrInvalidUpdate)
 			require.ErrorIs(t, apply(target, update, nil), ErrInvalidUpdate)
 			require.Zero(t, target.PendingStats().Items, "rejection must not park the update's deferred items")
 		})
@@ -287,7 +292,7 @@ func TestUnit_PendingBudget_GroupHeadsMatchFixedPoint(t *testing.T) {
 					item.OriginRight = &ID{Client: ClientID(1 + rng.Intn(10)), Clock: uint64(rng.Intn(12))}
 				}
 				groups[client] = append(groups[client], item)
-				clock += uint64(content.Len() + rng.Intn(3))
+				clock += content.Len() + uint64(rng.Intn(3))
 			}
 		}
 		for _, version := range []int{1, 2} {
@@ -298,18 +303,15 @@ func TestUnit_PendingBudget_GroupHeadsMatchFixedPoint(t *testing.T) {
 			update := encode(groups, newDeleteSet(), nil, source.store)
 			for _, cap := range []int{0, 1, 4, 100} {
 				budget := pendingBudget{initial: initial, update: update, remaining: cap, v2: version == 2}
-				want := referencePendingBudgetCheck(budget, cap)
-				got := budget.check(cap)
+				want := referencePendingBudgetCheck(budget)
+				got := budget.check()
 				require.Equal(t, want == nil, got == nil, "scenario=%d V%d cap=%d: reference=%v worklist=%v", scenario, version, cap, want, got)
 			}
 		}
 	}
 }
 
-func referencePendingBudgetCheck(b pendingBudget, count int) error {
-	if b.checked || count < b.remaining {
-		return nil
-	}
+func referencePendingBudgetCheck(b pendingBudget) error {
 	known := make(StateVector, len(b.initial))
 	for client, clock := range b.initial {
 		known[client] = clock
@@ -380,7 +382,6 @@ func referencePendingBudgetCheck(b pendingBudget, count int) error {
 			return wrapUpdateErr(s.err)
 		}
 		if pending <= b.remaining {
-			b.checked = true
 			return nil
 		}
 		if !progressed {

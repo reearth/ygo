@@ -49,6 +49,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // ErrSubdocAlreadyIntegrated is raised when a Doc already embedded as a
@@ -64,8 +65,17 @@ type DocOption func(*Doc)
 
 // WithClientID sets a fixed ClientID instead of generating a random one.
 // Useful in tests and server-side scenarios where the ID must be deterministic.
+// The document still takes a new ID when a remote update moves this client's
+// clock (see ClientID).
+// id must be at most 2^55-1, the largest client a V2 update can carry; a larger
+// one panics here, since the document could not encode its own writes in V2
+// and every decoder refuses them. Yjs client IDs fit in 53 bits.
 func WithClientID(id ClientID) DocOption {
-	return func(d *Doc) { d.clientID = id }
+	if id > maxClient {
+		// A programmer error: random and remote client IDs are always within it.
+		panic(fmt.Sprintf("crdt: WithClientID(%d): a client ID must be at most 2^55-1", id))
+	}
+	return func(d *Doc) { d.setClientID(id) }
 }
 
 // WithGC controls whether deleted item content is freed at the end of each
@@ -98,23 +108,25 @@ func WithCollectionID(id string) DocOption {
 	}
 }
 
-// defaultMaxPendingItems is the default cap on items parked in the per-doc
-// pending queue waiting for out-of-order dependencies. It is smaller than the
-// decoder's per-update item limit (maxV2Items, 1<<20), so one legal update
-// applied to a document that lacks the state it depends on can exceed it. See
-// WithMaxPendingItems and #46.
+// defaultMaxPendingItems is the default cap on parked items and, separately,
+// parked delete ranges (see WithMaxPendingItems).
 const defaultMaxPendingItems = 100_000
 
-// WithMaxPendingItems caps the per-doc pending queue depth — items parked
-// waiting for out-of-order dependencies. Once the cap is reached, further
-// items that would be parked cause ApplyUpdate to return ErrInvalidUpdate.
-// Zero or negative uses the default (100,000).
-//
-// This is a defence against a malicious peer crafting an update full of
-// far-future-clock items, which would otherwise grow the pending queue
-// without bound. See issue #46.
+// WithMaxPendingItems caps parked items and, separately, parked delete ranges
+// (default 100,000 when n <= 0), refusing with ErrInvalidUpdate, before any
+// change, an update that would park past either, so a peer cannot grow them
+// without bound. A struct sent again merges into the queue as Yjs merges its
+// pending update, and the cap counts what the park adds after the merge.
 func WithMaxPendingItems(n int) DocOption {
 	return func(d *Doc) { d.maxPendingItems = n }
+}
+
+// SetMaxPendingItems sets the WithMaxPendingItems cap after construction, so
+// stored state that exceeds it can load uncapped first.
+func (d *Doc) SetMaxPendingItems(n int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.maxPendingItems = n
 }
 
 // updateSub pairs a unique subscription ID with its callback so that
@@ -148,7 +160,8 @@ type subdocsSub struct {
 // Doc is the root of a Yjs collaborative document.
 // All shared types (YArray, YMap, YText, …) live inside a Doc.
 type Doc struct {
-	clientID        ClientID
+	clientID        ClientID      // read and written under mu, or before the doc is shared
+	sharedClientID  atomic.Uint64 // clientID's copy for ClientID, read without mu
 	gc              bool
 	guid            string // guid identifies this document (for subdocument embedding). Defaults to a random uuidv4 (see New) unless set with WithGUID.
 	shouldLoad      bool
@@ -190,9 +203,18 @@ type Doc struct {
 	undoManagerCount int
 }
 
-// ClientID returns the document's client identifier (read-only after creation).
+// ClientID returns the document's client identifier. A remote transaction
+// that changes this document's own client's clock gives it a new random one
+// when it commits, as Yjs does.
 func (d *Doc) ClientID() ClientID {
-	return d.clientID
+	return ClientID(d.sharedClientID.Load())
+}
+
+// setClientID sets the document's client identifier; called under mu once the
+// doc is shared.
+func (d *Doc) setClientID(id ClientID) {
+	d.clientID = id
+	d.sharedClientID.Store(uint64(id))
 }
 
 // GUID returns the document's identifier. Every Doc has one — a random uuidv4 by default (Yjs parity), or the value passed to WithGUID.
@@ -289,7 +311,6 @@ func NewClientID() ClientID {
 // New creates a new Doc with a randomly generated ClientID.
 func New(opts ...DocOption) *Doc {
 	d := &Doc{
-		clientID:   NewClientID(),
 		gc:         true,
 		guid:       uuidV4(),
 		shouldLoad: true,
@@ -297,6 +318,7 @@ func New(opts ...DocOption) *Doc {
 		share:      make(map[string]sharedType),
 		subdocs:    make(map[string]*Doc),
 	}
+	d.setClientID(NewClientID())
 	for _, opt := range opts {
 		opt(d)
 	}
@@ -345,7 +367,7 @@ func (d *Doc) upgradeRawType(raw *rawType, dst sharedType, name string) {
 	}
 	if d.store.pending != nil {
 		for _, item := range d.store.pending.items {
-			if item.Parent == &raw.abstractType {
+			if item != nil && item.Parent == &raw.abstractType {
 				item.Parent = at
 			}
 		}
@@ -473,8 +495,12 @@ func (d *Doc) GetText(name string) *YText {
 // The closure must be invoked OUTSIDE d.mu — observers may re-enter Doc
 // methods that acquire d.mu, which would deadlock under the lock.
 //
-// Returns nil only if there is nothing to fire (no observers of any kind).
+// Returns nil when there is nothing to fire: no observers, or a refused remote
+// apply (Transaction.refused).
 func buildPhase2(d *Doc, txn *Transaction) func() {
+	if txn.refused {
+		return nil
+	}
 	// Encode the incremental update and snapshot observer slices while still
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
@@ -596,8 +622,8 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 // exposed to fn via Transaction.Ctx().
 //
 // fn's returned error is captured as the named return value retErr.
-// Observers fire regardless of whether fn returned an error; the error
-// is propagated to the caller only after the observers have fired.
+// Observers fire, unless a remote apply was refused (Transaction.refused),
+// before fn's error is returned.
 //
 // See docs/superpowers/specs/2026-04-21-transact-panic-safety-design.md
 // for the full rationale on the defer/recover structure.
@@ -608,6 +634,10 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 	}
 
 	d.mu.Lock()
+	// A parking apply records only what this transaction parks.
+	if d.store.parked != nil {
+		*d.store.parked = transactionParked{}
+	}
 
 	txn := &Transaction{
 		doc:         d,
@@ -678,6 +708,18 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		// registered. RunGC remains available as the explicit manual entry point.
 		if d.gc && d.undoManagerCount == 0 && !deferGC {
 			gcTxnDeleteSet(d, txn)
+		}
+
+		// The document's park record drops this transaction's views of the queue.
+		if d.store.parked != nil {
+			*d.store.parked = transactionParked{}
+		}
+
+		// A remote transaction that moved this document's own clock gives it a
+		// new client ID, as Yjs cleanupTransactions does, so a local write never
+		// continues a clock that another peer set.
+		if !txn.Local && txn.afterState != nil && txn.afterState.Clock(d.clientID) != txn.beforeState.Clock(d.clientID) {
+			d.setClientID(NewClientID())
 		}
 
 		// Mark the transaction committed BEFORE releasing the lock so the
@@ -1033,7 +1075,7 @@ func (d *Doc) PendingStats() PendingStats {
 
 	stats := PendingStats{}
 	if d.store.pending != nil {
-		stats.Items = len(d.store.pending.items)
+		stats.Items = d.store.pending.heldStructs()
 		// missing is a StateVector (map[ClientID]uint64) — extract sorted keys
 		missing := make([]ClientID, 0, len(d.store.pending.missing))
 		for c := range d.store.pending.missing {
@@ -1042,9 +1084,7 @@ func (d *Doc) PendingStats() PendingStats {
 		sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
 		stats.MissingFor = missing
 	}
-	for _, ranges := range d.store.pendingDs.clients {
-		stats.DeleteRanges += len(ranges)
-	}
+	stats.DeleteRanges = d.store.pendingDsRanges
 	return stats
 }
 

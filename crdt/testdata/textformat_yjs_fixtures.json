@@ -5510,6 +5510,600 @@
       ]
     },
     {
+      "name": "remote_cleanup_visits_arrived_deletion_first_a1b2",
+      "clients": {
+        "A": 1,
+        "B": 2
+      },
+      "ops": [
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "d",
+          "a": {
+            "italic": true
+          }
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "b"
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 3,
+          "n": 1,
+          "a": {
+            "italic": "x"
+          }
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 1
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B",
+          "v2": false
+        }
+      ],
+      "trace": [
+        [
+          [],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "dede"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "bde"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "dede"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "bde"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "ded"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "ded"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d"
+            }
+          ],
+          [
+            {
+              "insert": "ded"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d"
+            }
+          ],
+          [
+            {
+              "insert": "ded"
+            }
+          ]
+        ]
+      ],
+      "final": [
+        {
+          "peer": "A",
+          "v1": "0201020001010174030301000401017401648101000141010001020201000301010102"
+        },
+        {
+          "peer": "B",
+          "v1": "020402000101017403440100026465c10100010101c601010200066974616c6963046e756c6c03010004010174016481010001410100010202020003050101010102"
+        }
+      ]
+    },
+    {
+      "name": "remote_cleanup_visits_arrived_deletion_first_v2_a1b2",
+      "clients": {
+        "A": 1,
+        "B": 2
+      },
+      "ops": [
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "d",
+          "a": {
+            "italic": true
+          }
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "b"
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 3,
+          "n": 1,
+          "a": {
+            "italic": "x"
+          }
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 1
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B",
+          "v2": true
+        }
+      ],
+      "trace": [
+        [
+          [],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "dede"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "bde"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "dede"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "bde"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "ded"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "ded"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d"
+            }
+          ],
+          [
+            {
+              "insert": "ded"
+            },
+            {
+              "insert": "e",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d"
+            }
+          ],
+          [
+            {
+              "insert": "ded"
+            }
+          ]
+        ]
+      ],
+      "final": [
+        {
+          "peer": "A",
+          "v1": "0201020001010174030301000401017401648101000141010001020201000301010102"
+        },
+        {
+          "peer": "B",
+          "v1": "020402000101017403440100026465c10100010101c601010200066974616c6963046e756c6c03010004010174016481010001410100010202020003050101010102"
+        }
+      ]
+    },
+    {
       "name": "concurrent_format_from_start_empty_array_a1b2",
       "clients": {
         "A": 1,
@@ -11687,6 +12281,666 @@
         {
           "peer": "B",
           "v1": "020c0200010101740386020204626f6c64047472756586020305636f6c6f72052272656422840204016c86020504626f6c64046e756c6c86020605636f6c6f72046e756c6cc10203020401c10102020001c502090200097b22696d67223a307dc1020a02000146010005636f6c6f720622626c756522c60208020405636f6c6f72046e756c6c0101000101017403020203000308020b0101010003"
+        }
+      ]
+    },
+    {
+      "name": "remote_cleanup_visits_arrived_deletion_first_a2b1",
+      "clients": {
+        "A": 2,
+        "B": 1
+      },
+      "ops": [
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "d",
+          "a": {
+            "italic": true
+          }
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "b"
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 3,
+          "n": 1,
+          "a": {
+            "italic": "x"
+          }
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 1
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B",
+          "v2": false
+        }
+      ],
+      "trace": [
+        [
+          [],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "b"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "b"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "e"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "e"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "e"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ]
+      ],
+      "final": [
+        {
+          "peer": "A",
+          "v1": "0202020001010174024101000103010006010174066974616c696304747275658401000164860101066974616c6963046e756c6c0102010003"
+        },
+        {
+          "peer": "B",
+          "v1": "020302000101017401810200014101000106010006010174066974616c69630474727565840100016481010101440100026465c10101010201c602000201066974616c6963046e756c6c0202010003010202010501"
+        }
+      ]
+    },
+    {
+      "name": "remote_cleanup_visits_arrived_deletion_first_v2_a2b1",
+      "clients": {
+        "A": 2,
+        "B": 1
+      },
+      "ops": [
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "d",
+          "a": {
+            "italic": true
+          }
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "b"
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 3,
+          "n": 1,
+          "a": {
+            "italic": "x"
+          }
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 1
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B",
+          "v2": true
+        }
+      ],
+      "trace": [
+        [
+          [],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "b"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "b"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "e"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "de"
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "e"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": "x"
+              }
+            },
+            {
+              "insert": "e"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ],
+          [
+            {
+              "insert": "de"
+            },
+            {
+              "insert": "d",
+              "attributes": {
+                "italic": true
+              }
+            }
+          ]
+        ]
+      ],
+      "final": [
+        {
+          "peer": "A",
+          "v1": "0202020001010174024101000103010006010174066974616c696304747275658401000164860101066974616c6963046e756c6c0102010003"
+        },
+        {
+          "peer": "B",
+          "v1": "020302000101017401810200014101000106010006010174066974616c69630474727565840100016481010101440100026465c10101010201c602000201066974616c6963046e756c6c0202010003010202010501"
         }
       ]
     },
@@ -18382,6 +19636,543 @@
         }
       ],
       "v1": "02030200c60105010104626f6c640474727565c402000101017ac60201010104626f6c64046e756c6c0301000401017401618401000162c101000101040101010204"
+    },
+    {
+      "name": "arrived_deletion_ins_plain_observe",
+      "mode": "observe",
+      "ops": [
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "d",
+          "a": {
+            "italic": true
+          }
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "b"
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 3,
+          "n": 1,
+          "a": {
+            "italic": "x"
+          }
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 1
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ded"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "observe",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "cleanup"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "xded"
+        }
+      ],
+      "v1": "020502000101017403440100026465c10100010101c601010200066974616c6963046e756c6cc401020203017803010004010174016481010001410100010202020003050101010102"
+    },
+    {
+      "name": "arrived_deletion_ins_plain_deep",
+      "mode": "deep",
+      "ops": [
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "d",
+          "a": {
+            "italic": true
+          }
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "b"
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 3,
+          "n": 1,
+          "a": {
+            "italic": "x"
+          }
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 1
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ded"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ded"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "observe",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "cleanup"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "xded"
+        }
+      ],
+      "v1": "020502000101017403440100026465c10100010101c601010200066974616c6963046e756c6cc401020203017803010004010174016481010001410100010202020003050101010102"
+    },
+    {
+      "name": "arrived_deletion_ins_plain_after",
+      "mode": "after",
+      "ops": [
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "d",
+          "a": {
+            "italic": true
+          }
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "k": "sync",
+          "from": "A",
+          "to": "B"
+        },
+        {
+          "k": "sync",
+          "from": "B",
+          "to": "A"
+        },
+        {
+          "p": "B",
+          "k": "ins",
+          "i": 0,
+          "s": "de"
+        },
+        {
+          "p": "A",
+          "k": "ins",
+          "i": 0,
+          "s": "b"
+        },
+        {
+          "p": "B",
+          "k": "fmt",
+          "i": 3,
+          "n": 1,
+          "a": {
+            "italic": "x"
+          }
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 0,
+          "n": 1
+        },
+        {
+          "p": "A",
+          "k": "del",
+          "i": 1,
+          "n": 2
+        }
+      ],
+      "react": {
+        "k": "ins",
+        "i": 0,
+        "s": "x"
+      },
+      "log": [
+        {
+          "ev": "observe",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ded"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "deep",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ded"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "after",
+          "txn": "remote",
+          "delta": [
+            {
+              "insert": "ded"
+            }
+          ],
+          "live": 2
+        },
+        {
+          "ev": "update",
+          "txn": "remote"
+        },
+        {
+          "ev": "observe",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "react",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "react"
+        },
+        {
+          "ev": "observe",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "deep",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "after",
+          "txn": "cleanup",
+          "delta": [
+            {
+              "insert": "xded"
+            }
+          ],
+          "live": 1
+        },
+        {
+          "ev": "update",
+          "txn": "cleanup"
+        }
+      ],
+      "delta": [
+        {
+          "insert": "xded"
+        }
+      ],
+      "v1": "020502000101017403440100026465c10100010101c601010200066974616c6963046e756c6cc401020203017803010004010174016481010001410100010202020003050101010102"
     }
   ]
 }

@@ -51,7 +51,7 @@ func TestUnit_SupersededGroups_MatchLastGroupPerClient(t *testing.T) {
 						key := fmt.Sprint("k", (i+j)%5)
 						content := contents[(i*3+j)%len(contents)]
 						groups[i] = append(groups[i], &Item{ID: ID{Client: c, Clock: clock}, parentID: &parent, ParentSub: &key, Content: content})
-						clock += uint64(content.Len())
+						clock += content.Len()
 					}
 				}
 				update := pendingGuardUpdate(source, groups, nil, version)
@@ -63,8 +63,9 @@ func TestUnit_SupersededGroups_MatchLastGroupPerClient(t *testing.T) {
 					require.NoError(t, err)
 					rest = *v2.restDec
 				}
-				set, err := supersededGroups(update, v2, rest)
+				set, structs, _, err := supersededGroups(update, v2, rest)
 				require.NoError(t, err)
+				require.Equal(t, 3*len(clients), structs, "the scan counts every group's three structs")
 				last := map[ClientID]int{}
 				for i, c := range clients {
 					last[c] = i
@@ -182,9 +183,7 @@ func TestUnit_SupersededGroups_StateVectorFromUpdate(t *testing.T) {
 		}
 		raw, err := encode(update)
 		require.NoError(t, err)
-		sv, err := DecodeStateVectorV1(raw)
-		require.NoError(t, err)
-		require.Equal(t, StateVector{9: 1}, sv, "V%d", version)
+		require.Equal(t, []byte{1, 9, 1}, raw, "V%d", version)
 	}
 }
 
@@ -203,7 +202,7 @@ func TestUnit_SupersededGroups_V2JSONLengthCostsNoScanWork(t *testing.T) {
 			e2.writeInfo(wireJSON)
 			e2.writeParentInfo(true)
 			e2.writeString("t")
-			e2.writeLen(int(maxV2Items))
+			e2.writeLen(maxV2Items)
 		}
 	}
 	encodeDeleteSetV2(e2, newDeleteSet())
