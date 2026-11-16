@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ── YMap ──────────────────────────────────────────────────────────────────────
@@ -67,6 +68,43 @@ func TestUnit_YMap_OverwriteSameKey(t *testing.T) {
 	v, ok := m.Get("k")
 	assert.True(t, ok)
 	assert.Equal(t, "v2", v)
+}
+
+// Overwriting a map or slice value on a detached map used to panic in Set,
+// which compared the old and new values with !=. The last value wins.
+func TestUnit_YMap_DetachedOverwriteOfAMapOrSliceValue(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second any
+	}{
+		{"map", map[string]any{"href": "https://a.example"}, map[string]any{"href": "https://b.example"}},
+		{"slice", []any{"a"}, []any{"b", "c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := newTestDoc(1)
+			root := doc.GetMap("root")
+			m := NewMapPrelim()
+			var panicked any
+			doc.Transact(func(txn *Transaction) {
+				func() {
+					defer func() { panicked = recover() }()
+					m.Set(txn, "k", tc.first)
+					m.Set(txn, "k", tc.second)
+				}()
+				root.Set(txn, "m", m)
+			})
+			require.Nil(t, panicked, "the overwrite panicked")
+			v, _ := m.Get("k")
+			assert.Equal(t, tc.second, v)
+
+			replica := newTestDoc(2)
+			require.NoError(t, ApplyUpdateV1(replica, EncodeStateAsUpdateV1(doc, nil), nil))
+			rm, _ := replica.GetMap("root").Get("m")
+			require.IsType(t, &YMap{}, rm)
+			v, _ = rm.(*YMap).Get("k")
+			assert.Equal(t, tc.second, v)
+		})
+	}
 }
 
 func TestUnit_YMap_MultipleKeys(t *testing.T) {

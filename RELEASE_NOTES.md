@@ -1,3 +1,13 @@
+## v1.55.1
+
+**Who is affected: anyone who sets the same key twice on a `YMap` that is not
+yet in a document (one from `NewMapPrelim`), with a map or slice value.**
+
+The second `Set` panicked with "comparing uncomparable type". It now replaces
+the value, as `Set` on a map in a document does.
+
+No API or wire format changes.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

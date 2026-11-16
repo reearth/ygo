@@ -195,10 +195,11 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 		if !exists {
 			m.prelimKeys = append(m.prelimKeys, key)
 		}
-		if exists && old != value {
-			// Overwriting displaces the previous value: if it was a staged
-			// handle, it leaves this map and becomes re-stageable.
-			releaseStaged(old)
+		if st, ok := old.(sharedType); ok && st != value {
+			// Overwriting displaces a staged handle: it leaves this map and
+			// becomes re-stageable. Only a handle is compared, as a map or
+			// slice value would make != panic.
+			releaseStaged(st)
 		}
 		if m.prelim == nil {
 			m.prelim = make(map[string]any)
