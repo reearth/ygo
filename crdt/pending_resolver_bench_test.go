@@ -30,7 +30,7 @@ func pendingLinearClientQueue(version, n int, complete bool) []byte {
 	if version == 2 {
 		encode = encodeStructStoreV2
 	}
-	return encode(groups, newDeleteSet(), nil, source.store)
+	return encode(groups, newDeleteSet(), nil)
 }
 
 func BenchmarkPendingLinearClientQueue(b *testing.B) {
@@ -156,7 +156,7 @@ func BenchmarkPendingOverlapFallback(b *testing.B) {
 }
 
 // Compare the same complete chain using the fixed-point reference and the
-// retry path directly, without enabling the dependency scheduler.
+// scheduler.
 func BenchmarkPendingFixedPointFallback(b *testing.B) {
 	for _, n := range []int{1000, 5000} {
 		for _, reference := range []bool{true, false} {
@@ -184,15 +184,8 @@ func BenchmarkPendingFixedPointFallback(b *testing.B) {
 					doc.Transact(func(txn *Transaction) {
 						if reference {
 							err = referenceWithinUpdatePending(txn, pending)
-							return
-						}
-						for len(pending) > 0 {
-							remaining := retryWithinUpdatePending(txn, pending)
-							if len(remaining) == len(pending) {
-								err = parkWithinUpdatePending(txn, remaining)
-								return
-							}
-							pending = remaining
+						} else {
+							err = resolveWithinUpdatePending(txn, pending)
 						}
 					})
 					b.StopTimer()
@@ -237,4 +230,44 @@ func BenchmarkInterleavedTyping(b *testing.B) {
 			}
 		}
 	})
+}
+
+// BenchmarkPendingDrainNewestFirst applies one client's keystrokes newest
+// first, so the last update drains every parked keystroke.
+func BenchmarkPendingDrainNewestFirst(b *testing.B) {
+	for _, n := range []int{1000, 5000} {
+		source := New(WithClientID(1))
+		text := source.GetText("t")
+		updates := make([][]byte, 0, n)
+		source.OnUpdate(func(u []byte, _ any) { updates = append(updates, append([]byte(nil), u...)) })
+		for i := range n {
+			source.Transact(func(txn *Transaction) { text.Insert(txn, i, "x", nil) })
+		}
+		for _, version := range []int{1, 2} {
+			apply, data := ApplyUpdateV1, updates
+			if version == 2 {
+				apply, data = ApplyUpdateV2, make([][]byte, n)
+				for i, u := range updates {
+					var err error
+					if data[i], err = UpdateV1ToV2(u); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+			b.Run(fmt.Sprintf("V%d/n=%d", version, n), func(b *testing.B) {
+				b.ReportAllocs()
+				for range b.N {
+					doc := New()
+					for j := n - 1; j >= 0; j-- {
+						if err := apply(doc, data[j], nil); err != nil {
+							b.Fatal(err)
+						}
+					}
+					if doc.PendingStats().Items != 0 {
+						b.Fatal("parked keystrokes left after the drain")
+					}
+				}
+			})
+		}
+	}
 }

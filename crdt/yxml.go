@@ -6,7 +6,7 @@ import (
 )
 
 // xmlNode is implemented by all XML node types (*YXmlFragment, *YXmlElement,
-// *YXmlText). It is used internally to walk and serialise XML trees.
+// *YXmlText and a Yjs YXmlHook). It is used internally to walk and serialise XML trees.
 //
 // toXMLLocked is the lock-free counterpart to ToXML, used by toJSONValue
 // (#75) when serialisation is happening from a context that already holds
@@ -113,6 +113,8 @@ func renderXML(root xmlNode, locked bool) string {
 					close: "</" + node.NodeName + ">",
 				})
 				stack = appendXMLChildren(stack, &node.YXmlFragment)
+			case *yxmlHook:
+				output.WriteString(hookXML)
 			case *YXmlText:
 				if locked {
 					output.WriteString(xmlEscapeText(node.toStringLocked()))
@@ -179,7 +181,7 @@ func (f *YXmlFragment) Len() int {
 	count := 0
 	for item := f.start; item != nil; item = item.Right {
 		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == nil {
-			count += item.Content.Len()
+			count += nativeContentLen(item.Content)
 		}
 	}
 	return count
@@ -211,7 +213,7 @@ func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 	}
 	left, offset := leftChildAt(t, index)
 	if offset > 0 {
-		splitItem(txn, left, offset)
+		splitItem(txn, left, uint64(offset))
 	}
 
 	for _, node := range nodes {
@@ -223,7 +225,7 @@ func (f *YXmlFragment) Insert(txn *Transaction, index int, nodes ...xmlNode) {
 		var origin *ID
 		var originRight *ID
 		if left != nil {
-			end := left.ID.Clock + uint64(left.Content.Len()) - 1
+			end := left.ID.Clock + left.Content.Len() - 1
 			origin = &ID{Client: left.ID.Client, Clock: end}
 			// originRight is the next child item (skip attribute items).
 			for r := left.Right; r != nil; r = r.Right {
@@ -713,6 +715,38 @@ func NewYXmlText() *YXmlText {
 	return t
 }
 
+// yxmlHook is a Yjs Y.XmlHook, a map with a hook name, kept so that it
+// encodes back as Yjs wrote it.
+type yxmlHook struct {
+	YMap
+	hookName string
+}
+
+func newYXmlHook(hookName string) *yxmlHook {
+	h := &yxmlHook{hookName: hookName}
+	h.itemMap = make(map[string]*Item)
+	h.owner = h
+	return h
+}
+
+// hookXML is how Yjs renders a hook in XML: YXmlHook has no toString, so JavaScript prints its default object string.
+const hookXML = "[object Object]"
+
+func (h *yxmlHook) baseXMLType() *abstractType { return &h.abstractType }
+
+// ToXML returns what Yjs toString gives for a hook.
+func (h *yxmlHook) ToXML() string { return hookXML }
+
+func (h *yxmlHook) toXMLLocked() string { return hookXML }
+
+// readOwner returns the value readers expose for a nested type; a YXmlHook reads as its map, as Yjs YXmlHook extends YMap.
+func readOwner(owner any) any {
+	if h, ok := owner.(*yxmlHook); ok {
+		return &h.YMap
+	}
+	return owner
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 // leftChildAt is like abstractType.leftNeighbourAt but skips attribute items
@@ -725,7 +759,7 @@ func leftChildAt(t *abstractType, index int) (*Item, int) {
 	var lastItem *Item
 	for item := t.start; item != nil; item = item.Right {
 		if !item.Deleted && item.Content.IsCountable() && item.ParentSub == nil {
-			n := item.Content.Len()
+			n := nativeContentLen(item.Content)
 			if counted+n >= index {
 				offset := index - counted
 				if offset == n {
@@ -753,24 +787,24 @@ func deleteChildRange(t *abstractType, txn *Transaction, index, length int) {
 			item = item.Right
 			continue
 		}
-		n := item.Content.Len()
+		n := nativeContentLen(item.Content)
 		if counted+n <= index {
 			counted += n
 			item = item.Right
 			continue
 		}
 		if counted < index {
-			right := splitItem(txn, item, index-counted)
+			right := splitItem(txn, item, uint64(index-counted))
 			counted = index
 			item = right
-			n = right.Content.Len()
+			n = nativeContentLen(right.Content)
 		}
 		if n <= length {
 			item.delete(txn)
 			length -= n
 			item = item.Right
 		} else {
-			splitItem(txn, item, length)
+			splitItem(txn, item, uint64(length))
 			item.delete(txn)
 			length = 0
 		}

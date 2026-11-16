@@ -47,8 +47,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // ErrSubdocAlreadyIntegrated is raised when a Doc already embedded as a
@@ -64,8 +66,17 @@ type DocOption func(*Doc)
 
 // WithClientID sets a fixed ClientID instead of generating a random one.
 // Useful in tests and server-side scenarios where the ID must be deterministic.
+// The document still takes a new ID when a remote update moves this client's
+// clock (see ClientID).
+// id must be at most 2^55-1, the largest client a V2 update can carry; a larger
+// one panics here, since the document could not encode its own writes in V2
+// and every decoder refuses them. Yjs client IDs fit in 53 bits.
 func WithClientID(id ClientID) DocOption {
-	return func(d *Doc) { d.clientID = id }
+	if id > maxClient {
+		// A programmer error: random and remote client IDs are always within it.
+		panic(fmt.Sprintf("crdt: WithClientID(%d): a client ID must be at most 2^55-1", id))
+	}
+	return func(d *Doc) { d.setClientID(id) }
 }
 
 // WithGC controls whether deleted item content is freed at the end of each
@@ -87,7 +98,7 @@ func WithGUID(guid string) DocOption {
 func WithAutoLoad(v bool) DocOption { return func(d *Doc) { d.autoLoad = v } }
 
 // WithShouldLoad controls whether a provider should sync this doc now. Default
-// true; a decoded/remote subdocument starts false until Load().
+// true; a decoded subdocument starts with its autoLoad value, as in Yjs.
 func WithShouldLoad(v bool) DocOption { return func(d *Doc) { d.shouldLoad = v } }
 
 // WithCollectionID sets an optional subdocument collection identifier.
@@ -98,23 +109,246 @@ func WithCollectionID(id string) DocOption {
 	}
 }
 
-// defaultMaxPendingItems is the default cap on items parked in the per-doc
-// pending queue waiting for out-of-order dependencies. It is smaller than the
-// decoder's per-update item limit (maxV2Items, 1<<20), so one legal update
-// applied to a document that lacks the state it depends on can exceed it. See
-// WithMaxPendingItems and #46.
+// defaultMaxPendingItems is the default cap on parked items and, separately,
+// parked delete ranges (see WithMaxPendingItems).
 const defaultMaxPendingItems = 100_000
 
-// WithMaxPendingItems caps the per-doc pending queue depth — items parked
-// waiting for out-of-order dependencies. Once the cap is reached, further
-// items that would be parked cause ApplyUpdate to return ErrInvalidUpdate.
-// Zero or negative uses the default (100,000).
-//
-// This is a defence against a malicious peer crafting an update full of
-// far-future-clock items, which would otherwise grow the pending queue
-// without bound. See issue #46.
+// WithMaxPendingItems caps parked items and, separately, parked delete ranges
+// (default 100,000 when n <= 0), refusing with ErrInvalidUpdate, before any
+// change, an update that would park past either, so a peer cannot grow them
+// without bound. A struct sent again merges into the queue as Yjs merges its
+// pending update, and the cap counts what the park adds after the merge.
 func WithMaxPendingItems(n int) DocOption {
 	return func(d *Doc) { d.maxPendingItems = n }
+}
+
+// SetMaxPendingItems sets the WithMaxPendingItems cap after construction, so
+// stored state that exceeds it can load uncapped first.
+func (d *Doc) SetMaxPendingItems(n int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.maxPendingItems = n
+}
+
+// WithIntegrateScanBudget bounds the items the conflict scans of one remote
+// apply (ApplyUpdate and its V1 and V2 forms) may pass, by origin, so a server
+// can bound a connected client's updates and not those it relays from another
+// node or loads from storage: budget gets the apply's origin before the apply
+// takes the document's lock, so applies on several goroutines may call it at
+// once, and zero or negative sets no bound.
+//
+// An apply that would pass the bound aborts partway with
+// ErrIntegrateScanBudget, and the drain of the parked queue that ends an
+// apply, past what the apply left of the bound, parks the rest without failing
+// the apply, for a later apply, from any sender, to try again when its drain
+// has more of its bound left than the scan that tripped had, or no bound; each
+// keeps what it integrated, or nothing on a document with
+// WithWholeOrNothingApplies.
+func WithIntegrateScanBudget(budget func(origin any) int) DocOption {
+	return func(d *Doc) { d.integrateScanBudget = budget }
+}
+
+// WithWholeOrNothingApplies, when on, rolls back before it commits a remote
+// apply that fails, by tripping the scan bound or for any other reason, so the
+// document is left as it was, no observer fires and ApplyUpdateV1Landed
+// reports nothing, while a drain of the parked queue that trips what the apply
+// left of the bound is rolled back alone and the apply stands. Such a document
+// refuses every remote update that carries a move or a subdocument, and each
+// remote apply on it allocates at least 288 bytes to record what it changes.
+func WithWholeOrNothingApplies(on bool) DocOption {
+	return func(d *Doc) { d.wholeOrNothing = on }
+}
+
+// ApplyBudget is what one remote apply may decode and add. A field of zero or
+// below is no limit in that measure, as WithIntegrateScanBudget reads its
+// bound, so the zero value bounds nothing. The smallest limit is 1, and a
+// budget cannot refuse every value, struct, byte or split: a caller that
+// wants an origin's updates refused whole refuses them before the apply.
+type ApplyBudget struct {
+	// Decoded is the values the apply may read: each struct, each delete
+	// range, each lib0 Any value at any depth, each entry of an Any map and
+	// each JSON value and member. It is counted as the update is read,
+	// before the apply allocates for a length the update declares, so it
+	// bounds the memory one update can take while it is decoded.
+	Decoded int
+	// Structs is the structs of the update the apply may add to the
+	// document, a struct that parks behind a clock the document lacks
+	// included. The structs a delete makes by splitting items the document
+	// holds are not among them, so Structs never refuses a delete.
+	Structs int
+	// Bytes is the bytes of content those structs may carry: text, binary,
+	// decoded values, a format's key and value, an XML element's or hook's
+	// name, and the map key a struct is set under; and the name of each root
+	// the update creates. A deleted range carries none, whatever its span.
+	Bytes int
+	// Split is the structs the apply may make by splitting items the
+	// document holds, which Structs does not count: a delete of a range
+	// inside a run cuts it into three. The splits the drain of the parked
+	// queue makes count against the apply that fills the gap, and a drain
+	// that would pass it stops and parks the rest without failing the apply.
+	// Split: 1 allows one split and refuses the second.
+	Split int
+}
+
+// WithApplyBudget bounds each remote apply (ApplyUpdate and its V1 and V2
+// forms) by the ApplyBudget that budget returns for the apply's origin. budget
+// runs once per apply, under the document's lock, so it must not call the
+// document; a nil budget bounds nothing, as a document without the option.
+//
+// An apply that would pass its budget stops at the value or the struct that
+// passes it, before that struct enters the document, and returns
+// ErrApplyBudget in a RefusedUpdateError. As for the scan bound
+// (WithIntegrateScanBudget), the document keeps what the apply integrated
+// before it stopped, which ApplyUpdateV1Landed reports, and keeps nothing on
+// a document that also has WithWholeOrNothingApplies. A struct of the update
+// that parks behind a clock the document lacks counts when it parks, and a
+// struct the drain of the parked queue integrates does not count again
+// against the apply that fills its gap. Local transactions are never
+// bounded. A budget that limits nothing changes nothing an apply does, and
+// every failed remote apply on the document returns a RefusedUpdateError.
+func WithApplyBudget(budget func(origin any) ApplyBudget) DocOption {
+	return func(d *Doc) { d.applyBudget = budget }
+}
+
+// SetApplyBudget sets the budget of WithApplyBudget on a document already
+// made, or with nil removes it, for an owner that loads trusted state first.
+// It takes the document's lock.
+func (d *Doc) SetApplyBudget(budget func(origin any) ApplyBudget) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.applyBudget = budget
+}
+
+// WithAllowedRoots names the root types a remote apply may write under: roots
+// runs once per apply with the apply's origin, under the document's lock, so
+// it must not call the document. A nil roots, or an answer of no names,
+// allows every root, as a document without the option.
+//
+// An apply that would create a root the answer does not name, or add to or
+// delete under one, at any depth of nested types, or add under no root of
+// the document, stops before that struct enters the document or that item is
+// deleted, and returns ErrRootNotAllowed in a RefusedUpdateError whose Root
+// is the root's name. The document keeps what the apply integrated before it
+// stopped, and keeps nothing on a document that also has
+// WithWholeOrNothingApplies. An update that names a root the document holds
+// and writes nothing under it, as a peer handing back the whole state does,
+// is applied. A struct that parks behind a clock the document lacks is checked
+// when it parks, and one whose parent is not known yet keeps the answer of
+// the apply that parked it. A parked struct that the drain integrates under a
+// root either answer does not name is dropped. The apply that filled its gap
+// does not fail for it, and PendingStats.RootsDropped counts the drop for the
+// struct's client, unless that apply has the origin of the one that parked
+// the struct, which then returns ErrRootNotAllowed. Every failed remote apply
+// on the document returns a RefusedUpdateError.
+func WithAllowedRoots(roots func(origin any) []string) DocOption {
+	return func(d *Doc) { d.allowedRoots = roots }
+}
+
+// SetAllowedRoots sets the list of WithAllowedRoots on a document already
+// made, or with nil removes it. It takes the document's lock.
+func (d *Doc) SetAllowedRoots(roots func(origin any) []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.allowedRoots = roots
+}
+
+// WithRefusedContent names the kinds of content a remote apply may not
+// bring into the document: kinds runs once per apply with the apply's origin,
+// under the document's lock, so it must not call the document. A nil kinds,
+// or an answer of no kinds, takes every kind, as a document without the
+// option.
+//
+// It is for an owner whose readers cannot show every kind of content: one
+// embed is one struct of a few bytes, inside any budget, and once a document
+// holds it every reader is shown content its schema has no node for.
+//
+// A struct of a kind the answer names refuses the whole update, wherever in
+// the update it sits, with ErrContentNotAllowed in a RefusedUpdateError.
+// The check reads each struct's content tag as the apply decodes the update,
+// and every struct of an update is decoded before one integrates, so a
+// refused update leaves the document as it was and tells no observer, with
+// or without WithWholeOrNothingApplies. A struct that parks was checked by
+// the apply that decoded it, so the drain that later integrates it does not
+// check it again. Naming ContentKindDoc or ContentKindMove refuses remote
+// subdocuments or moves; the option refuses neither by itself. An update
+// that carries none of the named kinds applies as it would without the
+// option, and every failed remote apply on the document returns a
+// RefusedUpdateError.
+//
+// The cost is the call of kinds per apply and, for each struct the update
+// carries, a scan of its answer, besides the per-apply count that every
+// RefusedUpdateError reports.
+func WithRefusedContent(kinds func(origin any) []ContentKind) DocOption {
+	return func(d *Doc) { d.refusedContent = kinds }
+}
+
+// SetRefusedContent sets the kinds of WithRefusedContent on a document
+// already made, or with nil removes them. It takes the document's lock.
+func (d *Doc) SetRefusedContent(kinds func(origin any) []ContentKind) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.refusedContent = kinds
+}
+
+// ApplyReport is what one remote apply left the document holding and what it
+// added of its own, as WithApplyReport reports it. A parked struct the drain
+// drops, under a root the list of the apply that parked it leaves out, is
+// not in it: PendingStats.RootsDropped counts those by client.
+type ApplyReport struct {
+	// DocStructs is the document's total: the structs it holds once the
+	// apply has committed, those parked behind a clock the document lacks
+	// included, read after the commit has merged runs back together. It is
+	// not a count of this apply's structs, which is Integrated, nor a sum of
+	// what earlier applies added.
+	DocStructs int
+	// Integrated is this apply's own count: the structs of the update the
+	// document kept, parked ones included, as ApplyBudget.Structs and
+	// RefusedUpdateError.Structs count them. A struct the drain of the parked
+	// queue integrates was counted by the apply that parked it.
+	Integrated int
+	// Bytes is the bytes those structs carry, as ApplyBudget.Bytes counts
+	// them.
+	Bytes int
+	// Split is the structs the apply made by splitting items the document
+	// held, its drain's splits included, as ApplyBudget.Split counts them;
+	// none of a drain that WithWholeOrNothingApplies takes back.
+	Split int
+	// Decoded is the values the apply read, as ApplyBudget.Decoded counts
+	// them.
+	Decoded int
+}
+
+// WithApplyReport calls report once for each remote apply (ApplyUpdate and
+// its V1 and V2 forms) that commits, with the apply's origin and an
+// ApplyReport of what the document holds and what the apply added. report
+// runs under the document's lock, after the commit has merged runs back
+// together and before the apply's observers fire, so it must not call the
+// document. A panic it raises refuses nothing, the apply having committed,
+// and reaches the apply's caller once the document is unlocked, as a panic
+// in a Transact callback does. A nil report makes no report.
+//
+// An apply that fails after it began to integrate commits what it kept, as
+// on any document without WithWholeOrNothingApplies, and reports it: its
+// counts are those of the RefusedUpdateError the apply returns. An apply
+// that leaves the document as it was, refused before any struct of it
+// integrated or rolled back by WithWholeOrNothingApplies, makes no report.
+// The option bounds and refuses nothing: every update applies as it would
+// without it.
+//
+// The cost is the count each apply keeps, as for WithApplyBudget, and at
+// the commit a step for each client the document holds structs of, to total
+// them. Every failed remote apply on the document returns a
+// RefusedUpdateError.
+func WithApplyReport(report func(origin any, report ApplyReport)) DocOption {
+	return func(d *Doc) { d.applyReport = report }
+}
+
+// SetApplyReport sets the callback of WithApplyReport on a document already
+// made, or with nil removes it. It takes the document's lock.
+func (d *Doc) SetApplyReport(report func(origin any, report ApplyReport)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.applyReport = report
 }
 
 // updateSub pairs a unique subscription ID with its callback so that
@@ -148,16 +382,48 @@ type subdocsSub struct {
 // Doc is the root of a Yjs collaborative document.
 // All shared types (YArray, YMap, YText, …) live inside a Doc.
 type Doc struct {
-	clientID        ClientID
-	gc              bool
-	guid            string // guid identifies this document (for subdocument embedding). Defaults to a random uuidv4 (see New) unless set with WithGUID.
+	clientID       ClientID      // read and written under mu, or before the doc is shared
+	sharedClientID atomic.Uint64 // clientID's copy for ClientID, read without mu
+	gc             bool
+	guid           string // guid identifies this document (for subdocument embedding). Defaults to a random uuidv4 (see New) unless set with WithGUID.
+	// linkMu guards shouldLoad, collectionID, item, parent and detached. It is a leaf lock:
+	// no other lock is taken while it is held, so a parent's transaction can
+	// take it, also for a document embedded in itself.
+	linkMu          sync.Mutex
 	shouldLoad      bool
 	autoLoad        bool
+	wholeOrNothing  bool // see WithWholeOrNothingApplies
 	collectionID    string
+	meta            any   // subdocument meta from Yjs opts, written back unchanged
 	item            *Item // set on integrate when this Doc is embedded as a subdocument (#63)
+	parent          *Doc  // document that owns item
+	detached        bool  // true once an embedded Doc is removed or destroyed
 	subdocs         map[string]*Doc
 	onSubdocs       []subdocsSub
 	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
+	// integrateScanBudget is the bound of WithIntegrateScanBudget, or nil.
+	integrateScanBudget func(origin any) int
+	// applying is the journal of the remote apply in progress on a document
+	// with whole-or-nothing applies, or nil.
+	applying *applyJournal
+	// applyBudget is the budget of WithApplyBudget, allowedRoots the list of
+	// WithAllowedRoots, refusedContent the kinds of WithRefusedContent and
+	// applyReport the callback of WithApplyReport, each nil for none;
+	// counting is the tally of the remote apply in progress on a document
+	// with any of them, or nil, and reporting the tally of an apply whose
+	// commit is to report it, from the apply's end to the report, or nil.
+	applyBudget    func(origin any) ApplyBudget
+	allowedRoots   func(origin any) []string
+	refusedContent func(origin any) []ContentKind
+	applyReport    func(origin any, report ApplyReport)
+	counting       *applyTally
+	reporting      *applyTally
+	// parkedBy is what the document keeps of the apply that parked each
+	// parked struct, on a document with a budget or a roots list, and nil
+	// when nothing is parked; rootsDropped counts, by client, the parked
+	// structs a drain dropped under a root another apply's list leaves out.
+	parkedBy     map[*Item]parkedFrom
+	rootsDropped map[ClientID]int
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -190,9 +456,18 @@ type Doc struct {
 	undoManagerCount int
 }
 
-// ClientID returns the document's client identifier (read-only after creation).
+// ClientID returns the document's client identifier. A remote transaction
+// that changes this document's own client's clock gives it a new random one
+// when it commits, as Yjs does.
 func (d *Doc) ClientID() ClientID {
-	return d.clientID
+	return ClientID(d.sharedClientID.Load())
+}
+
+// setClientID sets the document's client identifier; called under mu once the
+// doc is shared.
+func (d *Doc) setClientID(id ClientID) {
+	d.clientID = id
+	d.sharedClientID.Store(uint64(id))
 }
 
 // GUID returns the document's identifier. Every Doc has one — a random uuidv4 by default (Yjs parity), or the value passed to WithGUID.
@@ -207,45 +482,88 @@ func (d *Doc) AutoLoad() bool {
 
 // ShouldLoad returns whether a provider should sync this doc now.
 func (d *Doc) ShouldLoad() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
 	return d.shouldLoad
 }
 
-// CollectionID returns the optional subdocument collection identifier.
+// CollectionID returns the optional subdocument collection identifier. A
+// subdocument without one takes its parent's when it is added, as in Yjs.
 func (d *Doc) CollectionID() string {
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
 	return d.collectionID
+}
+
+// inheritCollectionID gives d the collection ID id when d has none, as Yjs
+// cleanupTransactions does for each added subdocument.
+func (d *Doc) inheritCollectionID(id string) {
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
+	if d.collectionID == "" {
+		d.collectionID = id
+	}
 }
 
 // Load signals that this subdocument's data should be synced. On a subdocument
 // it sets shouldLoad=true and emits a subdocs "loaded" event on the parent; on a
 // root doc it just sets shouldLoad=true. Safe to call multiple times.
 //
-// Load opens a transaction on the PARENT document, so it MUST NOT be called from
-// inside a Transact closure (re-entrant lock — same footgun as GetText-in-Transact).
+// On an embedded subdocument, Load opens a transaction on the PARENT document,
+// so it MUST NOT be called from inside the parent's Transact closure
+// (re-entrant lock — same footgun as GetText-in-Transact).
 func (d *Doc) Load() {
-	d.mu.Lock()
+	d.linkMu.Lock()
 	if d.shouldLoad {
-		d.mu.Unlock()
+		d.linkMu.Unlock()
 		return
 	}
 	d.shouldLoad = true
-	item := d.item
-	d.mu.Unlock()
-	if item == nil || item.Parent == nil {
+	item, parent := d.item, d.parent
+	d.linkMu.Unlock()
+	if item == nil {
 		return
 	}
-	item.Parent.doc.Transact(func(txn *Transaction) {
-		// A detached/overwritten subdoc leaves item tombstoned but d.item still
-		// pointing at it; reporting it as loaded would be spurious (the doc is
-		// no longer resident in the parent's registry). item.Deleted is read
-		// here — inside the parent's transaction — so the parent lock guards it.
-		// Mirrors Yjs, where a removed subdoc is destroyed and load() is a no-op.
+	parent.Transact(func(txn *Transaction) {
+		// item can be deleted after Load copied it under linkMu and before this
+		// parent transaction starts. Do not report a loaded event for that
+		// removed item. A detached subdocument clears d.item and returns above.
 		if item.Deleted {
 			return
 		}
 		txn.addSubdocLoaded(d)
 	})
+}
+
+// attachSubdoc records the item and parent together under linkMu and returns
+// the load request that integration must report.
+func (d *Doc) attachSubdoc(item *Item, parent *Doc) bool {
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
+	if d.item != nil || d.detached {
+		panic(ErrSubdocAlreadyIntegrated)
+	}
+	d.item, d.parent = item, parent
+	return d.shouldLoad
+}
+
+// detachSubdoc drops links that would otherwise retain the former parent.
+func (d *Doc) detachSubdoc(item *Item) {
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
+	if d.item == item {
+		d.item, d.parent, d.detached = nil, nil, true
+	}
+}
+
+// reattachSubdoc gives d back the item and parent detachSubdoc dropped, for
+// item, alive again after the rollback of the apply that deleted it.
+func (d *Doc) reattachSubdoc(item *Item, parent *Doc) {
+	d.linkMu.Lock()
+	defer d.linkMu.Unlock()
+	if d.item == nil && d.detached {
+		d.item, d.parent, d.detached = item, parent, false
+	}
 }
 
 // maxPendingItemsLimit returns the effective cap on the pending queue depth.
@@ -254,6 +572,48 @@ func (d *Doc) maxPendingItemsLimit() int {
 		return defaultMaxPendingItems
 	}
 	return d.maxPendingItems
+}
+
+// scanBudget is the bound WithIntegrateScanBudget sets for a remote apply with
+// origin, or 0 for none.
+func (d *Doc) scanBudget(origin any) int {
+	if d.integrateScanBudget == nil {
+		return 0
+	}
+	return d.integrateScanBudget(origin)
+}
+
+// callApplyBudget calls the WithApplyBudget callback, tagging a panic it
+// raises with the option's name; the caller holds d.mu.
+func (d *Doc) callApplyBudget(origin any) ApplyBudget {
+	defer func() {
+		if r := recover(); r != nil {
+			panic(budgetCallbackPanic{"WithApplyBudget", r})
+		}
+	}()
+	return d.applyBudget(origin)
+}
+
+// callAllowedRoots calls the WithAllowedRoots callback, tagging a panic it
+// raises with the option's name; the caller holds d.mu.
+func (d *Doc) callAllowedRoots(origin any) []string {
+	defer func() {
+		if r := recover(); r != nil {
+			panic(budgetCallbackPanic{"WithAllowedRoots", r})
+		}
+	}()
+	return d.allowedRoots(origin)
+}
+
+// callRefusedContent calls the WithRefusedContent callback, tagging a panic
+// it raises with the option's name; the caller holds d.mu.
+func (d *Doc) callRefusedContent(origin any) []ContentKind {
+	defer func() {
+		if r := recover(); r != nil {
+			panic(budgetCallbackPanic{"WithRefusedContent", r})
+		}
+	}()
+	return d.refusedContent(origin)
 }
 
 // uuidV4 returns a random RFC-4122 v4 UUID string. Used as the default document
@@ -289,7 +649,6 @@ func NewClientID() ClientID {
 // New creates a new Doc with a randomly generated ClientID.
 func New(opts ...DocOption) *Doc {
 	d := &Doc{
-		clientID:   NewClientID(),
 		gc:         true,
 		guid:       uuidV4(),
 		shouldLoad: true,
@@ -297,6 +656,7 @@ func New(opts ...DocOption) *Doc {
 		share:      make(map[string]sharedType),
 		subdocs:    make(map[string]*Doc),
 	}
+	d.setClientID(NewClientID())
 	for _, opt := range opts {
 		opt(d)
 	}
@@ -328,6 +688,9 @@ func (d *Doc) getOrCreateType(name string) *abstractType {
 	r.owner = r
 	r.name = name
 	d.share[name] = r
+	if d.applying != nil {
+		d.applying.named = append(d.applying.named, name)
+	}
 	return &r.abstractType
 }
 
@@ -345,7 +708,7 @@ func (d *Doc) upgradeRawType(raw *rawType, dst sharedType, name string) {
 	}
 	if d.store.pending != nil {
 		for _, item := range d.store.pending.items {
-			if item.Parent == &raw.abstractType {
+			if item != nil && item.Parent == &raw.abstractType {
 				item.Parent = at
 			}
 		}
@@ -473,8 +836,13 @@ func (d *Doc) GetText(name string) *YText {
 // The closure must be invoked OUTSIDE d.mu — observers may re-enter Doc
 // methods that acquire d.mu, which would deadlock under the lock.
 //
-// Returns nil only if there is nothing to fire (no observers of any kind).
+// Returns nil when there is nothing to fire: no observers, a refused remote
+// apply (Transaction.refused), or one whole-or-nothing rolled back
+// (Transaction.rolledBack); either left the document as it was.
 func buildPhase2(d *Doc, txn *Transaction) func() {
+	if txn.refused || txn.rolledBack {
+		return nil
+	}
 	// Encode the incremental update and snapshot observer slices while still
 	// holding the lock so we get a consistent view.
 	var updateBytes []byte
@@ -540,7 +908,9 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 	hasSubdocs := len(txn.subdocsAdded)+len(txn.subdocsRemoved)+len(txn.subdocsLoaded) > 0
 	var subdocsEv SubdocsEvent
 	if hasSubdocs {
+		parentCollectionID := d.CollectionID()
 		for sd := range txn.subdocsAdded {
+			sd.inheritCollectionID(parentCollectionID)
 			d.subdocs[sd.guid] = sd
 			subdocsEv.Added = append(subdocsEv.Added, sd)
 		}
@@ -596,8 +966,8 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 // exposed to fn via Transaction.Ctx().
 //
 // fn's returned error is captured as the named return value retErr.
-// Observers fire regardless of whether fn returned an error; the error
-// is propagated to the caller only after the observers have fired.
+// Observers fire, unless a remote apply was refused (Transaction.refused),
+// before fn's error is returned.
 //
 // See docs/superpowers/specs/2026-04-21-transact-panic-safety-design.md
 // for the full rationale on the defer/recover structure.
@@ -608,6 +978,10 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 	}
 
 	d.mu.Lock()
+	// A parking apply records only what this transaction parks.
+	if d.store.parked != nil {
+		*d.store.parked = transactionParked{}
+	}
 
 	txn := &Transaction{
 		doc:         d,
@@ -680,6 +1054,31 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			gcTxnDeleteSet(d, txn)
 		}
 
+		// The report of a remote apply that committed, after the commit's
+		// merges and collection and under the lock the apply held, so the
+		// structs it counts are the ones the document is left holding. A
+		// panic of its callback is carried like one of fn, raised after the
+		// unlock, so it skips nothing the commit still owes the document, such
+		// as the format cleanup decided above (WithApplyReport).
+		if report := d.reporting; report != nil {
+			d.reporting = nil
+			if r == nil {
+				r = reportApplyRecovered(txn, report)
+			}
+		}
+
+		// The document's park record drops this transaction's views of the queue.
+		if d.store.parked != nil {
+			*d.store.parked = transactionParked{}
+		}
+
+		// A remote transaction that moved this document's own clock gives it a
+		// new client ID, as Yjs cleanupTransactions does, so a local write never
+		// continues a clock that another peer set.
+		if !txn.Local && txn.afterState != nil && txn.afterState.Clock(d.clientID) != txn.beforeState.Clock(d.clientID) {
+			d.setClientID(NewClientID())
+		}
+
 		// Mark the transaction committed BEFORE releasing the lock so the
 		// txn-scoped accessors fail loudly from observers (which receive the
 		// *Transaction after unlock) or from a retained txn, instead of
@@ -701,6 +1100,8 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 	}()
 
 	retErr = fn(txn)
+	// An observer that keeps the *Transaction must not keep the scans' marks.
+	txn.scanMarks = nil
 
 	rearbitrateMoves(txn)
 	txn.afterState = d.store.StateVector()
@@ -1021,6 +1422,13 @@ type PendingStats struct {
 	// MissingFor lists the ClientIDs that pending items reference but
 	// haven't yet received. Sorted ascending. Read-only.
 	MissingFor []ClientID
+
+	// RootsDropped counts, by the client that wrote them, the parked structs
+	// that a drain dropped because they landed under a root the allowed-roots
+	// list does not name (WithAllowedRoots), when the apply that filled their
+	// gap was not the one that sent them: that apply does not fail for them.
+	// It counts from the document's creation and is a copy.
+	RootsDropped map[ClientID]int
 }
 
 // PendingStats returns a snapshot of the pending-queue state. Cheap; takes
@@ -1033,7 +1441,7 @@ func (d *Doc) PendingStats() PendingStats {
 
 	stats := PendingStats{}
 	if d.store.pending != nil {
-		stats.Items = len(d.store.pending.items)
+		stats.Items = d.store.pending.heldStructs()
 		// missing is a StateVector (map[ClientID]uint64) — extract sorted keys
 		missing := make([]ClientID, 0, len(d.store.pending.missing))
 		for c := range d.store.pending.missing {
@@ -1042,8 +1450,9 @@ func (d *Doc) PendingStats() PendingStats {
 		sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
 		stats.MissingFor = missing
 	}
-	for _, ranges := range d.store.pendingDs.clients {
-		stats.DeleteRanges += len(ranges)
+	stats.DeleteRanges = d.store.pendingDsRanges
+	if len(d.rootsDropped) > 0 {
+		stats.RootsDropped = maps.Clone(d.rootsDropped)
 	}
 	return stats
 }
@@ -1057,4 +1466,7 @@ func (d *Doc) Destroy() {
 	d.onAfterTxn = nil
 	d.share = make(map[string]sharedType)
 	d.store = newStructStore()
+	d.linkMu.Lock()
+	d.item, d.parent, d.detached = nil, nil, true
+	d.linkMu.Unlock()
 }
