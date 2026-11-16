@@ -38,6 +38,7 @@ type peer struct {
 	closeReason       string        // #104: WS close reason accompanying closeCode
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
 	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
+	identity          any           // ConnectionConfig.Identity, handed to OnPeerUpdate; set and read on the read loop
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
 	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
 
@@ -359,7 +360,8 @@ func (p *peer) handleAuth(dec *encoding.Decoder) {
 		return
 	}
 
-	p.readOnly = cfg.ReadOnly // safe: only read on this read-loop goroutine
+	// safe: both are only read on this read-loop goroutine
+	p.readOnly, p.identity = cfg.ReadOnly, cfg.Identity
 	scope := "read-write"
 	if cfg.ReadOnly {
 		scope = "readonly"

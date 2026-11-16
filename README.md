@@ -570,6 +570,28 @@ server.Authorize = func(r *http.Request) (ygws.ConnectionConfig, bool) {
 }
 ```
 
+`ConnectionConfig.Identity` (v1.56.0) attaches whatever names the connection's user, a user ID or a session. ygo never reads it; `Server.OnPeerUpdate` receives it as `PeerUpdateInfo.Identity` with each update the connection sends, so the hook can tell who wrote what:
+
+```go
+server.Authorize = func(r *http.Request) (ygws.ConnectionConfig, bool) {
+    user, ok := authenticate(r)
+    if !ok {
+        return ygws.ConnectionConfig{}, false
+    }
+    return ygws.ConnectionConfig{ReadOnly: !user.CanEdit, Identity: user.ID}, true
+}
+server.OnPeerUpdate = func(info ygws.PeerUpdateInfo, apply func() error) error {
+    if err := apply(); err != nil {
+        return err
+    }
+    userID, _ := info.Identity.(string)
+    recordEdit(info.Room, userID)
+    return nil
+}
+```
+
+An in-band token accepted by `Server.OnTokenAuth` replaces the connection's `ConnectionConfig` whole, its `Identity` included.
+
 ### Graceful shutdown
 
 `Server.Shutdown(ctx)` drains pending writes and closes peers. Adapters that implement `PersistenceAdapterContext` (v1.7.0) receive a context derived from the shutdown signal so they can abort in-flight DB calls instead of waiting for the driver's timeout.

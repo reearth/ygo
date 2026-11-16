@@ -1,3 +1,19 @@
+## v1.56.0
+
+**Who is affected: servers that set `Server.OnPeerUpdate` and need to know who
+sent each update.** Everyone else sees no change.
+
+`ConnectionConfig` gains `Identity any`. Return it from `Server.Authorize`
+with whatever names the connection's user, and `Server.OnPeerUpdate` receives
+it as `PeerUpdateInfo.Identity` with every update that connection sends. ygo
+never reads the value.
+
+`Server.OnTokenAuth` replaces the connection's whole `ConnectionConfig` when it
+accepts a token, as it already did for `ReadOnly`. A hook that returns no
+`Identity` therefore clears the one `Authorize` attached, so return the
+identity the token names. Connections accepted by `AuthFunc`, or with no auth
+hook, carry a nil `Identity`.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

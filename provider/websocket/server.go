@@ -801,6 +801,13 @@ type ConnectionConfig struct {
 	// awareness broadcasts but its inbound writes are dropped server-side. See
 	// Server.Authorize for the exact semantics.
 	ReadOnly bool
+
+	// Identity is whatever the embedder uses to name who opened the
+	// connection: a user ID, a session, a claims struct. ygo never reads it;
+	// it hands it back as PeerUpdateInfo.Identity with each update the
+	// connection sends, so an OnPeerUpdate hook can tell which authenticated
+	// user wrote it. Nil (the default) attaches nothing.
+	Identity any
 }
 
 // Server is a net/http-compatible WebSocket handler.
@@ -932,7 +939,8 @@ type Server struct {
 	// precedence over AuthFunc. A read-only peer receives document and awareness
 	// broadcasts but its inbound writes (SyncStep2/Update and awareness updates)
 	// are dropped; it can still request state (SyncStep1 is answered) and query
-	// awareness. Stateless signals are not gated by read-only.
+	// awareness. Stateless signals are not gated by read-only. The returned
+	// Identity reaches OnPeerUpdate with each update the connection sends.
 	Authorize func(r *http.Request) (ConnectionConfig, bool)
 
 	// AllowedOrigins is the list of origins permitted to open WebSocket
@@ -1001,6 +1009,9 @@ type Server struct {
 	// Authenticated (scope from the returned ConnectionConfig.ReadOnly); a
 	// non-nil error replies PermissionDenied(err) and closes with WS 4401.
 	// When nil, tag-2 frames are silently ignored (unchanged legacy behavior).
+	// An accepted token replaces the connection's ConnectionConfig whole, as
+	// Authorize set it: its ReadOnly and its Identity, a nil Identity included,
+	// so the hook returns the identity the token names.
 	//
 	// OnTokenAuth complements the HTTP-boundary AuthFunc/Authorize; it does not
 	// replace them. IMPORTANT: it is NOT a document-confidentiality gate — the
@@ -2018,7 +2029,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Authorize (issue #59) takes precedence over AuthFunc when both are set: it
 	// both accepts/rejects and reports per-connection config (read-only). AuthFunc
 	// grants read-write. Rejecting either way is a 401 before the upgrade.
-	var readOnly bool
+	var (
+		readOnly bool
+		identity any
+	)
 	switch {
 	case s.Authorize != nil:
 		cfg, ok := s.Authorize(r)
@@ -2026,7 +2040,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		readOnly = cfg.ReadOnly
+		readOnly, identity = cfg.ReadOnly, cfg.Identity
 	case s.AuthFunc != nil:
 		if !s.AuthFunc(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -2132,6 +2146,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writerDone:        make(chan struct{}),
 		limiter:           s.newPeerLimiter(),
 		readOnly:          readOnly,
+		identity:          identity,
 		hocuspocusFraming: s.HocuspocusFraming,
 	}
 

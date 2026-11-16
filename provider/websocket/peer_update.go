@@ -22,6 +22,10 @@ type PeerUpdateInfo struct {
 	// Origin is the transaction origin apply applies the update with, which
 	// the document's OnUpdate observers receive.
 	Origin any
+	// Identity is the ConnectionConfig.Identity of the connection that sent
+	// the update: from Server.Authorize, or from Server.OnTokenAuth once a
+	// token is accepted. Nil when neither set one.
+	Identity any
 }
 
 // PeerUpdateHook is the signature of Server.OnPeerUpdate. apply applies
@@ -124,7 +128,7 @@ func (p *peer) applyPeerUpdate(update []byte) (applied bool, closeWith *PeerClos
 	}
 	var hookErr error
 	p.server.safeHook("OnPeerUpdate", func() {
-		hookErr = hook(PeerUpdateInfo{Room: p.roomName, Doc: p.room.doc, Update: update, Origin: p}, apply)
+		hookErr = hook(PeerUpdateInfo{Room: p.roomName, Doc: p.room.doc, Update: update, Origin: p, Identity: p.identity}, apply)
 	})
 	mu.Lock()
 	returned = true
