@@ -90,7 +90,7 @@
 | **GC struct decoding (tag 0)** | ✅ | ✅ Fixed in v1.0.2 | ✅ | ygo pre-1.0.2 rejected tag-0 structs |
 | **Skip struct decoding (tag 10)** | ✅ | ✅ Fixed in v1.0.2 | ✅ | ygo pre-1.0.2 rejected tag-10 structs |
 | **Cross-client parent resolution** | ✅ | ✅ Fixed in v1.0.2–v1.0.3 | ✅ | Pending retry loop for items referencing later-decoded client groups |
-| **GC'd origin handling** | ✅ | ✅ Fixed in v1.0.3 | ✅ | Orphaned items encoded as GC structs; multi-client resolved via store scan |
+| **GC'd origin handling** | ✅ | ✅ Fixed in v1.0.3 and v1.55.1 | ✅ | An item whose origin or right origin is a GC struct is stored as a GC struct once both neighbours are present, as in Yjs; origins that name a GC struct are encoded unchanged |
 | **Out-of-order delta convergence** | ✅ `Store.pending` | ✅ `StructStore.pending` (inline retry, v1.2.0) | ✅ `pendingStructs` | parity — items with unresolved Origin/OriginRight are parked and retried on each subsequent apply; pendingDs mirrors JS pendingDs |
 
 ### 4.4 Undo / Redo
@@ -195,7 +195,7 @@
 | **JsonPath queries** | ✅ Documented as available for state extraction | ❌ Not implemented | — | Nice-to-have; limited adoption |
 | **Doc.ClientID** | ✅ `u32` (fits JS 53-bit VarUint limit) | ✅ `uint32` (fixed in v1.0.0, was uint64) | ✅ | — |
 | **GUID** | ✅ Auto-UUID if not set | ✅ `WithGUID()`, `GUID()` | — | — |
-| **Doc options** | `client_id`, `guid`, `collection_id`, `offset_kind`, `skip_gc`, `auto_load`, `should_load` | `WithClientID`, `WithGUID`, `WithGC` | — | yrs has `offset_kind` and `collection_id`/`auto_load` that ygo lacks |
+| **Doc options** | `client_id`, `guid`, `collection_id`, `offset_kind`, `skip_gc`, `auto_load`, `should_load` | `WithClientID`, `WithGUID`, `WithGC`, `WithCollectionID`, `WithAutoLoad`, `WithShouldLoad` | — | yrs has `offset_kind`, which ygo lacks; ygo always counts UTF-16 units |
 | **offset_kind** | ✅ `Bytes` or `UTF16` — controls how text offsets are counted | ❌ Hardcoded UTF-16 (fixed in v1.0.4) | ⚠️ yrs default is `Bytes`; must be set to `UTF16` for JS client compat | **Critical JS-compat risk in yrs.** If Rust integrators don't set `offset_kind: UTF16`, their YText offsets will be wrong for emoji/supplementary chars. ygo is correct by default. |
 | **TransactContext** | ❌ Not present | ✅ `Doc.TransactContext(ctx, ...)` | — | ygo-only; fn polls ctx to exit early; no mid-fn interrupt (matches yrs' no-cancel model) |
 
