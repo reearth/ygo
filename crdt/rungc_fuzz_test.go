@@ -121,13 +121,11 @@ func TestFuzzRunGCMerge(t *testing.T) {
 func gcPass1Only(doc *Doc) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
+	var contents gcContents
+	collectDeletedLocked(doc, &contents)
 	for _, items := range doc.store.clients {
 		for _, item := range items {
-			if item.Deleted {
-				if _, ok := item.Content.(*ContentDeleted); !ok {
-					item.Content = NewContentDeleted(item.Content.Len())
-				}
-			}
+			collectHolder(item, &contents)
 		}
 	}
 }

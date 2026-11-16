@@ -40,7 +40,7 @@ func TestUnit_Transaction_AutoGC_FreesDeletedContent(t *testing.T) {
 	})
 	require.NotNil(t, helloItem, "ContentString item must exist after insert")
 	originalLen := helloItem.Content.Len()
-	require.Equal(t, 5, originalLen)
+	require.Equal(t, uint64(5), originalLen)
 
 	// Delete in a separate transaction → auto-GC kicks in at commit.
 	doc.Transact(func(txn *Transaction) { txt.Delete(txn, 0, 5) })

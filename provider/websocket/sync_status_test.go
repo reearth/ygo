@@ -1,6 +1,7 @@
 package websocket_test
 
 import (
+	"encoding/hex"
 	"errors"
 	"net/http/httptest"
 	"strconv"
@@ -216,11 +217,10 @@ func TestInteg_SyncStatus_RefusedUpdateAnsweredZeroAndSocketStays(t *testing.T) 
 	assert.Equal(t, "after", srv.GetDoc("room").GetText("t").ToString())
 }
 
-// An update the room only partly takes (it overflows MaxPendingItems after
-// some of it has integrated) must still reach the other peers for the part
-// the room now holds.
+// An update the room only partly takes must still reach the other peers for the
+// part the room now holds.
 func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
-	srv, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 3 })
+	srv, ts := hocuspocusServer(t, nil)
 	author := crdt.New(crdt.WithClientID(1))
 	root := author.GetMap("m")
 	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
@@ -230,8 +230,8 @@ func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
 	watcherDoc := crdt.New(crdt.WithClientID(9))
 	watcher := hpDial(t, ts, "room", false, watcherDoc)
 
-	// The editor's own text integrates; its entries on a map the room never
-	// received park until the cap is hit.
+	// The text integrates and the map entries park before the delete set fails
+	// to decode.
 	require.NoError(t, crdt.ApplyUpdateV1(editor, crdt.EncodeStateAsUpdateV1(author, nil), nil))
 	v, _ := editor.GetMap("m").Get("nested")
 	nested := v.(*crdt.YMap)
@@ -242,7 +242,8 @@ func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
 			nested.Set(txn, "k"+strconv.Itoa(i), i)
 		}
 	})
-	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(editor, author.StateVector())))
+	cut := crdt.EncodeStateAsUpdateV1(editor, author.StateVector())
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(cut[:len(cut)-1]))
 	syncStatuses(t, conn, "room")
 	require.Equal(t, "abc", srv.GetDoc("room").GetText("t").ToString(), "the room kept the part that integrated")
 
@@ -260,12 +261,11 @@ func TestInteg_SyncStatus_PartlyAppliedUpdateReachesOtherPeers(t *testing.T) {
 	assert.Equal(t, "abc", watcherDoc.GetText("t").ToString())
 }
 
-// The broadcast for a partly applied update carries only what that update
-// landed, not the room's parked structs or its delete set: a room with 40
-// parked entries and 100 deletions forwards the three characters that
-// integrated and nothing more.
+// The broadcast for a partly applied update carries what that update left in
+// the room, its parked structs included, not the room's earlier parked
+// structs or its delete set.
 func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing.T) {
-	_, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 50 })
+	srv, ts := hocuspocusServer(t, func(srv *ygws.Server) { srv.MaxPendingItems = 200 })
 	editor := crdt.New(crdt.WithClientID(7))
 	conn := hpDial(t, ts, "room", false, editor)
 	watcherDoc := crdt.New(crdt.WithClientID(9))
@@ -285,8 +285,8 @@ func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing
 	require.Equal(t, []uint64{1, 1, 1}, syncStatuses(t, conn, "room"))
 	watcherSyncBytes(t, watcher, watcherDoc)
 
-	// "abc" integrates; eleven entries on a map the room never received
-	// overflow the ten pending slots left.
+	// "abc" integrates and five map entries park, well inside the cap, before a
+	// cut-short delete set.
 	author := crdt.New(crdt.WithClientID(1))
 	root := author.GetMap("m")
 	author.Transact(func(txn *crdt.Transaction) { root.Set(txn, "nested", crdt.NewMapPrelim()) })
@@ -296,33 +296,112 @@ func TestInteg_SyncStatus_PartlyAppliedBroadcastCarriesOnlyWhatLanded(t *testing
 	before = editor.StateVector() // includes the author's map, so it is not sent
 	editor.Transact(func(txn *crdt.Transaction) {
 		txt.Insert(txn, 0, "abc", nil)
-		for i := range 11 {
+		for i := range 5 {
 			nested.Set(txn, "e"+strconv.Itoa(i), i)
 		}
 	})
-	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(editor, before)))
+	cut := crdt.EncodeStateAsUpdateV1(editor, before)
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(cut[:len(cut)-1]))
 	require.Equal(t, []uint64{0}, syncStatuses(t, conn, "room"))
 
 	got := watcherSyncBytes(t, watcher, watcherDoc)
 	assert.Equal(t, "abc"+strings.Repeat("x", 100), watcherDoc.GetText("t").ToString(),
 		"the watcher gets the text that landed")
-	assert.Less(t, got, 64, "the broadcast carries what landed, not the parked entries or the delete set")
+	assert.Equal(t, srv.GetDoc("room").PendingStats(), watcherDoc.PendingStats(), "the watcher parks the five entries too")
+	assert.Less(t, got, 128, "the broadcast carries what this update left, not the 40 earlier parked entries or the delete set")
 }
 
-// watcherSyncBytes reads conn's frames up to the Pong of a Ping it sends,
-// applies every sync frame to doc, and returns the sync frames' total size.
+// The other peers get the update yjs emits for a peer's update cut inside its
+// delete set, plus the structs the room parked; the hex is from
+// crdt/testdata/truncated_ds_yjs_fixtures.json.
+func TestInteg_SyncStatus_TruncatedDeleteSetRelaysWhatApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix, update, relayed, text string
+	}{
+		{
+			// One struct and client 300000's range applied; client 1's ranges cut.
+			name:    "structs and the ranges read",
+			prefix:  "0201e0a71200c4010401050358595a020100040101740568656c6c6f8401040620776f726c6400",
+			update:  "0101010b84010a015102e0a712010003",
+			relayed: "0101010b84010a015101e0a712010003",
+			text:    "hello worldQ",
+		},
+		{
+			// The struct parks and the cut comes before any range: only the
+			// parked struct is relayed.
+			name:    "nothing but the parked struct",
+			prefix:  "01010100040101740661626364656600",
+			update:  "0101010784010601680101",
+			relayed: "01010107840106016800",
+			text:    "abcdef",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts := hocuspocusServer(t, nil)
+			editor := crdt.New(crdt.WithClientID(7))
+			conn := hpDial(t, ts, "room", false, editor)
+			watcherDoc := crdt.New(crdt.WithClientID(9))
+			watcher := hpDial(t, ts, "room", false, watcherDoc)
+
+			prefix, err := hex.DecodeString(tc.prefix)
+			require.NoError(t, err)
+			update, err := hex.DecodeString(tc.update)
+			require.NoError(t, err)
+			hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(prefix))
+			require.Equal(t, []uint64{1}, syncStatuses(t, conn, "room"))
+			watcherUpdates(t, watcher, watcherDoc)
+
+			hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(update))
+			require.Equal(t, []uint64{0}, syncStatuses(t, conn, "room"))
+			var want []string
+			if tc.relayed != "" {
+				want = []string{tc.relayed}
+			}
+			assert.Equal(t, want, watcherUpdates(t, watcher, watcherDoc))
+			assert.Equal(t, tc.text, watcherDoc.GetText("t").ToString())
+		})
+	}
+}
+
+// watcherUpdates returns the hex of the Update payloads among
+// watcherSyncFrames.
+func watcherUpdates(t *testing.T, conn *gws.Conn, doc *crdt.Doc) []string {
+	t.Helper()
+	var updates []string
+	for _, body := range watcherSyncFrames(t, conn, doc) {
+		msgType, payload, err := ygsync.ReadSyncMessage(body)
+		require.NoError(t, err)
+		if msgType == ygsync.MsgUpdate {
+			updates = append(updates, hex.EncodeToString(payload))
+		}
+	}
+	return updates
+}
+
+// watcherSyncBytes returns the total size of watcherSyncFrames.
 func watcherSyncBytes(t *testing.T, conn *gws.Conn, doc *crdt.Doc) int {
 	t.Helper()
-	hpSend(t, conn, "room", tagPing, nil)
 	total := 0
+	for _, body := range watcherSyncFrames(t, conn, doc) {
+		total += len(body)
+	}
+	return total
+}
+
+// watcherSyncFrames reads conn's frames up to the Pong of a Ping it sends,
+// applies every sync frame to doc, and returns the sync frames' bodies.
+func watcherSyncFrames(t *testing.T, conn *gws.Conn, doc *crdt.Doc) [][]byte {
+	t.Helper()
+	hpSend(t, conn, "room", tagPing, nil)
+	var bodies [][]byte
 	for {
 		tag, body, err := hpRead(conn, "room", 2*time.Second)
 		require.NoError(t, err)
 		switch tag {
 		case tagPong:
-			return total
+			return bodies
 		case tagSync:
-			total += len(body)
+			bodies = append(bodies, body)
 			_, err := ygsync.ApplySyncMessage(doc, body, nil)
 			require.NoError(t, err)
 		}
