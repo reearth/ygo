@@ -17,7 +17,7 @@ func pendingManyClientCheckpoint(n int) []byte {
 	text := doc.GetText("text")
 	for i := 0; i < n; i++ {
 		doc.Transact(func(txn *Transaction) {
-			doc.clientID = ClientID(i + 1)
+			doc.setClientID(ClientID(i + 1))
 			text.Insert(txn, i, "x", nil)
 		})
 	}

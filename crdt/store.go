@@ -20,6 +20,11 @@ type StructStore struct {
 	// pendingDs holds delete-set entries targeting items not yet integrated.
 	// Accumulated across updates and retried whenever pending drains.
 	pendingDs DeleteSet
+	// pendingDsRanges counts pendingDs's ranges so an apply need not.
+	pendingDsRanges int
+	// pendingDsMoved holds the parked clients given a struct since the last
+	// retry, the only ones whose ranges can apply.
+	pendingDsMoved map[ClientID]struct{}
 
 	// pendingMoves holds ContentMove items whose target item was not yet
 	// integrated when the move itself integrated (e.g. a fresh peer applying a
@@ -34,6 +39,9 @@ type StructStore struct {
 	// next resolve pass for that target client — bounded by move-op count,
 	// and it is never applied without its target.
 	pendingMoves map[ClientID][]*Item
+
+	// parked is allocated only for a transaction that parks (Transaction.parkRecord).
+	parked *transactionParked
 }
 
 // pendingUpdate holds decoded items parked because of unresolved
@@ -41,8 +49,21 @@ type StructStore struct {
 // park time. A retry is worth attempting when the store's current
 // clock for any client in `missing` has advanced past its recorded value.
 type pendingUpdate struct {
-	items   []*Item     // parked items, in arrival order
+	// items are appended, or emptied in place (nil) when a merge drops them,
+	// so a transaction can record its park as a view of this queue.
+	items   []*Item
+	dead    int         // the nil slots of items
 	missing StateVector // clientID -> store clock at park time for that client
+	// cover is the clocks items span, built on demand and kept by addCover.
+	cover *pendingCover
+	// tail is the single client's clock past every parked struct, when tail
+	// is valid and no struct of another client parked; it lets a tail append
+	// skip building cover.
+	tailClient ClientID
+	tail       uint64
+	tailValid  bool
+	// ready latches a clock past missing until the drain replaces this queue.
+	ready bool
 }
 
 func newStructStore() *StructStore {
@@ -55,6 +76,56 @@ func newStructStore() *StructStore {
 // Append adds item to the store. Items must be appended in Clock order per client.
 func (s *StructStore) Append(item *Item) {
 	s.clients[item.ID.Client] = append(s.clients[item.ID.Client], item)
+	s.noteAppend(item)
+}
+
+// noteAppend keeps parked-clock bookkeeping out of Append's inlined fast path.
+func (s *StructStore) noteAppend(item *Item) {
+	if p := s.pending; p != nil && !p.ready {
+		if parkedAt, waits := p.missing[item.ID.Client]; waits && item.ID.Clock+item.Content.Len() > parkedAt {
+			p.ready = true
+		}
+	}
+	if _, parked := s.pendingDs.clients[item.ID.Client]; parked {
+		if s.pendingDsMoved == nil {
+			s.pendingDsMoved = make(map[ClientID]struct{})
+		}
+		s.pendingDsMoved[item.ID.Client] = struct{}{}
+	}
+}
+
+// parkDeletes merges ds into pendingDs.
+func (s *StructStore) parkDeletes(ds DeleteSet) {
+	if len(s.pendingDs.clients) == 0 && len(ds.clients) > 1 {
+		// Sized once, so a park of many clients does not regrow the map.
+		s.pendingDs = DeleteSet{clients: make(map[ClientID][]DeleteRange, len(ds.clients))}
+	}
+	for client := range ds.clients {
+		s.pendingDsRanges -= len(s.pendingDs.clients[client])
+	}
+	s.pendingDs.Merge(ds)
+	for client := range ds.clients {
+		s.pendingDsRanges += len(s.pendingDs.clients[client])
+	}
+}
+
+// takeReadyDeletes removes and returns the parked ranges of clients whose new
+// structs reach their lowest range, the only ones that can apply.
+func (s *StructStore) takeReadyDeletes() DeleteSet {
+	var ready DeleteSet
+	for client := range s.pendingDsMoved {
+		if ranges := s.pendingDs.clients[client]; len(ranges) > 0 && s.NextClock(client) > ranges[0].Clock {
+			if ready.clients == nil {
+				ready = newDeleteSet()
+			}
+			ready.clients[client] = ranges
+			ready.order = append(ready.order, client)
+			delete(s.pendingDs.clients, client)
+			s.pendingDsRanges -= len(ranges)
+		}
+	}
+	clear(s.pendingDsMoved)
+	return ready
 }
 
 // Find returns the Item that contains the given ID, or nil if not found.
@@ -78,7 +149,7 @@ func (s *StructStore) Find(id ID) *Item {
 		return nil
 	}
 	item := items[idx]
-	if item.ID.Clock+uint64(item.Content.Len()) > id.Clock {
+	if item.ID.Clock+item.Content.Len() > id.Clock {
 		return item
 	}
 	return nil
@@ -93,7 +164,7 @@ func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock u
 	if item == nil {
 		return nil
 	}
-	end := item.ID.Clock + uint64(item.Content.Len()) - 1
+	end := item.ID.Clock + item.Content.Len() - 1
 	if end == clock {
 		return item
 	}
@@ -104,7 +175,7 @@ func (s *StructStore) getItemCleanEnd(txn *Transaction, client ClientID, clock u
 		return item
 	}
 	// Split so the left half ends exactly at clock.
-	splitAt := int(clock - item.ID.Clock + 1)
+	splitAt := clock - item.ID.Clock + 1
 	splitItem(txn, item, splitAt)
 	return item // item is now the left half, ending at clock
 }
@@ -135,7 +206,7 @@ func (s *StructStore) getItemCleanStart(txn *Transaction, id ID) *Item {
 		return item
 	}
 	// Split so the right half starts exactly at id.Clock.
-	splitAt := int(id.Clock - item.ID.Clock)
+	splitAt := id.Clock - item.ID.Clock
 	return splitItem(txn, item, splitAt)
 }
 
@@ -196,7 +267,7 @@ func (s *StructStore) StateVector() StateVector {
 	for client, items := range s.clients {
 		if len(items) > 0 {
 			last := items[len(items)-1]
-			sv[client] = last.ID.Clock + uint64(last.Content.Len())
+			sv[client] = last.ID.Clock + last.Content.Len()
 		}
 	}
 	return sv
@@ -209,7 +280,7 @@ func (s *StructStore) NextClock(client ClientID) uint64 {
 		return 0
 	}
 	last := items[len(items)-1]
-	return last.ID.Clock + uint64(last.Content.Len())
+	return last.ID.Clock + last.Content.Len()
 }
 
 // insertItem inserts item into the per-client slice at the correct clock position.
@@ -238,22 +309,9 @@ func (s *StructStore) IterateFrom(sv StateVector, fn func(*Item)) {
 	}
 }
 
-// retryable reports whether the pending queue has any chance of draining
-// given the store's current integrated clocks. It returns true when the
-// store's clock for any client in `missing` has advanced past the
-// watermark recorded at park time. When true, the caller should drain
-// pending items through tryIntegrate.
-//
-// Matches yrs' `for (client, &clock) in pending.missing.iter()
-// { if clock < store.blocks.get_clock(client) { retry = true; break; } }`
-// and Yjs JS's equivalent gate in readUpdateV2.
-func (s *StructStore) retryable(missing StateVector) bool {
-	for client, parkedAt := range missing {
-		if s.NextClock(client) > parkedAt {
-			return true
-		}
-	}
-	return false
+// retryable reports whether an append advanced a clock the pending queue waits on.
+func (s *StructStore) retryable() bool {
+	return s.pending != nil && s.pending.ready
 }
 
 // mergePendingMissing sets missing[client] to the minimum of its

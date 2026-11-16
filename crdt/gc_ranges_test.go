@@ -23,7 +23,7 @@ func TestUnit_GCTransaction_OverlappingRanges(t *testing.T) {
 	for i, item := range doc.store.clients[1] {
 		_, gc := item.Content.(*ContentDeleted)
 		require.Equal(t, i == 0 || i == 1 || i == 4, gc, "item %d", i)
-		require.Equal(t, 4, item.Content.Len())
+		require.Equal(t, uint64(4), item.Content.Len())
 	}
 }
 
@@ -55,7 +55,7 @@ func TestUnit_GCTransaction_RangeBoundaries(t *testing.T) {
 			for i, item := range doc.store.clients[1] {
 				_, collected := item.Content.(*ContentDeleted)
 				require.Equal(t, tc.collected[i], collected, "item %d", i)
-				require.Equal(t, 4, item.Content.Len(), "item %d", i)
+				require.Equal(t, uint64(4), item.Content.Len(), "item %d", i)
 			}
 		})
 	}
@@ -67,7 +67,7 @@ type gcRangeCountingContent struct {
 	lenCalls int
 }
 
-func (c *gcRangeCountingContent) Len() int {
+func (c *gcRangeCountingContent) Len() uint64 {
 	c.lenCalls++
 	return c.Content.Len()
 }
@@ -86,7 +86,7 @@ func TestUnit_GCTransaction_SeekSkipsPrefix(t *testing.T) {
 	gcTxnDeleteSet(doc, txn)
 	require.Zero(t, prefix.lenCalls, "seek must not inspect content preceding the range")
 	require.IsType(t, &ContentDeleted{}, target.Content)
-	require.Equal(t, 4, target.Content.Len())
+	require.Equal(t, uint64(4), target.Content.Len())
 }
 
 func TestUnit_GCTransaction_MatchesLinearScan(t *testing.T) {
@@ -108,7 +108,7 @@ func TestUnit_GCTransaction_MatchesLinearScan(t *testing.T) {
 					item := &Item{ID: ID{Client: client, Clock: clock}, Content: content, Deleted: rng.Intn(4) != 0}
 					doc.store.Append(item)
 					reference.store.Append(&Item{ID: item.ID, Content: content.Copy(), Deleted: item.Deleted})
-					clock += uint64(content.Len() + rng.Intn(8))
+					clock += content.Len() + uint64(rng.Intn(8))
 				}
 				// Leave ranges unsorted and overlapping; include empty ranges and
 				// starts before, inside and after the stored clock interval.
@@ -142,7 +142,7 @@ func gcTxnDeleteSetLinearScan(doc *Doc, txn *Transaction) {
 				if item.ID.Clock >= rangeEnd {
 					break
 				}
-				if item.ID.Clock+uint64(item.Content.Len()) <= r.Clock {
+				if item.ID.Clock+item.Content.Len() <= r.Clock {
 					continue
 				}
 				if !item.Deleted {

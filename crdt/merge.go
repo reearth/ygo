@@ -44,15 +44,11 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 		if total > maxV2Items {
 			return nil, DeleteSet{}, ErrInvalidUpdate
 		}
-		clientU, err := dec.ReadVarUint()
+		start, err := readID(dec)
 		if err != nil {
 			return nil, DeleteSet{}, wrapUpdateErr(err)
 		}
-		client := ClientID(clientU)
-		clock, err := dec.ReadVarUint()
-		if err != nil {
-			return nil, DeleteSet{}, wrapUpdateErr(err)
-		}
+		client, clock := start.Client, start.Clock
 		// A later group for the client replaces earlier ones, as in apply (yjs parity).
 		var structs []*Item
 		for j := uint64(0); j < numStructs; j++ {
@@ -60,12 +56,16 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 			if err != nil {
 				return nil, DeleteSet{}, wrapUpdateErr(err)
 			}
-			clock += uint64(item.Content.Len())
+			if clock, err = structEnd(clock, item.Content.Len()); err != nil {
+				return nil, DeleteSet{}, err
+			}
 			// Skip structs are clock-range placeholders, not content. Drop them
 			// from the struct list — advancing clock above leaves a gap that the
 			// encoder re-emits as a skip (Yjs filterSkips). Carrying them would
 			// later hand a contentSkip to encodeItem, which can't encode it.
-			if _, isSkip := item.Content.(*contentSkip); isSkip {
+			// A struct of length zero is dropped too, so a merge cleans stored
+			// state that holds one, which the apply refuses.
+			if _, isSkip := item.Content.(*contentSkip); isSkip || item.Content.Len() == 0 {
 				continue
 			}
 			structs = append(structs, item)
@@ -79,18 +79,12 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 	return out, ds, nil
 }
 
-// sliceItemFront mutates item to drop its first `offset` logical units, so it
-// starts `offset` clocks later. Used to dedup overlapping struct ranges when
-// merging. Content.Splice(offset) mutates the receiver to hold [0,offset) and
-// returns the suffix; we keep the suffix.
-func sliceItemFront(item *Item, offset int) {
-	// An origin-less, parent-less struct (a GC placeholder) must stay so it
-	// re-encodes as a GC struct rather than a normal item; only set Origin for a
-	// real item (one that already has an origin or a resolved parent). Skip
-	// structs never reach here — they're filtered out during decode.
-	hadAnchor := item.Origin != nil || item.Parent != nil
+// sliceItemFront drops item's first offset clocks, as Yjs sliceStruct does.
+func sliceItemFront(item *Item, offset uint64) {
+	// A GC placeholder keeps no origin so it re-encodes as a GC struct.
+	hadAnchor := !item.isGCOrphan()
 	suffix := item.Content.Splice(offset)
-	item.ID.Clock += uint64(offset)
+	item.ID.Clock += offset
 	if hadAnchor {
 		item.Origin = &ID{Client: item.ID.Client, Clock: item.ID.Clock - 1}
 	}
@@ -114,12 +108,12 @@ func dedupClientStructs(items []*Item) []*Item {
 	var covEnd uint64
 	hasCov := false
 	for _, it := range items {
-		end := it.ID.Clock + uint64(it.Content.Len())
+		end := it.ID.Clock + it.Content.Len()
 		if hasCov && end <= covEnd {
 			continue // fully covered by an earlier struct
 		}
 		if hasCov && it.ID.Clock < covEnd {
-			sliceItemFront(it, int(covEnd-it.ID.Clock))
+			sliceItemFront(it, covEnd-it.ID.Clock)
 		}
 		out = append(out, it)
 		covEnd = end
@@ -147,7 +141,7 @@ func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 		// items above sv) so we can write the exact struct count up front.
 		type entry struct {
 			item   *Item // nil => skip struct
-			offset int
+			offset uint64
 			skip   uint64
 		}
 		type group struct {
@@ -164,14 +158,14 @@ func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 			started := false
 			expected := uint64(0)
 			for _, it := range items {
-				end := it.ID.Clock + uint64(it.Content.Len())
+				end := it.ID.Clock + it.Content.Len()
 				if end <= svClock {
 					continue // already known to the receiver
 				}
-				offset := 0
+				offset := uint64(0)
 				clk := it.ID.Clock
 				if clk < svClock {
-					offset = int(svClock - clk)
+					offset = svClock - clk
 					clk = svClock
 				}
 				if !started {
@@ -331,30 +325,87 @@ func DiffUpdateV1(update []byte, sv StateVector) ([]byte, error) {
 	return encodeStructStoreV1(perClient, ds, sv, store), nil
 }
 
-// EncodeStateVectorFromUpdate extracts the state vector described by a V1 update
-// — the next clock per client (max struct end) — without integrating it. Useful
-// for computing what a peer is missing directly from an update. (#57)
+// EncodeStateVectorFromUpdate extracts the state vector described by a V1
+// update without integrating it: each client's clock is the end of its
+// structs from clock 0 up to the first Skip or gap, as Yjs reports it.
 func EncodeStateVectorFromUpdate(update []byte) ([]byte, error) {
-	perClient, _, _, err := buildMergeStore([][]byte{update}, decodeStructsV1)
-	if err != nil {
-		return nil, err
+	return encodeStateVectorFromUpdate(update, false)
+}
+
+// encodeStateVectorFromUpdate reads the structs of a V1 or V2 update in wire
+// order, as Yjs encodeStateVectorFromUpdate does, so a client's consecutive
+// groups count as one run, a Skip of any length ends the run, and the delete
+// set is never read.
+func encodeStateVectorFromUpdate(update []byte, v2 bool) ([]byte, error) {
+	type entry struct {
+		client ClientID
+		clock  uint64
 	}
-	sv := make(StateVector, len(perClient))
-	for c, items := range perClient {
-		var maxEnd uint64
-		for _, it := range items {
-			if end := it.ID.Clock + uint64(it.Content.Len()); end > maxEnd {
-				maxEnd = end
-			}
+	var entries []entry
+	var client ClientID
+	var clock uint64
+	started, stop := false, false
+	s := newPendingScanner(update, v2)
+	groups := s.uint()
+	if groups > maxV2Items {
+		return nil, ErrInvalidUpdate
+	}
+	var total uint64
+	for i := uint64(0); i < groups && s.err == nil; i++ {
+		n := s.uint()
+		// The same bounds as the decoders, so a run-length V2 column cannot
+		// declare more structs than an apply would read.
+		if n > maxV2Items-total {
+			return nil, ErrInvalidUpdate
 		}
-		sv[c] = maxEnd
+		total += n
+		c := s.client()
+		at := s.uint()
+		if s.err == nil && c > maxClient {
+			return nil, ErrInvalidUpdate
+		}
+		for j := uint64(0); j < n && s.err == nil; j++ {
+			length, skip, _, _ := s.item()
+			if s.err != nil {
+				break
+			}
+			end, err := structEnd(at, length)
+			if err != nil {
+				return nil, err
+			}
+			switch {
+			case !started:
+				// Yjs starts the first run from the first struct, a Skip too.
+				client, started, stop = c, true, at != 0
+				if !stop {
+					clock = end
+				}
+			case c != client:
+				if clock != 0 {
+					entries = append(entries, entry{client, clock})
+				}
+				client, clock, stop = c, 0, at != 0
+			}
+			if skip {
+				stop = true
+			}
+			if !stop {
+				clock = end
+			}
+			at = end
+		}
 	}
-	clients := clientsSorted(sv)
+	if s.err != nil {
+		return nil, wrapUpdateErr(scanReason(s.err))
+	}
+	if clock != 0 {
+		entries = append(entries, entry{client, clock})
+	}
 	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
-		enc.WriteVarUint(uint64(len(clients)))
-		for _, c := range clients {
-			enc.WriteVarUint(uint64(c))
-			enc.WriteVarUint(sv[c])
+		enc.WriteVarUint(uint64(len(entries)))
+		for _, e := range entries {
+			enc.WriteVarUint(uint64(e.client))
+			enc.WriteVarUint(e.clock)
 		}
 	}), nil
 }

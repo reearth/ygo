@@ -15,21 +15,21 @@ import (
 
 func TestUnit_ContentDeleted_CopyAndSplice(t *testing.T) {
 	c := NewContentDeleted(10)
-	assert.Equal(t, 10, c.Len())
+	assert.Equal(t, uint64(10), c.Len())
 	assert.False(t, c.IsCountable())
 
 	cp := c.Copy()
-	assert.Equal(t, 10, cp.Len())
+	assert.Equal(t, uint64(10), cp.Len())
 
 	right := c.Splice(4)
-	assert.Equal(t, 4, c.Len())
-	assert.Equal(t, 6, right.Len())
+	assert.Equal(t, uint64(4), c.Len())
+	assert.Equal(t, uint64(6), right.Len())
 }
 
 func TestUnit_ContentBinary_Methods(t *testing.T) {
 	data := []byte{1, 2, 3}
 	c := NewContentBinary(data)
-	assert.Equal(t, 1, c.Len())
+	assert.Equal(t, uint64(1), c.Len())
 	assert.True(t, c.IsCountable())
 
 	cp := c.Copy()
@@ -41,20 +41,20 @@ func TestUnit_ContentBinary_Methods(t *testing.T) {
 
 func TestUnit_ContentJSON_Methods(t *testing.T) {
 	c := NewContentJSON("a", "b", "c")
-	assert.Equal(t, 3, c.Len())
+	assert.Equal(t, uint64(3), c.Len())
 	assert.True(t, c.IsCountable())
 
 	cp := c.Copy()
 	assert.Equal(t, c.Vals, cp.(*ContentJSON).Vals)
 
 	right := c.Splice(1)
-	assert.Equal(t, 1, c.Len())
-	assert.Equal(t, 2, right.Len())
+	assert.Equal(t, uint64(1), c.Len())
+	assert.Equal(t, uint64(2), right.Len())
 }
 
 func TestUnit_ContentEmbed_Methods(t *testing.T) {
 	c := NewContentEmbed(map[string]any{"type": "image"})
-	assert.Equal(t, 1, c.Len())
+	assert.Equal(t, uint64(1), c.Len())
 	assert.True(t, c.IsCountable())
 
 	cp := c.Copy()
@@ -66,7 +66,7 @@ func TestUnit_ContentEmbed_Methods(t *testing.T) {
 func TestUnit_ContentDoc_Methods(t *testing.T) {
 	inner := New(WithGUID("g"), WithCollectionID("cid"))
 	c := NewContentDoc(inner)
-	assert.Equal(t, 1, c.Len())
+	assert.Equal(t, uint64(1), c.Len())
 	assert.True(t, c.IsCountable())
 
 	cp := c.Copy()
@@ -89,7 +89,7 @@ func TestUnit_ContentType_CopyAndSplice(t *testing.T) {
 	doc := newTestDoc(1)
 	at := newTestType(doc)
 	c := NewContentType(at)
-	assert.Equal(t, 1, c.Len())
+	assert.Equal(t, uint64(1), c.Len())
 	assert.True(t, c.IsCountable())
 
 	// Copy wraps a fresh empty type of the same kind, never the original.
@@ -1439,8 +1439,8 @@ func TestUnit_ContentString_Splice_AtEnd(t *testing.T) {
 	// This hits the "return s, \"\"" path at the end of the loop.
 	c := NewContentString("hello")
 	right := c.Splice(5) // split at the very end
-	assert.Equal(t, 5, c.Len())
-	assert.Equal(t, 0, right.Len())
+	assert.Equal(t, uint64(5), c.Len())
+	assert.Equal(t, uint64(0), right.Len())
 	assert.Equal(t, "hello", c.Str)
 	assert.Empty(t, right.(*ContentString).Str)
 }
