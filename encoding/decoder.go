@@ -91,6 +91,10 @@ func (d *Decoder) ReadBigInt64() (int64, error) { return d.cursor.ReadBigInt64()
 // ReadAny decodes a tagged-union value written by Encoder.WriteAny.
 // Nested arrays and maps are limited to maxAnyDepth levels to prevent
 // stack-overflow DoS from crafted inputs.
+//
+// A number reads back as an int64 (tag 125), a BigInt (tag 122) or a float64
+// (tags 123 and 124). Tag 124 carries a float32 on the wire, but lib0 reads
+// it as a JavaScript Number, so it reads back as the float64 it holds.
 func (d *Decoder) ReadAny() (any, error) {
 	return d.cursor.ReadAny(func(v int64) any { return BigInt(v) })
 }

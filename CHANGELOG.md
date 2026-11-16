@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.0] — 2026-11-13
+
+### Changed
+
+- **`encoding`: `ReadAny` reads Any tag 124 as a `float64` (#289).** Tag 124
+  is lib0's 4-byte form of a number that a float32 holds exactly, such as 1.5,
+  2^40 or -2^31. JavaScript reads it as a Number, a float64, but `ReadAny`
+  returned a Go `float32`. So a `float64` such as `1.5` read back as a
+  `float64` on the writer and as a `float32` on every replica, and a replica
+  printed some of these numbers as other numbers: `ToJSON` printed 2^40 as
+  `1099511600000` and the timestamp 1718999973888 as `1719000000000`.
+  `ReadAny` now returns the `float64` that the value holds. A replica's `Get`,
+  `ToSlice`, `Entries`, `GetAttributeValue` and `ToDelta` return a `float64`
+  where they returned a `float32`, and `ToJSON`, `GetAttribute`,
+  `GetAttributes`, `ToXML` and the JSON text that V1 writes for a text
+  attribute or embed print the number written. A replica that formats text
+  with an attribute value it received as V2, such as `{size: 1.5}`, no longer
+  adds format markers, because the `float32(1.5)` it held compared unequal to
+  `1.5`. Code that type-switches on a decoded value must take `float64` where
+  it took `float32`. A `float32` that a caller stores is still written as tag
+  124, and its writer still prints it as `encoding/json` prints a `float32`.
+- **`encoding`: `WriteAny` writes a Go integer as lib0 writes the same Number.**
+  An integer outside int32 within ±2^53 was tag 123, 9 bytes, where lib0 writes
+  one that a float32 holds exactly, such as 2^31, 2^40 or 2^53, as tag 124, 5
+  bytes. -2^31 was tag 125, where lib0, which tests the magnitude against
+  2^31-1, writes tag 124. Both now match lib0 0.2.119 byte for byte, and so
+  does a `uint64` above `math.MaxInt64`. An integer past ±2^53 is still tag 122
+  (BigInt). Read back, each such integer is a `float64`, as before, except
+  -2^31, which read back as an `int64`. This reverses the "large-integer
+  float32-vs-float64 `Any` tag" that the 1.22.0 entry left as-is: a replica
+  re-encoded a Go writer's `int64(1 << 40)` to other bytes than the writer
+  sent, and now re-encodes it to the same bytes. Yjs fixtures in
+  `crdt/testdata/anynumber_yjs_fixtures.json` pin the V1 and V2 bytes Yjs
+  writes for 14 numbers at the edges of lib0's dispatch, and the bytes ygo
+  writes for the Go integers that hold them.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

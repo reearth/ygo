@@ -287,7 +287,8 @@ func (d *Decoder) readAny(bigInt func(int64) any, depth int, skip bool) (any, er
 		if skip {
 			return nil, err
 		}
-		return v, err
+		// lib0 reads every number as a JavaScript Number, and every float32 is a float64.
+		return float64(v), err
 	case 123:
 		v, err := d.ReadFloat64()
 		if skip {

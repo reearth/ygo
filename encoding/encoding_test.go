@@ -218,7 +218,11 @@ func TestUnit_Any_AllVariants(t *testing.T) {
 			e.WriteAny(tc.val)
 			got, err := encoding.NewDecoder(e.Bytes()).ReadAny()
 			require.NoError(t, err)
-			assert.Equal(t, tc.val, got)
+			want := tc.val
+			if f, ok := tc.val.(float32); ok {
+				want = float64(f) // tag 124 reads back as the float64 it holds
+			}
+			assert.Equal(t, want, got)
 		})
 	}
 }
@@ -281,7 +285,8 @@ func TestGolden_Any_Lib0FloatBytes(t *testing.T) {
 		wire := []byte{124, 0x3f, 0xc0, 0x00, 0x00}
 		got, err := encoding.NewDecoder(wire).ReadAny()
 		require.NoError(t, err)
-		assert.InDelta(t, float32(1.5), got, 0)
+		assert.IsType(t, float64(0), got, "lib0 reads tag 124 as a Number")
+		assert.InDelta(t, 1.5, got, 0)
 
 		e := encoding.NewEncoder()
 		e.WriteAny(float32(1.5))
@@ -486,15 +491,16 @@ func TestUnit_Any_Int64Precision_WithinInt32Range_RoundTripsAsInt64(t *testing.T
 
 func TestUnit_Any_Int64Precision_WithinFloat64SafeRange_RoundTripsAsFloat64(t *testing.T) {
 	// Per #77 (lib0 parity): ints outside int32 but within float64's lossless
-	// integer range (≤ 2^53) emit tag 123 (float64) and decode as float64.
-	// JS readers see the same value because JS Number is float64.
-	v := int64(1) << 40 // outside int32, inside float64 safe-int
+	// integer range (≤ 2^53) that a float32 cannot hold emit tag 123
+	// (float64) and decode as float64, as lib0 writes such a Number. One a
+	// float32 holds exactly takes tag 124 (any_int_lib0_test.go).
+	v := int64(1)<<40 + 1 // outside int32, inside float64 safe-int, not float32
 	e := encoding.NewEncoder()
 	e.WriteAny(v)
 	got, err := encoding.NewDecoder(e.Bytes()).ReadAny()
 	require.NoError(t, err)
-	// Delta 0 means exact equality — 2^40 is exactly representable in float64,
-	// so this is a precise check, not a fuzzy one. assert.InDelta over
+	// Delta 0 means exact equality — 2^40+1 is exactly representable in
+	// float64, so this is a precise check, not a fuzzy one. assert.InDelta over
 	// assert.Equal here is a testifylint requirement (float-compare rule).
 	gotFloat, ok := got.(float64)
 	require.True(t, ok, "safe-int-range int must decode as float64")
@@ -570,12 +576,14 @@ func TestEncoder_WriteVarInt_StillPanicsOnOutOfRange(t *testing.T) {
 // --- #77: lib0 Any tagged-union encoding parity ---
 
 // G1: ints outside lib0's int32 range must NOT use tag 125. lib0 emits tag
-// 123 (float64) for ints whose magnitude exceeds int32 range; ygo previously
-// always used tag 125, breaking byte-equality with Yjs-JS-produced fixtures.
+// 123 (float64) for ints whose magnitude exceeds int32 range and that a
+// float32 cannot hold; ygo previously always used tag 125, breaking
+// byte-equality with Yjs-JS-produced fixtures.
 func TestUnit_Any_LargeInt_UsesFloat64Tag_NotInt(t *testing.T) {
-	// 2^35 is well outside int32 range, but inside float64 safe-int range
-	// (< 2^53), so it round-trips losslessly as float64.
-	val := int64(1) << 35
+	// 2^35+1 is well outside int32 range, but inside float64 safe-int range
+	// (< 2^53), so it round-trips losslessly as float64; a float32 cannot
+	// hold it.
+	val := int64(1)<<35 + 1
 	e := encoding.NewEncoder()
 	e.WriteAny(val)
 	got := e.Bytes()
@@ -584,9 +592,10 @@ func TestUnit_Any_LargeInt_UsesFloat64Tag_NotInt(t *testing.T) {
 		"int outside int32 range must use tag 123 (float64), matching lib0")
 }
 
-// G1 cont.: ints WITHIN int32 range still use tag 125 (preserved behavior).
+// G1 cont.: ints of magnitude at most 2^31-1 still use tag 125. lib0 tests
+// the magnitude, so -2^31 is not among them: it takes tag 124 (float32).
 func TestUnit_Any_Int32RangeInt_StillUsesIntTag(t *testing.T) {
-	for _, v := range []int64{0, 1, -1, 0x7FFFFFFF, -0x80000000} {
+	for _, v := range []int64{0, 1, -1, 0x7FFFFFFF, -0x7FFFFFFF} {
 		e := encoding.NewEncoder()
 		e.WriteAny(v)
 		got := e.Bytes()
@@ -661,8 +670,9 @@ func TestUnit_ReadVarString_AcceptsValidUTF8(t *testing.T) {
 
 // --- #77 boundary cases ---
 
-// Int32 boundary: -2^31 and 2^31-1 are still tag 125 (inside int32 range);
-// 2^31 and -2^31-1 are just outside and must use tag 123 (float64).
+// Int32 boundary: lib0 writes tag 125 while |v| <= 2^31-1, so 2^31-1 and
+// -(2^31-1) are tag 125. 2^31 and -2^31 are just outside; a float32 holds
+// both exactly, so they take tag 124. -2^31-1 needs float64: tag 123.
 func TestUnit_Any_IntDispatch_Int32Boundary(t *testing.T) {
 	cases := []struct {
 		v       int64
@@ -670,8 +680,9 @@ func TestUnit_Any_IntDispatch_Int32Boundary(t *testing.T) {
 		desc    string
 	}{
 		{v: 0x7FFFFFFF, wantTag: 125, desc: "max int32 (2^31-1): tag 125"},
-		{v: -0x80000000, wantTag: 125, desc: "min int32 (-2^31): tag 125"},
-		{v: 0x80000000, wantTag: 123, desc: "max int32 + 1 (2^31): tag 123"},
+		{v: -0x7FFFFFFF, wantTag: 125, desc: "-(2^31-1): tag 125"},
+		{v: -0x80000000, wantTag: 124, desc: "min int32 (-2^31): tag 124"},
+		{v: 0x80000000, wantTag: 124, desc: "max int32 + 1 (2^31): tag 124"},
 		{v: -0x80000001, wantTag: 123, desc: "min int32 - 1 (-2^31 - 1): tag 123"},
 	}
 	for _, tc := range cases {
@@ -684,8 +695,9 @@ func TestUnit_Any_IntDispatch_Int32Boundary(t *testing.T) {
 	}
 }
 
-// Safe-int boundary: 2^53 and -2^53 are exactly representable in float64
-// and use tag 123. Values just outside (2^53+1, -2^53-1) lose precision in
+// Safe-int boundary: 2^53 and -2^53 are exactly representable in float64,
+// and in float32, so they take tag 124; 2^53-1 needs float64's mantissa and
+// takes tag 123. Values just outside (2^53+1, -2^53-1) lose precision in
 // float64 and must use tag 122 (BigInt) for lossless round-trip.
 func TestUnit_Any_IntDispatch_SafeIntBoundary(t *testing.T) {
 	cases := []struct {
@@ -693,8 +705,9 @@ func TestUnit_Any_IntDispatch_SafeIntBoundary(t *testing.T) {
 		wantTag byte
 		desc    string
 	}{
-		{v: 1 << 53, wantTag: 123, desc: "2^53 (max safe-int): tag 123"},
-		{v: -(1 << 53), wantTag: 123, desc: "-2^53 (min safe-int): tag 123"},
+		{v: 1 << 53, wantTag: 124, desc: "2^53 (max safe-int): tag 124"},
+		{v: -(1 << 53), wantTag: 124, desc: "-2^53 (min safe-int): tag 124"},
+		{v: 1<<53 - 1, wantTag: 123, desc: "2^53 - 1: tag 123"},
 		{v: (1 << 53) + 1, wantTag: 122, desc: "2^53 + 1 (precision-lossy): tag 122 BigInt"},
 		{v: -(1 << 53) - 1, wantTag: 122, desc: "-2^53 - 1: tag 122 BigInt"},
 	}
@@ -709,16 +722,17 @@ func TestUnit_Any_IntDispatch_SafeIntBoundary(t *testing.T) {
 }
 
 // uint64 values above math.MaxInt64 can't be expressed as int64 (which BigInt
-// wraps) and fall back to tag 123 (float64) with documented precision loss.
-// Test pins that it doesn't panic and produces the expected wire shape.
+// wraps) and take lib0's float dispatch with documented precision loss:
+// math.MaxUint64 becomes 2^64 as a float64, which a float32 holds, so it is
+// tag 124. Test pins that it doesn't panic and produces lib0's wire shape.
 func TestUnit_Any_VeryLargeUint64_FallsBackToFloat64(t *testing.T) {
 	v := uint64(math.MaxUint64)
 	e := encoding.NewEncoder()
 	assert.NotPanics(t, func() { e.WriteAny(v) })
 	got := e.Bytes()
-	require.Len(t, got, 9, "tag(1) + float64(8) = 9 bytes")
-	assert.Equal(t, byte(123), got[0], "uint64 > MaxInt64 must use tag 123 (float64)")
-	// Round-trip returns float64 with precision loss (expected — same as JS).
+	require.Len(t, got, 5, "tag(1) + float32(4) = 5 bytes")
+	assert.Equal(t, byte(124), got[0], "uint64 > MaxInt64 at 2^64 must use tag 124 (float32)")
+	// Round-trip returns a float64 with precision loss (expected — same as JS).
 	dec := encoding.NewDecoder(got)
 	decoded, err := dec.ReadAny()
 	require.NoError(t, err)
@@ -754,9 +768,9 @@ func TestUnit_Any_FloatSpecials(t *testing.T) {
 		dec := encoding.NewDecoder(got)
 		decoded, err := dec.ReadAny()
 		require.NoError(t, err)
-		f, ok := decoded.(float32)
+		f, ok := decoded.(float64)
 		require.True(t, ok)
-		assert.True(t, math.IsInf(float64(f), 1))
+		assert.True(t, math.IsInf(f, 1))
 	})
 	t.Run("NegInf_narrows_to_float32", func(t *testing.T) {
 		e := encoding.NewEncoder()

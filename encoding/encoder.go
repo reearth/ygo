@@ -181,9 +181,11 @@ func (e *Encoder) writeNegVarUint(v uint64) {
 //
 //	nil            -> 126 (null)
 //	bool           -> 120 (true) / 121 (false)
-//	int / int64    -> 125 + VarInt
+//	integers       -> 125 + VarInt while |v| <= 2^31-1, else as a float64
+//	                  up to ±2^53, else 122 + 8 bytes BE (writeAnyInt)
 //	float32        -> 124 + 4 bytes BE
-//	float64        -> 123 + 8 bytes BE
+//	float64        -> 124 + 4 bytes BE when a float32 holds it exactly,
+//	                  else 123 + 8 bytes BE
 //	BigInt         -> 122 + 8 bytes BE
 //	string         -> 119 + VarString
 //	[]byte         -> 116 + VarBytes
@@ -223,15 +225,7 @@ func (e *Encoder) WriteAny(v any) {
 		e.WriteUint8(124)
 		e.WriteFloat32(val)
 	case float64:
-		// lib0 narrows float64 to float32 (tag 124) when the value round-trips
-		// losslessly, matching lib0's isFloat32 dispatch.
-		if isFloat32Lossless(val) {
-			e.WriteUint8(124)
-			e.WriteFloat32(float32(val))
-		} else {
-			e.WriteUint8(123)
-			e.WriteFloat64(val)
-		}
+		e.writeAnyFloat(val)
 	case BigInt:
 		e.WriteUint8(122)
 		e.WriteBigInt64(int64(val))
@@ -268,32 +262,31 @@ func (e *Encoder) WriteAny(v any) {
 	}
 }
 
-// writeAnyInt dispatches an int64 to the correct lib0 Any tag based on
-// magnitude, matching lib0's writeAny number dispatch (encoding.js):
+// writeAnyInt dispatches an int64 to the lib0 Any tag lib0's writeAny gives
+// the same value as a JavaScript Number (encoding.js, lib0 0.2.119):
 //
-//   - int32 range  → tag 125 (int) + VarInt: byte-identical to lib0 for
-//     values JavaScript Number would treat as a small integer.
-//   - float64 safe-int range → tag 123 (float64): values that exceed int32
-//     but round-trip losslessly through float64's 52-bit mantissa. lib0
-//     emits the same here because JS Number is float64.
+//   - |v| <= 2^31-1 → tag 125 (int) + VarInt. lib0 tests the magnitude, so
+//     -2^31 is not in this range: it goes on to the float32 check.
+//   - otherwise, within float64's safe-int range (|v| <= 2^53) → the float
+//     dispatch lib0 uses for every other Number (writeAnyFloat): tag 124
+//     (float32) when a float32 holds the value exactly, as it does 2^31 or
+//     2^40, else tag 123 (float64).
 //   - outside float64 safe-int → tag 122 (BigInt): Go's int64 can hold these
 //     exactly; lib0 JS cannot (Number would lose precision), so the BigInt
 //     tag is the correct cross-impl representation for full-precision int64.
 //     Decodes as `bigint` on the JS side via lib0's BigInt path.
 func (e *Encoder) writeAnyInt(v int64) {
 	const (
-		int32Min = -1 << 31
-		int32Max = 1<<31 - 1
-		safeMin  = -1 << 53 // -2^53; float64's lossless integer floor
-		safeMax  = 1 << 53  // 2^53;  float64's lossless integer ceiling
+		bits31  = 1<<31 - 1 // lib0's binary.BITS31
+		safeMin = -1 << 53  // -2^53; float64's lossless integer floor
+		safeMax = 1 << 53   // 2^53;  float64's lossless integer ceiling
 	)
 	switch {
-	case v >= int32Min && v <= int32Max:
+	case v >= -bits31 && v <= bits31:
 		e.WriteUint8(125)
 		e.WriteVarInt(v)
 	case v >= safeMin && v <= safeMax:
-		e.WriteUint8(123)
-		e.WriteFloat64(float64(v))
+		e.writeAnyFloat(float64(v))
 	default:
 		e.WriteUint8(122)
 		e.WriteBigInt64(v)
@@ -303,15 +296,26 @@ func (e *Encoder) writeAnyInt(v int64) {
 // writeAnyUint dispatches a uint64. Values within int64 range route through
 // writeAnyInt for the normal magnitude-based tag choice. Values exceeding
 // int64 (> 2^63 - 1) can't be represented in BigInt's signed int64 wire
-// format; they fall back to tag 123 (float64) with documented precision loss,
-// matching lib0 JS's behavior for Numbers in that range.
+// format; they take the float dispatch with documented precision loss, as
+// lib0 JS does for Numbers in that range.
 func (e *Encoder) writeAnyUint(v uint64) {
 	if v <= math.MaxInt64 {
 		e.writeAnyInt(int64(v))
 		return
 	}
-	e.WriteUint8(123)
-	e.WriteFloat64(float64(v))
+	e.writeAnyFloat(float64(v))
+}
+
+// writeAnyFloat writes a Number as lib0's writeAny does once it is past the
+// integer check: tag 124 (float32) when the value round-trips through float32
+// exactly (isFloat32Lossless), otherwise tag 123 (float64). It appends
+// directly to stay small enough to inline into WriteAny's hot float64 case.
+func (e *Encoder) writeAnyFloat(v float64) {
+	if isFloat32Lossless(v) {
+		e.buf = binary.BigEndian.AppendUint32(append(e.buf, 124), math.Float32bits(float32(v)))
+		return
+	}
+	e.buf = binary.BigEndian.AppendUint64(append(e.buf, 123), math.Float64bits(v))
 }
 
 // isFloat32Lossless reports whether the float64 value round-trips through

@@ -1,3 +1,53 @@
+## v1.56.0
+
+**Who is affected: code that reads numbers from a document it received from a
+peer, or from `encoding.Decoder.ReadAny`, and checks their Go type.** A value
+that arrives as Any tag 124 now reads back as a `float64`, where it read back
+as a `float32`. JavaScript peers see no change.
+
+Tag 124 is how lib0 and ygo write a number that a float32 holds exactly, such
+as 1.5, 0.25, 2^40 or -2^31. Yjs writes it for any such Number, ygo for any
+such `float64`, and from this release for any such Go integer too (below).
+JavaScript reads it as a Number, which is a float64, and ygo now does the same.
+The number is unchanged: a float32 holds it exactly, so the `float64` is the
+same number.
+
+What to change:
+
+- A type switch or type assertion on a decoded number must take `float64`
+  where it took `float32`. No value that ygo decodes is a `float32` any more,
+  so a `case float32:` matches only a `float32` that your own code stored.
+- A comparison of a decoded value with `reflect.DeepEqual` or `assert.Equal`
+  against a `float32` must compare against the `float64` instead. A value from
+  a peer now equals the writer's `float64`, as it does in Yjs.
+
+What gets better:
+
+- A replica prints the number written. `ToJSON`, `GetAttribute`,
+  `GetAttributes`, `ToXML`, and the JSON text that V1 writes for a text
+  attribute or embed printed a `float32` with the shortest digits that
+  identify it, and those digits name a different number: 2^40 as
+  `1099511600000`, and the millisecond timestamp 1718999973888 as
+  `1719000000000`. The `mobile` package's `GetMapJSON` and `GetArrayJSON` call
+  `ToJSON`, and get this once `mobile` requires this release.
+- A replica that formats text with an attribute value it already holds, such
+  as `{size: 1.5}` from a V2 update, no longer adds format markers and splits
+  the run.
+
+`WriteAny` now writes a Go integer as lib0 writes the same Number. An integer
+outside int32 that a float32 holds exactly, such as 2^31, 2^40 or 2^53, is
+tag 124, 5 bytes, where it was tag 123, 9 bytes. -2^31 is tag 124 where it was
+tag 125, because lib0 writes tag 125 only while the magnitude is at most
+2^31-1. Read back, these integers are a `float64`, as before, except -2^31,
+which read back as an `int64`. Integers past ±2^53 keep tag 122 (BigInt).
+
+A `float32` that your own code stores is still written as tag 124. Its writer
+still prints it as `encoding/json` prints a `float32`, `float32(0.1)` as `0.1`,
+while a replica, ygo or Yjs, prints the `float64` it receives,
+`0.10000000149011612`. A text attribute or embed sent as V1 is JSON text, so
+there the replica receives the writer's `0.1`. Store a `float64` if every peer
+must print the same.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

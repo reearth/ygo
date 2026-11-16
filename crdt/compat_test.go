@@ -84,9 +84,10 @@ func TestCompat_ApplyJSUpdate_YArrayFloatAny(t *testing.T) {
 	arr := doc.GetArray("list")
 	got := arr.ToSlice()
 	require.Len(t, got, 2)
-	assert.InDelta(t, float32(1.5), got[0], 0)
+	assert.IsType(t, float64(0), got[0], "tag 124 reads back as a float64, the Number Yjs wrote")
+	assert.InDelta(t, 1.5, got[0], 0)
 	assert.Equal(t, map[string]any{
-		"nested": float32(2.25),
+		"nested": 2.25,
 		"label":  "ok",
 	}, got[1])
 }

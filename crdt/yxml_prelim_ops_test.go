@@ -164,12 +164,12 @@ func TestUnit_YXmlElement_TypedAttrsWireRoundTrip(t *testing.T) {
 	}, el.GetAttributeValues())
 
 	// On the wire, lib0 narrows a float64 to float32 (Any tag 124) when the
-	// value round-trips losslessly; the decoder keeps that width. So 1.5
-	// comes back as float32 while 1e-7 / 1e20 (not float32-lossless) stay
-	// float64 — same numeric values in both formats.
+	// value round-trips losslessly, and the decoder reads it back as the
+	// float64 it holds. So 1.5 comes back as float64, as 1e-7 / 1e20 (tag
+	// 123) do.
 	wantDecoded := map[string]any{
 		"level": int64(2),
-		"ratio": float32(1.5),
+		"ratio": 1.5,
 		"flag":  true,
 		"name":  "n",
 		"tiny":  1e-7,
