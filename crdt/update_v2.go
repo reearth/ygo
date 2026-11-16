@@ -608,7 +608,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	// that force a Splice on non-splittable content types.
 	defer func() {
 		if r := recover(); r != nil {
-			retErr = fmt.Errorf("%w: panic during item integration: %v", ErrInvalidUpdate, r)
+			retErr = recoveredApplyErr(r)
 		}
 	}()
 
@@ -833,6 +833,14 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		txn.doc.store.pendingDs.Merge(unresolvableDs)
 	}
 
+	drainParked(txn, drainPendingV2)
+
+	return nil
+}
+
+// drainPendingV2 is applyV2Txn's drain of the parked queue, which tries the
+// parked items in queue order.
+func drainPendingV2(txn *Transaction) {
 	// pendingDs may be drainable even if pending items aren't — integrated
 	// items from this update might be targets of previously-parked deletes.
 	if len(txn.doc.store.pendingDs.clients) > 0 {
@@ -849,7 +857,7 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 	// Matches yrs' apply_update retry gate and Yjs JS's readUpdateV2
 	// recursion, but executed inline so everything integrated during
 	// this call surfaces in a single OnUpdate notification.
-	for txn.doc.store.pending != nil && txn.doc.store.retryable(txn.doc.store.pending.missing) {
+	for txn.drainable() {
 		items := txn.doc.store.pending.items
 		txn.doc.store.pending = nil
 
@@ -902,8 +910,6 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 			break
 		}
 	}
-
-	return nil
 }
 
 func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info byte) (*Item, int, error) {

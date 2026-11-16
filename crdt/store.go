@@ -39,10 +39,18 @@ type StructStore struct {
 // pendingUpdate holds decoded items parked because of unresolved
 // dependencies, plus a per-client watermark of the store's clock at
 // park time. A retry is worth attempting when the store's current
-// clock for any client in `missing` has advanced past its recorded value.
+// clock for any client in `missing` has advanced past its recorded value,
+// or, once the scan bound tripped in the drain that last tried the items,
+// when a drain has more of the bound left than the scan that tripped had.
 type pendingUpdate struct {
 	items   []*Item     // parked items, in arrival order
 	missing StateVector // clientID -> store clock at park time for that client
+	// tripped is set when the drain that parked these items again tripped
+	// the scan bound (WithIntegrateScanBudget), so some of them may wait on
+	// nothing in missing; scanLeft is what the bound left the scan that
+	// tripped when it began.
+	tripped  bool
+	scanLeft uint32
 }
 
 func newStructStore() *StructStore {

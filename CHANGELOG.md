@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.0] — 2026-11-13
+
+### Added
+
+- **`crdt`: `WithIntegrateScanBudget` bounds the conflict scans of a remote
+  apply, by its origin.** YATA places an item by scanning right from its left
+  origin, and an item that names an early left origin and no right origin
+  scans to the end of the list, so an update of a few KB can hold the
+  document's lock for seconds. `WithIntegrateScanBudget(func(origin any) int)`
+  gives each remote apply a bound on the items its scans pass, by the origin it
+  is applied with; zero or negative sets none. An apply whose scans would pass
+  the bound aborts partway with `ErrIntegrateScanBudget`, which wraps
+  `ErrInvalidUpdate`: the document keeps what it integrated, as for an update
+  that overflows the pending cap, `ApplyUpdateV1Landed` reports that part, and
+  the same update sent again carries on from there, until it reaches an item
+  whose scan alone passes the bound: from then on each send integrates nothing
+  and `ApplyUpdateV1Landed` returns no landed part. The drain of the parked
+  queue runs on what the apply left of the bound; past it, the drain keeps what
+  it integrated, parks the rest, and the apply succeeds. A later apply, from any
+  sender, tries the rest again when its drain has more of its bound left than
+  the scan that tripped had, or no bound. Any other panic in the drain still
+  fails the apply with `ErrInvalidUpdate`. Remote moves and subdocuments apply
+  as before, and a document without the option is unchanged.
+
+## [1.55.1] — 2026-11-13
+
+### Performance
+
+- **`crdt`: split runs merge back at commit in linear time.** When a
+  transaction splits a run and nothing is inserted between the halves,
+  `tryMergeWithLefts` joins them again at commit. Each join appended its half
+  to the run's whole text and searched and shifted the client's store slice,
+  so a run split n times was copied n times. The halves now merge in client
+  and clock order: each run's text is joined once, and each client's store
+  slice is compacted in one pass. One update of 20,000 items that each split a
+  40,000-character run allocated 420.5 MiB and now allocates 12.0 MiB. The
+  merge conditions are unchanged, so the merged items and the encoded state
+  are as before.
+- **`crdt`: a transaction's conflict scans share one map.** YATA places an
+  item by scanning right from its left origin, and each scan built two new
+  sets of the items it passed. An item that names an early left origin and no
+  right origin scans to the end of the list, so an update of many such items
+  allocated the list's size once per item. The scans now mark the items they
+  pass in one map the transaction keeps and never clears. One update of 2,000
+  such items into a 40,000-item list allocated 4,511 MiB and now allocates
+  2.7 MiB, in 59% less time. A transaction whose scans pass only a few items
+  makes two more allocations than before, for the map. Placement is unchanged.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added
