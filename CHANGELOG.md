@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.0] — 2026-11-14
+
+### Added
+
+- **`crdt`: `Doc.StructCount` returns how many structs the document holds.**
+  Every client's items count, deleted items and garbage-collected placeholders
+  included. Structs parked until a missing dependency arrives do not count
+  until they integrate (`PendingStats` reports them), and a subdocument's
+  structs count in its own `Doc`. A struct is a run of content, and the count
+  is this replica's: text typed one character per transaction is a struct per
+  character on the writer and on a replica that applied each transaction's
+  update, and one struct on a replica that loads the writer's state in one
+  update. The call takes the document's read lock, so it must not be made
+  inside a `Transact` callback; it walks the clients, not the structs, and
+  allocates nothing. `StructStore.Count` is the same count on the store.
+- **`crdt`: `Doc.ClientCount` returns how many clients the document holds
+  structs from.** A client counts from the first of its writes that
+  integrates, and stays counted when its content is deleted and collected. A
+  client that has only deleted is not counted, nor is a client whose every
+  struct is parked until a missing dependency arrives, and a subdocument's
+  clients count in its own `Doc`. It is the number of clients `StateVector`
+  returns. A peer chooses its own client ID, and what a document costs follows
+  its clients as well as its structs: encoding the state of 100,000 structs
+  allocates 8.4 MB in 64 allocations when one client wrote them, and 30.8 MB
+  in 100,069 when each came from a client of its own. The call takes the
+  document's read lock, so it must not be made inside a `Transact` callback;
+  it allocates nothing and takes the same time however many clients the
+  document holds.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added

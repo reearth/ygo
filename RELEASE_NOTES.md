@@ -1,3 +1,43 @@
+## v1.56.0
+
+**Who is affected: nobody, unless you choose to be.** Nothing that exists
+changes.
+
+**`Doc.StructCount` reports how many structs a document holds.** What a
+document costs follows its structs as well as its content. The same 10,000
+characters typed in one transaction are one struct, a 10,011-byte state that
+a new document loads with 36 allocations and 13 KB. Typed one character per
+transaction, each at the front, they are 10,000 structs, a 59,878-byte state
+that a new document loads with 40,088 allocations and 2.5 MB. The store is
+unexported, and until now no method reported this count.
+
+The count takes in every client's items, deleted items and garbage-collected
+placeholders. It leaves out structs parked until a missing dependency arrives,
+which `PendingStats` reports, and a subdocument's structs, which its own `Doc`
+counts. It is this replica's count: text typed one character per transaction
+is a struct per character on the writer and on a server that applied each
+keystroke's update as it arrived, and one struct on a replica that loads the
+writer's state in one update.
+
+**`Doc.ClientCount` reports how many clients a document holds structs from.**
+What a document costs follows its clients as well as its structs, and a peer
+chooses its own client ID. The same 100,000 one-character structs, each typed
+at the front, are a 683,494-byte state whose encoding allocates 8.4 MB in 64
+allocations when one client wrote them, and a 1,166,983-byte state whose
+encoding allocates 30.8 MB in 100,069 allocations when each came from a
+client of its own. `StructCount` is 100,000 for both.
+
+A client counts from the first of its writes that integrates, and stays
+counted when its content is deleted and collected. A client that has only
+deleted is not counted, nor is a client whose every struct is parked, and a
+subdocument's clients are counted by its own `Doc`. The count is the number
+of clients `StateVector` returns.
+
+Both methods take the document's read lock, so call them outside `Transact`,
+and neither allocates. `StructCount` walks the document's clients rather than
+its structs, and `ClientCount` takes the same time however many clients the
+document holds.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

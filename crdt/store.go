@@ -189,6 +189,17 @@ func (s *StructStore) resolvePendingMoves(txn *Transaction, client ClientID) {
 	}
 }
 
+// Count returns how many structs the store holds, every client's together. It
+// sums the clients' slices because a running total would have to be kept in
+// step by every write to them.
+func (s *StructStore) Count() int {
+	n := 0
+	for _, items := range s.clients {
+		n += len(items)
+	}
+	return n
+}
+
 // StateVector computes the current state vector: for each client, the clock of
 // the last item + its length (i.e. the next expected clock from that client).
 func (s *StructStore) StateVector() StateVector {
