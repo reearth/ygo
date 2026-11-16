@@ -1,3 +1,30 @@
+## v1.56.0
+
+**Who is affected: stores that merge the updates a document took, and
+documents that hold a struct parked over clocks they hold.** A merge in which
+no two insertions claim one clock returns the same bytes as before.
+
+A struct parks while it names a struct the document lacks. It can stay parked
+over clocks the document holds: an update can carry it after those clocks,
+or fill the gap behind it while it still waits. `MergeUpdatesV1` and
+`MergeUpdatesV2` kept, on each clock, the struct that started first and was
+longest, so such a struct took the clocks from the structs that held them. A
+reader of the merge parked it again, and everything of its client after it. A
+stored log of 1,000 keystrokes and one 1,000-character update of that kind
+read back as 3 characters. `EncodeStateAsUpdateV1` and
+`EncodeStateAsUpdateV2`, which merge a document's parked structs into its
+state, lost text the same way.
+
+Where the struct the old rule keeps names another origin, right origin,
+parent or key than the struct the earliest update carried on that clock, the
+two are different insertions, and the earlier update's struct is now kept.
+The other keeps only the clocks past it, as an apply of the updates in order
+integrates only those. A stored log in which such an update follows the
+clocks it overlaps now reads back whole. A merge cannot tell which struct a
+document integrated, so a log that holds the parked struct before those
+clocks still merges as before; a document that applies the log encodes its
+state whole.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

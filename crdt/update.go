@@ -113,7 +113,8 @@ func EncodeStateAsUpdateV2(doc *Doc, sv StateVector) []byte {
 // dependency into an encoded state, as Yjs encodeStateAsUpdate does with
 // pendingStructs and pendingDs; a snapshot that dropped them would lose them
 // once the filler arrives. Kept out of encodeV1Locked so OnUpdate payloads
-// stay transaction-only, as in Yjs.
+// stay transaction-only, as in Yjs. The state goes first, so where a parked
+// struct names clocks doc holds, the merge keeps doc's own structs.
 func withParked(doc *Doc, sv StateVector, state []byte,
 	encode func(map[ClientID][]*Item, DeleteSet, StateVector, *StructStore) []byte,
 	merge func(...[]byte) ([]byte, error)) []byte {
