@@ -28,7 +28,7 @@ func nestedJSONEntryForContent(ct *ContentType) nestedJSONEntry {
 	if ct == nil || ct.Type == nil || ct.Type.owner == nil {
 		return nestedJSONEntry{}
 	}
-	return nestedJSONEntry{owner: ct.Type.owner}
+	return nestedJSONEntry{owner: readOwner(ct.Type.owner)}
 }
 
 // nestedJSONEntryForValue reads a staged entry of a detached container, which
@@ -272,7 +272,7 @@ func toJSONValue(ct *ContentType) any {
 	if ct == nil || ct.Type == nil || ct.Type.owner == nil {
 		return nil
 	}
-	return nestedJSONValue(ct.Type.owner)
+	return nestedJSONValue(readOwner(ct.Type.owner))
 }
 
 // jsonWriter is ToJSON's scratch space, pooled so repeated calls reuse its

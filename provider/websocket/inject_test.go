@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -875,6 +876,339 @@ func TestUnit_CloseRoom_WithPersistence_DrainsBeforeReturn(t *testing.T) {
 	stored, err := p.LoadDoc("room")
 	require.NoError(t, err)
 	require.NotNil(t, stored)
+}
+
+// TestUnit_LastPeerLeave_ApplyInFlight_KeepsRoom checks that the last peer's
+// leave does not evict a room an Apply is inside, with the default eager evict.
+func TestUnit_LastPeerLeave_ApplyInFlight_KeepsRoom(t *testing.T) {
+	srv := ygws.NewServer()
+	left := make(chan struct{})
+	srv.OnLastPeer = func(context.Context, string) { close(left) }
+	httpSrv := httptest.NewServer(srv)
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	drainHandshake(t, conn, crdt.New())
+
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "before", "1") })
+		require.NoError(t, conn.Close())
+		recv(t, left, "the last peer to leave") // OnLastPeer fires after the eviction decision
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "after", "2") })
+	}))
+
+	doc := srv.GetDoc("room")
+	require.NotNil(t, doc, "the room an Apply was writing must still be resident")
+	got, ok := doc.GetMap("m").Get("after")
+	require.True(t, ok, "the mutation made after the last peer left was lost")
+	assert.Equal(t, "2", got)
+}
+
+// TestUnit_CloseRoom_ApplyInFlight_ErrRoomInUse runs a closer outside any
+// Apply while fn waits between two transactions, and requires both writes kept.
+func TestUnit_CloseRoom_ApplyInFlight_ErrRoomInUse(t *testing.T) {
+	srv := ygws.NewServer()
+
+	inside := make(chan struct{})
+	closed := make(chan error, 1)
+	go func() {
+		<-inside
+		closed <- srv.CloseRoom("room", false)
+	}()
+
+	var closeErr error
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "before", "1") })
+		close(inside)
+		closeErr = recv(t, closed, "the closer")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "after", "2") })
+	}))
+	require.ErrorIs(t, closeErr, ygws.ErrRoomInUse,
+		"CloseRoom must refuse a room an Apply is inside")
+
+	doc := srv.GetDoc("room")
+	require.NotNil(t, doc, "the room an Apply was writing must still be resident")
+	got, ok := doc.GetMap("m").Get("after")
+	require.True(t, ok, "the mutation fn made after the close attempt was lost")
+	assert.Equal(t, "2", got)
+
+	// The refusal is transient: once the Apply returns the room closes.
+	var seenBefore, seenAfter any
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		seenBefore, _ = m.Get("before")
+		seenAfter, _ = m.Get("after")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "third", "3") })
+	}))
+	assert.Equal(t, "1", seenBefore)
+	assert.Equal(t, "2", seenAfter)
+	require.NoError(t, srv.CloseRoom("room", false),
+		"the refusal is transient: the room closes once the Apply has returned")
+	assert.Nil(t, srv.GetDoc("room"))
+}
+
+// TestUnit_CloseRoom_ApplyInFlight_Force_ErrRoomInUse is the same race with
+// force and a persistence adapter.
+func TestUnit_CloseRoom_ApplyInFlight_Force_ErrRoomInUse(t *testing.T) {
+	p := ygws.NewMemoryPersistence()
+	srv := ygws.NewServerWithPersistence(p)
+
+	inside := make(chan struct{})
+	closed := make(chan error, 1)
+	go func() {
+		<-inside
+		closed <- srv.CloseRoom("room", true)
+	}()
+
+	var closeErr error
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		close(inside)
+		closeErr = recv(t, closed, "the closer")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+	}))
+	require.ErrorIs(t, closeErr, ygws.ErrRoomInUse,
+		"force must refuse a room an Apply is inside")
+	require.NotNil(t, srv.GetDoc("room"), "the room an Apply was writing must still be resident")
+
+	// The write reaches the store through the ordinary close.
+	require.NoError(t, srv.CloseRoom("room", false))
+	stored, err := p.LoadDoc("room")
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	reloaded := crdt.New()
+	require.NoError(t, crdt.ApplyUpdateV1(reloaded, stored, nil))
+	got, ok := reloaded.GetMap("m").Get("k")
+	require.True(t, ok, "the mutation fn made while the close was refused never reached the store")
+	assert.Equal(t, "v", got)
+}
+
+// TestUnit_CloseRoom_ApplyInFlight_Force_LeavesPeersConnected checks that force
+// refuses before it closes any peer.
+func TestUnit_CloseRoom_ApplyInFlight_Force_LeavesPeersConnected(t *testing.T) {
+	srv := ygws.NewServer()
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	drainHandshake(t, conn, crdt.New())
+
+	inside := make(chan struct{})
+	closed := make(chan error, 1)
+	go func() {
+		<-inside
+		closed <- srv.CloseRoom("room", true)
+	}()
+
+	var closeErr error
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		close(inside)
+		closeErr = recv(t, closed, "the closer")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+	}))
+	require.ErrorIs(t, closeErr, ygws.ErrRoomInUse)
+
+	// A non-force close reports the peer, so the peer is still registered.
+	require.ErrorIs(t, srv.CloseRoom("room", false), ygws.ErrRoomHasPeers)
+	require.NoError(t, srv.CloseRoom("room", true),
+		"force closes the room once no Apply is inside it")
+}
+
+// TestUnit_CloseRoomWithin_FromOwnApply_Closes closes a room from inside its own
+// Apply and requires the room gone at once and the earlier write stored.
+func TestUnit_CloseRoomWithin_FromOwnApply_Closes(t *testing.T) {
+	p := ygws.NewMemoryPersistence()
+	srv := ygws.NewServerWithPersistence(p)
+
+	var closeErr error
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+		require.NotNil(t, srv.GetDoc("room"))
+		closeErr = srv.CloseRoomWithin("room", doc, true)
+		assert.Nil(t, srv.GetDoc("room"), "the room is out of the server before the close returns")
+	}))
+	require.NoError(t, closeErr, "a close from inside the caller's own Apply must go through")
+	assert.Nil(t, srv.GetDoc("room"), "the room must still be gone once the Apply returns")
+
+	stored, err := p.LoadDoc("room")
+	require.NoError(t, err)
+	require.NotNil(t, stored, "the close must flush what fn wrote before it")
+	reloaded := crdt.New()
+	require.NoError(t, crdt.ApplyUpdateV1(reloaded, stored, nil))
+	got, ok := reloaded.GetMap("m").Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "v", got)
+}
+
+// TestUnit_CloseRoomWithin_FromOwnApply_WithPeer_Closes force-closes a room with
+// a peer connected from inside its own Apply, so the peer's teardown races the
+// close while that Apply is inside the room.
+func TestUnit_CloseRoomWithin_FromOwnApply_WithPeer_Closes(t *testing.T) {
+	srv := ygws.NewServer()
+	httpSrv := httptest.NewServer(srv)
+	t.Cleanup(httpSrv.Close)
+	conn := dial(t, httpSrv, "room")
+	drainHandshake(t, conn, crdt.New())
+
+	var closeErr error
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+		closeErr = srv.CloseRoomWithin("room", doc, true)
+	}))
+	require.NoError(t, closeErr, "a close from inside the caller's own Apply must go through with a peer connected")
+	assert.Nil(t, srv.GetDoc("room"))
+	awaitServerClose(t, conn)
+}
+
+// TestUnit_CloseRoomWithin_SecondApplyInFlight_ErrRoomInUse checks that only the
+// calling Apply is discounted, and that the close succeeds after the second returns.
+func TestUnit_CloseRoomWithin_SecondApplyInFlight_ErrRoomInUse(t *testing.T) {
+	srv := ygws.NewServer()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var released sync.Once
+	releaseSecond := func() { released.Do(func() { close(release) }) }
+	// A failed assertion must not leave the second Apply blocked.
+	t.Cleanup(releaseSecond)
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		_ = srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			m := doc.GetMap("m")
+			close(entered)
+			<-release
+			transact(func(txn *crdt.Transaction) { m.Set(txn, "second", "2") })
+		})
+	}()
+	recv(t, entered, "the second Apply")
+
+	var closeErr error
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "first", "1") })
+		closeErr = srv.CloseRoomWithin("room", doc, true)
+	}))
+	require.ErrorIs(t, closeErr, ygws.ErrRoomInUse,
+		"the discount covers the calling Apply only: a second one still refuses the close")
+	require.NotNil(t, srv.GetDoc("room"), "the room the second Apply is inside must still be resident")
+
+	releaseSecond()
+	recv(t, secondDone, "the second Apply to return")
+	doc := srv.GetDoc("room")
+	require.NotNil(t, doc)
+	got, ok := doc.GetMap("m").Get("second")
+	require.True(t, ok, "the second Apply's write was lost")
+	assert.Equal(t, "2", got)
+
+	var retryErr error
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "third", "3") })
+		retryErr = srv.CloseRoomWithin("room", doc, true)
+	}))
+	require.NoError(t, retryErr, "the refusal is transient: the close goes through once the second Apply has returned")
+	assert.Nil(t, srv.GetDoc("room"))
+}
+
+// TestUnit_CloseRoomWithin_OutsideApply checks that with nobody inside, an
+// escaped call closes nothing, and that a stale doc closes nothing either.
+func TestUnit_CloseRoomWithin_OutsideApply(t *testing.T) {
+	srv := ygws.NewServer()
+
+	var live *crdt.Doc
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v") })
+		live = doc
+	}))
+
+	require.ErrorIs(t, srv.CloseRoomWithin("room", live, true), ygws.ErrNotInApply,
+		"with nobody inside the room, an escaped call closes nothing")
+	require.NotNil(t, srv.GetDoc("room"))
+
+	// A doc the name no longer holds names a room already out of the server.
+	require.NoError(t, srv.CloseRoom("room", false))
+	var staleErr error
+	require.NoError(t, srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		m := doc.GetMap("m")
+		transact(func(txn *crdt.Transaction) { m.Set(txn, "k", "v2") })
+		staleErr = srv.CloseRoomWithin("room", live, true)
+	}))
+	require.ErrorIs(t, staleErr, ygws.ErrRoomNotFound)
+	assert.NotNil(t, srv.GetDoc("room"), "the reloaded room must survive a close aimed at its predecessor")
+}
+
+// flushGate is a persistence adapter whose first StoreUpdate signals storing
+// and then waits for release.
+type flushGate struct {
+	storing chan struct{}
+	release chan struct{}
+	parked  sync.Once
+	opened  sync.Once
+}
+
+func (g *flushGate) LoadDoc(string) ([]byte, error) { return nil, nil }
+
+func (g *flushGate) StoreUpdate(string, []byte) error {
+	g.parked.Do(func() {
+		close(g.storing)
+		<-g.release
+	})
+	return nil
+}
+
+// open releases the waiting StoreUpdate; later calls do nothing.
+func (g *flushGate) open() { g.opened.Do(func() { close(g.release) }) }
+
+// TestUnit_CloseRoom_ApplyStartsDuringFlush_ErrRoomInUse holds CloseRoom in
+// its flush, past its first check, while an Apply enters the room, so only the
+// check where the room is deleted can refuse.
+func TestUnit_CloseRoom_ApplyStartsDuringFlush_ErrRoomInUse(t *testing.T) {
+	gate := &flushGate{storing: make(chan struct{}), release: make(chan struct{})}
+	srv := ygws.NewServerWithPersistence(gate)
+	srv.PersistCoalesceWindow = time.Hour // the first edit waits in the batch for CloseRoom's flush
+	srv.PersistCoalesceMaxWait = time.Hour
+	set := func(key string) func(*crdt.Doc, func(func(*crdt.Transaction))) {
+		return func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			m := doc.GetMap("m")
+			transact(func(txn *crdt.Transaction) { m.Set(txn, key, "1") })
+		}
+	}
+	require.NoError(t, srv.Apply(context.Background(), "room", set("a")))
+
+	inside, finish := make(chan struct{}), make(chan struct{})
+	var finished sync.Once
+	finishApply := func() { finished.Do(func() { close(finish) }) }
+	// A failed assertion must not leave CloseRoom or the second Apply blocked.
+	t.Cleanup(func() { gate.open(); finishApply() })
+
+	closed := make(chan error, 1)
+	go func() { closed <- srv.CloseRoom("room", false) }()
+	recv(t, gate.storing, "CloseRoom's flush")
+
+	applied := make(chan error, 1)
+	go func() {
+		applied <- srv.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			close(inside)
+			<-finish
+			set("b")(doc, transact)
+		})
+	}()
+	recv(t, inside, "the second Apply")
+	gate.open()
+
+	require.ErrorIs(t, recv(t, closed, "CloseRoom"), ygws.ErrRoomInUse)
+	finishApply()
+	require.NoError(t, recv(t, applied, "the second Apply"))
+	doc := srv.GetDoc("room")
+	require.NotNil(t, doc, "the room the second Apply wrote must still be resident")
+	_, ok := doc.GetMap("m").Get("b")
+	assert.True(t, ok, "the second Apply's write was lost")
+	require.NoError(t, srv.CloseRoom("room", false), "the refusal is transient: the room closes once the Apply has returned")
 }
 
 // TestUnit_Apply_RelaysToOtherNodes is the regression test for the

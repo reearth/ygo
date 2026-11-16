@@ -60,15 +60,16 @@ var ErrPeerUpdateApplied = errors.New("ygo/websocket: peer update already applie
 // hook returned. It applies nothing.
 var ErrPeerUpdateHookReturned = errors.New("ygo/websocket: apply called after OnPeerUpdate returned")
 
-// PeerClose is an error Server.OnPeerUpdate returns to close the peer whose
-// update it refused, with Code and Reason in the close frame. Code should be
-// an application code (4000-4999). Only 1000 and 3000-4999 are sent, the rule
-// ServeHTTP applies to a context cause's close code: the codes below 3000
-// other than 1000 are reserved for the WebSocket protocol and its
-// implementations, so with one (or 5000 and above) the peer is closed with
-// 4205 "Reset Connection" instead, as for a plain error. A nil *PeerClose is a
-// plain error too. Invalid UTF-8 is dropped from Reason, and a Reason longer
-// than a close frame carries (123 bytes) is cut at a rune boundary.
+// PeerClose is an error Server.OnPeerUpdate or Server.OnStateAnswer returns
+// to close the peer whose update or SyncStep1 it refused, with Code and
+// Reason in the close frame. Code should be an application code (4000-4999).
+// Only 1000 and 3000-4999 are sent, the rule ServeHTTP applies to a context
+// cause's close code: the codes below 3000 other than 1000 are reserved for
+// the WebSocket protocol and its implementations, so with one (or 5000 and
+// above) the peer is closed with 4205 "Reset Connection" instead, as for a
+// plain error. A nil *PeerClose is a plain error too. Invalid UTF-8 is dropped
+// from Reason, and a Reason longer than a close frame carries (123 bytes) is
+// cut at a rune boundary.
 type PeerClose struct {
 	Code   int
 	Reason string

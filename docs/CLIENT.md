@@ -250,10 +250,10 @@ credential will be rejected again forever, so retrying it would just hammer
 the server with a request that can never succeed.
 
 What it is **not**: a way to withhold document content from an
-unauthenticated caller. ygo's own server pushes `SyncStep1` + a full
-`SyncStep2` + `Awareness` the moment a connection is accepted — **before it
-has read anything the client sent, Token included**. Concretely, all of the
-following can be true on the same connection:
+unauthenticated caller. ygo's own server answers a `SyncStep1` that reaches
+it before the token with the room's state, and a server that checks the
+token only after it answers `SyncStep1` serves this client too. Against such
+a server, all of the following can be true on the same connection:
 
 - This client's `Doc` is already fully populated with the room's real
   content.

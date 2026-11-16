@@ -72,10 +72,9 @@ type Inbound struct {
 // concrete implementation is *websocket.Server, which satisfies this interface
 // directly (Inject, Rooms, GetAwareness, GetDoc).
 type Sink interface {
-	// Inject applies a remote change to the local room. For KindSync the data
-	// is applied to the room's crdt.Doc with the relay sentinel origin and
-	// rebroadcast to local peers; for KindAwareness it is merged into the
-	// room's awareness.Awareness with the relay sentinel origin.
+	// Inject applies a remote sync or awareness change to the local room with
+	// the relay sentinel origin and rebroadcasts it to local peers; a sync
+	// update that fails partway rebroadcasts only what it left in the room.
 	//
 	// Inject MAY BE CALLED CONCURRENTLY for distinct rooms — a relay is not
 	// required to deliver every room from a single goroutine, and every Sink
@@ -179,6 +178,11 @@ type Relay interface {
 	// shipped relays are unaffected: cluster/redis's RoomDeactivated only
 	// UNSUBSCRIBEs, which is inbound-only and never consulted by Publish;
 	// MemRelay no-ops both calls.
+	//
+	// The websocket provider makes no RoomActivated or RoomDeactivated call
+	// once Server.Shutdown has begun, so a room still active then gets no
+	// RoomDeactivated: release per-room state in Close, which for a relay that
+	// several Servers share runs only after the last of them shuts down.
 	RoomDeactivated(room string)
 	// Close stops the relay and releases its resources. After Close, Publish
 	// returns ErrRelayClosed and no further inbound changes are delivered.

@@ -50,6 +50,72 @@ func EncodeSyncStep1(doc *crdt.Doc) []byte {
 // EncodeSyncStep2 decodes the state vector from a step-1 message and returns
 // a sync-step-2 message containing the updates the remote peer is missing.
 func EncodeSyncStep2(doc *crdt.Doc, step1msg []byte) ([]byte, error) {
+	sv, err := readStateVector(step1msg)
+	if err != nil {
+		return nil, err
+	}
+
+	update := crdt.EncodeStateAsUpdateV1(doc, sv)
+
+	enc := encoding.NewEncoder()
+	enc.WriteVarUint(MsgSyncStep2)
+	enc.WriteVarBytes(update)
+	return enc.Bytes(), nil
+}
+
+// syncMessageHeaderBytes is what a sync message spends on its own header: the
+// message type, and the VarUint length of the update it wraps, which for an
+// update small enough to send in one transport frame is at most five bytes.
+const syncMessageHeaderBytes = 6
+
+// EncodeSyncStep2Split answers a step-1 message with the series of sync
+// messages that carry what its sender is missing, each at most maxBytes long,
+// for a transport whose receiver must not be handed the whole answer at once.
+// A browser applies one message in one task: a 1.22 MB state, a
+// 406,319-character text one client wrote, took 355 ms as one update replayed
+// through yjs 13.6.32 in Chromium with the CPU throttled 4x, the median of 9
+// runs after 2 warm-ups.
+//
+// All but the last are Update messages (type 2), each integrating on its own:
+// once a receiver has applied one it holds every struct that message carries
+// and waits for none. The last is a SyncStep2 (type 1) carrying what no
+// Update could — the deletions left and the structs doc holds parked — so a
+// receiver that applies them in order ends up holding exactly what the one
+// message EncodeSyncStep2 returns would have left it holding, and a client
+// that reads a SyncStep2 as the end of a sync reads one, last. It is always
+// there, empty when there is nothing left to carry.
+//
+// maxBytes bounds each message, not the update inside it. A message carrying
+// a single struct longer than maxBytes, which a V1 update cannot cut, and the
+// last message when doc holds parked structs, pass it; see
+// crdt.SplitStateAsUpdateV1.
+func EncodeSyncStep2Split(doc *crdt.Doc, step1msg []byte, maxBytes int) ([][]byte, error) {
+	sv, err := readStateVector(step1msg)
+	if err != nil {
+		return nil, err
+	}
+
+	updates, err := crdt.SplitStateAsUpdateV1(doc, sv, maxBytes-syncMessageHeaderBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	msgs := make([][]byte, len(updates))
+	for i, update := range updates {
+		msgType := uint64(MsgUpdate)
+		if i == len(updates)-1 {
+			msgType = MsgSyncStep2
+		}
+		msgs[i] = encoding.EncodeBytes(func(enc *encoding.Encoder) {
+			enc.WriteVarUint(msgType)
+			enc.WriteVarBytes(update)
+		})
+	}
+	return msgs, nil
+}
+
+// readStateVector decodes the state vector a step-1 message carries.
+func readStateVector(step1msg []byte) (crdt.StateVector, error) {
 	dec := encoding.NewDecoder(step1msg)
 
 	msgType, err := dec.ReadVarUint()
@@ -65,17 +131,7 @@ func EncodeSyncStep2(doc *crdt.Doc, step1msg []byte) ([]byte, error) {
 		return nil, ErrUnexpectedEOF
 	}
 
-	sv, err := crdt.DecodeStateVectorV1(svBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	update := crdt.EncodeStateAsUpdateV1(doc, sv)
-
-	enc := encoding.NewEncoder()
-	enc.WriteVarUint(MsgSyncStep2)
-	enc.WriteVarBytes(update)
-	return enc.Bytes(), nil
+	return crdt.DecodeStateVectorV1(svBytes)
 }
 
 // ReadSyncMessage parses the header of a sync message and returns the message

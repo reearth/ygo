@@ -604,11 +604,8 @@ func TestUnit_WithGUID(t *testing.T) {
 	assert.Len(t, doc2.GUID(), 36) // UUID v4 format is 36 chars
 }
 
-func TestUnit_MergeUpdatesV1_YMapWithGCdOrigins(t *testing.T) {
-	// Reproduce: repeated YMap.Set on same key → delete+insert cycles.
-	// After merge (which creates a fresh gc=true doc), deleted items become
-	// GC structs. The encoder must fall back to explicit parent info when
-	// the origin item is a GC placeholder.
+func TestUnit_MergeUpdatesV1_FoldedYMapSetsKeepLastValue(t *testing.T) {
+	// Folding MergeUpdatesV1 over repeated Set calls on one key keeps the last value.
 	doc := New(WithClientID(1))
 	m := doc.GetMap("meta")
 
