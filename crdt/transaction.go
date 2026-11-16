@@ -1,7 +1,10 @@
 package crdt
 
 import (
+	"cmp"
 	"context"
+	"math"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -13,6 +16,8 @@ type Transaction struct {
 	doc         *Doc
 	Origin      any  // user-supplied tag forwarded to update observers
 	Local       bool // true when the change originated on this peer; false while applying a remote update
+	scanBounded bool // this remote apply's conflict scans may pass only scanLeft more items (WithIntegrateScanBudget)
+	scanLeft    uint32
 	deleteSet   DeleteSet
 	beforeState StateVector
 	afterState  StateVector
@@ -54,18 +59,65 @@ type Transaction struct {
 	// undefined for every txn method); for one used cross-goroutine after
 	// commit the check is best-effort.
 	done bool
+	// rolledBack marks a remote apply that WithWholeOrNothingApplies rolled
+	// back, which commits as a transaction that changed nothing.
+	rolledBack bool
 	// ctx is the context associated with this transaction. Set to
 	// context.Background() by Transact and to the caller's ctx by
 	// TransactContext. Exposed via the Ctx() method so fn can poll for
 	// cancellation.
 	ctx context.Context
+	// scanMarks holds the marks this transaction's conflict scans leave on
+	// the items they pass (Item.integrate), and scanSerial numbers the scans.
+	scanMarks  map[*Item]scanMark
+	scanSerial uint32
 	// formatCleanup marks a remote transaction whose format cleanup runs
 	// once its observers have fired; afterTypeObservers, when set, decides
 	// it after the type observers (typeObserved: there are some), where
 	// Yjs does.
-	formatCleanup      bool
-	typeObserved       bool
+	formatCleanup bool
+	typeObserved  bool
+	// refused marks a remote apply that failed before integrating, so the
+	// commit fires nothing.
+	refused            bool
 	afterTypeObservers func()
+}
+
+// transactionParked is what one transaction parked, which a failed apply's
+// landed update carries (encodeTxnV1Locked); each document keeps one, since
+// its transactions run one at a time.
+type transactionParked struct {
+	items   []*Item     // the first run is a view of the pending queue
+	deletes []DeleteSet // sharing ranges that nothing changes
+	// left is what a drain took out of the queue after the park, so the
+	// structs still parked are found without a pass over the queue; a merge
+	// runs before the transaction's one park and cannot take them.
+	left []*Item
+}
+
+// parkRecord allocates the document's record only when a transaction parks.
+func (t *Transaction) parkRecord() *transactionParked {
+	s := t.doc.store
+	if s.parked == nil {
+		s.parked = &transactionParked{}
+	}
+	return s.parked
+}
+
+// noteParked keeps the first appended run as a queue view to avoid copying it.
+func (t *Transaction) noteParked(run []*Item) {
+	p := t.parkRecord()
+	if p.items == nil {
+		p.items = run
+		return
+	}
+	p.items = append(p.items, run...)
+}
+
+// noteParkedDeletes records ds, which this transaction parked.
+func (t *Transaction) noteParkedDeletes(ds DeleteSet) {
+	p := t.parkRecord()
+	p.deletes = append(p.deletes, ds)
 }
 
 // Ctx returns the context associated with this transaction. Transactions
@@ -209,7 +261,7 @@ func squashRuns(txn *Transaction) {
 			// current merged item, updated with each absorbed right item's
 			// original Len() — avoiding a call to left.Content.Len() (which is
 			// O(string length) and would make the loop O(n²)).
-			expectedClock := left.ID.Clock + uint64(left.Content.Len())
+			expectedClock := left.ID.Clock + left.Content.Len()
 			var sb strings.Builder
 			sb.WriteString(left.Content.(*ContentString).Str)
 
@@ -234,7 +286,7 @@ func squashRuns(txn *Transaction) {
 					break
 				}
 				// right is directly adjacent and clock-contiguous: absorb it.
-				rightLen := uint64(right.Content.Len()) // O(1) for single-char items
+				rightLen := right.Content.Len() // O(1) for single-char items
 				expectedClock = right.ID.Clock + rightLen
 
 				// Rewire linked list: splice right out.
@@ -351,10 +403,110 @@ func tryMergeWithLefts(txn *Transaction) {
 	if len(txn.mergeStructs) == 0 {
 		return
 	}
-	store := txn.doc.store
+	// In client and clock order each half merges into the run left of it, so a
+	// run split n times is copied once rather than n times.
+	slices.SortFunc(txn.mergeStructs, func(a, b *Item) int {
+		if c := cmp.Compare(a.ID.Client, b.ID.Client); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ID.Clock, b.ID.Clock)
+	})
+	merging := mergeRuns{store: txn.doc.store}
 	for _, item := range txn.mergeStructs {
-		tryMergeWithLeft(item, store)
+		tryMergeWithLeft(item, &merging)
 	}
+	merging.finish()
+}
+
+// mergeRuns is the state of tryMergeWithLefts's merges, which take the halves
+// in client and clock order.
+type mergeRuns struct {
+	store *StructStore
+
+	// text is the run the last string merge extended, and joined its text from
+	// the run's second merge on, written back when another run starts.
+	text   *ContentString
+	joined strings.Builder
+
+	// items is client's store slice while merged halves leave it: items[:kept]
+	// is compacted and items[next:] not yet reached.
+	client     ClientID
+	items      []*Item
+	kept, next int
+}
+
+// appendString adds right's text to left's run without copying the whole run
+// at every merge.
+func (m *mergeRuns) appendString(left, right *ContentString) {
+	switch {
+	case left != m.text:
+		m.flushText()
+		m.text = left
+		left.Str += right.Str
+	case m.joined.Len() == 0:
+		m.joined.Grow(len(left.Str) + len(right.Str))
+		m.joined.WriteString(left.Str)
+		m.joined.WriteString(right.Str)
+	default:
+		m.joined.WriteString(right.Str)
+	}
+	left.utf16Len += right.utf16Len
+}
+
+// flushText writes the joined text back to its run.
+func (m *mergeRuns) flushText() {
+	if m.joined.Len() > 0 {
+		m.text.Str = m.joined.String()
+		m.joined.Reset()
+	}
+}
+
+// remove takes item, merged into its left neighbour, out of its client's store
+// slice, moving each item that stays at most once, as a single removal did.
+func (m *mergeRuns) remove(item *Item) {
+	if m.items != nil && item.ID.Client == m.client {
+		// Later halves come in clock order, so this scan passes only items the
+		// compaction moves anyway.
+		for i := m.next; i < len(m.items) && m.items[i].ID.Clock <= item.ID.Clock; i++ {
+			if m.items[i] == item {
+				m.kept += copy(m.items[m.kept:], m.items[m.next:i])
+				m.next = i + 1
+				return
+			}
+		}
+		return
+	}
+	m.flushItems()
+	items := m.store.clients[item.ID.Client]
+	if i, ok := indexOfItem(items, item); ok {
+		m.client, m.items, m.kept, m.next = item.ID.Client, items, i, i+1
+	}
+}
+
+// flushItems closes the gap the merged halves left in the current client's
+// store slice.
+func (m *mergeRuns) flushItems() {
+	if m.items == nil {
+		return
+	}
+	n := m.kept + copy(m.items[m.kept:], m.items[m.next:])
+	clear(m.items[n:])
+	m.store.clients[m.client] = m.items[:n]
+	m.items = nil
+}
+
+// finish writes back the last run's text and the last client's store slice.
+func (m *mergeRuns) finish() {
+	m.flushText()
+	m.flushItems()
+}
+
+// indexOfItem finds item in items, a store slice in clock order.
+func indexOfItem(items []*Item, item *Item) (int, bool) {
+	i, found := slices.BinarySearchFunc(items, item.ID.Clock, func(it *Item, clock uint64) int {
+		return cmp.Compare(it.ID.Clock, clock)
+	})
+	return i, found && items[i] == item
 }
 
 // tryMergeWithLeft attempts to absorb item into item.Left. Returns true when
@@ -369,7 +521,7 @@ func tryMergeWithLefts(txn *Transaction) {
 //
 // On success: left's content is extended in place, the linked list is spliced
 // past item, and item is removed from the store.
-func tryMergeWithLeft(item *Item, store *StructStore) bool {
+func tryMergeWithLeft(item *Item, merging *mergeRuns) bool {
 	left := item.Left
 	if left == nil {
 		return false
@@ -380,7 +532,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if left.Right != item {
 		return false
 	}
-	if left.ID.Clock+uint64(left.Content.Len()) != item.ID.Clock {
+	if left.ID.Clock+left.Content.Len() != item.ID.Clock {
 		return false
 	}
 	if left.Deleted != item.Deleted {
@@ -405,7 +557,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if item.Origin == nil {
 		return false
 	}
-	expectedLast := left.ID.Clock + uint64(left.Content.Len()) - 1
+	expectedLast := left.ID.Clock + left.Content.Len() - 1
 	if item.Origin.Client != left.ID.Client || item.Origin.Clock != expectedLast {
 		return false
 	}
@@ -423,8 +575,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		if !ok {
 			return false
 		}
-		lc.Str += rc.Str
-		lc.utf16Len += rc.utf16Len
+		merging.appendString(lc, rc)
 	case *ContentAny:
 		rc, ok := item.Content.(*ContentAny)
 		if !ok {
@@ -466,13 +617,27 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		left.Parent.clearMarkers()
 	}
 
-	// Remove item from the store's per-client slice.
-	storeItems := store.clients[item.ID.Client]
-	for i, it := range storeItems {
-		if it == item {
-			store.clients[item.ID.Client] = append(storeItems[:i], storeItems[i+1:]...)
-			break
-		}
-	}
+	// Remove item from its client's store slice.
+	merging.remove(item)
 	return true
+}
+
+// scanMark is a conflict scan's mark on an item it passed: which scan of the
+// transaction, and at which step of it (Item.integrate).
+type scanMark struct{ scan, step uint32 }
+
+// scanMarkMap returns the transaction's scan marks, made on first use.
+func (txn *Transaction) scanMarkMap() map[*Item]scanMark {
+	if txn.scanMarks == nil {
+		txn.scanMarks = make(map[*Item]scanMark)
+	}
+	return txn.scanMarks
+}
+
+// boundScans lets txn's conflict scans pass at most n more items, when n is
+// positive.
+func (txn *Transaction) boundScans(n int) {
+	if n > 0 {
+		txn.scanBounded, txn.scanLeft = true, uint32(min(uint64(n), math.MaxUint32))
+	}
 }
