@@ -701,6 +701,8 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 	}()
 
 	retErr = fn(txn)
+	// An observer that keeps the *Transaction must not keep the scans' marks.
+	txn.scanMarks = nil
 
 	rearbitrateMoves(txn)
 	txn.afterState = d.store.StateVector()

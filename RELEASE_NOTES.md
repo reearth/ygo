@@ -1,3 +1,26 @@
+## v1.55.1
+
+**Who is affected:** servers that apply updates from peers, where one update
+places many items among the ones a document holds.
+
+**Split runs merge back at commit in linear time.** When a transaction splits
+a run of text and nothing is inserted between the halves, the halves are
+joined again at commit. Each join copied the whole run, so an update that split
+one run n times copied it n times: 20,000 items that each split one
+40,000-character run allocated 420 MiB in one apply. The same apply now
+allocates 12 MiB. The merged items and the encoded state are as before.
+
+**An update's conflict scans share one map.** YATA places an item by scanning
+right from its left origin, and each scan built two new sets of the items it
+passed. An item that names an early left origin and no right origin scans to
+the end of the list, so an update of many such items allocated the list's size
+once per item: 2,000 of them into a 40,000-item list allocated 4,511 MiB. The
+scans of one transaction now mark the items they pass in one map, so the same
+update allocates 2.7 MiB and takes less than half the time. Placement is
+unchanged.
+
+**Upgrading.** No API change.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single
