@@ -114,6 +114,15 @@ func BenchmarkYText_RandomDelete_100k(b *testing.B) {
 	}
 }
 
+// BenchmarkApplyUpdateV1_ConflictScan_40k is BenchmarkApplyUpdateV1_ConflictScan
+// with 2,000 items scanning a 40,000-item list.
+func BenchmarkApplyUpdateV1_ConflictScan_40k(b *testing.B) { benchConflictScan(b, 40_000, 2_000) }
+
+// BenchmarkApplyUpdateV1_SplitRunMergedBack_20k is
+// BenchmarkApplyUpdateV1_SplitRunMergedBack with 20,000 items splitting a
+// 40,000-character run.
+func BenchmarkApplyUpdateV1_SplitRunMergedBack_20k(b *testing.B) { benchSplitRunMergedBack(b, 20_000) }
+
 // benchConflict simulates `users` independent peers, each performing
 // opsPerUser concurrent inserts at the same start position (index 0) of a
 // shared YText, then converging all peers via a single MergeUpdatesV1 +

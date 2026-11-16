@@ -1,3 +1,234 @@
+## v1.56.0
+
+**Who is affected: servers that apply updates from peers they do not trust,
+every relay or cluster that forwards updates, and code that builds a document
+with `WithClientID` and re-applies its own updates.** A refused, cut-off or
+reordered update now leaves the server and the peers it relays to holding
+the same document.
+
+- Breaking: `Content.Len()` returns `uint64`, and `Content.Splice` takes a
+  `uint64` offset. Custom implementations must change both signatures.
+  `NewContentDeleted`, `NewContentMove`, and `ContentMove.TargetLen` also use
+  `uint64` lengths. Check string and slice bounds before conversion to `int`.
+  Rendered text and array positions remain `int`.
+- Logical spans retain their lengths on 32-bit builds, including coalesced
+  deleted and GC spans. V1 and V2 support the same wide spans and offsets.
+  String, list, allocation, and struct-count limits remain in force.
+- Breaking: a document takes a new random client ID when a remote update
+  changes its own client's clock, as in Yjs. A document built with
+  `WithClientID` that re-applies its own updates gets a new ID too: read
+  `ClientID()` again after the apply if you track writes by client ID.
+- An update that would park past `MaxPendingItems` (`WithMaxPendingItems`) is
+  refused before it changes the document. Before, part of it stayed and its
+  observers were told.
+- Parked delete ranges count against the same cap, separately, and are
+  retried only when they can apply. `Doc.SetMaxPendingItems` sets the cap
+  after construction.
+- A struct sent again merges into the pending queue as Yjs merges its pending
+  update, so the queue holds what Yjs's pending update holds. Each struct a
+  park adds, cuts or drops costs, on average, time logarithmic in the queue.
+- An update decides whether to retry parked structs from the clocks it
+  advances, without scanning all clients that the queue waits on.
+- A struct the document already holds waits on another client's struct it
+  names and the document lacks, as in Yjs.
+- An item next to a GC struct integrates as a GC struct, as in Yjs.
+- An item that names a struct of its own client past that client's clock is
+  refused, as Yjs throws for it.
+- Clocks past 2^53-1, and struct, origin and parent clients past 2^55-1, are
+  refused. The attribution decoders (`DecodeIDSet`, `DecodeIDMap`,
+  `DecodeContentIDs`, `DecodeContentMap`) refuse a range whose running clock
+  would pass 2^64-1, and an `IDMap` client past 2^55-1.
+- `ApplyUpdateV1Landed`, which the websocket provider relays after a partial
+  apply, carries the structs the apply parked.
+- `Server.Inject` relays to local peers what a partly applied update left.
+- A parked struct that panics in the drain is dropped, not the structs after
+  it.
+- An item that continues its client's GC struct is refused, as in Yjs.
+- The deletions read before a cut in the delete set, or before a range that
+  reaches a clock past 2^53-1, stay applied, as in Yjs for a cut, whatever the
+  pending cap, and `ApplyUpdateV1Landed` carries them.
+- An item that arrives with deleted content is deleted when it integrates, as
+  in Yjs.
+- `EncodeStateVectorFromUpdate` and its V2 form return the state vector Yjs
+  returns, and a subdocument guid that is not UTF-8 is an error, not a panic.
+- An update's structs integrate in Yjs's order, and the integration stops at
+  the first refused struct, as Yjs stops.
+- Every struct of an update decodes before one integrates, so a struct that
+  does not decode changes nothing.
+- `WithClientID` panics for a client ID past 2^55-1.
+- `ApplyUpdateV1Landed` also carries the delete ranges a failed apply parked.
+- A type ref Yjs has no type for is refused before any change.
+- `YArray.Insert` and `YArray.Push` with no values make no item, as in Yjs.
+- An item or GC struct of length zero is refused before any change, also in
+  an update from an older ygo. ygo 1.55.0 and earlier stored one when it
+  parked one, and when `YArray.Insert` or `Push` had no values. The bundled
+  persistence adapters merge a room's records on load, and the merge drops
+  such a struct, so that state still loads. If you apply a stored state
+  without a merge, for example a snapshot from `RestoreSnapshot` or an
+  adapter's own blob, pass it through `crdt.MergeUpdatesV1` first.
+- A delete set read from an update allocates in proportion to its bytes. In
+  tests with crafted delete sets of about 1 MiB, an apply allocates at most
+  17.2 times their bytes at the default cap, where 1.55.0 allocated up to
+  137.3.
+
+**Who is affected: servers that receive GC structs, which Yjs peers send for
+the content of a deleted nested type.**
+
+Yjs stores an item as a GC struct when the struct to its left or to its right
+is a GC struct. ygo did so only when the item had no live neighbour. With one
+live neighbour, ygo put the item in that neighbour's type: at the wrong
+position, or stored but not linked. Two Yjs clients reach this when one
+inserts into a nested type that the other deletes, and the server gets that
+part of the type from the deleter as GC structs. There ygo kept the insert as
+a deleted item where Yjs keeps a GC struct. A GC struct next to live content,
+which no Yjs client sends, made ygo show text that Yjs does not: with a GC
+right origin the document showed the item, and with a GC origin a replica
+loaded from the document's encoded state showed it while the document did
+not, with the same state vector.
+
+Such an item now becomes a GC struct once both neighbours are present, as in
+Yjs, and ygo no longer splits a GC struct, as Yjs does not. Encoders now keep
+an origin that names a GC struct, as Yjs does. They dropped it, so
+`MergeUpdatesV1/V2`, `DiffUpdateV1/V2`, the update format converters, and an
+encoded state that holds a parked item produced an update that put the item
+into the text where applying the original updates makes it a GC struct. A
+state that an earlier ygo wrote carries no such origin and loads as before.
+No API or wire format changes.
+
+An array move whose target had not arrived waits until the target's client
+reaches that clock. A target that arrived as a GC struct did not release such
+a move until another struct of its client arrived, and every struct an update
+added rescanned all the moves that waited for its client. Waiting moves are
+now indexed by target clock, a move never claims a GC struct, and deleted
+waiting moves are dropped once they outnumber the live ones. So many moves for
+an absent target no longer cost time on every later struct, and deleted ones
+never hold more memory than the moves still waiting.
+
+When the GC collected a deleted nested type (a map entry, array element or XML
+node that holds a map, array, text or XML type), it kept the items under that
+type as deleted items, each with its parent and origins. Yjs turns them into
+GC structs. The GC at the end of a transaction and `RunGC` now do the same,
+and an item that arrives later in a collected type is stored as a GC struct,
+as in Yjs. `RunGC` also merges neighbouring GC structs of one client into
+one, as Yjs does at the end of a transaction. Content does not change, but
+encoded state does: after such a
+delete, the state that `EncodeStateAsUpdate` returns holds GC structs where it
+held deleted items, and is smaller. A write through a handle to a type inside
+a collected type no longer fires the deep observers of the types above it, as
+in Yjs. `Doc.Load` no longer races with the GC, with attaching a subdocument
+or with an undo that restores it, and a removed or destroyed subdocument no
+longer keeps its parent in memory. A state that an earlier version stored
+loads as before. Every peer
+that can process updates with a GC neighbour must upgrade to get the same
+materialized state.
+
+ygo decoded a Yjs `Y.XmlHook` (type ref 5) to an untyped placeholder and
+dropped its hook name. Every update ygo encoded from the document wrote the
+hook as an empty `YArray`: the state a server sends to a late joiner, the
+`OnUpdate` output it stores, `MergeUpdates` and `DiffUpdate` results. A Yjs
+client that loaded that state got an empty array without the hook's entries.
+ygo now keeps the hook and its name and writes them back byte for byte as Yjs
+does. `ToJSON`, `Entries`, `ToSlice` and observer values, which gave `null`
+for a hook, now give its entries as an object, as Yjs `toJSON` does.
+`YXmlFragment.Children()` now includes a hook, so its indexes match `Len()`,
+and `ToXML` renders the hook as `[object Object]`, as Yjs `toString` does.
+`YMap.Get` and `YArray.Get` return a hook as a `*YMap`. State that an older
+ygo already stored keeps the hook as an empty `YArray`.
+
+A subdocument's opts are now written as Yjs `ContentDoc` writes them:
+`gc: false`, `autoLoad: true` and `meta` only when set, so a subdocument with
+GC on writes `{}`. ygo always wrote `gc` and also wrote a `collectionId` key
+that Yjs ignores, so its bytes differed whenever GC was on, autoLoad was set
+or a collection ID was set. The collection ID is no longer sent to peers; as
+in Yjs, a subdocument without one takes its parent's when it is added. A
+`collectionId` key that an earlier ygo wrote still decodes, and a `meta` value
+from Yjs is kept and written back. A subdocument that an undo restores starts
+with `ShouldLoad()` equal to `AutoLoad()` and takes its parent's collection
+ID, as in Yjs.
+
+**Who is affected:** servers that apply updates from clients they do not
+control. Nothing changes unless you set one of the new options.
+
+**A bound on the conflict scans of one remote apply, set per origin.** YATA
+places an item by scanning right from its left origin. An item that names an
+early left origin and no right origin scans to the end of the list, so an
+update of a few KB can hold the document's lock for seconds.
+`crdt.WithIntegrateScanBudget(func(origin any) int)` bounds the items one
+apply's scans pass, by the origin the apply is given: a server bounds the
+origin it applies a connected client's updates with, and returns 0 for updates
+it relays from another node or loads from storage.
+
+An apply that passes the bound aborts partway and returns
+`crdt.ErrIntegrateScanBudget`, which wraps `crdt.ErrInvalidUpdate`. The
+document keeps what the apply integrated, as it does for an update that
+overflows the pending cap, and `ApplyUpdateV1Landed` returns that part for
+relay. The same update sent again carries on from there. An update with an
+item whose scan alone passes the bound integrates nothing from that item on,
+so each later send returns the error with no landed part: a resend under the
+same bound cannot progress, and the server can close the sender or apply the
+update under a larger bound. When the drain of the parked queue passes the
+bound, it keeps what it integrated and parks the rest, and the apply that
+filled the gap still succeeds. A later apply, from any sender, tries the rest
+again when its drain has more of its bound left than the scan that tripped
+had. Remote moves and subdocuments work under a bound.
+
+**Whole-or-nothing applies, as a document option.**
+`crdt.WithWholeOrNothingApplies(true)` refuses a remote apply that fails, by
+tripping the bound or for any other reason: it is rolled back before it
+commits, so where an apply without the option is not fully applied, this one
+keeps nothing. The document is left byte for byte as it was, no observer
+fires, and `ApplyUpdateV1Landed` returns nothing, so a server can tell the
+sender that none of its update was kept. A drain of the parked queue that
+trips the bound is rolled back on its own, the apply that filled the gap still
+succeeds, and a later apply tries the queue again when its drain has more of
+its bound left than that drain began with. Such a document refuses every
+remote update that carries a move or a subdocument, with
+`crdt.ErrInvalidUpdate`. Each remote apply on it allocates at least 288 bytes
+to record what it changes.
+
+**A budget for each remote apply, and the roots it may write under.**
+`crdt.WithApplyBudget(func(origin any) crdt.ApplyBudget)` bounds, per apply,
+the values it reads (`Decoded`), the structs of the update it adds
+(`Structs`), the bytes they carry, map keys and new roots' names included
+(`Bytes`), and the structs it makes by splitting items the document holds
+(`Split`). A field of zero or below is no limit, as `WithIntegrateScanBudget`
+reads its bound, so the zero value bounds nothing and the smallest limit is
+1. `Decoded` is counted as the update is read, so a frame that declares
+millions of values is refused before they are in memory.
+`crdt.WithAllowedRoots(func(origin any) []string)` names the root types an
+apply may write under, at any depth; a struct that parks keeps the list of the
+apply that sent it until it lands. A parked struct that lands under a root a
+list leaves out is dropped; an apply that only filled its gap does not fail
+for it, and `PendingStats.RootsDropped` counts it by client. An apply that
+would pass its budget or leave its roots stops before that struct enters the
+document and returns `crdt.ErrApplyBudget` or `crdt.ErrRootNotAllowed` in a
+`crdt.RefusedUpdateError` that reports what it decoded and added. A struct
+that waits on a missing clock counts when it parks, so a sender cannot pass
+the budget by writing behind a clock it never sends. The document keeps what
+the apply integrated before it stopped, as for the scan bound, and keeps
+nothing on a document with `WithWholeOrNothingApplies`, which is the one
+option that rolls an apply back. A budget that limits nothing, or a list that
+names every root an update writes, changes nothing an apply does.
+
+**Who is affected:** servers that apply updates from peers, where one update
+places many items among the ones a document holds.
+
+**Split runs merge back at commit in linear time.** When a transaction splits
+a run of text and nothing is inserted between the halves, the halves are
+joined again at commit. Each join copied the whole run, so an update that split
+one run n times copied it n times: 20,000 items that each split one
+40,000-character run allocated 420 MiB in one apply. The same apply now
+allocates 12 MiB. The merged items and the encoded state are as before.
+
+**An update's conflict scans share one map.** YATA places an item by scanning
+right from its left origin, and each scan built two new sets of the items it
+passed. An item that names an early left origin and no right origin scans to
+the end of the list, so an update of many such items allocated the list's size
+once per item: 2,000 of them into a 40,000-item list allocated 4,511 MiB. The
+scans of one transaction now mark the items they pass in one map, so the same
+update allocates 2.7 MiB and takes less than half the time. Placement is
+unchanged.
+
 ## v1.55.0
 
 **Who is affected: servers that bridge many awareness clients over a single

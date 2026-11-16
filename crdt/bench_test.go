@@ -1,7 +1,9 @@
 package crdt
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"reflect"
 	"strings"
@@ -257,6 +259,102 @@ func BenchmarkApplyUpdateV2_Bulk(b *testing.B) {
 	}
 }
 
+// BenchmarkApplyUpdateV1_Small applies a one-keystroke V1 update, a single
+// one-character struct, to a fresh document on every iteration.
+func BenchmarkApplyUpdateV1_Small(b *testing.B) {
+	src, _ := buildTextDocBulk(1)
+	benchApplyUpdate(b, EncodeStateAsUpdateV1(src, nil), ApplyUpdateV1)
+}
+
+// BenchmarkApplyUpdateV2_Small is BenchmarkApplyUpdateV1_Small in V2.
+func BenchmarkApplyUpdateV2_Small(b *testing.B) {
+	src, _ := buildTextDocBulk(1)
+	benchApplyUpdate(b, EncodeStateAsUpdateV2(src, nil), ApplyUpdateV2)
+}
+
+// BenchmarkApplyUpdateV1_Large applies a V1 update of 200,000 one-character
+// structs from one client, twice the default pending cap, to a fresh document
+// on every iteration.
+func BenchmarkApplyUpdateV1_Large(b *testing.B) {
+	src, _ := buildTextDoc(200_000)
+	benchApplyUpdate(b, EncodeStateAsUpdateV1(src, nil), ApplyUpdateV1)
+}
+
+// BenchmarkApplyUpdateV2_Large is BenchmarkApplyUpdateV1_Large in V2.
+func BenchmarkApplyUpdateV2_Large(b *testing.B) {
+	src, _ := buildTextDoc(200_000)
+	benchApplyUpdate(b, EncodeStateAsUpdateV2(src, nil), ApplyUpdateV2)
+}
+
+// buildDeletedEveryOther is a text of 2n characters with every second one
+// deleted, whose state carries n delete ranges.
+func buildDeletedEveryOther(n int) *Doc {
+	src, txt := buildTextDocBulk(2 * n)
+	src.Transact(func(txn *Transaction) {
+		for i := range n {
+			txt.Delete(txn, i+1, 1)
+		}
+	})
+	return src
+}
+
+// BenchmarkApplyUpdateV1_DeleteSetOverTheCap applies a state of 5,000 delete
+// ranges to a document whose pending cap is far smaller, so the parked-range
+// check reads the delete set before the apply.
+func BenchmarkApplyUpdateV1_DeleteSetOverTheCap(b *testing.B) {
+	update := EncodeStateAsUpdateV1(buildDeletedEveryOther(5_000), nil)
+	benchApplyUpdate(b, update, func(_ *Doc, u []byte, origin any) error {
+		return ApplyUpdateV1(New(WithClientID(2), WithMaxPendingItems(100)), u, origin)
+	})
+}
+
+// BenchmarkApplyUpdateV2_DeleteSetOverTheCap is
+// BenchmarkApplyUpdateV1_DeleteSetOverTheCap in V2.
+func BenchmarkApplyUpdateV2_DeleteSetOverTheCap(b *testing.B) {
+	update := EncodeStateAsUpdateV2(buildDeletedEveryOther(5_000), nil)
+	benchApplyUpdate(b, update, func(_ *Doc, u []byte, origin any) error {
+		return ApplyUpdateV2(New(WithClientID(2), WithMaxPendingItems(100)), u, origin)
+	})
+}
+
+// BenchmarkApplyUpdate_CraftedDeleteSet applies each of craftedDeleteSets at
+// the default cap, which refuses or parks it, and with the cap lifted, which
+// parks it whole; B/op over the update's bytes is what a delete set costs.
+func BenchmarkApplyUpdate_CraftedDeleteSet(b *testing.B) {
+	for _, format := range applyFormats {
+		for _, shape := range craftedDeleteSets(format.v2) {
+			update, apply := encodeRawDeleteSet(shape.entries, format.v2), ApplyUpdateV1
+			if format.v2 {
+				apply = ApplyUpdateV2
+			}
+			for _, lifted := range []bool{false, true} {
+				name, opts := shape.name+"/"+format.name+"/default_cap", []DocOption{WithClientID(1)}
+				if lifted {
+					name, opts = shape.name+"/"+format.name+"/cap_lifted", append(opts, WithMaxPendingItems(math.MaxInt))
+				}
+				b.Run(name, func(b *testing.B) {
+					b.ReportAllocs()
+					for range b.N {
+						if err := apply(New(opts...), update, nil); err != nil && (lifted && !shape.cut || !errors.Is(err, ErrInvalidUpdate)) {
+							b.Fatal(err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func benchApplyUpdate(b *testing.B, update []byte, apply func(*Doc, []byte, any) error) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := apply(newTestDoc(2), update, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkMergeUpdatesV1 encodes 10 small V1 updates (100 chars each) and
 // then merges them into a single update on each iteration.
 func BenchmarkMergeUpdatesV1(b *testing.B) {
@@ -280,6 +378,42 @@ func BenchmarkMergeUpdatesV1(b *testing.B) {
 			b.Fatal(err)
 		}
 		_ = merged
+	}
+}
+
+// BenchmarkEncodeStateVectorFromUpdate reads the state vector of 10 clients'
+// merged updates (100 chars each).
+func BenchmarkEncodeStateVectorFromUpdate(b *testing.B) {
+	var v1, v2 [][]byte
+	for i := 0; i < 10; i++ {
+		doc, _ := buildTextDocWithClient(uint64(i+1), 100)
+		v1 = append(v1, EncodeStateAsUpdateV1(doc, nil))
+		v2 = append(v2, EncodeStateAsUpdateV2(doc, nil))
+	}
+	merged1, err := MergeUpdatesV1(v1...)
+	if err != nil {
+		b.Fatal(err)
+	}
+	merged2, err := MergeUpdatesV2(v2...)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, bc := range []struct {
+		name   string
+		update []byte
+		encode func([]byte) ([]byte, error)
+	}{
+		{"V1", merged1, EncodeStateVectorFromUpdate},
+		{"V2", merged2, EncodeStateVectorFromUpdateV2},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := bc.encode(bc.update); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 
@@ -390,9 +524,8 @@ func BenchmarkTwoPeerConvergence(b *testing.B) {
 // path in Item.integrate (issue #54-C). N peers each insert one element at
 // position 0 of an empty doc, so every item shares Origin=nil and OriginRight=nil
 // — the maximal-contention case. Converging all N updates into one doc forces
-// integrate to walk a conflict group that grows toward N, which is exactly where
-// the `conflicting` / `beforeOrigin` maps (item.go) are allocated and reset.
-// Measure this before deciding whether pooling those maps is worthwhile.
+// integrate to walk a conflict group that grows toward N, which is where the
+// conflict scan marks the items it passes (item.go).
 func BenchmarkConcurrentSamePositionInsert(b *testing.B) {
 	for _, peers := range []int{20, 100, 400} {
 		b.Run(fmt.Sprintf("peers=%d", peers), func(b *testing.B) {
@@ -416,6 +549,65 @@ func BenchmarkConcurrentSamePositionInsert(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// BenchmarkApplyUpdateV1_ConflictScan applies 200 items that each name the
+// first item of a 2,000-item list as their left origin and no right origin, so
+// each item's conflict scan passes the whole list.
+func BenchmarkApplyUpdateV1_ConflictScan(b *testing.B) { benchConflictScan(b, 2_000, 200) }
+
+// BenchmarkApplyUpdateV1_ConflictScanBounded is
+// BenchmarkApplyUpdateV1_ConflictScan on a document whose bound never trips.
+func BenchmarkApplyUpdateV1_ConflictScanBounded(b *testing.B) {
+	benchConflictScan(b, 2_000, 200, WithIntegrateScanBudget(func(any) int { return 1 << 30 }))
+}
+
+// BenchmarkApplyUpdateV1_ConflictScanWholeOrNothing is
+// BenchmarkApplyUpdateV1_ConflictScanBounded on a document with
+// whole-or-nothing applies.
+func BenchmarkApplyUpdateV1_ConflictScanWholeOrNothing(b *testing.B) {
+	benchConflictScan(b, 2_000, 200, WithIntegrateScanBudget(func(any) int { return 1 << 30 }), WithWholeOrNothingApplies(true))
+}
+
+// BenchmarkApplyUpdateV1_SplitRunMergedBack applies 2,000 items that each split
+// one 4,000-character run, whose halves all merge back at commit.
+func BenchmarkApplyUpdateV1_SplitRunMergedBack(b *testing.B) { benchSplitRunMergedBack(b, 2_000) }
+
+// benchConflictScan applies originAtTheStart(n) to a fresh copy of
+// chainedList(l), made with opts, on each iteration; loading the copy is not
+// timed.
+func benchConflictScan(b *testing.B, l, n int, opts ...DocOption) {
+	state := EncodeStateAsUpdateV1(chainedList(b, l), nil)
+	update := originAtTheStart(n)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		b.StopTimer()
+		doc := New(opts...)
+		if err := ApplyUpdateV1(doc, state, nil); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		if err := ApplyUpdateV1(doc, update, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// benchSplitRunMergedBack applies leftOriginsOnly(n) to a fresh scanDoc(n) on
+// each iteration; building the document is not timed.
+func benchSplitRunMergedBack(b *testing.B, n int) {
+	update := leftOriginsOnly(n)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		b.StopTimer()
+		doc := scanDoc(b, n)
+		b.StartTimer()
+		if err := ApplyUpdateV1(doc, update, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

@@ -1,6 +1,10 @@
 package crdt
 
-import "unicode/utf8"
+import (
+	"unicode/utf8"
+
+	"github.com/reearth/ygo/encoding"
+)
 
 // Content is the payload carried by an Item.
 // Every concrete content type must implement this interface.
@@ -8,7 +12,7 @@ type Content interface {
 	// Len returns how many logical positions this content occupies.
 	// For ContentString this is the number of UTF-16 code units, matching Yjs
 	// wire-protocol semantics (JavaScript's string length model).
-	Len() int
+	Len() uint64
 	// IsCountable reports whether this content contributes to a type's length.
 	// Deleted and format-marker content do not count.
 	IsCountable() bool
@@ -16,7 +20,16 @@ type Content interface {
 	Copy() Content
 	// Splice splits the content at offset, mutates the receiver to hold [0, offset),
 	// and returns a new Content holding [offset, Len()).
-	Splice(offset int) Content
+	Splice(offset uint64) Content
+}
+
+// nativeContentLen bounds a materialized content length before using a rendered position.
+func nativeContentLen(c Content) int {
+	n := c.Len()
+	if n > uint64(^uint(0)>>1) {
+		panic("crdt: content length exceeds native positions")
+	}
+	return int(n)
 }
 
 // utf16Len returns the number of UTF-16 code units in s.
@@ -72,13 +85,13 @@ func splitUTF16(s string, offset int) (left, right string) {
 
 // ContentDeleted is a tombstone. It replaces real content when an item is
 // deleted but must stay in the linked list to preserve position references.
-type ContentDeleted struct{ length int }
+type ContentDeleted struct{ length uint64 }
 
-func NewContentDeleted(length int) *ContentDeleted { return &ContentDeleted{length} }
-func (c *ContentDeleted) Len() int                 { return c.length }
-func (c *ContentDeleted) IsCountable() bool        { return false }
-func (c *ContentDeleted) Copy() Content            { return &ContentDeleted{c.length} }
-func (c *ContentDeleted) Splice(offset int) Content {
+func NewContentDeleted(length uint64) *ContentDeleted { return &ContentDeleted{length} }
+func (c *ContentDeleted) Len() uint64                 { return c.length }
+func (c *ContentDeleted) IsCountable() bool           { return false }
+func (c *ContentDeleted) Copy() Content               { return &ContentDeleted{c.length} }
+func (c *ContentDeleted) Splice(offset uint64) Content {
 	right := &ContentDeleted{c.length - offset}
 	c.length = offset
 	return right
@@ -106,16 +119,20 @@ func NewContentString(s string) *ContentString {
 // Len returns the number of UTF-16 code units, matching Yjs wire-protocol
 // index semantics. This is NOT the same as len(s) (bytes) or rune count when
 // the string contains characters outside the Basic Multilingual Plane.
-func (c *ContentString) Len() int          { return c.utf16Len }
+func (c *ContentString) Len() uint64       { return uint64(c.utf16Len) }
 func (c *ContentString) IsCountable() bool { return true }
 func (c *ContentString) Copy() Content {
 	return &ContentString{Str: c.Str, utf16Len: c.utf16Len}
 }
-func (c *ContentString) Splice(offset int) Content {
-	left, right := splitUTF16(c.Str, offset)
-	rightLen := c.utf16Len - offset
+func (c *ContentString) Splice(offset uint64) Content {
+	if offset > uint64(c.utf16Len) {
+		panic("crdt: ContentString splice offset out of bounds")
+	}
+	n := int(offset)
+	left, right := splitUTF16(c.Str, n)
+	rightLen := c.utf16Len - n
 	c.Str = left
-	c.utf16Len = offset
+	c.utf16Len = n
 	return &ContentString{Str: right, utf16Len: rightLen}
 }
 
@@ -123,14 +140,14 @@ func (c *ContentString) Splice(offset int) Content {
 type ContentBinary struct{ Data []byte }
 
 func NewContentBinary(b []byte) *ContentBinary { return &ContentBinary{b} }
-func (c *ContentBinary) Len() int              { return 1 }
+func (c *ContentBinary) Len() uint64           { return 1 }
 func (c *ContentBinary) IsCountable() bool     { return true }
 func (c *ContentBinary) Copy() Content {
 	cp := make([]byte, len(c.Data))
 	copy(cp, c.Data)
 	return &ContentBinary{cp}
 }
-func (c *ContentBinary) Splice(_ int) Content { panic("crdt: ContentBinary is not splittable") }
+func (c *ContentBinary) Splice(_ uint64) Content { panic("crdt: ContentBinary is not splittable") }
 
 // ContentAny holds a slice of arbitrary JSON-compatible values.
 // Used by YArray when storing heterogeneous elements.
@@ -160,14 +177,14 @@ func NewContentAny(vals ...any) *ContentAny {
 	}
 	return &ContentAny{normalized}
 }
-func (c *ContentAny) Len() int          { return len(c.Vals) }
+func (c *ContentAny) Len() uint64       { return uint64(len(c.Vals)) }
 func (c *ContentAny) IsCountable() bool { return true }
 func (c *ContentAny) Copy() Content {
 	cp := make([]any, len(c.Vals))
 	copy(cp, c.Vals)
 	return &ContentAny{cp}
 }
-func (c *ContentAny) Splice(offset int) Content {
+func (c *ContentAny) Splice(offset uint64) Content {
 	right := &ContentAny{append([]any{}, c.Vals[offset:]...)}
 	c.Vals = c.Vals[:offset]
 	return right
@@ -178,14 +195,14 @@ func (c *ContentAny) Splice(offset int) Content {
 type ContentJSON struct{ Vals []any }
 
 func NewContentJSON(vals ...any) *ContentJSON { return &ContentJSON{vals} }
-func (c *ContentJSON) Len() int               { return len(c.Vals) }
+func (c *ContentJSON) Len() uint64            { return uint64(len(c.Vals)) }
 func (c *ContentJSON) IsCountable() bool      { return true }
 func (c *ContentJSON) Copy() Content {
 	cp := make([]any, len(c.Vals))
 	copy(cp, c.Vals)
 	return &ContentJSON{cp}
 }
-func (c *ContentJSON) Splice(offset int) Content {
+func (c *ContentJSON) Splice(offset uint64) Content {
 	right := &ContentJSON{append([]any{}, c.Vals[offset:]...)}
 	c.Vals = c.Vals[:offset]
 	return right
@@ -217,10 +234,10 @@ func lastPlainVal(c Content) (any, bool) {
 type ContentEmbed struct{ Val any }
 
 func NewContentEmbed(val any) *ContentEmbed { return &ContentEmbed{val} }
-func (c *ContentEmbed) Len() int            { return 1 }
+func (c *ContentEmbed) Len() uint64         { return 1 }
 func (c *ContentEmbed) IsCountable() bool   { return true }
 func (c *ContentEmbed) Copy() Content       { return &ContentEmbed{c.Val} }
-func (c *ContentEmbed) Splice(_ int) Content {
+func (c *ContentEmbed) Splice(_ uint64) Content {
 	panic("crdt: ContentEmbed is not splittable")
 }
 
@@ -232,10 +249,10 @@ type ContentFormat struct {
 }
 
 func NewContentFormat(key string, val any) *ContentFormat { return &ContentFormat{key, val} }
-func (c *ContentFormat) Len() int                         { return 1 }
+func (c *ContentFormat) Len() uint64                      { return 1 }
 func (c *ContentFormat) IsCountable() bool                { return false }
 func (c *ContentFormat) Copy() Content                    { return &ContentFormat{c.Key, c.Val} }
-func (c *ContentFormat) Splice(_ int) Content {
+func (c *ContentFormat) Splice(_ uint64) Content {
 	panic("crdt: ContentFormat is not splittable")
 }
 
@@ -244,9 +261,9 @@ func (c *ContentFormat) Splice(_ int) Content {
 type ContentType struct{ Type *abstractType }
 
 func NewContentType(t *abstractType) *ContentType { return &ContentType{t} }
-func (c *ContentType) Len() int                   { return 1 }
+func (c *ContentType) Len() uint64                { return 1 }
 func (c *ContentType) IsCountable() bool          { return true }
-func (c *ContentType) Splice(_ int) Content       { panic("crdt: ContentType is not splittable") }
+func (c *ContentType) Splice(_ uint64) Content    { panic("crdt: ContentType is not splittable") }
 
 // Copy wraps a FRESH, empty type of the same kind: a type's item back-pointer
 // and child list are single-valued, so a re-inserted copy must not alias the
@@ -281,6 +298,8 @@ func (t *abstractType) emptyCopy() *abstractType {
 		f := &YXmlFragment{}
 		f.owner = f
 		at = &f.abstractType
+	case *yxmlHook:
+		at = &newYXmlHook(v.hookName).abstractType
 	case *YXmlText:
 		at = &NewYXmlText().abstractType
 	default:
@@ -298,25 +317,28 @@ func (t *abstractType) emptyCopy() *abstractType {
 type ContentDoc struct{ Doc *Doc }
 
 func NewContentDoc(d *Doc) *ContentDoc  { return &ContentDoc{d} }
-func (c *ContentDoc) Len() int          { return 1 }
+func (c *ContentDoc) Len() uint64       { return 1 }
 func (c *ContentDoc) IsCountable() bool { return true }
 
 // Copy returns a ContentDoc wrapping a FRESH Doc with the same guid and opts. A
 // Doc may be embedded only once (its item back-reference is single-valued), so
 // item copies during split/merge must not alias one inner Doc. Mirrors Yjs
-// ContentDoc.copy / createDocFromOpts.
+// ContentDoc.copy / createDocFromOpts, which derives shouldLoad from autoLoad,
+// so a copy reads no state that a concurrent Load changes.
 func (c *ContentDoc) Copy() Content {
 	if c.Doc == nil {
 		return &ContentDoc{nil}
 	}
 	s := c.Doc
-	return &ContentDoc{New(
+	copied := New(
 		WithGUID(s.guid), WithGC(s.gc), WithAutoLoad(s.autoLoad),
-		WithShouldLoad(s.shouldLoad), WithCollectionID(s.collectionID),
-	)}
+		WithShouldLoad(s.autoLoad),
+	)
+	copied.meta = s.meta
+	return &ContentDoc{copied}
 }
 
-func (c *ContentDoc) Splice(_ int) Content { panic("crdt: ContentDoc is not splittable") }
+func (c *ContentDoc) Splice(_ uint64) Content { panic("crdt: ContentDoc is not splittable") }
 
 // ContentMove is a CRDT-safe array move marker. It sits at the destination
 // position in the linked list and causes the target item to be rendered there
@@ -333,54 +355,75 @@ func (c *ContentDoc) Splice(_ int) Content { panic("crdt: ContentDoc is not spli
 // delta updates, ensuring the same item granularity on all peers.
 type ContentMove struct {
 	Target    *ID
-	TargetLen int
+	TargetLen uint64
 }
 
-func NewContentMove(target *ID, targetLen int) *ContentMove {
+func NewContentMove(target *ID, targetLen uint64) *ContentMove {
 	return &ContentMove{Target: target, TargetLen: targetLen}
 }
-func (c *ContentMove) Len() int          { return 1 }
+func (c *ContentMove) Len() uint64       { return 1 }
 func (c *ContentMove) IsCountable() bool { return false }
 func (c *ContentMove) Copy() Content {
 	id := *c.Target
 	return &ContentMove{Target: &id, TargetLen: c.TargetLen}
 }
-func (c *ContentMove) Splice(_ int) Content { panic("crdt: ContentMove is not splittable") }
+func (c *ContentMove) Splice(_ uint64) Content { panic("crdt: ContentMove is not splittable") }
 
 // contentSkip is a decode-only placeholder for V1 skip structs (tag 10).
 // Skip structs represent clock ranges the sender intentionally omits.
 // They are consumed during decoding and never stored in the document.
-type contentSkip struct{ length int }
+type contentSkip struct{ length uint64 }
 
-func (s *contentSkip) Len() int          { return s.length }
+func (s *contentSkip) Len() uint64       { return s.length }
 func (s *contentSkip) IsCountable() bool { return false }
 func (s *contentSkip) Copy() Content     { return &contentSkip{s.length} }
-func (s *contentSkip) Splice(_ int) Content {
+func (s *contentSkip) Splice(_ uint64) Content {
 	panic("crdt: contentSkip is not splittable")
 }
 
-// subdocOpts builds the opts map written after a ContentDoc guid. Yjs: always
-// gc; autoLoad when true; collectionId when non-empty. shouldLoad is NOT on the
-// wire (a decoder derives it from autoLoad). {gc:true} for a nil doc.
-func subdocOpts(d *Doc) map[string]any {
+// writeSubdocOpts writes a subdocument's opts after its guid as Yjs
+// ContentDoc.write does: gc:false, autoLoad:true and meta in that order, each
+// only when set, so a gc-enabled doc writes {}. shouldLoad and the
+// collection ID are not written.
+func writeSubdocOpts(enc *encoding.Encoder, d *Doc) {
+	n := 0
+	if d != nil {
+		if !d.gc {
+			n++
+		}
+		if d.autoLoad {
+			n++
+		}
+		if d.meta != nil {
+			n++
+		}
+	}
+	enc.WriteUint8(118) // lib0 Any object
+	enc.WriteVarUint(uint64(n))
 	if d == nil {
-		return map[string]any{"gc": true}
+		return
 	}
-	m := map[string]any{"gc": d.gc}
+	if !d.gc {
+		enc.WriteVarString("gc")
+		enc.WriteAny(false)
+	}
 	if d.autoLoad {
-		m["autoLoad"] = true
+		enc.WriteVarString("autoLoad")
+		enc.WriteAny(true)
 	}
-	if d.collectionID != "" {
-		m["collectionId"] = d.collectionID
+	if d.meta != nil {
+		enc.WriteVarString("meta")
+		enc.WriteAny(d.meta)
 	}
-	return m
 }
 
 // newSubdocFromOpts builds an embedded Doc from a decoded guid + opts map. Per
-// Yjs, shouldLoad is derived as opts.autoLoad. Unknown keys and a non-map value
+// Yjs, shouldLoad is derived as opts.autoLoad. A collectionId key, which
+// earlier ygo versions wrote, is still read. Unknown keys and a non-map value
 // are ignored (robust decode).
 func newSubdocFromOpts(guid string, optsAny any) *Doc {
 	gc, autoLoad, collectionID := true, false, ""
+	var meta any
 	if m, ok := optsAny.(map[string]any); ok {
 		if v, ok := m["gc"].(bool); ok {
 			gc = v
@@ -391,7 +434,10 @@ func newSubdocFromOpts(guid string, optsAny any) *Doc {
 		if v, ok := m["collectionId"].(string); ok {
 			collectionID = v
 		}
+		meta = m["meta"]
 	}
-	return New(WithGUID(guid), WithGC(gc), WithAutoLoad(autoLoad),
+	d := New(WithGUID(guid), WithGC(gc), WithAutoLoad(autoLoad),
 		WithShouldLoad(autoLoad), WithCollectionID(collectionID))
+	d.meta = meta
+	return d
 }

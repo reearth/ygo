@@ -87,13 +87,49 @@ func TestConformance_Content_SubDoc(t *testing.T) {
 	}
 }
 
-// YXmlHook (typeRef 5): a Yjs fragment with a hook followed by a <div>. ygo
-// has no YXmlHook type, but the V1 decoder must consume the hook's name string
-// so the rest of the update stays aligned — otherwise the trailing <div>
-// struct is misread ("parent item not found"). V2 already degrades gracefully.
+// A Yjs YXmlHook before a <div>: the V1 decoder must consume the hook name or the <div> struct is misread.
 func TestConformance_Content_XmlHook_NoDesync(t *testing.T) {
 	const v1 = "0102828adaef04000701016605066d79686f6f6b87828adaef0400030364697600"
 	doc := crdt.New()
 	require.NoError(t, crdt.ApplyUpdateV1(doc, mustHex(t, v1), nil),
 		"a YXmlHook from genuine Yjs must not desync the V1 decoder")
+}
+
+// ContentDeleted: an item that arrives with deleted content is deleted, and in
+// the transaction's delete set, from integration on, also when the update's
+// delete set omits it and when it waits for its right origin. The update is
+// one struct, 10:2 with right origin 10:0, and an empty delete set (written by
+// hand; its V2 form is Y.convertUpdateFormatV1ToV2's). The expected state and
+// update event bytes are Yjs's.
+func TestConformance_Content_Deleted(t *testing.T) {
+	const (
+		baseV1  = "01010a000401017402646500" // client 10 inserts "de"
+		baseV2  = "0000010a00000104060374646501020101000001010000"
+		itemV1  = "01010a02410a000100"
+		itemV2  = "0000024a00000100014101000000010101010200"
+		state   = "01020a0004010174026465410a0001010a010201"
+		itemOut = "01010a02410a0001010a010201"
+	)
+	for _, tc := range []struct {
+		name        string
+		apply       func(*crdt.Doc, []byte, any) error
+		first, last string
+		lastUpdate  string
+	}{
+		{"v1", crdt.ApplyUpdateV1, baseV1, itemV1, itemOut},
+		{"v1_pending", crdt.ApplyUpdateV1, itemV1, baseV1, state},
+		{"v2", crdt.ApplyUpdateV2, baseV2, itemV2, itemOut},
+		{"v2_pending", crdt.ApplyUpdateV2, itemV2, baseV2, state},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := crdt.New(crdt.WithClientID(2))
+			require.NoError(t, tc.apply(doc, mustHex(t, tc.first), nil))
+			var update []byte
+			doc.OnUpdate(func(u []byte, _ any) { update = u })
+			require.NoError(t, tc.apply(doc, mustHex(t, tc.last), nil))
+			assert.Equal(t, tc.lastUpdate, hex.EncodeToString(update))
+			assert.Equal(t, state, hex.EncodeToString(crdt.EncodeStateAsUpdateV1(doc, nil)))
+			assert.Equal(t, "de", doc.GetText("t").ToString())
+		})
+	}
 }

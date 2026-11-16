@@ -190,6 +190,12 @@ func TestSubdocs_LoadAfterRemoveIsNoOp(t *testing.T) {
 	if len(parent.GetSubdocs()) != 0 {
 		t.Fatalf("precondition: expected empty registry after delete, got %v", parent.GetSubdocGUIDs())
 	}
+	if child.item != nil || child.parent != nil || !child.detached {
+		t.Fatal("a removed subdocument must release its former parent links")
+	}
+	if child.ShouldLoad() {
+		t.Fatal("Load on a removed subdocument must be a no-op")
+	}
 
 	fires := 0
 	var ev SubdocsEvent
@@ -198,13 +204,32 @@ func TestSubdocs_LoadAfterRemoveIsNoOp(t *testing.T) {
 	if fires != 0 {
 		t.Fatalf("Load() on a removed subdoc must not fire a subdocs event; fired %d (Loaded=%v)", fires, ev.Loaded)
 	}
+	if !child.ShouldLoad() {
+		t.Fatal("Load on a removed subdocument must retain its load request")
+	}
+}
+
+func TestSubdocs_DestroyReleasesParentLinks(t *testing.T) {
+	parent := New()
+	child := New(WithGUID("c"))
+	embedSubdoc(t, parent, "a", child)
+	child.Destroy()
+	if child.item != nil || child.parent != nil || !child.detached {
+		t.Fatal("Destroy must release subdocument parent links")
+	}
 }
 
 func TestContentDoc_CopyClonesFreshDoc(t *testing.T) {
 	orig := New(WithGUID("g"), WithAutoLoad(true), WithCollectionID("cid"))
 	cp := (&ContentDoc{orig}).Copy().(*ContentDoc)
-	if cp.Doc == orig || cp.Doc.GUID() != "g" || !cp.Doc.AutoLoad() || cp.Doc.CollectionID() != "cid" {
-		t.Fatalf("Copy must clone opts into a fresh Doc; got %+v", cp.Doc)
+	if cp.Doc == orig || cp.Doc.GUID() != "g" || !cp.Doc.AutoLoad() || cp.Doc.CollectionID() != "" {
+		t.Fatalf("Copy must clone Yjs opts into a fresh Doc; got %+v", cp.Doc)
+	}
+	// Yjs createDocFromOpts takes the copy's shouldLoad from autoLoad, not
+	// from the original's load state.
+	loaded := New(WithGUID("h"), WithAutoLoad(false), WithShouldLoad(true))
+	if (&ContentDoc{loaded}).Copy().(*ContentDoc).Doc.ShouldLoad() {
+		t.Fatal("a copy must start with ShouldLoad() equal to AutoLoad()")
 	}
 }
 
@@ -229,7 +254,8 @@ func TestSubdocs_V1OptsRoundTrip(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 	subs := fresh.GetSubdocs()
-	if len(subs) != 1 || subs[0].GUID() != "c" || !subs[0].AutoLoad() || subs[0].CollectionID() != "cid" || !subs[0].ShouldLoad() {
+	// Yjs ContentDoc opts carry no collection ID, so it stays local.
+	if len(subs) != 1 || subs[0].GUID() != "c" || !subs[0].AutoLoad() || subs[0].CollectionID() != "" || !subs[0].ShouldLoad() {
 		t.Fatalf("autoLoad subdoc opts lost: %+v", subs)
 	}
 
@@ -241,6 +267,32 @@ func TestSubdocs_V1OptsRoundTrip(t *testing.T) {
 	}
 	if f2.GetSubdocs()[0].ShouldLoad() {
 		t.Error("non-autoLoad subdoc should decode shouldLoad=false")
+	}
+}
+
+// A subdocument without a collection ID takes its parent's when it is added,
+// locally or from an update, as Yjs cleanupTransactions does. One with its own
+// collection ID keeps it; the wire does not carry it.
+func TestSubdocs_InheritParentCollectionID(t *testing.T) {
+	parent := New(WithCollectionID("ws"))
+	plain, own := New(WithGUID("plain")), New(WithGUID("own"), WithCollectionID("mine"))
+	embedSubdoc(t, parent, "plain", plain)
+	embedSubdoc(t, parent, "own", own)
+	if plain.CollectionID() != "ws" || own.CollectionID() != "mine" {
+		t.Fatalf("local collection IDs: plain=%q own=%q", plain.CollectionID(), own.CollectionID())
+	}
+	remote := New(WithCollectionID("ws2"))
+	if err := ApplyUpdateV1(remote, EncodeStateAsUpdateV1(parent, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	subs := remote.GetSubdocs()
+	if len(subs) != 2 {
+		t.Fatalf("got %d subdocuments", len(subs))
+	}
+	for _, sd := range subs {
+		if sd.CollectionID() != "ws2" {
+			t.Errorf("received %s has collection ID %q, want the receiver's", sd.GUID(), sd.CollectionID())
+		}
 	}
 }
 
