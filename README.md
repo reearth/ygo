@@ -166,6 +166,15 @@ For a ready-to-run binary — with flags for origins, connection/room limits, an
 go run github.com/reearth/ygo/cmd/ygo-server -store data.db
 ```
 
+### Hocuspocus sync status
+
+With `Server.HocuspocusFraming` set, the server answers every SyncStep2 or Update the client sends under Sync (tag 0) or SyncReply (tag 4) with one SyncStatus (tag 8) frame, in the order the frames arrived, so the `@hocuspocus/provider` unsynced-changes count drops for each update the room applied:
+
+- **1** when the room fully applied the update.
+- **0** when it did not. An update that overflows `MaxPendingItems` is refused before it changes the room. An update that fails to decode partway still sends the part that integrated to the other peers.
+- **Read-only connection:** an Update gets 0, and a SyncStep2 gets 1 only when the room already holds everything in it.
+- **A sync frame that does not decode** gets no SyncStatus: the server closes the connection with 1002 (protocol error) and handles no later frame from it.
+
 ## Server-side document injection
 
 Backend services — AI agents, HTTP handlers, content pipelines — can push
@@ -236,6 +245,46 @@ the idle sweeper reclaims them once they have been idle that long.
 if err := server.CloseRoom("my-room", false); err != nil { /* ... */ }
 // force=true closes connected peers first.
 ```
+
+`CloseRoom` returns `ErrRoomInUse`, with `force=true` as well as
+`force=false`, while a caller is inside the room: an `Apply` callback, a
+relay `Inject`, or a websocket join that has not yet registered its
+peer. The room stays resident. When that caller was inside before the
+call, no peer is disconnected. A caller that enters while `force` is
+closing the peers leaves those peers closed. Evicting such a room would
+take the document away from a caller still mutating it, and `force`
+exists to close connected peers rather than to interrupt a server-side
+writer. The refusal is transient; retry once that caller has returned.
+
+### `CloseRoomWithin(name, doc, force)`
+
+`CloseRoom` for a caller that is inside its own `Apply` on the room,
+which is how a room is closed without the idle sweeper retiring it
+between the decision to close and the close itself — the `Apply` holds
+the room resident for exactly that span:
+
+```go
+err := server.Apply(ctx, "my-room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+    // ... inspect doc, decide to close ...
+    closeErr = server.CloseRoomWithin("my-room", doc, true) // last act of fn
+})
+```
+
+`doc` is the document that `Apply` passed to `fn`: it names the room
+instance `fn` is writing, and if the name holds a different one by now —
+evicted and reloaded since — nothing is closed and the call returns
+`ErrRoomNotFound`. The one in-flight caller it discounts is that `Apply`;
+any other caller inside the room still gives `ErrRoomInUse`. The discount
+trusts the caller: a call made outside its `Apply` while another caller
+is inside would evict that caller's room.
+
+Call it from `fn`, not from inside a `transact` callback: a `force` close
+waits for each peer's read loop to exit, and a read loop applying an
+update needs the document lock that `transact` holds. Make it `fn`'s last
+act: the room leaves the server before the call returns, so anything `fn`
+mutates afterwards lands on a detached document. Called where nobody is
+inside the room at all, a call that escaped its `Apply`, it closes
+nothing and returns `ErrNotInApply`.
 
 ### Access control: `Server.OnInject`
 
@@ -423,18 +472,21 @@ embedding the same `*Doc` a second time panics with `ErrSubdocAlreadyIntegrated`
 - **`Doc.Load()`** — signals that a subdocument's data should be synced now.
   A locally-created, locally-embedded subdoc loads immediately on integrate
   (`ShouldLoad()` defaults to `true`); a subdoc decoded off the wire starts
-  with `ShouldLoad() == false` until the receiving application decides to
-  page it in and calls `Load()`, which flips `ShouldLoad()` to `true` and
-  emits a `Loaded` event on the **parent**. `Load` opens a transaction on the
-  parent, so — like `GetText` — it must not be called from inside a `Transact`
-  closure.
+  with `ShouldLoad()` equal to its `AutoLoad()`, as in Yjs. One that does not
+  auto-load waits until the receiving application decides to page it in and
+  calls `Load()`, which flips `ShouldLoad()` to `true` and
+  emits a `Loaded` event on the **parent**. On an embedded subdoc, `Load`
+  opens a transaction on the parent, so — like `GetText` — it must not be
+  called from inside the parent's `Transact` closure.
 - **`crdt.WithAutoLoad(bool)`** — marks a subdocument so remote peers/providers
   auto-load it instead of waiting for an explicit `Load()` call. Default `false`.
 - **`crdt.WithShouldLoad(bool)`** — sets the initial `ShouldLoad()` value.
   Default `true` for a doc you create yourself; a doc materialized from a
-  decoded update starts `false` (derived from `autoLoad`) until `Load()`.
+  decoded update starts with its `AutoLoad()` value, as in Yjs.
 - **`crdt.WithCollectionID(string)`** — an optional grouping label
   (`Doc.CollectionID()`), e.g. to batch-load every subdoc in a collection.
+  As in Yjs, it is local: subdocument opts on the wire do not carry it, and a
+  subdocument without one takes its parent's when it is added.
 
 ```go
 child := crdt.New(
@@ -540,8 +592,9 @@ All hard-capped (semaphore-backed for connection counts):
 - `Server.MaxRooms` — total-room cap (applies to peer upgrades and `Server.Apply`).
 - `Server.MaxUpdateBytes` — per-update size cap (default 64 MiB).
 - `Server.MaxMessageBytes` — per-message size on the WebSocket read path (default 64 MiB).
-- `Server.PeerWriteQueueSize` — per-peer broadcast queue depth (default 256). When the queue fills, the peer is disconnected.
-- `Server.MaxPendingItems` — per-document cap on items parked in the out-of-order pending queue (default 100,000). When the cap is reached, updates that would park additional items return `ErrInvalidUpdate`. Defends against a crafted update full of far-future-clock items that would otherwise grow the queue unboundedly. Same cap is available at the doc level via `crdt.WithMaxPendingItems(n)`.
+- `Server.PeerWriteQueueSize` — per-peer broadcast queue depth (default 512). When the queue fills, the peer is disconnected.
+- `Server.PeerWriteQueueBytes` — per-peer bound on the bytes waiting in a peer's write queue (default 0: no bound). The queue depth alone bounds frames, not bytes: a frame that relays an update carries the whole update, and the answer to a SyncStep1 sends a struct that cannot be cut and is longer than 64 KiB in one frame of its own size. When the waiting frames reach the bound, the next frame closes the peer. The handshake is not counted. Set it above the largest room state the server holds.
+- `Server.MaxPendingItems` — per-document cap on items parked in the out-of-order pending queue (default 100,000), and separately on delete ranges parked waiting for the structs they delete. An update that would park items past the cap, or leave more parked delete ranges than the cap, returns `ErrInvalidUpdate` and leaves the document unchanged: it is refused before any of it integrates. Defends against a crafted update full of far-future-clock items, or a run of delete sets naming clocks nobody holds, that would otherwise grow the queue unboundedly. Same cap is available at the doc level via `crdt.WithMaxPendingItems(n)`.
 - `Server.HandshakeTimeout` — first-read deadline applied after WebSocket upgrade (default 30s). Closes connections that complete the handshake but never send a message (slow-loris defense). Cleared after the first successful read.
 - `Server.MaxAwarenessBytesPerRoom` — cap on the cumulative byte size of awareness state held in one room across all remote clients (default unlimited; suggested production value: 100 MiB). Without this cap, a single peer can claim up to 10,000 clientIDs each holding the 1 MiB per-state maximum. Forwarded to each room's `Awareness` via `awareness.Awareness.SetMaxBytes`.
 - `Server.RoomIdleTimeout` (v1.39.0) — keeps a room resident and warm (durably flushed, in-memory doc intact) for this long after its last peer disconnects, so a quick reconnect skips a full `LoadDoc` reload. Default 0: evict immediately, matching prior releases.
@@ -715,10 +768,17 @@ JS and yrs, neither of which has transactional rollback. Callers who need
 atomicity must implement it above `Transact` and reconcile via sync;
 `UndoManager` is the supported route for undoing already-committed work.
 
-### `Doc.ClientID` is read-only after creation
+### `Doc.ClientID` changes when a remote update moves its own clock
 
-Use `crdt.WithClientID(id)` at construction time. Changing the ID after the
-document has started accepting operations will corrupt the item store.
+Use `crdt.WithClientID(id)` at construction time; there is no setter. When a
+remote transaction (an applied update) changes the clock of the document's own
+client, the document takes a new random client ID as the transaction commits,
+as Yjs does, so a local write never continues a clock that another peer set.
+The ID changes before that transaction's observers run, so they already see
+the new ID; in Yjs the type observers and `afterTransaction` still see the old
+one. A document built with `WithClientID` that then applies its own earlier
+updates gets a new ID the same way: read `ClientID()` again after the apply if
+you track what the document writes by client ID.
 
 ## What's changed since v1.0
 

@@ -74,16 +74,21 @@ func strPtr(s string) *string { return &s }
 
 // integrate inserts this item into its parent's linked list using the YATA
 // conflict-resolution algorithm. After integrate returns, Left and Right
-// reflect the item's final position.
+// reflect the item's final position. An item whose right origin is a GC struct
+// is stored as an unlinked GC struct instead.
 //
 // offset skips an already integrated prefix when the item's range partially
 // overlaps the store, either during decoding or when retrying a parked item.
-func (item *Item) integrate(txn *Transaction, offset int) {
+func (item *Item) integrate(txn *Transaction, offset uint64) {
+	if item.Parent != nil && !item.Deleted && item.Content.IsCountable() &&
+		item.Content.Len()-offset > uint64(int(^uint(0)>>1)-item.Parent.length) {
+		panic("crdt: content length exceeds native positions")
+	}
 	if offset > 0 {
-		item.ID.Clock += uint64(offset)
+		item.ID.Clock += offset
 		item.Left = txn.doc.store.getItemCleanEnd(txn, item.ID.Client, item.ID.Clock-1)
 		if item.Left != nil {
-			last := item.Left.ID.Clock + uint64(item.Left.Content.Len()) - 1
+			last := item.Left.ID.Clock + item.Left.Content.Len() - 1
 			item.Origin = &ID{Client: item.Left.ID.Client, Clock: last}
 		}
 		item.Content = item.Content.Splice(offset)
@@ -101,7 +106,15 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// `if (this.rightOrigin !== null) this.right = getItemCleanStart(...)`
 	// at the top of Item.integrate.
 	if item.Right == nil && item.OriginRight != nil {
-		item.Right = txn.doc.store.getItemCleanStart(txn, *item.OriginRight)
+		right := txn.doc.store.getItemCleanStart(txn, *item.OriginRight)
+		// Yjs stores an item whose right origin is a GC struct as a GC struct.
+		if right != nil && right.isGCOrphan() {
+			item.markGCOrphan()
+			txn.doc.store.Append(item)
+			txn.doc.store.resolvePendingMoves(txn, item.ID.Client)
+			return
+		}
+		item.Right = right
 	}
 
 	// Determine the starting scan position: immediately right of the left origin.
@@ -220,13 +233,14 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	hint := item.Parent.insertHint
 	item.Parent.insertHint = 0
 	if !item.Deleted && item.Content.IsCountable() {
-		item.Parent.length += item.Content.Len()
+		length := nativeContentLen(item.Content)
+		item.Parent.length += length
 		if item.Right != nil {
 			if hint > 0 {
 				if l := item.Left; l != nil && (l.Deleted || !l.Content.IsCountable()) {
 					item.Parent.dropUncountedMarkersAt(hint)
 				}
-				item.Parent.updateMarkerChanges(hint, item.Content.Len())
+				item.Parent.updateMarkerChanges(hint, length)
 			} else {
 				item.Parent.clearMarkers()
 			}
@@ -235,6 +249,16 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 
 	// Register in the document store.
 	txn.doc.store.Append(item)
+
+	// As Yjs ContentDeleted.integrate does, an item that arrives with deleted
+	// content is deleted here, so a move that splits it below keeps every part
+	// deleted, and its range joins the delete set after the map block, where Yjs
+	// has already deleted a key's previous winner.
+	var arrivedDeleted uint64
+	if _, ok := item.Content.(*ContentDeleted); ok && !item.Deleted {
+		item.Deleted = true
+		arrivedDeleted = item.Content.Len()
+	}
 
 	// #63 — register an embedded subdocument (Content has no integrate hook).
 	// This MUST run here, before the ParentSub last-writer-wins block below,
@@ -252,12 +276,9 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	// item) runs before the "delete if not the current attribute value"
 	// check in Item.integrate.
 	if cd, ok := item.Content.(*ContentDoc); ok && cd.Doc != nil {
-		if cd.Doc.item != nil && cd.Doc.item != item {
-			panic(ErrSubdocAlreadyIntegrated)
-		}
-		cd.Doc.item = item
+		shouldLoad := cd.Doc.attachSubdoc(item, txn.doc)
 		txn.addSubdocAdded(cd.Doc)
-		if cd.Doc.shouldLoad {
+		if shouldLoad {
 			txn.addSubdocLoaded(cd.Doc)
 		}
 	}
@@ -268,7 +289,7 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 	if cm, ok := item.Content.(*ContentMove); ok && !item.Deleted && cm.Target != nil {
 		target := resolveMovedItem(txn, cm.Target, cm.TargetLen)
 		if target != nil {
-			if moveBeats(item, target.MovedBy) {
+			if !target.isGCOrphan() && moveBeats(item, target.MovedBy) {
 				txn.setMovedBy(target, item)
 			}
 		} else {
@@ -278,7 +299,7 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 			// integrates first. Defer arbitration until the target arrives (in
 			// this or a later update); otherwise the move is silently dropped and
 			// the array diverges by integration order (#191, move fuzzer seed 16).
-			txn.doc.store.addPendingMove(cm.Target.Client, item)
+			txn.doc.store.addPendingMove(*cm.Target, item)
 		}
 	}
 
@@ -374,8 +395,15 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 			if existing, ok := item.Parent.itemMap[key]; ok && existing != item && !existing.Deleted {
 				existing.delete(txn)
 			}
+			if item.Parent.itemMap == nil {
+				item.Parent.itemMap = make(map[string]*Item)
+			}
 			item.Parent.itemMap[key] = item
 		}
+	}
+
+	if arrivedDeleted > 0 {
+		txn.deleteSet.add(item.ID, arrivedDeleted)
 	}
 
 	// Yjs Item.integrate deletes an item whose parent is already deleted: a
@@ -395,7 +423,7 @@ func (item *Item) integrate(txn *Transaction, offset int) {
 func (item *Item) lastID() ID {
 	id := item.ID
 	if n := item.Content.Len(); n > 0 {
-		id.Clock += uint64(n) - 1
+		id.Clock += n - 1
 	}
 	return id
 }
@@ -429,11 +457,14 @@ func (item *Item) delete(txn *Transaction) {
 		}
 
 		current.Deleted = true
+		if cm, ok := current.Content.(*ContentMove); ok && cm.Target != nil {
+			txn.doc.store.moveDeleted(*cm.Target)
+		}
 		if _, ok := current.Content.(*ContentFormat); ok && current.Parent != nil {
 			current.Parent.fmtGen++
 		}
 		if current.Parent != nil && current.Content.IsCountable() {
-			current.Parent.length -= current.Content.Len()
+			current.Parent.length -= nativeContentLen(current.Content)
 			if !txn.Local {
 				current.Parent.clearMarkers()
 			}
@@ -462,6 +493,7 @@ func (item *Item) delete(txn *Transaction) {
 		// #63 — subdocument removal. Cancel an add-in-same-txn; else mark removed.
 		// GC does not remove subdocs (matches Yjs ContentDoc: gc is a no-op).
 		if cd, ok := current.Content.(*ContentDoc); ok && cd.Doc != nil {
+			cd.Doc.detachSubdoc(current)
 			if _, added := txn.subdocsAdded[cd.Doc]; added {
 				delete(txn.subdocsAdded, cd.Doc)
 				delete(txn.subdocsLoaded, cd.Doc)
@@ -505,11 +537,11 @@ func nextDeleteItem(current, root *Item) *Item {
 // splitItem splits item at offset, returning the new right half.
 // item.Content is mutated to hold [0, offset); the returned item holds [offset, end).
 // Both halves are registered in the store. The linked-list pointers are updated.
-func splitItem(txn *Transaction, item *Item, offset int) *Item {
+func splitItem(txn *Transaction, item *Item, offset uint64) *Item {
 	rightContent := item.Content.Splice(offset) // mutates item.Content → [0, offset)
 	right := &Item{
-		ID:          ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset)},
-		Origin:      &ID{Client: item.ID.Client, Clock: item.ID.Clock + uint64(offset) - 1},
+		ID:          ID{Client: item.ID.Client, Clock: item.ID.Clock + offset},
+		Origin:      &ID{Client: item.ID.Client, Clock: item.ID.Clock + offset - 1},
 		OriginRight: item.OriginRight,
 		Left:        item,
 		Right:       item.Right,
@@ -519,7 +551,7 @@ func splitItem(txn *Transaction, item *Item, offset int) *Item {
 		Deleted:     item.Deleted,
 	}
 	if item.redone != nil {
-		right.redone = &ID{Client: item.redone.Client, Clock: item.redone.Clock + uint64(offset)}
+		right.redone = &ID{Client: item.redone.Client, Clock: item.redone.Clock + offset}
 	}
 	if right.Right != nil {
 		right.Right.Left = right
@@ -641,15 +673,16 @@ func rearbitrateMoves(txn *Transaction) {
 // targetLen clock units starting at targetID.Clock. When the item is part of
 // a larger multi-value ContentAny (common when a delta update arrives without
 // the local splits a sender performed during Move()), splitItem is called to
-// carve out the exact boundary. Returns nil when no item contains targetID.
-func resolveMovedItem(txn *Transaction, targetID *ID, targetLen int) *Item {
+// carve out the exact boundary. Returns nil when no item contains targetID;
+// returns a GC struct whole.
+func resolveMovedItem(txn *Transaction, targetID *ID, targetLen uint64) *Item {
 	si := txn.doc.store.Find(*targetID)
-	if si == nil {
-		return nil
+	if si == nil || si.isGCOrphan() {
+		return si
 	}
 	// Trim leading prefix: ensure si starts exactly at targetID.Clock.
 	if si.ID.Clock < targetID.Clock {
-		prefix := int(targetID.Clock - si.ID.Clock)
+		prefix := targetID.Clock - si.ID.Clock
 		si = splitItem(txn, si, prefix) // si is now the right half
 	}
 	// Trim trailing suffix: ensure si covers no more than targetLen units.

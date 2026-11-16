@@ -1,16 +1,12 @@
 package crdt
 
-import (
-	"sort"
-
-	"github.com/reearth/ygo/encoding"
-)
+import "sort"
 
 // V2 struct-level merge / diff / state-vector extraction (#57). Mirrors the V1
 // path in merge.go but drives the columnar V2 codec (newV2Decoder /
-// decodeItemV2 / newV2Encoder / encodeItemV2). The merge/dedup/resolveParents
-// logic in merge.go is format-agnostic (it operates on *Item), so only the
-// decode and encode steps differ.
+// decodeItemV2 / newV2Encoder / encodeItemV2). The merge/dedup logic in
+// merge.go is format-agnostic (it operates on *Item), so only the decode and
+// encode steps differ.
 
 // decodeStructsV2 decodes every struct in a V2 update into per-client,
 // clock-ordered slices (without integrating) plus the delete set.
@@ -59,12 +55,16 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 				if err != nil {
 					return nil, DeleteSet{}, wrapUpdateErr(err)
 				}
-				structs = append(structs, &Item{
-					ID:      ID{Client: client, Clock: clock},
-					Content: NewContentDeleted(l),
-					Deleted: true,
-				})
-				clock += uint64(l)
+				if l > 0 { // dropped at length zero, as in decodeStructsV1
+					structs = append(structs, &Item{
+						ID:      ID{Client: client, Clock: clock},
+						Content: NewContentDeleted(l),
+						Deleted: true,
+					})
+				}
+				if clock, err = structEnd(clock, l); err != nil {
+					return nil, DeleteSet{}, err
+				}
 			case 10: // skip struct: a clock-range placeholder, not content.
 				l, err := dec.restDec.ReadVarUint()
 				if err != nil {
@@ -72,14 +72,20 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 				}
 				// Advance clock but don't carry the skip (encodeItemV2 can't
 				// encode it); the gap is re-emitted as a skip by the encoder.
-				clock += l
+				if clock, err = structEnd(clock, l); err != nil {
+					return nil, DeleteSet{}, err
+				}
 			default:
 				item, contentLen, err := decodeItemV2(dec, scratch, client, clock, info)
 				if err != nil {
 					return nil, DeleteSet{}, wrapUpdateErr(err)
 				}
-				structs = append(structs, item)
-				clock += uint64(contentLen)
+				if contentLen > 0 { // dropped at length zero, as in decodeStructsV1
+					structs = append(structs, item)
+				}
+				if clock, err = structEnd(clock, contentLen); err != nil {
+					return nil, DeleteSet{}, err
+				}
 			}
 		}
 		out[client] = structs
@@ -94,8 +100,8 @@ func decodeStructsV2(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 // encodeStructStoreV2 encodes per-client struct slices + a delete set into a V2
 // update. Mirrors encodeStructStoreV1 but uses the columnar V2 encoder and the
 // V2 conventions (clients written in DESCENDING order; skip length on the rest
-// stream). store provides origin look-ups for encodeItemV2.
-func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateVector, store *StructStore) []byte {
+// stream).
+func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateVector) []byte {
 	clients := make([]ClientID, 0, len(perClient))
 	for c, items := range perClient {
 		if len(items) > 0 {
@@ -107,7 +113,7 @@ func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 
 	type entry struct {
 		item   *Item // nil => skip struct
-		offset int
+		offset uint64
 		skip   uint64
 	}
 	type group struct {
@@ -122,14 +128,14 @@ func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 		var startClock, expected uint64
 		started := false
 		for _, it := range perClient[c] {
-			end := it.ID.Clock + uint64(it.Content.Len())
+			end := it.ID.Clock + it.Content.Len()
 			if end <= svClock {
 				continue
 			}
-			offset := 0
+			offset := uint64(0)
 			clk := it.ID.Clock
 			if clk < svClock {
-				offset = int(svClock - clk)
+				offset = svClock - clk
 				clk = svClock
 			}
 			if !started {
@@ -160,7 +166,7 @@ func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 				enc.restEnc.WriteVarUint(e.skip)
 				continue
 			}
-			encodeItemV2(enc, e.item, e.offset, store)
+			encodeItemV2(enc, e.item, e.offset)
 		}
 	}
 	encodeDeleteSetV2(enc, ds)
@@ -170,47 +176,27 @@ func encodeStructStoreV2(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 // MergeUpdatesV2 merges several V2 updates into one at the struct level
 // (preserving non-integrable structs and clock gaps; unioning delete sets). (#57)
 func MergeUpdatesV2(updates ...[]byte) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore(updates, decodeStructsV2)
+	perClient, ds, err := buildMergeStore(updates, decodeStructsV2)
 	if err != nil {
 		return nil, err
 	}
-	return encodeStructStoreV2(perClient, ds, StateVector{}, store), nil
+	return encodeStructStoreV2(perClient, ds, StateVector{}), nil
 }
 
 // DiffUpdateV2 returns the portion of a V2 update missing from sv (structs
 // sliced at the sv boundary; full delete set preserved). (#57)
 func DiffUpdateV2(update []byte, sv StateVector) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore([][]byte{update}, decodeStructsV2)
+	perClient, ds, err := buildMergeStore([][]byte{update}, decodeStructsV2)
 	if err != nil {
 		return nil, err
 	}
-	return encodeStructStoreV2(perClient, ds, sv, store), nil
+	return encodeStructStoreV2(perClient, ds, sv), nil
 }
 
 // EncodeStateVectorFromUpdateV2 extracts the state vector described by a V2
-// update (next clock per client) without integrating it. The state vector wire
-// format is identical to V1 (client/clock varuint pairs). (#57)
+// update without integrating it, by the same rule as
+// EncodeStateVectorFromUpdate. The state vector wire format is identical to V1
+// (client/clock varuint pairs).
 func EncodeStateVectorFromUpdateV2(update []byte) ([]byte, error) {
-	perClient, _, _, err := buildMergeStore([][]byte{update}, decodeStructsV2)
-	if err != nil {
-		return nil, err
-	}
-	sv := make(StateVector, len(perClient))
-	for c, items := range perClient {
-		var maxEnd uint64
-		for _, it := range items {
-			if end := it.ID.Clock + uint64(it.Content.Len()); end > maxEnd {
-				maxEnd = end
-			}
-		}
-		sv[c] = maxEnd
-	}
-	clients := clientsSorted(sv)
-	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
-		enc.WriteVarUint(uint64(len(clients)))
-		for _, c := range clients {
-			enc.WriteVarUint(uint64(c))
-			enc.WriteVarUint(sv[c])
-		}
-	}), nil
+	return encodeStateVectorFromUpdate(update, true)
 }

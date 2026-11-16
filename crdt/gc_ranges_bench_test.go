@@ -26,7 +26,7 @@ func BenchmarkGCTransactionStringRanges(b *testing.B) {
 					// 384 UTF-16 units per item, including supplementary characters.
 					// GC only replaces Content, so sharing this immutable string is safe.
 					content := NewContentString(strings.Repeat("a😀", 128))
-					length := uint64(content.Len())
+					length := content.Len()
 					for i := 0; i < size; i++ {
 						clock := uint64(i) * length
 						doc.store.Append(&Item{ID: ID{Client: 1, Clock: clock}, Content: content, Deleted: true})

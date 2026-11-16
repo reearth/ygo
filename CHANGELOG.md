@@ -5,6 +5,354 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.0] — 2026-11-01
+
+### Added
+
+- **`crdt`: `Doc.SetMaxPendingItems(n)`** sets the pending cap after
+  construction, so stored state over a cap can load first.
+
+- `provider/websocket`: add `Server.CloseRoomWithinContext` to cancel a room-load
+  wait without closing the room. `CloseRoomWithin` retains its signature and
+  uses a background context. Once close starts, teardown runs to completion.
+
+- **`provider/websocket`: `Server.PeerWriteQueueBytes` bounds the bytes
+  waiting in a peer's write queue.** `PeerWriteQueueSize` bounds that queue
+  in frames only, and the server answers each SyncStep1 with the room's full
+  state on the sender's own queue. So a peer that sends SyncStep1 and does not
+  read made the server keep one copy of the document for each message, up to
+  512 copies, while the connection stayed open. With the budget set, when the
+  frames that wait for a peer reach it, the next frame closes the peer, on
+  every enqueue path and whatever `SlowPeerPolicy` is set, and the read loop
+  drops the input the peer already sent. The close is logged at Warn as
+  `peer queued bytes over budget`. The frame that crosses the budget is
+  queued whatever its size, and the connect handshake is not counted. A frame
+  that arrives while the budget or more waits closes even a peer that reads,
+  so set the budget above the largest room state. Zero, the default, or a
+  negative value means no budget.
+- **`provider/websocket`: `ErrRoomInUse`, `ErrNotInApply` and
+  `Server.CloseRoomWithin`.** `CloseRoom` returns `ErrRoomInUse` when a caller
+  is inside the room — an `Apply` callback, a relay `Inject`, or a websocket
+  join between the room lookup and peer registration — and keeps the room
+  resident. `CloseRoomWithin(name, doc, force)` is the close a caller makes
+  from inside its own `Apply` on the room, which is how a room is closed
+  without the idle sweeper retiring it in between: `doc` is the document that
+  `Apply` passed to the callback, naming the room instance it is writing, and
+  the one in-flight caller discounted is that `Apply`. It returns
+  `ErrRoomNotFound` when the name holds a different instance by then, and
+  `ErrNotInApply` when nobody is inside the room at all.
+
+- **`crdt.SplitUpdateV1(update, sv, maxBytes)`** returns the series of V1
+  updates a receiver whose state vector is `sv` applies, in order, in place
+  of one update. Every update but the last integrates on its own - no struct
+  or deletion it carries waits for an update still to come - and each is at
+  most `maxBytes` long, except one carrying a single struct a V1 update cannot
+  cut (content occupying one clock) and the last, which carries the structs
+  the sender itself holds parked. A text item longer than `maxBytes` is cut at
+  a character boundary, never inside one.
+- **`crdt.SplitStateAsUpdateV1(doc, sv, maxBytes)`** returns what
+  `SplitUpdateV1` returns for `EncodeStateAsUpdateV1(doc, sv)`, byte for
+  byte, without encoding the state or decoding it back: it reads the
+  document's own structs and writes each one once. For a document whose
+  values came in updates, what it allocates grows with the updates it
+  returns and the document's clients, not with its structs, also when it
+  holds parked structs or deletions: those add what they cost themselves.
+- **`sync.EncodeSyncStep2Split(doc, step1msg, maxBytes)`** answers a step-1
+  message with the series `SplitStateAsUpdateV1` cuts the document's state
+  into, as sync messages, each at most `maxBytes` long:
+  Update messages (type 2) and then one SyncStep2 (type 1), last. A receiver
+  that applies them in order holds exactly what `EncodeSyncStep2`'s one
+  message would have left it holding.
+
+### Changed
+
+- **`crdt` (breaking): `Content.Len()` returns `uint64`, and
+  `Content.Splice(offset)` takes `uint64`.** Custom content implementations
+  must change both method signatures. Callers that use these lengths as
+  string or slice indices must check their bounds before conversion to `int`.
+  `NewContentDeleted`, `NewContentMove`, and `ContentMove.TargetLen` also use
+  `uint64` lengths. Rendered text and array positions remain `int`.
+
+- **`crdt` (breaking): a document whose own client's clock is advanced by a
+  non-local transaction takes a new random client ID when that transaction
+  commits.** Anyone who sets `WithClientID` and re-applies their own updates
+  must read `ClientID()` again after doing so. This breaks the documented
+  contract of `WithClientID` (a fixed, deterministic ID) and of `ClientID`
+  (read-only after creation). It is Yjs's `cleanupTransactions` rule, so a
+  local write never continues a clock that another peer set. Before, a peer
+  could send a GC struct over the document's own client, and the next local
+  write continued that clock, past 2^53-1 if the GC struct reached it; this
+  release's clock bound refuses that state.
+
+- **`provider/websocket`: a peer's SyncStep1 is answered in frames it applies
+  one at a time.** The room's state goes out as Update frames of at most
+  64 KiB, each of which integrates on its own, followed by one SyncStep2
+  carrying only what no Update could. A receiver applies one frame in one
+  task. Before, it applied the whole state as one SyncStep2 in one task: for
+  a 1.22 MB state, a 406,319-character text one client wrote, replayed
+  through yjs 13.6.32 in Chromium with the CPU throttled 4x, that task took
+  355 ms, the median of 9 runs after 2 warm-ups. The frames of one answer are
+  queued together, in order, so nothing queued later - a SyncStatus among
+  it - reaches the peer before that SyncStep2, and the answer is charged to
+  `Server.PeerWriteQueueBytes` on the one decision the single frame it
+  replaces got. The peer's write queue (`Server.PeerWriteQueueSize`) must
+  hold every frame of the answer, or the peer is closed. With nothing else
+  queued, the 512-frame default held a state of up to 33,470,582 bytes of one
+  client's text, but only 511 map values of 32,800 characters
+  (16,768,471 bytes), one to a frame: a map value cannot be cut, and two of
+  these do not fit in one. A struct that cannot be cut and is longer than
+  64 KiB goes out in one frame of its own size, so no single state size
+  covers every room. The connect handshake still carries no state, and the
+  slow-peer resync (`SlowPeerResync`) still sends one full-state SyncStep2.
+  What cutting the answer costs the server, against the single SyncStep2
+  (`BenchmarkJoinAnswer_FragmentedRoom`, `BenchmarkJoinAnswer_MixedRoom`):
+  for a room of 20,000 characters typed into the middle, up to 11% more CPU
+  time per answer, and 103 allocations of 1.6 MiB in all against 33 of
+  1.9 MiB; for a room of 16,000 small structs - map entries, XML elements
+  and attributes, formatted text - 43% more CPU time, and 5,165 allocations
+  of 1.9 MiB against 5,048 of 1.7 MiB.
+
+### Fixed
+
+- **`crdt`: a merge keeps an earlier update's struct where a later update
+  names other content on its clocks.** A struct that names a struct no update
+  carries parks, also over clocks the document holds, because the apply looks
+  up what a struct names before it checks the struct's clocks, as Yjs does.
+  `MergeUpdatesV1` and `MergeUpdatesV2` kept, on each clock, the struct that
+  started first and was longest, so such a struct took those clocks from the
+  structs that held them. A reader of the merge parked it again, and
+  everything of its client after it: a stored log of 1,000 keystrokes and one
+  such update read back as 3 characters. `EncodeStateAsUpdateV1` and
+  `EncodeStateAsUpdateV2` merge a document's parked structs into its state,
+  and the same 1,000 keystrokes read back as 5. Where the struct the old rule
+  keeps names another origin, right origin, parent or key than the struct of
+  the earliest update on that clock, the earlier update's struct is now kept,
+  and the other keeps only the clocks past it, as an apply of the updates in
+  order integrates only those. A merge in which no two insertions claim one
+  clock returns the same bytes as before.
+
+- **`crdt`: logical span lengths and offsets do not depend on the build's
+  integer width.** Coalesced GC and deleted spans retain their lengths on
+  32-bit builds. V1 and V2 accept the same wide spans, including offsets
+  inside them. String and list allocation limits remain in force.
+
+- **`crdt`: an update that would park past `WithMaxPendingItems` is refused
+  before it changes anything.** The cap was checked while the apply
+  integrated, so a refused update could leave part of itself in the document
+  and tell its observers. The check now runs before the first change. For an
+  update cut short before the struct that takes it past the cap, the refusal
+  names the decoder's reason. An apply that fails after it began to integrate
+  drains the pending queue on what it kept.
+- **`crdt`: parked delete ranges are capped and refused before any change.**
+  `WithMaxPendingItems` also bounds, separately, the delete ranges waiting for
+  structs the document lacks, and a client's parked ranges are retried only
+  once its structs move past the lowest of them.
+- **`crdt`: the pending queue merges a struct sent again as Yjs merges its
+  pending update.** Of the structs that give one clock, the one that Yjs's
+  merge takes first keeps it, and the queue drops or cuts the others. The
+  pending cap counts what the park adds after the merge, and a queue above a
+  lowered cap does not grow. Each struct a park adds, cuts or drops costs, on
+  average, time logarithmic in the queue.
+- **`crdt`: an update checks only the clients whose clocks it advances when
+  deciding whether to retry parked structs.** An update that wakes nothing
+  no longer scans every client that the queue waits on.
+- **`crdt`: a struct the document already holds waits on an origin, right
+  origin or parent of another client that the document lacks, as Yjs
+  `getMissing` does,** and parks with every struct of its client after it.
+- **`crdt`: an item whose right origin is a GC struct, or a parked item whose
+  origin is one, integrates as a GC struct, as Yjs `getMissing` makes it.**
+- **`crdt`: an item that names a struct of its own client past that client's
+  clock is refused, as Yjs throws for it.**
+- **`crdt`: clocks past 2^53-1, and struct, origin and parent clients past
+  2^55-1, are refused.** Both decoders and the merge decoders refuse them, so
+  `EncodeStateAsUpdateV2` cannot meet a struct it cannot write, and encoding
+  parked state keeps every part that merges. The attribution decoders
+  (`DecodeIDSet`, `DecodeIDMap`, `DecodeContentIDs`, `DecodeContentMap`)
+  refuse an `IDMap` client past 2^55-1 and a range whose running clock would
+  pass 2^64-1, so the clock cannot wrap onto a low clock.
+- **`crdt`: `ApplyUpdateV1Landed` carries the structs and delete ranges a
+  failed apply parked.** A peer that applies the update it returns parks what
+  the document parks.
+- **`provider/websocket`: `Server.Inject` relays to local peers what a partly
+  applied update left in the room** before it returns the apply's error.
+- **`crdt`: a parked struct that panics in the drain is dropped, not the
+  structs after it.** The apply returns the panic as its error.
+- **`crdt`: an item that continues its client's GC struct is refused, as in
+  Yjs.**
+- **`crdt`: the deletions read before a cut in the delete set, or before a
+  range that reaches a clock past 2^53-1, stay applied, as in Yjs for a cut,
+  whatever the pending cap,** and the delete-set decoders no longer cap the
+  client and range counts. The apply returns its error, and
+  `ApplyUpdateV1Landed` carries those deletions.
+- **`crdt`: an item that arrives with deleted content is deleted when it
+  integrates, as in Yjs,** and a V2 GC struct adds nothing to the
+  transaction's delete set.
+- **`crdt`: `EncodeStateVectorFromUpdate` and `EncodeStateVectorFromUpdateV2`
+  return the state vector Yjs returns,** and a V1 subdocument whose guid is
+  not UTF-8 is an error rather than a panic.
+- **`crdt`: an update's structs integrate in Yjs's order,** and the
+  integration stops at the first refused struct, as Yjs stops.
+- **`crdt`: every struct of an update decodes before one integrates,** so a
+  struct that does not decode leaves the document unchanged.
+- **`crdt`: `WithClientID` panics for a client ID past 2^55-1,** the largest
+  a V2 update can carry.
+- **`crdt`: a type ref above 6 is refused before any change,** as Yjs
+  refuses it.
+- **`crdt`: `YArray.Insert` and `YArray.Push` with no values make no item,**
+  as in Yjs. They made an item of length zero, which the full state of the
+  document then carried.
+- **`crdt`: an item or GC struct of length zero is refused before any
+  change.** Yjs never writes one. When Yjs applies a zero-length map item, it
+  deletes the key's value and breaks that document's later encoding. The
+  apply also refuses an update from an older ygo that holds one. The merge
+  and conversion functions drop such a struct, and the bundled persistence
+  adapters merge a room's records on load, so a state that ygo 1.55.0 or
+  earlier stored with one still loads.
+- **`crdt`: a delete set read from an update allocates in proportion to its
+  bytes.** A counting first pass lets the decoders size the map, the order
+  list and each client's ranges once, from counts that the bytes bound. The
+  apply no longer copies the ranges it only reads. In tests with seven
+  crafted delete sets of about 1 MiB, 1.55.0 allocated up to 137.3 times
+  their bytes. 1.56.0 allocates at most 17.2 times at the default cap, and
+  30.3 times with the cap lifted, where the document keeps its own copy.
+
+- **`crdt`: an item whose origin or right origin is a GC struct becomes a GC
+  struct.** Yjs does this for either neighbour. ygo did it only when the item
+  had no live neighbour. With a GC right origin, ygo showed the item where
+  Yjs shows none. With a GC origin, ygo stored the item without linking it,
+  so a replica loaded from the document's encoded state showed other text
+  than the document, with the same state vector.
+  The item now becomes a GC struct once both neighbours are present, as in
+  Yjs. A GC struct is no longer split, as in Yjs. A move never claims a GC
+  struct, and a move that waits for a target that arrives as a GC struct
+  stops waiting. Waiting moves are indexed by target clock, so an update no
+  longer rescans all of them for every struct it adds, and deleted waiting
+  moves are dropped once they outnumber the live ones.
+- **`crdt`: encoders keep an origin that names a GC struct, as Yjs does.**
+  They dropped it, so `MergeUpdatesV1/V2`, `DiffUpdateV1/V2`,
+  `UpdateV1ToV2`/`UpdateV2ToV1` and an encoded state holding a parked item
+  put the item into the text where the original updates make it a GC struct.
+- **`crdt`: GC turns the items under a deleted nested type into GC structs.**
+  When the GC collected a deleted item that holds a nested type, it replaced
+  the item's content but kept the type's items, and those of the types nested
+  in it, as deleted items with their parent and origins. Yjs stores a GC
+  struct for each of them. The GC at the end of a transaction and `RunGC` now
+  turn every item under a collected type into a GC struct and empty the type,
+  as Yjs `ContentType.gc` does, so an item that arrives later in that type is
+  a GC struct too. For a map entry that holds an array of 10,000 one-entry
+  maps, the encoded state after the delete goes from 133,510 to 40,023 bytes.
+  Content does not change. A write through a handle to a type inside a
+  collected type no longer fires the deep observers above it, as in Yjs.
+  `Doc.Load` now reads a subdocument's parent from the subdocument under its
+  own lock, so it no longer races with the GC, with attaching the
+  subdocument or with an undo that restores it, and a removed or destroyed
+  subdocument no longer keeps its parent in memory.
+  `RunGC` also merges neighbouring GC structs of one client, as Yjs does at
+  the end of a transaction: after `RunGC`, the same delete keeps one GC
+  struct where it kept 20,000, and the state is 25 bytes. Both GC passes
+  take the contents of the structs they collect from blocks, so collecting n
+  items makes O(log n + n/128) allocations instead of n.
+- **`crdt`: a Yjs `Y.XmlHook` keeps its type and hook name, and reads as Yjs
+  reads it.** ygo decoded a hook (type ref 5) to an untyped placeholder and
+  dropped its name, so every update it encoded from the document
+  (`EncodeStateAsUpdateV1`/`V2`, the `OnUpdate` output, `MergeUpdates`,
+  `DiffUpdate`, `UpdateV1ToV2`/`V2ToV1`, an undone delete) wrote the hook as an
+  empty `YArray` (type ref 0). ygo now keeps the hook and writes it back as Yjs
+  does. `ToJSON`, `Entries`, `ToSlice` and observer values give its entries as
+  an object, as Yjs `toJSON` does. `YXmlFragment.Children()` includes a hook,
+  so its indexes match `Len()`, and `ToXML` renders it as `[object Object]`,
+  as Yjs `toString` does. `YMap.Get` and `YArray.Get` return a hook as a
+  `*YMap`. State that an older ygo already stored keeps the hook as a
+  `YArray`.
+- **`crdt`: a subdocument's opts are written as Yjs writes them.** Yjs
+  `ContentDoc` writes `gc: false`, `autoLoad: true` and `meta` only when they
+  are set, so a subdocument with GC on writes `{}`. ygo always wrote `gc` and
+  wrote a `collectionId` key that Yjs does not read, so its bytes differed
+  whenever GC was on, autoLoad was set or a collection ID was set. ygo now
+  writes the same keys in the same order and keeps a `meta` value it decodes.
+  A `collectionId` key that an earlier ygo wrote still decodes; the collection
+  ID is no longer sent, and a subdocument without one takes its parent's when
+  it is added, as in Yjs. A subdocument that an undo restores starts with
+  `ShouldLoad()` equal to `AutoLoad()` and takes its parent's collection ID,
+  as Yjs's copy does.
+
+- `provider/websocket`: a failed join reclaims an existing empty room in eager
+  eviction mode when its last peer left during the join. Idle-resident rooms
+  and rooms with another caller remain resident. Rejected joins do not force
+  a persistence flush for an active room.
+
+- **`provider/websocket`: a failed write closes the peer's connection.** When
+  a write to a peer failed, for example because its 10-second write deadline
+  expired, the peer's writer stopped but the connection stayed open. A peer
+  that kept sending stayed in its room, `OnLastPeer` did not fire, and its
+  replies queued with no writer until the queue overflowed. The writer now
+  closes the connection, and the read loop removes the peer without handling
+  the frames left in its read buffer.
+- **`provider/websocket`: when the server closes a peer while its read loop
+  runs, the loop drops the input it has not handled.** This applies to a full
+  write queue (on a direct send, or on a broadcast under
+  `SlowPeerDisconnect`), a Hocuspocus close message, a cancelled request
+  context without a close code, `Shutdown` and `CloseRoom(name, true)`.
+  Before, the read loop still handled the messages in its read buffer (up to
+  about 4 KiB): it encoded the room's full state for each buffered SyncStep1,
+  and it applied each buffered update after the close, and stored it too after
+  `Shutdown` or `CloseRoom`. Updates that the server had not read when it
+  closed the connection are not saved. A client that reconnects sends them
+  again.
+- **`provider/websocket`: a joining peer receives the room's state once.** On
+  connect the server sent SyncStep1, a SyncStep2 with the room's full state
+  and awareness, then answered the peer's own SyncStep1 with a second full
+  SyncStep2, so every join downloaded the document twice. The server now
+  sends SyncStep1 on connect, awareness only when the room holds awareness
+  states, and the room's state only in answer to the peer's SyncStep1, as the
+  y-websocket and Hocuspocus servers do. This holds on both framings and for
+  read-only peers. A client that never sends SyncStep1 now gets no snapshot
+  of the room's state, only the updates broadcast after it joins. A client
+  that sends a Hocuspocus token `OnTokenAuth` rejects before its SyncStep1 no
+  longer gets the snapshot either, but updates broadcast before the rejection
+  can still reach it: withhold content with `AuthFunc` or `Authorize`.
+- **`provider/websocket`: `Shutdown` waits for the connections it serves.**
+  Its doc said it waits for the peers' goroutines to exit, but it closed each
+  connection and waited only for the persistence workers, stranded writes and
+  relay workers. A hook on a connection's read loop (`OnTokenAuth`,
+  `OnPeerUpdate`) or in its teardown (`OnLastPeer`, `OnUnloadDocument`) could
+  still run after `Shutdown` returned `nil`. `Shutdown` now also waits, bounded
+  by its `ctx`, until every `ServeHTTP` call in progress has returned, its
+  teardown included. A hook that does not return holds `Shutdown` until `ctx`
+  expires, and `Shutdown` then returns `ctx.Err()`. A hook that calls
+  `Shutdown` must pass a `ctx` that expires, because `Shutdown` waits for that
+  hook's own connection. Once `Shutdown` has begun, the server makes no relay
+  `RoomActivated` or `RoomDeactivated` call, because a relay may wait on the
+  relay context, which `Shutdown` cancels only after this wait.
+- **`provider/websocket`: a peer closed for a full write queue or its byte
+  budget is logged once.** Each frame that reached the peer before its
+  teardown logged the Warn again and closed the connection again. Those frames
+  are now dropped without a log, the writer's failed write after a close the
+  server made is logged at Debug, and no full-state resync is built for the
+  peer.
+- **`provider/websocket`: the last peer's leave no longer evicts a room an
+  `Apply` is inside.** With the default `RoomIdleTimeout == 0`, the room was
+  evicted as soon as its last peer left, also while an `Apply` callback, a
+  relay `Inject` or a join was inside it, so the callback's later writes went
+  to a document the server no longer held. The room now stays resident until
+  a later last-peer leave or `CloseRoom` evicts it, and `OnUnloadDocument`
+  fires then, not with `OnLastPeer`.
+- **`provider/websocket`: `CloseRoom` no longer evicts a room an `Apply` is
+  writing.** `Apply` holds the room's inflight count for the whole of its
+  callback, and the idle sweeper has honoured it since #193, but `CloseRoom`
+  removed the room regardless. Every mutation the callback made after that
+  landed on a document the server no longer held: it reached the adapter only
+  through the retiring worker's stranded-write path, and with no persistence
+  adapter it was lost outright, while `GetDoc` and the next `Apply` saw a room
+  without it. `CloseRoom` now returns `ErrRoomInUse` instead, with `force=true`
+  as well as `force=false` — `force` closes connected peers, which is not the
+  same as interrupting a server-side writer. When the caller is inside before
+  the call, no peer is closed; one that enters while `force` closes the peers
+  leaves those peers closed. The refusal is transient, and the call never
+  waits on the count, so it cannot deadlock. A caller that is itself inside
+  an `Apply` on the room, and so is the writer rather than a racer, calls
+  `CloseRoomWithin`.
+
 ## [1.55.0] — 2026-10-31
 
 ### Added
@@ -2224,15 +2572,15 @@ surfaced by ygo's new randomized convergence fuzzer (#70).
   cancels out, so no event fires for a net no-op.
 - **`Doc.Load()`** — signals that a subdocument's data should be synced.
   Flips `ShouldLoad()` to `true` and, for a doc already embedded in a
-  parent, emits a `Loaded` event on the parent. Idempotent. Must not be
-  called from inside a `Transact` closure — like `GetText`, it acquires a
-  document lock itself (the parent's, not the callee's).
+  parent, emits a `Loaded` event on the parent. Idempotent. On an embedded
+  subdocument it opens a transaction on the parent, so it must not be called
+  from inside the parent's `Transact` closure, like `GetText`.
 - **`crdt.WithAutoLoad(bool)`**, **`crdt.WithShouldLoad(bool)`**,
   **`crdt.WithCollectionID(string)`** — new `DocOption`s for subdocument
   configuration, plus matching accessors `Doc.AutoLoad()`, `Doc.ShouldLoad()`,
   and `Doc.CollectionID()`. A doc constructed directly defaults
   `ShouldLoad()` to `true`; a doc materialized from a decoded update starts
-  `false` (derived from `autoLoad`, matching Yjs) until `Load()` is called.
+  with `ShouldLoad()` equal to `AutoLoad()`, as in Yjs.
 - **`crdt.Example_subdocs`** — a runnable godoc example
   (`crdt/example_subdocs_test.go`) showing embed → `OnSubdocs` → `GetSubdocGUIDs`.
 - **`ContentDoc` opts round-trip on both wire formats.** A subdocument's

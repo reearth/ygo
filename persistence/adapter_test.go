@@ -82,19 +82,23 @@ func TestLegacyAdapter_PluggedIntoServer(t *testing.T) {
 	assert.Equal(t, "persisted", docB.GetText("t").ToString())
 }
 
-// End to end at the server's default settings, write coalescing included, in a
-// room whose state is already stored: the updates reach the store and survive
-// a reload, although decoded on its own each batch the server writes parks more
-// entries than crdt's default pending cap (100,000), all waiting for the stored
-// map. A one-key edit after them must reach the store too: a refused batch
-// stays queued, and every later edit is merged into it.
+// End to end in a room whose state is already stored: the updates reach the
+// store and survive a reload, although decoded on its own each batch the
+// server writes parks more entries than crdt's default pending cap (100,000),
+// all waiting for the stored map. A one-key edit after them must reach the
+// store too: a refused batch stays queued, and every later edit is merged into
+// it. One update runs at the server's default settings, write coalescing
+// included. Two updates coalesce into one batch over the cap under a window
+// that outlasts the test, so however slowly a loaded machine applies them,
+// closing the room writes them as one batch.
 func TestLegacyAdapter_PluggedIntoServer_StoresLargeIncrementalUpdates(t *testing.T) {
 	cases := []struct {
-		name  string
-		sizes []int // keys set by each update the peer sends before the one-key edit
+		name   string
+		sizes  []int         // keys set by each update the peer sends before the one-key edit
+		window time.Duration // PersistCoalesceWindow; 0 is the default
 	}{
-		{"one update over the cap", []int{100_001}},
-		{"two updates under the cap, coalesced into one batch over it", []int{50_001, 50_001}},
+		{"one update over the cap", []int{100_001}, 0},
+		{"two updates under the cap, coalesced into one batch over it", []int{50_001, 50_001}, time.Hour},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -110,6 +114,7 @@ func TestLegacyAdapter_PluggedIntoServer_StoresLargeIncrementalUpdates(t *testin
 			_, err := store.AppendUpdate(ctx, "room", base)
 			require.NoError(t, err)
 			srv := ygws.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
+			srv.PersistCoalesceWindow = tc.window
 			ts := httptest.NewServer(srv)
 			defer ts.Close()
 			// Called from require.Eventually's goroutine, so it reports, never fails.
@@ -126,8 +131,17 @@ func TestLegacyAdapter_PluggedIntoServer_StoresLargeIncrementalUpdates(t *testin
 			for _, u := range large {
 				sendV1Update(t, connA, u)
 			}
-			require.Eventually(t, func() bool { return versions() >= 2 }, 15*time.Second, 20*time.Millisecond,
-				"the updates never reached the store")
+			if tc.window == 0 {
+				require.Eventually(t, func() bool { return versions() >= 2 }, time.Minute, 20*time.Millisecond,
+					"the updates never reached the store")
+			} else {
+				require.Eventually(t, func() bool { return nestedEntries(srv.GetDoc("room")) == entries },
+					time.Minute, 20*time.Millisecond, "the room never applied the updates")
+				require.Equal(t, 1, versions(), "a batch was written before the room closed")
+				require.NoError(t, srv.CloseRoom("room", true))
+				connA = dialWS(t, ts, "room")
+				drainWS(t, connA, crdt.New())
+			}
 			v, got := storedNestedEntries(t, store)
 			require.Equal(t, persistence.Version(2), v, "the updates were written in more than one batch")
 			require.Equal(t, entries, got, "the first batch does not hold every update")
@@ -135,7 +149,7 @@ func TestLegacyAdapter_PluggedIntoServer_StoresLargeIncrementalUpdates(t *testin
 			// CloseRoom writes the edit as the next batch once the room has it.
 			sendV1Update(t, connA, edit)
 			require.Eventually(t, func() bool { return nestedEntries(srv.GetDoc("room")) == entries+1 },
-				15*time.Second, 20*time.Millisecond, "the room never applied the edit")
+				time.Minute, 20*time.Millisecond, "the room never applied the edit")
 			require.NoError(t, srv.CloseRoom("room", true))
 			require.Equal(t, 3, versions(), "the edit after them never reached the store")
 
@@ -253,20 +267,38 @@ func dialWS(t *testing.T, ts *httptest.Server, room string) *gws.Conn {
 	return conn
 }
 
-func drainWS(t *testing.T, conn *gws.Conn, doc *crdt.Doc) {
+// drainWS joins conn with doc: it sends doc's SyncStep1 and reads up to and
+// including the sync step-2 reply, applying the sync frames to doc. It waits up
+// to a minute for each frame, since a loaded machine can take seconds to load a
+// large room.
+func drainWS(t testing.TB, conn *gws.Conn, doc *crdt.Doc) {
 	t.Helper()
-	for i := 0; i < 3; i++ {
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	require.NoError(t, conn.WriteMessage(gws.BinaryMessage, syncStep1Frame(doc)))
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(time.Minute))
 		_, data, err := conn.ReadMessage()
 		_ = conn.SetReadDeadline(time.Time{})
 		require.NoError(t, err)
 		dec := encoding.NewDecoder(data)
 		outer, err := dec.ReadVarUint()
 		require.NoError(t, err)
-		if outer == 0 { // msgSync
-			_, _ = ygsync.ApplySyncMessage(doc, dec.RemainingBytes(), nil)
+		if outer != 0 { // msgSync
+			continue
+		}
+		payload := dec.RemainingBytes()
+		_, _ = ygsync.ApplySyncMessage(doc, payload, nil)
+		if sub, _, err := ygsync.ReadSyncMessage(payload); err == nil && sub == ygsync.MsgSyncStep2 {
+			return
 		}
 	}
+}
+
+// syncStep1Frame returns the msgSync frame carrying doc's SyncStep1.
+func syncStep1Frame(doc *crdt.Doc) []byte {
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(0) // msgSync
+		enc.WriteRaw(ygsync.EncodeSyncStep1(doc))
+	})
 }
 
 func sendV1Update(t *testing.T, conn *gws.Conn, update []byte) {

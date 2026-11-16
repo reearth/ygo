@@ -67,13 +67,12 @@ func TestUnit_MergeUpdatesV1_HandlesSkipStructs(t *testing.T) {
 	a := &Item{ID: ID{Client: 1, Clock: 0}, Parent: parent, Content: NewContentString("A")}
 	f := &Item{ID: ID{Client: 1, Clock: 5}, Origin: &ID{Client: 1, Clock: 4}, Parent: parent, Content: NewContentString("F")}
 	items := []*Item{a, f}
-	gappy := encodeStructStoreV1(map[ClientID][]*Item{1: items}, newDeleteSet(), StateVector{},
-		&StructStore{clients: map[ClientID][]*Item{1: items}})
+	gappy := encodeStructStoreV1(map[ClientID][]*Item{1: items}, newDeleteSet(), StateVector{})
 
 	merged, err := MergeUpdatesV1(gappy)
 	require.NoError(t, err)
 
-	per2, _, _, err := buildMergeStore([][]byte{merged}, decodeStructsV1)
+	per2, _, err := buildMergeStore([][]byte{merged}, decodeStructsV1)
 	require.NoError(t, err)
 	got := map[uint64]string{}
 	for _, it := range per2[1] {
@@ -182,4 +181,65 @@ func TestUnit_EncodeStateVectorFromUpdateV2_MatchesDoc(t *testing.T) {
 	fromUpdate, err := EncodeStateVectorFromUpdateV2(EncodeStateAsUpdateV2(a, nil))
 	require.NoError(t, err)
 	assert.Equal(t, EncodeStateVectorV1(a), fromUpdate)
+}
+
+// A client counts only from clock 0 up to its first gap, so an update that
+// starts a client above 0 gives it no entry.
+func TestUnit_EncodeStateVectorFromUpdate_CountsFromClockZero(t *testing.T) {
+	for _, ver := range []struct {
+		tag    string
+		state  func(*Doc, StateVector) []byte
+		merge  func(...[]byte) ([]byte, error)
+		encode func([]byte) ([]byte, error)
+	}{
+		{"V1", EncodeStateAsUpdateV1, MergeUpdatesV1, EncodeStateVectorFromUpdate},
+		{"V2", EncodeStateAsUpdateV2, MergeUpdatesV2, EncodeStateVectorFromUpdateV2},
+	} {
+		d := New(WithClientID(9))
+		txt := d.GetText("t")
+		txns := make([][]byte, 0, 3)
+		for i, ch := range []string{"a", "b", "c"} {
+			sv := d.StateVector()
+			d.Transact(func(tx *Transaction) { txt.Insert(tx, i, ch, nil) })
+			txns = append(txns, ver.state(d, sv))
+		}
+		skipAfterA, err := ver.merge(txns[0], txns[2])
+		require.NoError(t, err)
+		for _, tc := range []struct {
+			name   string
+			update []byte
+			want   []byte
+		}{
+			{"full state", ver.state(d, nil), []byte{1, 9, 3}},
+			{"diff past clock 0", txns[1], []byte{0}},
+			{"gap after clock 0", skipAfterA, []byte{1, 9, 1}},
+		} {
+			got, err := ver.encode(tc.update)
+			require.NoError(t, err, "%s %s", ver.tag, tc.name)
+			assert.Equal(t, tc.want, got, "%s %s", ver.tag, tc.name)
+		}
+		d.Destroy()
+	}
+}
+
+// A client group with no structs adds no entry.
+func TestUnit_EncodeStateVectorFromUpdate_EmptyGroup(t *testing.T) {
+	e2 := newV2Encoder()
+	e2.restEnc.WriteVarUint(1)
+	e2.restEnc.WriteVarUint(0)
+	e2.writeClient(7)
+	e2.restEnc.WriteVarUint(0)
+	encodeDeleteSetV2(e2, newDeleteSet())
+	for _, ver := range []struct {
+		tag    string
+		update []byte
+		encode func([]byte) ([]byte, error)
+	}{
+		{"V1", []byte{1, 0, 7, 0, 0}, EncodeStateVectorFromUpdate},
+		{"V2", e2.toBytes(), EncodeStateVectorFromUpdateV2},
+	} {
+		got, err := ver.encode(ver.update)
+		require.NoError(t, err, ver.tag)
+		assert.Equal(t, []byte{0}, got, ver.tag)
+	}
 }

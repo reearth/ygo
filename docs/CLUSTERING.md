@@ -110,13 +110,17 @@ http.Handle("/yjs/{room}", srv)
 - calls `relay.Start(ctx, srv)` with a context cancelled on `Server.Shutdown`;
 - wires `doc.OnUpdate` + `awareness.OnUpdate` for every room as it becomes
   resident (and calls `RoomActivated`), and unwires them on eviction (calling
-  `RoomDeactivated`). `Server.Shutdown` cancels the relay context and calls
-  `relay.Close()`.
+  `RoomDeactivated`). Once `Server.Shutdown` has begun, the server makes no
+  `RoomActivated` or `RoomDeactivated` call. `Server.Shutdown` cancels the
+  relay context at its end; it does not call `relay.Close()`, which the caller
+  owns.
 
 When a remote change arrives, the relay calls `srv.Inject(ctx, Inbound)`:
 
 - `KindSync` → applied to the room's doc with the relay sentinel origin, then
-  rebroadcast to local peers via `BroadcastUpdate`.
+  rebroadcast to local peers via `BroadcastUpdate`. An update that fails
+  partway rebroadcasts only what it left in the room, the structs that
+  integrated and those that parked, and `Inject` returns the apply's error.
 - `KindAwareness` → merged into the room's `awareness.Awareness` with the
   sentinel origin, then fanned out to local peers (as sent when the room
   applied it exactly, otherwise the room's state for the clients it applied).

@@ -660,10 +660,13 @@ count. Since v1.49.0 (#229) that separation is enforced:
   re-stored on the exit path under a background context — the same
   retain-and-re-flush rule that already applied to a coalesced batch.
 - **A transaction committed while `Shutdown` is running still reaches the
-  adapter.** Peer read loops keep committing for the whole
-  close-connections-and-join window, so the room's persistence worker publishes
-  its retirement before its final drain; a commit that arrives too late for
-  that drain is written by the committing goroutine itself.
+  adapter.** A peer's read loop can still commit the message it was handling
+  when its connection closed, and a slow hook or apply can stretch that across
+  the whole close-connections-and-join window, so the room's persistence worker
+  publishes its retirement before its final drain; a commit that arrives too
+  late for that drain is written by the committing goroutine itself. Messages
+  the read loop had not started to handle when the connection closed are
+  dropped, not applied.
 - **`Shutdown` joins those writes** (bounded by the caller's context) before
   returning, so `srv.Shutdown(ctx)` followed by exiting the process does not
   kill a write in flight.
@@ -700,14 +703,14 @@ section would otherwise read as promising against it. Stop accepting
 connections first and the room set cannot grow underneath `Shutdown`.
 
 **Why "provided `Shutdown` returns `nil`."** Every wait inside `Shutdown` —
-the persistence join, `waitStranded`, the relay-lane join — is bounded by the
-caller's `ctx`, not by the work actually finishing. A deadline that fires mid-
-drain makes `Shutdown` return `ctx.Err()` while a final flush or a stranded
-write is still in flight; that write may still land, but `Shutdown` returning
-gives you no way to know whether it did. Only a `nil` return means every wait
-actually resolved by the work completing rather than by the clock running out.
-See "What adapters must now tolerate" below for the two independent things
-that can produce that deadline error.
+the connection join, the persistence join, the stranded-writer join, the
+relay-lane join — is bounded by the caller's `ctx`, not by the work actually
+finishing. A deadline that fires mid-drain makes `Shutdown` return `ctx.Err()`
+while a final flush or a stranded write is still in flight; that write may
+still land, but `Shutdown` returning gives you no way to know whether it did.
+Only a `nil` return means every wait actually resolved by the work completing
+rather than by the clock running out. See "What adapters must now tolerate"
+below for the independent things that can produce that deadline error.
 
 **Why "handed to the adapter," not "the adapter accepted it."** The observer
 that performs a commit's write — whether the room's normal persistence worker
@@ -724,10 +727,11 @@ surface, or a read-back via `LoadDoc`/`Compact`.
 
 **Why the guarantee is still not losslessness.** **`Shutdown` is not lossless
 and cannot be made so.** A transaction that *begins* committing after `Shutdown`
-has observed its last in-flight write is not covered: the producers are peer
-read loops and any code holding a `*crdt.Doc`, none of which the server can
-join, and inventing a join would risk a `Shutdown` that never returns — a worse
-failure than the one being fixed.
+has observed its last in-flight write is not covered: the producer is code
+holding a `*crdt.Doc`, which the server cannot join. Peer read loops are joined
+since v1.56.0: `Shutdown` waits, bounded by its `ctx`, for every `ServeHTTP`
+call in progress. Under the precondition above, and when that wait ends
+before `ctx` expires, no peer commits after it.
 
 ### What adapters must now tolerate
 
@@ -745,6 +749,15 @@ failure than the one being fixed.
   tight loop can keep it above zero for as long as it runs, so `Shutdown` burns
   its whole deadline with no wedged adapter anywhere. Stop your writers, not
   just your connections, if you want `Shutdown` to return early.
+- **A third cause of that `DeadlineExceeded`:** a connection that does not
+  finish. `Shutdown` waits for every `ServeHTTP` call in progress, and so for
+  every hook it calls (`Authorize` or `AuthFunc`, `OnLoadDocument`,
+  `OnFirstPeer`, `OnTokenAuth`, `OnPeerUpdate`, `OnStateless`, `OnLastPeer`,
+  `OnUnloadDocument`), for an adapter `LoadDoc` of a room the connection
+  loads, and for a relay `RoomActivated` or `RoomDeactivated` call that the
+  connection started before `Shutdown` began. One that blocks holds `Shutdown`
+  until it returns or `ctx` expires. Before v1.56.0 `Shutdown` returned `nil`
+  while they still ran.
 - **Writes for a room the server already considers gone.** Nothing calls
   `doc.Destroy` on teardown, so a caller that retains the `*crdt.Doc` (from
   `GetDoc`, or from an `OnLoadDocument` hook) keeps its persistence observer

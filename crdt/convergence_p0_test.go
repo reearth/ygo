@@ -427,11 +427,8 @@ func TestP0_C3_V2SelfDecodeReloads(t *testing.T) {
 // TestP0_C3_V2MergeDiffPreservesParentByID guards the V2 struct-level
 // merge/diff path against dropping a cross-client parent-by-ID child. The
 // "class" attribute item (client 200) references its container element (client
-// 100) purely by item-ID with no origin, so resolveParents (which only follows
-// origins) leaves it as a deferred parentID; it reaches encodeItemV2 with
-// Parent==nil. Before the fix encodeItemV2 GC-orphaned it (content dropped);
-// this asserts it survives both MergeUpdatesV2 and DiffUpdateV2. (#140, Copilot
-// review on #145)
+// 100) purely by item-ID with no origin, so it reaches encodeItemV2 with a
+// deferred parentID and must survive MergeUpdatesV2 and DiffUpdateV2.
 func TestP0_C3_V2MergeDiffPreservesParentByID(t *testing.T) {
 	dLow := New(WithClientID(100))
 	frag := dLow.GetXmlFragment("f")
