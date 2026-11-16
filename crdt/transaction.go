@@ -1,7 +1,10 @@
 package crdt
 
 import (
+	"cmp"
 	"context"
+	"math"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -13,6 +16,8 @@ type Transaction struct {
 	doc         *Doc
 	Origin      any  // user-supplied tag forwarded to update observers
 	Local       bool // true when the change originated on this peer; false while applying a remote update
+	scanBounded bool // this remote apply's conflict scans may pass only scanLeft more items (WithIntegrateScanBudget)
+	scanLeft    uint32
 	deleteSet   DeleteSet
 	beforeState StateVector
 	afterState  StateVector
@@ -54,18 +59,65 @@ type Transaction struct {
 	// undefined for every txn method); for one used cross-goroutine after
 	// commit the check is best-effort.
 	done bool
+	// rolledBack marks a remote apply that WithWholeOrNothingApplies rolled
+	// back, which commits as a transaction that changed nothing.
+	rolledBack bool
 	// ctx is the context associated with this transaction. Set to
 	// context.Background() by Transact and to the caller's ctx by
 	// TransactContext. Exposed via the Ctx() method so fn can poll for
 	// cancellation.
 	ctx context.Context
+	// scanMarks holds the marks this transaction's conflict scans leave on
+	// the items they pass (Item.integrate), and scanSerial numbers the scans.
+	scanMarks  map[*Item]scanMark
+	scanSerial uint32
 	// formatCleanup marks a remote transaction whose format cleanup runs
 	// once its observers have fired; afterTypeObservers, when set, decides
 	// it after the type observers (typeObserved: there are some), where
 	// Yjs does.
-	formatCleanup      bool
-	typeObserved       bool
+	formatCleanup bool
+	typeObserved  bool
+	// refused marks a remote apply that failed before integrating, so the
+	// commit fires nothing.
+	refused            bool
 	afterTypeObservers func()
+}
+
+// transactionParked is what one transaction parked, which a failed apply's
+// landed update carries (encodeTxnV1Locked); each document keeps one, since
+// its transactions run one at a time.
+type transactionParked struct {
+	items   []*Item     // the first run is a view of the pending queue
+	deletes []DeleteSet // sharing ranges that nothing changes
+	// left is what a drain took out of the queue after the park, so the
+	// structs still parked are found without a pass over the queue; a merge
+	// runs before the transaction's one park and cannot take them.
+	left []*Item
+}
+
+// parkRecord allocates the document's record only when a transaction parks.
+func (t *Transaction) parkRecord() *transactionParked {
+	s := t.doc.store
+	if s.parked == nil {
+		s.parked = &transactionParked{}
+	}
+	return s.parked
+}
+
+// noteParked keeps the first appended run as a queue view to avoid copying it.
+func (t *Transaction) noteParked(run []*Item) {
+	p := t.parkRecord()
+	if p.items == nil {
+		p.items = run
+		return
+	}
+	p.items = append(p.items, run...)
+}
+
+// noteParkedDeletes records ds, which this transaction parked.
+func (t *Transaction) noteParkedDeletes(ds DeleteSet) {
+	p := t.parkRecord()
+	p.deletes = append(p.deletes, ds)
 }
 
 // Ctx returns the context associated with this transaction. Transactions
@@ -178,6 +230,9 @@ func squashRuns(txn *Transaction) {
 	}
 
 	store := txn.doc.store
+	// A report's encoded state loses each squashed struct's header and
+	// length prefix, the text moving into the run (stateDue).
+	state := txn.stateDue()
 
 	// removedByClient collects items squashed into their left neighbour.
 	// Items are appended in clock order (squashRuns processes them that way),
@@ -209,9 +264,13 @@ func squashRuns(txn *Transaction) {
 			// current merged item, updated with each absorbed right item's
 			// original Len() — avoiding a call to left.Content.Len() (which is
 			// O(string length) and would make the loop O(n²)).
-			expectedClock := left.ID.Clock + uint64(left.Content.Len())
+			expectedClock := left.ID.Clock + left.Content.Len()
 			var sb strings.Builder
-			sb.WriteString(left.Content.(*ContentString).Str)
+			leftText := left.Content.(*ContentString).Str
+			sb.WriteString(leftText)
+			// taken is what the squash takes off a report's encoded state:
+			// each absorbed struct's header and length prefix.
+			taken := 0
 
 			j := i + 1
 			for j < len(items) {
@@ -234,7 +293,7 @@ func squashRuns(txn *Transaction) {
 					break
 				}
 				// right is directly adjacent and clock-contiguous: absorb it.
-				rightLen := uint64(right.Content.Len()) // O(1) for single-char items
+				rightLen := right.Content.Len() // O(1) for single-char items
 				expectedClock = right.ID.Clock + rightLen
 
 				// Rewire linked list: splice right out.
@@ -244,7 +303,11 @@ func squashRuns(txn *Transaction) {
 				}
 
 				// Collect right's string into the builder.
-				sb.WriteString(right.Content.(*ContentString).Str)
+				rightText := right.Content.(*ContentString).Str
+				sb.WriteString(rightText)
+				if state != nil {
+					taken += headerLen(right, 0) + uvarLen(uint64(len(rightText)))
+				}
 
 				// Schedule for store removal (appended in clock order).
 				if removedByClient == nil {
@@ -261,6 +324,14 @@ func squashRuns(txn *Transaction) {
 				cs := left.Content.(*ContentString)
 				cs.Str = sb.String()
 				cs.utf16Len = utf16Len(cs.Str)
+				if state != nil {
+					// Not where the run shares clocks with a struct the queue
+					// holds, whose merge into the state may keep that one
+					// instead (overlapSlack).
+					if _, _, overlaps, _ := commitShare(store, client, left.ID.Clock, expectedClock); !overlaps {
+						*state += uvarLen(uint64(len(cs.Str))) - uvarLen(uint64(len(leftText))) - taken
+					}
+				}
 				// A run squash absorbs the right items into left and splices them
 				// out of the linked list; a marker still pointing at an absorbed
 				// (now off-list) item would walk from a dangling node. Rendered
@@ -281,6 +352,11 @@ func squashRuns(txn *Transaction) {
 	// matching the clock-sorted order of storeItems — no hash lookup needed.
 	for client, removed := range removedByClient {
 		storeItems := store.clients[client]
+		var queued, held int
+		known := true
+		if state != nil {
+			queued, known, _, held = commitShare(store, client, 0, 0)
+		}
 		n, ri := 0, 0
 		for _, item := range storeItems {
 			if ri < len(removed) && item == removed[ri] {
@@ -293,6 +369,9 @@ func squashRuns(txn *Transaction) {
 		// Zero out the tail to release GC references.
 		for k := n; k < len(storeItems); k++ {
 			storeItems[k] = nil
+		}
+		if state != nil {
+			*state += sectionCountGrowth(uint64(len(storeItems)), queued, known, n-len(storeItems), held)
 		}
 		store.clients[client] = storeItems[:n]
 	}
@@ -351,10 +430,135 @@ func tryMergeWithLefts(txn *Transaction) {
 	if len(txn.mergeStructs) == 0 {
 		return
 	}
-	store := txn.doc.store
+	// In client and clock order each half merges into the run left of it, so a
+	// run split n times is copied once rather than n times.
+	slices.SortFunc(txn.mergeStructs, func(a, b *Item) int {
+		if c := cmp.Compare(a.ID.Client, b.ID.Client); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ID.Clock, b.ID.Clock)
+	})
+	merging := mergeRuns{store: txn.doc.store, state: txn.stateDue()}
 	for _, item := range txn.mergeStructs {
-		tryMergeWithLeft(item, store)
+		tryMergeWithLeft(item, &merging)
 	}
+	merging.finish()
+}
+
+// mergeRuns is the state of tryMergeWithLefts's merges, which take the halves
+// in client and clock order.
+type mergeRuns struct {
+	store *StructStore
+
+	// text is the run the last string merge extended, and joined its text from
+	// the run's second merge on, written back when another run starts.
+	text   *ContentString
+	joined strings.Builder
+
+	// items is client's store slice while merged halves leave it: items[:kept]
+	// is compacted and items[next:] not yet reached.
+	client     ClientID
+	items      []*Item
+	kept, next int
+
+	// state is the StateBytes of the report the commit makes, which each
+	// merge takes the merged half's header and length prefix off, or nil
+	// (stateDue).
+	state *int
+}
+
+// textLen is the bytes of left's text as its merges have left it, which
+// appendString holds in joined from a run's second merge on.
+func (m *mergeRuns) textLen(left *ContentString) int {
+	if left == m.text && m.joined.Len() > 0 {
+		return m.joined.Len()
+	}
+	return len(left.Str)
+}
+
+// appendString adds right's text to left's run without copying the whole run
+// at every merge.
+func (m *mergeRuns) appendString(left, right *ContentString) {
+	switch {
+	case left != m.text:
+		m.flushText()
+		m.text = left
+		left.Str += right.Str
+	case m.joined.Len() == 0:
+		m.joined.Grow(len(left.Str) + len(right.Str))
+		m.joined.WriteString(left.Str)
+		m.joined.WriteString(right.Str)
+	default:
+		m.joined.WriteString(right.Str)
+	}
+	left.utf16Len += right.utf16Len
+}
+
+// flushText writes the joined text back to its run.
+func (m *mergeRuns) flushText() {
+	if m.joined.Len() > 0 {
+		m.text.Str = m.joined.String()
+		m.joined.Reset()
+	}
+}
+
+// remove takes item, merged into its left neighbour, out of its client's store
+// slice, moving each item that stays at most once, as a single removal did,
+// and reports whether the slice held it.
+func (m *mergeRuns) remove(item *Item) bool {
+	if m.items != nil && item.ID.Client == m.client {
+		// Later halves come in clock order, so this scan passes only items the
+		// compaction moves anyway.
+		for i := m.next; i < len(m.items) && m.items[i].ID.Clock <= item.ID.Clock; i++ {
+			if m.items[i] == item {
+				m.kept += copy(m.items[m.kept:], m.items[m.next:i])
+				m.next = i + 1
+				return true
+			}
+		}
+		return false
+	}
+	m.flushItems()
+	items := m.store.clients[item.ID.Client]
+	i, ok := indexOfItem(items, item)
+	if ok {
+		m.client, m.items, m.kept, m.next = item.ID.Client, items, i, i+1
+	}
+	return ok
+}
+
+// flushItems closes the gap the merged halves left in the current client's
+// store slice.
+func (m *mergeRuns) flushItems() {
+	if m.items == nil {
+		return
+	}
+	var queued, held int
+	known := true
+	if m.state != nil {
+		queued, known, _, held = commitShare(m.store, m.client, 0, 0)
+	}
+	n := m.kept + copy(m.items[m.kept:], m.items[m.next:])
+	clear(m.items[n:])
+	if m.state != nil {
+		*m.state += sectionCountGrowth(uint64(len(m.items)), queued, known, n-len(m.items), held)
+	}
+	m.store.clients[m.client] = m.items[:n]
+	m.items = nil
+}
+
+// finish writes back the last run's text and the last client's store slice.
+func (m *mergeRuns) finish() {
+	m.flushText()
+	m.flushItems()
+}
+
+// indexOfItem finds item in items, a store slice in clock order.
+func indexOfItem(items []*Item, item *Item) (int, bool) {
+	i, found := slices.BinarySearchFunc(items, item.ID.Clock, func(it *Item, clock uint64) int {
+		return cmp.Compare(it.ID.Clock, clock)
+	})
+	return i, found && items[i] == item
 }
 
 // tryMergeWithLeft attempts to absorb item into item.Left. Returns true when
@@ -369,7 +573,7 @@ func tryMergeWithLefts(txn *Transaction) {
 //
 // On success: left's content is extended in place, the linked list is spliced
 // past item, and item is removed from the store.
-func tryMergeWithLeft(item *Item, store *StructStore) bool {
+func tryMergeWithLeft(item *Item, merging *mergeRuns) bool {
 	left := item.Left
 	if left == nil {
 		return false
@@ -380,7 +584,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if left.Right != item {
 		return false
 	}
-	if left.ID.Clock+uint64(left.Content.Len()) != item.ID.Clock {
+	if left.ID.Clock+left.Content.Len() != item.ID.Clock {
 		return false
 	}
 	if left.Deleted != item.Deleted {
@@ -405,7 +609,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	if item.Origin == nil {
 		return false
 	}
-	expectedLast := left.ID.Clock + uint64(left.Content.Len()) - 1
+	expectedLast := left.ID.Clock + left.Content.Len() - 1
 	if item.Origin.Client != left.ID.Client || item.Origin.Clock != expectedLast {
 		return false
 	}
@@ -416,32 +620,38 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		return false
 	}
 
-	// Content-type match + in-place extension.
+	// Content-type match + in-place extension. grown is what the merge does
+	// to the length prefixes the encoded state writes: one for the run in
+	// place of one for each struct, the content itself moving.
+	var grown int
 	switch lc := left.Content.(type) {
 	case *ContentString:
 		rc, ok := item.Content.(*ContentString)
 		if !ok {
 			return false
 		}
-		lc.Str += rc.Str
-		lc.utf16Len += rc.utf16Len
+		grown = mergedLenGrowth(uint64(merging.textLen(lc)), uint64(len(rc.Str)))
+		merging.appendString(lc, rc)
 	case *ContentAny:
 		rc, ok := item.Content.(*ContentAny)
 		if !ok {
 			return false
 		}
+		grown = mergedLenGrowth(uint64(len(lc.Vals)), uint64(len(rc.Vals)))
 		lc.Vals = append(lc.Vals, rc.Vals...)
 	case *ContentJSON:
 		rc, ok := item.Content.(*ContentJSON)
 		if !ok {
 			return false
 		}
+		grown = mergedLenGrowth(uint64(len(lc.Vals)), uint64(len(rc.Vals)))
 		lc.Vals = append(lc.Vals, rc.Vals...)
 	case *ContentDeleted:
 		rc, ok := item.Content.(*ContentDeleted)
 		if !ok {
 			return false
 		}
+		grown = mergedLenGrowth(lc.length, rc.length)
 		lc.length += rc.length
 	default:
 		// ContentEmbed, ContentType, ContentFormat, ContentBinary, ContentDoc,
@@ -466,13 +676,43 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 		left.Parent.clearMarkers()
 	}
 
-	// Remove item from the store's per-client slice.
-	storeItems := store.clients[item.ID.Client]
-	for i, it := range storeItems {
-		if it == item {
-			store.clients[item.ID.Client] = append(storeItems[:i], storeItems[i+1:]...)
-			break
+	// Remove item from its client's store slice. The report's encoded state
+	// loses its header with its length prefix; a half the slice did not hold
+	// was never in the state, which gains the content the run took in. Where
+	// the run shares clocks with a struct the queue holds, whose merge into the
+	// state may keep that one instead, nothing is taken off and what a cut
+	// there can add is counted (overlapSlack).
+	removed := merging.remove(item)
+	if merging.state != nil {
+		grown -= headerLen(item, 0)
+		if !removed {
+			grown += structLen(item, 0, true)
 		}
+		end := item.ID.Clock + item.Content.Len()
+		if _, _, overlaps, _ := commitShare(merging.store, item.ID.Client, left.ID.Clock, end); overlaps {
+			grown = max(grown, 0) + overlapSlack(item.ID.Client, end)
+		}
+		*merging.state += grown
 	}
 	return true
+}
+
+// scanMark is a conflict scan's mark on an item it passed: which scan of the
+// transaction, and at which step of it (Item.integrate).
+type scanMark struct{ scan, step uint32 }
+
+// scanMarkMap returns the transaction's scan marks, made on first use.
+func (txn *Transaction) scanMarkMap() map[*Item]scanMark {
+	if txn.scanMarks == nil {
+		txn.scanMarks = make(map[*Item]scanMark)
+	}
+	return txn.scanMarks
+}
+
+// boundScans lets txn's conflict scans pass at most n more items, when n is
+// positive.
+func (txn *Transaction) boundScans(n int) {
+	if n > 0 {
+		txn.scanBounded, txn.scanLeft = true, uint32(min(uint64(n), math.MaxUint32))
+	}
 }

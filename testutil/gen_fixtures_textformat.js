@@ -158,6 +158,20 @@ function emptiedRangeScript (sync2) {
 	]
 }
 
+// A deletes a character it never synced, so its sync to B carries that
+// character as deleted content.
+const arrivedDeletion = [
+	{ p: 'B', k: 'ins', i: 0, s: 'd', a: { italic: true } },
+	{ p: 'A', k: 'ins', i: 0, s: 'de' },
+	{ k: 'sync', from: 'A', to: 'B' },
+	{ k: 'sync', from: 'B', to: 'A' },
+	{ p: 'B', k: 'ins', i: 0, s: 'de' },
+	{ p: 'A', k: 'ins', i: 0, s: 'b' },
+	{ p: 'B', k: 'fmt', i: 3, n: 1, a: { italic: 'x' } },
+	{ p: 'A', k: 'del', i: 0, n: 1 },
+	{ p: 'A', k: 'del', i: 1, n: 2 },
+]
+
 const multis = []
 for (const [a, b] of [[1, 2], [2, 1]]) {
 	const c = { A: a, B: b }
@@ -275,6 +289,12 @@ for (const [a, b] of [[1, 2], [2, 1]]) {
 		{ k: 'sync', from: 'B', to: 'A' },
 		{ k: 'sync', from: 'A', to: 'B' },
 	]))
+	// An item that arrives already deleted enters the receiver's delete set
+	// when it integrates, so its client's deletions are visited first.
+	for (const v2 of [false, true]) {
+		multis.push(multi('remote_cleanup_visits_arrived_deletion_first' + (v2 ? '_v2' : '') + tag, c,
+			[...arrivedDeletion, { k: 'sync', from: 'A', to: 'B', v2 }]))
+	}
 	// The receiver's cleanup compares composite values by identity; a value
 	// the sender's format restores is one object shared by two markers.
 	for (const [vn, v] of [['empty_array', []], ['empty_object', {}], ['array', [1]], ['object', { k: 1 }]]) {
@@ -378,6 +398,7 @@ const observedScripts = {
 		{ k: 'sync', from: 'A', to: 'B' },
 		{ p: 'A', k: 'del', i: 1, n: 2 },
 	], { ins_plain: { k: 'ins', i: 1, s: 'z' }, ins_bold: { k: 'ins', i: 1, s: 'z', a: B } }],
+	arrived_deletion: [arrivedDeletion, { ins_plain: insPlain }],
 }
 const observedRows = []
 for (const [sname, [ops, reactions]] of Object.entries(observedScripts)) {

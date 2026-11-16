@@ -3,6 +3,7 @@ package crdt
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"slices"
 	"testing"
@@ -11,37 +12,61 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fragmentedDeleteTime times applying, to a peer with formatted text, one
-// remote deletion of n adjacent single-character structs.
-func fragmentedDeleteTime(tb testing.TB, n int) time.Duration {
-	a, b := newTestDoc(1), newTestDoc(2)
-	at, bt := a.GetText("t"), b.GetText("t")
-	a.Transact(func(txn *Transaction) { at.Insert(txn, 0, "ab", nil) })
-	for range n {
-		a.Transact(func(txn *Transaction) { at.Insert(txn, 1, "x", nil) })
+// fragmentedDeleteTimes measures with clock, for each of sizes, applying to k
+// peers with formatted text one remote deletion each of n adjacent
+// single-character structs. The sizes are measured back to back, so they see
+// the machine alike.
+func fragmentedDeleteTimes(tb testing.TB, clock func(func()) time.Duration, sizes ...setSize) []time.Duration {
+	peers, updates := make([][]*Doc, len(sizes)), make([][][]byte, len(sizes))
+	for s, size := range sizes {
+		peers[s], updates[s] = make([]*Doc, size.k), make([][]byte, size.k)
+		for i := range size.k {
+			a, b := newTestDoc(1), newTestDoc(2)
+			at, bt := a.GetText("t"), b.GetText("t")
+			a.Transact(func(txn *Transaction) { at.Insert(txn, 0, "ab", nil) })
+			for range size.n {
+				a.Transact(func(txn *Transaction) { at.Insert(txn, 1, "x", nil) })
+			}
+			require.NoError(tb, ApplyUpdateV1(b, EncodeStateAsUpdateV1(a, nil), nil))
+			b.Transact(func(txn *Transaction) { bt.Format(txn, size.n+1, 1, Attributes{"bold": true}) })
+			sv := a.StateVector()
+			a.Transact(func(txn *Transaction) { at.Delete(txn, 1, size.n) })
+			peers[s][i], updates[s][i] = b, EncodeStateAsUpdateV1(a, sv)
+		}
 	}
-	require.NoError(tb, ApplyUpdateV1(b, EncodeStateAsUpdateV1(a, nil), nil))
-	b.Transact(func(txn *Transaction) { bt.Format(txn, n+1, 1, Attributes{"bold": true}) })
-	sv := a.StateVector()
-	a.Transact(func(txn *Transaction) { at.Delete(txn, 1, n) })
-	u := EncodeStateAsUpdateV1(a, sv)
-	start := time.Now()
-	require.NoError(tb, ApplyUpdateV1(b, u, nil))
-	return time.Since(start)
+	took := make([]time.Duration, len(sizes))
+	var errs []error
+	for s := range sizes {
+		took[s] = clock(func() {
+			for i, b := range peers[s] {
+				if err := ApplyUpdateV1(b, updates[s][i], nil); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		})
+	}
+	require.Empty(tb, errs)
+	return took
 }
 
 func TestPerf_RemoteFragmentedDeleteCleanupIsLinear(t *testing.T) {
 	if testing.Short() || raceEnabled || testing.CoverMode() != "" {
 		t.Skip("timing test")
 	}
-	const small, large = 1000, 8000 // 8×: linear ≈ 8×, quadratic ≈ 64×
-	var s, l time.Duration
-	for range 3 {
-		s += fragmentedDeleteTime(t, small)
-		l += fragmentedDeleteTime(t, large)
+	// Thread CPU time, not wall time, so waits for a core on a loaded machine
+	// do not count. Sixteen small deletions hold as many structs as one large
+	// one, so a struct costs about the same in both when the cleanup is linear,
+	// and sixteen times as much in the large one when it is quadratic. Each
+	// size keeps the fewest of interleaved runs.
+	clock := threadCPUClock(t)
+	const small, large, peers = 500, 8000, 16
+	var s, l time.Duration = math.MaxInt64, math.MaxInt64
+	for range 16 {
+		took := fragmentedDeleteTimes(t, clock, setSize{small, peers}, setSize{large, 1})
+		s, l = min(s, took[0]), min(l, took[1])
 	}
-	t.Logf("%v → %v", s, l)
-	require.Less(t, l, 24*s+20*time.Millisecond, "the contextless cleanup grows superlinearly")
+	t.Logf("%d structs deleted as %d deletions of %d, then as one: %v → %v (%.1f×)", large, peers, small, s, l, float64(l)/float64(s))
+	require.Less(t, l, 3*s, "the contextless cleanup grows superlinearly")
 }
 
 func BenchmarkYText_RemoteFragmentedDelete(b *testing.B) {
@@ -49,7 +74,7 @@ func BenchmarkYText_RemoteFragmentedDelete(b *testing.B) {
 		b.Run(fmt.Sprint(n), func(b *testing.B) {
 			var d time.Duration
 			for range b.N {
-				d += fragmentedDeleteTime(b, n)
+				d += fragmentedDeleteTimes(b, wallTime, setSize{n, 1})[0]
 			}
 			b.ReportMetric(float64(d.Nanoseconds())/float64(b.N), "apply-ns/op")
 		})
