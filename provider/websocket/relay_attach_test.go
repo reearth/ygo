@@ -242,3 +242,76 @@ func TestUnit_AttachRelay_EditDuringStartIsNotPublishedBeforeTheRelayStarts(t *t
 	assert.Zero(t, srv.RelayStats().Dropped, "the edit was dropped")
 	require.Len(t, relay.published, 1, "the edit never reached the relay")
 }
+
+// activationTrackingRelay refuses room activations until its Start has
+// returned, as a relay that subscribes per room must: there is nothing to
+// subscribe with yet. Start blocks until the test releases it.
+type activationTrackingRelay struct {
+	entered   chan struct{}
+	release   chan struct{}
+	started   atomic.Bool
+	activated chan string
+	refused   atomic.Uint64
+}
+
+func (r *activationTrackingRelay) Start(context.Context, cluster.Sink) error {
+	close(r.entered)
+	<-r.release
+	r.started.Store(true)
+	return nil
+}
+
+func (r *activationTrackingRelay) Publish(context.Context, cluster.Outbound) error {
+	return nil
+}
+
+func (r *activationTrackingRelay) RoomActivated(room string) {
+	if !r.started.Load() {
+		r.refused.Add(1) // nothing records it; the room is never subscribed
+		return
+	}
+	select {
+	case r.activated <- room:
+	default:
+	}
+}
+
+func (r *activationTrackingRelay) RoomDeactivated(string) {}
+func (r *activationTrackingRelay) Close() error           { return nil }
+
+// A room created while AttachRelay is still inside Start must still end up
+// activated. The relay cannot accept an activation before it has started,
+// and nothing repeats the call — getOrCreateRoom issues exactly one per
+// room — so an activation made in that window is lost and the room is never
+// subscribed: remote edits never reach it for as long as it stays resident.
+func TestUnit_AttachRelay_RoomCreatedDuringStartIsActivatedAfterIt(t *testing.T) {
+	relay := &activationTrackingRelay{
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+		activated: make(chan string, 8),
+	}
+
+	srv := ygws.NewServer()
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	attached := make(chan error, 1)
+	go func() { attached <- srv.AttachRelay(relay) }()
+	<-relay.entered
+
+	require.NoError(t, srv.Apply(context.Background(), "room",
+		func(d *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := d.GetText("t")
+			transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "local", nil) })
+		}))
+
+	close(relay.release)
+	require.NoError(t, <-attached)
+
+	assert.Zero(t, relay.refused.Load(),
+		"the activation was offered before the relay could accept it")
+	select {
+	case room := <-relay.activated:
+		assert.Equal(t, "room", room)
+	default:
+		t.Fatal("the room created during the attach was never activated")
+	}
+}

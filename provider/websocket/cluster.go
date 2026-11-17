@@ -7,6 +7,7 @@ package websocket
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/cluster"
@@ -80,6 +81,59 @@ type relayState struct {
 	// starting — and a relay is entitled to refuse one. publishRelay waits
 	// here rather than spending the payload on that refusal.
 	attached chan struct{}
+
+	// pending holds the rooms created during that same window, whose
+	// RoomActivated was therefore held back: a relay that subscribes per
+	// room cannot accept one before Start has returned, and nothing repeats
+	// the call. AttachRelay issues them once Start succeeds. nil once
+	// released, which is what tells a later caller to activate inline.
+	pendingMu sync.Mutex
+	pending   map[string]struct{}
+	released  bool
+}
+
+// deferActivation holds room's activation back if the attach window is still
+// open, reporting whether it did. The caller activates inline when it did
+// not. Taking this before the relay call, rather than after, is what keeps
+// a synchronous Inject from inside Start off a relay that cannot serve it.
+func (st *relayState) deferActivation(room string) bool {
+	st.pendingMu.Lock()
+	defer st.pendingMu.Unlock()
+	if st.released {
+		return false
+	}
+	if st.pending == nil {
+		st.pending = make(map[string]struct{})
+	}
+	st.pending[room] = struct{}{}
+	return true
+}
+
+// takeActivation removes room's held-back activation, reporting whether one
+// was there. A teardown that finds one skips its RoomDeactivated: the
+// matching RoomActivated was never issued, and issuing only the deactivation
+// would push the relay's room refcount below where it started.
+func (st *relayState) takeActivation(room string) bool {
+	st.pendingMu.Lock()
+	defer st.pendingMu.Unlock()
+	_, ok := st.pending[room]
+	delete(st.pending, room)
+	return ok
+}
+
+// releaseActivations closes the window and returns the rooms held in it, for
+// AttachRelay to activate now that Start has returned. Every later caller
+// activates inline.
+func (st *relayState) releaseActivations() []string {
+	st.pendingMu.Lock()
+	defer st.pendingMu.Unlock()
+	st.released = true
+	rooms := make([]string, 0, len(st.pending))
+	for room := range st.pending {
+		rooms = append(rooms, room)
+	}
+	st.pending = nil
+	return rooms
 }
 
 // ErrRelayAlreadyAttached is returned by AttachRelay if a relay is already set.
@@ -103,8 +157,10 @@ var _ cluster.Sink = (*Server)(nil)
 // normal case when attaching to a bus other nodes already publish on — finds
 // a server that is fully wired: rooms it creates get their observers, their
 // outbound lane and RoomActivated, and its updates carry the echo sentinel.
-// A relay must therefore tolerate RoomActivated and Publish before its own
-// Start has returned. If relay.Start returns an error the commit is undone,
+// Neither RoomActivated nor Publish is offered to the relay before its own
+// Start has returned, though: activations made in that window are held back
+// and issued once Start succeeds, and a room's outbound backlog waits on its
+// lane. If relay.Start returns an error the commit is undone,
 // the server is left UNATTACHED and the call may be retried — it does not
 // latch a partial attach. Rooms that become resident after attach
 // are wired automatically (doc.OnUpdate + awareness.OnUpdate → that room's own
@@ -159,6 +215,9 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 		// finds no relay and nothing re-wires behind the rollback.
 		s.retireRelayLanes(true)
 		s.detachRelayRooms()
+		// Nothing started, so the held activations are simply dropped —
+		// their rooms are unwired by detachRelayRooms above.
+		st.releaseActivations()
 		// Released only now: a lane held in the attach window must not wake
 		// to a state that still looks attached and publish to a relay whose
 		// Start failed. Past this close every waiter sees the state gone and
@@ -167,8 +226,14 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 		cancel()
 		return err
 	}
-	// The attach window is over: release the lanes held in it. Start does
-	// not wait on them, so this cannot deadlock against itself.
+	// The attach window is over. Activations held in it go first, so a room
+	// is subscribed before its backlog starts publishing, and both happen
+	// off the lock Start just released.
+	for _, room := range st.releaseActivations() {
+		r.RoomActivated(room)
+	}
+	// Release the lanes held in the window. Start does not wait on them, so
+	// this cannot deadlock against itself.
 	close(st.attached)
 	return nil
 }
@@ -861,6 +926,9 @@ func (s *Server) teardownRelayRoom(r *room, name string) {
 	// doc explains why a name-only lookup here would be unsafe across the
 	// evict-then-reconnect window.
 	s.stopRelayLane(name, relayLane)
+	if st.takeActivation(name) {
+		return // its RoomActivated is still held back: nothing to undo
+	}
 	st.relay.RoomDeactivated(name)
 }
 

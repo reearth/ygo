@@ -1744,7 +1744,11 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, bool,
 		if st := s.relayAttach.Load(); r.loadErr == nil && st != nil {
 			// Off-lock and post-ready: a re-entrant Sink.Inject from RoomActivated
 			// finds the published room and waits on the already-closed ready.
-			st.relay.RoomActivated(name)
+			// Held back while the attach window is open — AttachRelay issues it
+			// once Start has returned and the relay can accept it.
+			if !st.deferActivation(name) {
+				st.relay.RoomActivated(name)
+			}
 		}
 	} else {
 		// Someone else is (or was) loading this room; wait for the barrier.

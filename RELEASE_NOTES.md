@@ -22,7 +22,10 @@ undone if `Start` fails — so a failed `Start` still leaves the server
 unattached and the call retryable, as before.
 
 A room created in that window keeps its outbound backlog on its lane until
-`Start` returns. Publishing to a relay that has not finished starting invites
+`Start` returns, and its `RoomActivated` is held back and issued once `Start`
+succeeds — a relay that subscribes per room cannot accept an activation
+before then, and nothing repeats the call, so the room would never be
+subscribed. Publishing to a relay that has not finished starting invites
 a refusal, and the payload is already off the lane by then, so the edit would
 be lost rather than retried.
 

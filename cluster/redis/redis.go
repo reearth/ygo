@@ -842,10 +842,10 @@ func (r *Relay) awaitStart(ctx context.Context) error {
 // waitForStartAttempt blocks, holding no lock, while a Start attempt is in
 // flight. Room-membership calls that arrive once Start holds mu already wait
 // on mu; one that reaches mu first does not, and would see started false and
-// drop the activation for good — nothing repeats it. That window is real
-// because provider/websocket's AttachRelay wires the server before calling
-// Start. Waiting here rather than under mu is what keeps it from blocking
-// the very Start it waits for.
+// drop the activation for good — nothing repeats it. Waiting here rather
+// than under mu is what keeps it from blocking the very Start it waits for.
+// provider/websocket does not rely on this: it holds activations back for
+// the whole attach window and issues them once Start has returned.
 func (r *Relay) waitForStartAttempt() {
 	if r.started.Load() || r.closed.Load() {
 		return

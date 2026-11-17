@@ -143,3 +143,67 @@ func TestUnit_AttachRelay_FailedStartDoesNotPublishTheHeldBacklog(t *testing.T) 
 	require.Equal(t, uint64(1), srv.RelayStats().Dropped,
 		"the edit is lost, so it must be counted")
 }
+
+// lifecycleRelay records every room activation and deactivation it is
+// offered, whether or not it has started.
+type lifecycleRelay struct {
+	entered     chan struct{}
+	release     chan struct{}
+	activated   chan string
+	deactivated chan string
+}
+
+func (r *lifecycleRelay) Start(context.Context, cluster.Sink) error {
+	close(r.entered)
+	<-r.release
+	return nil
+}
+
+func (r *lifecycleRelay) Publish(context.Context, cluster.Outbound) error { return nil }
+
+func (r *lifecycleRelay) RoomActivated(room string) {
+	select {
+	case r.activated <- room:
+	default:
+	}
+}
+
+func (r *lifecycleRelay) RoomDeactivated(room string) {
+	select {
+	case r.deactivated <- room:
+	default:
+	}
+}
+
+func (r *lifecycleRelay) Close() error { return nil }
+
+// A room torn down while its activation is still held back must take that
+// activation with it: the relay was never told the room existed, so telling
+// it the room is gone would push its room refcount below where it started,
+// and activating it afterwards would subscribe a room nobody is in.
+func TestUnit_AttachRelay_TeardownDuringStartTakesTheHeldActivation(t *testing.T) {
+	relay := &lifecycleRelay{
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+		activated:   make(chan string, 8),
+		deactivated: make(chan string, 8),
+	}
+
+	srv := NewServer()
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	attached := make(chan error, 1)
+	go func() { attached <- srv.AttachRelay(relay) }()
+	<-relay.entered
+
+	r, _, err := srv.getOrCreateRoom(context.Background(), "room")
+	require.NoError(t, err)
+	srv.teardownRelayRoom(r, "room")
+
+	close(relay.release)
+	require.NoError(t, <-attached)
+
+	require.Empty(t, relay.deactivated,
+		"deactivated a room the relay was never told about")
+	require.Empty(t, relay.activated,
+		"activated a room that was torn down before the attach finished")
+}

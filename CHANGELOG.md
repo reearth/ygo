@@ -24,11 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still leaves the server unattached and retryable. A room created in that
   window holds its outbound backlog on its lane until `Start` returns, rather
   than spending it on a relay that has not started yet and may refuse it.
+  Its `RoomActivated` is held back for the same window and issued once
+  `Start` succeeds, since a relay that subscribes per room cannot accept one
+  before then and `getOrCreateRoom` issues exactly one per room.
   The exposure is a relay that
   delivers during `Start` — attaching to a bus other nodes already publish on
   — and it does not depend on this server accepting connections yet, since
-  the relay itself creates the room. A relay must now tolerate
-  `RoomActivated` and `Publish` before its own `Start` has returned.
+  the relay itself creates the room. A relay is now offered
+  neither `RoomActivated` nor `Publish` before its own `Start` has returned.
 - **`cluster/redis`: `Publish` waits for an in-flight `Start` instead of
   failing it.** `Publish` documents `ErrRelayNotStarted` as the answer for a
   relay `Start` has not been called on, but it also returned it while a
