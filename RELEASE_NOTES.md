@@ -279,7 +279,12 @@ sync messages; `sync.EncodeSyncStep2` is unchanged. Cutting the answer costs
 the server up to 11% more CPU time than the single SyncStep2 did for a room
 of 20,000 characters typed into the middle, and 43% more for a room of
 16,000 small structs: map entries, XML elements and attributes, formatted
-text.
+text. A room whose structs chain across clients, each client's item naming
+the item of the client before it as its left origin, is cut in time linear
+in its structs: a client can build such a room on purpose, and a cut that
+made a pass over every client for each link of the chain took 1.5 s for
+8,000 clients where it now takes 23 ms
+(`BenchmarkSplitStateAsUpdateV1_ChainedClients`).
 
 **Who is affected: stores that merge the updates a document took, and
 documents that hold a struct parked over clocks they hold.** A merge in which

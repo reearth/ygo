@@ -342,6 +342,12 @@ type updateSplitter struct {
 	dels     []clientDeletes // descending by client
 	maxBytes int
 
+	pass    clientQueue              // the clients this pass of the walk has still to visit, highest first
+	next    clientQueue              // the clients the pass after this one visits
+	cursor  ClientID                 // the client the walk is placing the structs of
+	waiting map[ClientID]waiterQueue // by the client whose clocks are waited for: the clients that wait, and for which clock
+	checks  int                      // readiness checks the walk has made, which its work is counted in
+
 	// stored is set when the queues' items are a document's own structs
 	// rather than structs decoded from an update. The splitter then writes
 	// them as the decode would have read them (encodeOwn), cuts only a copy of
@@ -390,9 +396,14 @@ func newUpdateSplitter(queues []splitQueue, ds DeleteSet, sv StateVector, maxByt
 	// encodeDeleteSet sort them that way too.
 	slices.SortFunc(s.queues, func(a, b splitQueue) int { return cmp.Compare(b.client, a.client) })
 	slices.SortFunc(s.dels, func(a, b clientDeletes) int { return cmp.Compare(b.client, a.client) })
+	// A pass of the walk takes the clients highest first, which a descending
+	// slice is a heap for already.
+	s.pass = make(clientQueue, len(s.queues))
 	for i := range s.queues {
 		s.queueOf[s.queues[i].client] = &s.queues[i]
+		s.pass[i] = s.queues[i].client
 	}
+	s.waiting = make(map[ClientID]waiterQueue)
 	for i := range s.dels {
 		if q := s.queueOf[s.dels[i].client]; q != nil {
 			q.dels = &s.dels[i]
@@ -406,57 +417,119 @@ func newUpdateSplitter(queues []splitQueue, ds DeleteSet, sv StateVector, maxByt
 // deletions no update carried with its structs, and ends the series with the
 // update that carries what is left.
 func (s *updateSplitter) run() {
-	// A struct placed in this pass can be what another client's struct waits
-	// for, so the walk repeats until a pass places nothing.
-	for progress := true; progress; {
-		progress = false
-		for i := range s.queues {
-			for s.placeReady(&s.queues[i]) {
-				progress = true
-			}
-		}
-	}
+	s.walk()
 	s.flush()
 	s.emitRemainingDeletes()
 	s.out = append(s.out, s.tail())
 }
 
-// placeReady places the next struct of q when the receiver can integrate it,
-// and reports whether it did.
-func (s *updateSplitter) placeReady(q *splitQueue) bool {
-	it := q.next()
-	if it == nil || !s.ready(q, it) {
-		return false
+// walk places every struct the receiver can integrate on its own. It takes
+// the clients in passes, each pass highest first as the encoder writes them,
+// because a struct placed in a pass can be what another client's struct waits
+// for: a client the pass has gone by is visited in the next one, and the walk
+// ends with the pass that places nothing.
+//
+// A pass visits only the clients a placement can have changed anything for,
+// which is what keeps the work proportional to the structs and the clocks
+// they name rather than to clients times passes: a client that stops waits on
+// the one clock that holds its next struct up (placeReady and blocker), and
+// the placement that delivers that clock is what visits it again (wake).
+func (s *updateSplitter) walk() {
+	for len(s.pass) > 0 || len(s.next) > 0 {
+		if len(s.pass) == 0 {
+			s.pass, s.next = s.next, s.pass
+		}
+		s.cursor = s.pass.pop()
+		dep, need, waits := s.placeReady(s.queueOf[s.cursor])
+		// A need of zero is a struct naming a clock no receiver can reach,
+		// which no placement delivers, so nothing waits for it.
+		if waits && need > 0 {
+			w := s.waiting[dep]
+			w.push(waiter{clock: need, client: s.cursor})
+			s.waiting[dep] = w
+		}
 	}
-	s.place(q)
-	return true
 }
 
-// ready reports whether it, a struct of q, integrates into the receiver
-// without waiting for a struct that has not arrived: its own client's clocks
-// reach it, and the structs its encoding names as origin, right origin and
-// parent have arrived. These are the dependencies the apply defers an item
-// for — a clock gap and missingDep in decodeStructs and integrateGroup, the
-// right origin in integrateGroup, and all four again in itemFutureDep, which
-// is what parks it.
-func (s *updateSplitter) ready(q *splitQueue, it *Item) bool {
+// wake visits again the clients whose next struct waited for a clock of q's
+// client the update being packed now delivers. A client this pass has gone by
+// is left to the next one, which is where the walk that looked at every client
+// in every pass would have placed it.
+func (s *updateSplitter) wake(q *splitQueue) {
+	w := s.waiting[q.client]
+	for len(w) > 0 && w[0].clock <= q.held {
+		woken := w.pop()
+		if woken.client > s.cursor {
+			s.next.push(woken.client)
+		} else {
+			s.pass.push(woken.client)
+		}
+	}
+	if len(w) == 0 {
+		delete(s.waiting, q.client)
+		return
+	}
+	s.waiting[q.client] = w
+}
+
+// placeReady places the structs of q the receiver can integrate, one after
+// another, and returns what the first one it cannot integrate waits for: the
+// client whose clocks it needs, and the clock they have to reach. It reports
+// false when q has nothing left to place.
+func (s *updateSplitter) placeReady(q *splitQueue) (ClientID, uint64, bool) {
+	for {
+		it := q.next()
+		if it == nil {
+			return 0, 0, false
+		}
+		s.checks++
+		if dep, need, blocked := s.blocker(q, it); blocked {
+			return dep, need, true
+		}
+		s.place(q)
+	}
+}
+
+// blocker is what it, a struct of q, waits for before it integrates into the
+// receiver: the client whose clocks have to reach a clock, and that clock. A
+// struct waits for its own client's clocks to reach it, and for the structs
+// its encoding names as origin, right origin and parent to have arrived.
+// These are the dependencies the apply defers an item for — a clock gap and
+// missingDep in decodeStructs and integrateGroup, the right origin in
+// integrateGroup, and all four again in itemFutureDep, which is what parks
+// it. It reports false when the struct waits for none of them, which is when
+// it integrates on its own.
+func (s *updateSplitter) blocker(q *splitQueue, it *Item) (ClientID, uint64, bool) {
 	if it.ID.Clock > q.held {
-		return false
+		return q.client, it.ID.Clock, true
 	}
 	switch {
 	case it.isGCOrphan():
 		// Written as a GC struct, which names nothing.
-		return true
+		return 0, 0, false
 	case it.ID.Clock < q.held:
 		// Cut at the receiver's clock, it names as origin the clock before the
 		// cut, which the receiver holds, and no parent.
-		return s.holds(q, it.OriginRight)
+		return s.missing(q, it.OriginRight)
 	case it.Origin != nil || it.OriginRight != nil:
 		// With an origin it names no parent: the receiver takes the parent of
 		// the struct its origin names (decodeItem).
-		return s.holds(q, it.Origin) && s.holds(q, it.OriginRight)
+		if dep, need, blocked := s.missing(q, it.Origin); blocked {
+			return dep, need, true
+		}
+		return s.missing(q, it.OriginRight)
 	}
-	return s.holds(q, namedParent(it))
+	return s.missing(q, namedParent(it))
+}
+
+// missing is what the receiver waits for before it holds the struct id names,
+// as blocker returns it, or false when it holds it or id is nil; q is the
+// queue of the struct naming it.
+func (s *updateSplitter) missing(q *splitQueue, id *ID) (ClientID, uint64, bool) {
+	if s.holds(q, id) {
+		return 0, 0, false
+	}
+	return id.Client, id.Clock + 1, true
 }
 
 // holds reports whether the receiver holds the struct id names, or id is nil,
@@ -589,9 +662,10 @@ func (s *updateSplitter) materialize(it *Item, offset uint64) *Item {
 }
 
 // add puts it, a struct of q, in the update being packed, advances what the
-// receiver holds, and takes the deletions of the clocks it delivers, so the
-// update that brings a struct brings its deletion: a receiver never renders
-// deleted content it is about to be told is gone.
+// receiver holds, visits again the clients waiting for the clocks it
+// delivers, and takes the deletions of those clocks, so the update that
+// brings a struct brings its deletion: a receiver never renders deleted
+// content it is about to be told is gone.
 func (s *updateSplitter) add(q *splitQueue, it *Item, own bool) {
 	s.bytes += s.structCost(q, it, own)
 	if q.packed != s.pieces {
@@ -606,6 +680,7 @@ func (s *updateSplitter) add(q *splitQueue, it *Item, own bool) {
 		s.piece[q.client] = append(s.piece[q.client], it)
 	}
 	q.held = it.ID.Clock + it.Content.Len()
+	s.wake(q)
 	if q.dels != nil {
 		s.takeDeletes(q.dels, q.held)
 	}
@@ -1035,4 +1110,92 @@ func varUintLen(v uint64) int {
 		n++
 	}
 	return n
+}
+
+// clientQueue is the clients a pass of the walk has still to visit, as a
+// max-heap: the pass takes them highest first, the order the encoder writes
+// them in, whichever order the placements that wake them fall in.
+type clientQueue []ClientID
+
+func (q *clientQueue) push(c ClientID) {
+	*q = append(*q, c)
+	h := *q
+	for i := len(h) - 1; i > 0; {
+		p := (i - 1) / 2
+		if h[p] >= h[i] {
+			break
+		}
+		h[p], h[i] = h[i], h[p]
+		i = p
+	}
+}
+
+func (q *clientQueue) pop() ClientID {
+	h := *q
+	top, n := h[0], len(h)-1
+	h[0] = h[n]
+	h = h[:n]
+	for i := 0; ; {
+		m := 2*i + 1
+		if m >= len(h) {
+			break
+		}
+		if r := m + 1; r < len(h) && h[r] > h[m] {
+			m = r
+		}
+		if h[i] >= h[m] {
+			break
+		}
+		h[i], h[m] = h[m], h[i]
+		i = m
+	}
+	*q = h
+	return top
+}
+
+// waiter is a client whose next struct waits for the clocks of one other
+// client, which have to reach clock before it integrates.
+type waiter struct {
+	clock  uint64
+	client ClientID
+}
+
+// waiterQueue is what waits on one client's clocks, as a min-heap on the
+// clock waited for, so a placement looks at the waiters it wakes alone.
+type waiterQueue []waiter
+
+func (q *waiterQueue) push(w waiter) {
+	*q = append(*q, w)
+	h := *q
+	for i := len(h) - 1; i > 0; {
+		p := (i - 1) / 2
+		if h[p].clock <= h[i].clock {
+			break
+		}
+		h[p], h[i] = h[i], h[p]
+		i = p
+	}
+}
+
+func (q *waiterQueue) pop() waiter {
+	h := *q
+	top, n := h[0], len(h)-1
+	h[0] = h[n]
+	h = h[:n]
+	for i := 0; ; {
+		m := 2*i + 1
+		if m >= len(h) {
+			break
+		}
+		if r := m + 1; r < len(h) && h[r].clock < h[m].clock {
+			m = r
+		}
+		if h[i].clock <= h[m].clock {
+			break
+		}
+		h[i], h[m] = h[m], h[i]
+		i = m
+	}
+	*q = h
+	return top
 }

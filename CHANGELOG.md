@@ -49,7 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   most `maxBytes` long, except one carrying a single struct a V1 update cannot
   cut (content occupying one clock) and the last, which carries the structs
   the sender itself holds parked. A text item longer than `maxBytes` is cut at
-  a character boundary, never inside one.
+  a character boundary, never inside one. The walk that places the structs
+  keeps a heap of the clients waiting on each client's clocks and wakes each
+  into the pass that places it, so a document whose structs chain across
+  clients - the item of client N+1 naming the item of client N as its left
+  origin, which a client can build on purpose - is cut in work linear in its
+  structs, where a walk that repeats a pass over every client until one places
+  nothing makes a pass per link (`BenchmarkSplitUpdateV1_ChainedClients`).
 - **`crdt.SplitStateAsUpdateV1(doc, sv, maxBytes)`** returns what
   `SplitUpdateV1` returns for `EncodeStateAsUpdateV1(doc, sv)`, byte for
   byte, without encoding the state or decoding it back: it reads the
