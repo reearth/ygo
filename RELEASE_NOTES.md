@@ -247,7 +247,8 @@ the apply returns `crdt.ErrApplyCheck` and the check's error in a
 `crdt.RefusedUpdateError`. What the drain of the parked queue lands was parked
 by other updates, so it is checked on its own: a refusal rolls back the drain
 alone, and the apply returns `crdt.ErrApplyCheckDrain` while the update
-stands. A panic in the check rolls back the apply, or the drain, and then
+stands. `provider/websocket` and `provider/http` answer such an update as
+applied. A panic in the check rolls back the apply, or the drain, and then
 reaches the caller. The view reads without the document's lock, which the
 apply holds, cannot write, and reads nothing once the check returns. A
 document with a check applies remote updates whole or not at all, as with

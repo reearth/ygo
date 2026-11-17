@@ -28,20 +28,22 @@ type PeerUpdateInfo struct {
 // info.Update to info.Doc as the room does without a hook, returning the
 // apply's error (an update whose V1 bytes do not decode, or one that
 // overflows MaxPendingItems); a second call returns ErrPeerUpdateApplied
-// without applying anything. apply must be called before the hook returns: a
-// call after it returns applies nothing and returns ErrPeerUpdateHookReturned,
-// since by then the peer has been answered and the update would reach no other
-// peer. The hook runs on the peer's read loop, so the peer's next frame waits
-// for it. apply takes the document's write lock, so calling it inside
-// info.Doc.Transact deadlocks the room.
+// without applying anything. An error wrapping crdt.ErrApplyCheckDrain is no
+// refusal: the room's apply check refused only what the drain of the parked
+// queue landed, and the update was applied. apply must be called before the
+// hook returns: a call after it returns applies nothing and returns
+// ErrPeerUpdateHookReturned, since by then the peer has been answered and the
+// update would reach no other peer. The hook runs on the peer's read loop, so
+// the peer's next frame waits for it. apply takes the document's write lock,
+// so calling it inside info.Doc.Transact deadlocks the room.
 //
 // A hook that refuses the update — returns without apply having applied it,
 // or panics before that — closes the peer: with the code and reason of a
 // *PeerClose when the hook's error is or wraps one, and with 4205 "Reset
 // Connection" otherwise, as @hocuspocus/server closes on a beforeHandleMessage
 // rejection. When apply ran and the room itself did not take the update
-// (apply returned an error), the peer is answered as it would be without a
-// hook, and closed only for a *PeerClose.
+// (apply returned an error other than a refused drain), the peer is answered
+// as it would be without a hook, and closed only for a *PeerClose.
 //
 // The close is needed because the client's later edits build on the refused
 // one, so the room could not integrate them. The client still holds the
@@ -89,7 +91,7 @@ func (c *PeerClose) Error() string {
 func (p *peer) applyPeerUpdate(update []byte) (applied bool, closeWith *PeerClose) {
 	hook := p.server.OnPeerUpdate
 	if hook == nil {
-		if err := p.applyToRoom(update); err != nil {
+		if err := p.applyToRoom(update); !updateStood(err) {
 			p.server.log().Debug("discarded unappliable sync message",
 				"room", p.roomName, "err", err)
 			return false, nil
@@ -133,7 +135,7 @@ func (p *peer) applyPeerUpdate(update []byte) (applied bool, closeWith *PeerClos
 	if ranApply {
 		<-applyDone // an apply that started before the return finishes first
 	}
-	if ranApply && applyErr == nil {
+	if ranApply && updateStood(applyErr) {
 		return true, nil
 	}
 	p.server.log().Debug("peer update refused", "room", p.roomName,
@@ -148,4 +150,12 @@ func (p *peer) applyPeerUpdate(update []byte) (applied bool, closeWith *PeerClos
 		return false, nil
 	}
 	return false, &PeerClose{Code: wsCodeResetConnection, Reason: wsReasonResetConnection}
+}
+
+// updateStood is whether an apply that returned err left the update in the
+// room: err is nil, or it wraps crdt.ErrApplyCheckDrain, which means the
+// room's apply check (crdt.WithApplyCheck) refused only what the drain of the
+// parked queue landed, and that drain was rolled back.
+func updateStood(err error) bool {
+	return err == nil || errors.Is(err, crdt.ErrApplyCheckDrain)
 }

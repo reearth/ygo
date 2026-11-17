@@ -113,7 +113,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TextDelta`, `MapGet`, `MapEntries`, `ArraySlice`, `ChangedTypes`), cannot
   write, reads only its own document and panics once the check has returned.
   A document with a check applies remote updates whole or nothing, as with
-  `WithWholeOrNothingApplies`.
+  `WithWholeOrNothingApplies`. `provider/websocket` and `provider/http`
+  answer an update whose drain alone was refused as applied: the peer gets
+  `SyncStatus(1)` and the update is relayed, `Inject` returns nil, and a POST
+  gets 204.
 
 ### Changed
 

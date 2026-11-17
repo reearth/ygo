@@ -762,6 +762,12 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
 		landed, err := crdt.ApplyUpdateV1Landed(rm.doc, in.Data, s.relaySentinel)
+		if err != nil && updateStood(err) {
+			// Only the drain the room's apply check refused was rolled back:
+			// the update stood, and goes out to local peers as an applied one.
+			s.log().Debug("relayed update stood; its drain was refused", "room", in.Room, "err", err)
+			err = nil
+		}
 		if err != nil {
 			// The room and its observers already hold landed, so local peers need it too.
 			if landed != nil {

@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"path"
@@ -181,7 +182,9 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, room string)
 
 	doc := s.getOrCreateDoc(room)
 
-	if err := crdt.ApplyUpdateV1(doc, body, r.RemoteAddr); err != nil {
+	// An update whose drain alone the room's apply check refused was applied
+	// (crdt.ErrApplyCheckDrain), so it is answered as applied.
+	if err := crdt.ApplyUpdateV1(doc, body, r.RemoteAddr); err != nil && !errors.Is(err, crdt.ErrApplyCheckDrain) {
 		// Return a generic message — err.Error() may contain internal decoder
 		// details that are unhelpful to callers and leak implementation info (N-M4).
 		http.Error(w, "failed to apply update", http.StatusBadRequest)
