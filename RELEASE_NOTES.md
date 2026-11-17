@@ -1,3 +1,60 @@
+## v1.56.1
+
+**Who is affected: clustered deployments that call `AttachRelay` on a relay
+other nodes are already publishing on.** What matters is whether the relay
+delivers anything while `Start` runs, not whether this server is taking
+connections yet: the delivery itself creates the room, so attaching before
+you serve — what `cmd/ygo-server` does — narrows the window but does not
+close it.
+
+`AttachRelay` started the relay before recording it on the server. A message
+delivered in that window found the server unattached: the room it created came
+up with no outbound lane, no observers publishing its changes, and no
+`RoomActivated` call. The room stayed unwired until it unloaded, so its peers'
+edits on this node never reached the other nodes, and with a relay that
+subscribes per room the other nodes' edits never reached it either. The room
+silently split across the cluster until the last peer left it. The same window
+also left the echo sentinel nil, and all four attach fields were read without
+the lock that guarded the writes, which the race detector reported.
+
+The attach state is now a single value committed **before** `relay.Start`, and
+undone if `Start` fails — so a failed `Start` still leaves the server
+unattached and the call retryable, as before.
+
+A room created in that window keeps its outbound backlog on its lane until
+`Start` returns, and its `RoomActivated` is held back and issued once `Start`
+succeeds — a relay that subscribes per room cannot accept an activation
+before then, and nothing repeats the call, so the room would never be
+subscribed. Publishing to a relay that has not finished starting invites
+a refusal, and the payload is already off the lane by then, so the edit would
+be lost rather than retried.
+
+**Behaviour change for relay implementations.** Because the server is wired
+before `Start` runs, a relay can now receive `RoomActivated` and `Publish`
+calls before its own `Start` has returned, and a custom relay that assumes
+`Start` completes first should be checked. Both bundled relays handle it.
+`MemRelay`'s callbacks do not depend on `Start`. The Redis relay's
+`RoomActivated` already blocked on the lock `Start` holds and then subscribed
+normally, but its `Publish` returned `ErrRelayNotStarted` for as long as
+`Start` was running — contradicting its own documented contract, which
+reserves that error for a relay `Start` has not been called on. `Publish` now
+waits for an in-flight `Start` and publishes once it finishes; it still fails
+fast when no `Start` has been called, and when the `Start` that ran failed.
+
+`RoomActivated` and `RoomDeactivated` now wait one out as well. Taking the
+relay's lock only made them wait out a `Start` that already held it: a room
+activated before `Start` reached the lock was dropped silently and never
+subscribed, and nothing repeats the call.
+
+Two further fixes on the same attach path: `Shutdown` cancelled the relay
+context only after joining the outbound lane workers, so it could hang
+forever on an attach that had not finished, and `Sink.Inject` stamped its
+echo-guard origin before loading the room — if the attach was rolled back and
+retried while that load blocked, the room's observers held a different
+sentinel and published the remote update straight back to the cluster.
+
+No API changes.
+
 ## v1.56.0
 
 **Who is affected: servers that set `Server.OnPeerUpdate` and need to know who
