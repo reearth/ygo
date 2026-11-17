@@ -5,7 +5,10 @@ package websocket
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -60,4 +63,83 @@ func TestUnit_RegisterRelayObservers_UndoesItselfWhenItsAttachIsGone(t *testing.
 			transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "local", nil) })
 		}))
 	require.Zero(t, srv.RelayStats().Dropped)
+}
+
+// acceptingFailedStartRelay fails its Start but accepts every Publish,
+// returning nil without delivering anywhere — what a relay that never
+// finished starting does with a payload handed to it.
+type acceptingFailedStartRelay struct {
+	entered   chan struct{}
+	release   chan struct{}
+	published chan cluster.Outbound
+}
+
+func (r *acceptingFailedStartRelay) Start(context.Context, cluster.Sink) error {
+	close(r.entered)
+	<-r.release
+	return errors.New("relay start failed")
+}
+
+func (r *acceptingFailedStartRelay) Publish(_ context.Context, out cluster.Outbound) error {
+	select {
+	case r.published <- out:
+	default:
+	}
+	return nil
+}
+
+func (r *acceptingFailedStartRelay) RoomActivated(string)   {}
+func (r *acceptingFailedStartRelay) RoomDeactivated(string) {}
+func (r *acceptingFailedStartRelay) Close() error           { return nil }
+
+// A payload held on a lane through the attach window must not be published
+// once that attach has been rolled back: the relay never started, so a
+// Publish it accepts goes nowhere, and an accepted Publish is not counted —
+// the loss would vanish from RelayStats entirely.
+//
+// Internal because the ordering is what is under test. Holding relayLanesMu
+// parks the rollback at its first step, so a lane released before the state
+// was cleared has unbounded time to publish: without that the worker loses
+// the race every run and the test passes against the defect.
+func TestUnit_AttachRelay_FailedStartDoesNotPublishTheHeldBacklog(t *testing.T) {
+	relay := &acceptingFailedStartRelay{
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+		published: make(chan cluster.Outbound, 8),
+	}
+
+	srv := NewServer()
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	attached := make(chan error, 1)
+	go func() { attached <- srv.AttachRelay(relay) }()
+	<-relay.entered // the state is published; Start is parked
+
+	require.NoError(t, srv.Apply(context.Background(), "room",
+		func(d *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := d.GetText("t")
+			transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "local", nil) })
+		}))
+
+	// Park the rollback before it can clear the state, then let Start fail.
+	// Guarded and registered as a cleanup: the assertion below runs while
+	// the lock is held, and a failure there must not leave Shutdown — whose
+	// cleanup was registered first, so it runs last — deadlocked on it.
+	var once sync.Once
+	unlock := func() { once.Do(srv.relayLanesMu.Unlock) }
+	srv.relayLanesMu.Lock()
+	t.Cleanup(unlock)
+	close(relay.release)
+	// Long enough for a lane released ahead of the clear to publish.
+	time.Sleep(100 * time.Millisecond)
+	require.Empty(t, relay.published,
+		"the backlog was published to a relay whose Start failed")
+	unlock()
+
+	require.Error(t, <-attached)
+	require.NoError(t, srv.Shutdown(context.Background()))
+
+	require.Empty(t, relay.published,
+		"the backlog was published to a relay whose Start failed")
+	require.Equal(t, uint64(1), srv.RelayStats().Dropped,
+		"the edit is lost, so it must be counted")
 }

@@ -154,17 +154,22 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 	// Committed first so delivery from inside Start lands on a wired server;
 	// undone here if Start fails, which keeps the attach retryable.
 	err := r.Start(ctx, s)
-	// Either way the attach window is over: release the lanes held in it.
-	// Start does not wait on them, so this cannot deadlock against itself.
-	close(st.attached)
 	if err != nil {
 		// Clear the state before unwiring, so a room created from here on
 		// finds no relay and nothing re-wires behind the rollback.
 		s.retireRelayLanes(true)
 		s.detachRelayRooms()
+		// Released only now: a lane held in the attach window must not wake
+		// to a state that still looks attached and publish to a relay whose
+		// Start failed. Past this close every waiter sees the state gone and
+		// counts its payload as the loss it is.
+		close(st.attached)
 		cancel()
 		return err
 	}
+	// The attach window is over: release the lanes held in it. Start does
+	// not wait on them, so this cannot deadlock against itself.
+	close(st.attached)
 	return nil
 }
 
