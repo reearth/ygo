@@ -1,3 +1,28 @@
+## v1.56.2
+
+**Who is affected: clustered deployments whose rooms can be evicted and
+re-created while `AttachRelay` is still running.** The exposure is the same
+attach window v1.56.1 addressed — a relay that delivers traffic from inside
+`Start` — with a room that leaves and comes back inside it.
+
+v1.56.1 holds a room's `RoomActivated` back for the length of the attach
+window and issues it once `Start` returns. Those held activations were
+tracked by room name. A room leaves `s.rooms` before its teardown runs — the
+teardown first waits for the room's persistence goroutine to drain — so a
+replacement under the same name can be created, and hold its own activation,
+while its predecessor's teardown is still pending. The predecessor's teardown
+then took whatever entry sat under that name, which was the replacement's: the
+resident room was never offered to the relay, and with a relay that subscribes
+per room it stayed unsubscribed for as long as it was resident. Edits from the
+other nodes never arrived, and the room silently diverged across the cluster.
+The mirror case cost a subscription the other way, with the teardown waiting
+out an in-flight activation and then issuing a `RoomDeactivated` that
+unsubscribed the room still using it.
+
+Held activations are now keyed by room instance, so a teardown settles only
+its own room's activation and a replacement keeps its own. The rest of the
+attach handshake is unchanged.
+
 ## v1.56.1
 
 **Who is affected: clustered deployments that call `AttachRelay` on a relay

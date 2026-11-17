@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.2] — 2026-11-17
+
+### Fixed
+
+- **`provider/websocket`: a room re-created during the attach window is no
+  longer left unsubscribed from the relay.** The activations held back for
+  the length of `AttachRelay` (v1.56.1) were tracked by room name. A room
+  leaves `s.rooms` before its teardown runs — the teardown waits for the
+  room's persistence goroutine to drain first — so a replacement under the
+  same name can be created, and hold its own activation, while the
+  predecessor's teardown is still pending. That teardown then took the
+  replacement's entry: the resident room was never offered to the relay, and
+  with a relay that subscribes per room it stayed unsubscribed for as long as
+  it was resident, silently diverging from the other nodes. The mirror
+  ordering cost the subscription the other way, the teardown waiting out an
+  in-flight activation and then issuing a `RoomDeactivated` for the room still
+  using it. Held activations are now keyed by room instance, so a teardown
+  settles only its own room's and a replacement keeps its own.
+
 ## [1.56.1] — 2026-11-17
 
 ### Fixed

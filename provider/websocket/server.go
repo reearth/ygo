@@ -1770,7 +1770,7 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, bool,
 			// finds the published room and waits on the already-closed ready.
 			// Held back while the attach window is open — AttachRelay issues it
 			// once Start has returned and the relay can accept it.
-			if !st.deferActivation(name) {
+			if !st.deferActivation(r, name) {
 				st.relay.RoomActivated(name)
 			}
 		}
