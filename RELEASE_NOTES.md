@@ -33,6 +33,11 @@ reserves that error for a relay `Start` has not been called on. `Publish` now
 waits for an in-flight `Start` and publishes once it finishes; it still fails
 fast when no `Start` has been called, and when the `Start` that ran failed.
 
+`RoomActivated` and `RoomDeactivated` now wait one out as well. Taking the
+relay's lock only made them wait out a `Start` that already held it: a room
+activated before `Start` reached the lock was dropped silently and never
+subscribed, and nothing repeats the call.
+
 No API changes.
 
 ## v1.56.0

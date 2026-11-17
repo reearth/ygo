@@ -417,8 +417,9 @@ type Relay struct {
 	// starting holds the Start attempt that has begun but not yet finished,
 	// so Publish can wait one out instead of rejecting a relay that IS being
 	// started (see awaitStart). Set before Start takes mu, cleared when it
-	// returns. RoomActivated / RoomDeactivated need nothing like it: they
-	// take mu, which Start holds throughout, so they already wait.
+	// returns. RoomActivated / RoomDeactivated consult it too (see
+	// waitForStartAttempt): taking mu only makes them wait out a Start that
+	// already holds mu, not one that has yet to reach it.
 	starting    atomic.Pointer[startAttempt]
 	closed      atomic.Bool // set under mu in Close
 	sink        cluster.Sink
@@ -816,6 +817,11 @@ type startAttempt struct{ done chan struct{} }
 func (r *Relay) awaitStart(ctx context.Context) error {
 	att := r.starting.Load()
 	if att == nil {
+		// Cleared on the way out of Start, so a nil attempt means either
+		// "never started" or "started just now".
+		if r.started.Load() {
+			return nil
+		}
 		return ErrRelayNotStarted
 	}
 	select {
@@ -829,6 +835,27 @@ func (r *Relay) awaitStart(ctx context.Context) error {
 		return ErrRelayNotStarted
 	}
 	return nil
+}
+
+// waitForStartAttempt blocks, holding no lock, while a Start attempt is in
+// flight. Room-membership calls that arrive once Start holds mu already wait
+// on mu; one that reaches mu first does not, and would see started false and
+// drop the activation for good — nothing repeats it. That window is real
+// because provider/websocket's AttachRelay wires the server before calling
+// Start. Waiting here rather than under mu is what keeps it from blocking
+// the very Start it waits for.
+func (r *Relay) waitForStartAttempt() {
+	if r.started.Load() || r.closed.Load() {
+		return
+	}
+	att := r.starting.Load()
+	if att == nil {
+		return
+	}
+	select {
+	case <-att.done:
+	case <-r.done:
+	}
 }
 
 // Publish hands an Outbound to the publisher goroutine. Blocks if the
@@ -910,6 +937,8 @@ func (r *Relay) Publish(ctx context.Context, out cluster.Outbound) error {
 // return from getOrCreateRoom for THIS room, which is what the cancelable
 // context guards against.
 func (r *Relay) RoomActivated(room string) {
+	r.waitForStartAttempt()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -962,6 +991,8 @@ func (r *Relay) RoomActivated(room string) {
 // actual drain happens later, asynchronously, on the worker's own goroutine
 // (see runRoomWorker's w.done case), which Close's wg.Wait joins.
 func (r *Relay) RoomDeactivated(room string) {
+	r.waitForStartAttempt()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

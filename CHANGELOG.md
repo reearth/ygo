@@ -33,8 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subscribed and spawned its delivery goroutines. A local edit committed in
   that window was rejected rather than published. It now blocks until the
   attempt finishes, and still fails fast when no `Start` has been called or
-  when the one that ran failed. `RoomActivated` and `RoomDeactivated` needed
-  no change: they take the lock `Start` holds, so they already waited.
+  when the one that ran failed. `RoomActivated` and `RoomDeactivated` wait one
+  out too: taking the lock only made them wait out a `Start` that already held
+  it, so an activation that arrived first was dropped and the room was left
+  with no Redis subscription.
 
 ## [1.56.0] — 2026-11-16
 
