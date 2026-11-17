@@ -59,6 +59,22 @@ type relayRoomLane struct {
 // value.
 type relayOriginSentinel struct{ _ byte }
 
+// relayState is the whole attach handshake, published as one value.
+//
+// These four fields are read without a lock from every relay path — room
+// creation, the lane workers, teardown, Inject — so they cannot live as
+// separate fields: AttachRelay's writes would race those reads, and a reader
+// could see a half-built attach (a committed relay with a nil sentinel). One
+// atomic store of a fully-built state makes a reader see all of it or none of
+// it, at no cost on the read side. Treat an instance as immutable once
+// stored; nil means no relay is attached.
+type relayState struct {
+	relay    clusterRelay
+	sentinel *relayOriginSentinel
+	ctx      context.Context
+	cancel   context.CancelFunc
+}
+
 // ErrRelayAlreadyAttached is returned by AttachRelay if a relay is already set.
 var ErrRelayAlreadyAttached = errors.New("ygo/websocket: relay already attached")
 
@@ -75,9 +91,15 @@ var _ cluster.Sink = (*Server)(nil)
 // ErrRelayAlreadyAttached.
 //
 // AttachRelay starts the relay (relay.Start(ctx, s)) with a context that is
-// cancelled when Server.Shutdown is called. If relay.Start returns an error the
-// server is left UNATTACHED (s.relay stays nil) and the call may be retried —
-// it does not latch a partial attach. Rooms that become resident after attach
+// cancelled when Server.Shutdown is called. The attach state is committed
+// BEFORE Start, so a relay that delivers traffic from inside Start — the
+// normal case when attaching to a bus other nodes already publish on — finds
+// a server that is fully wired: rooms it creates get their observers, their
+// outbound lane and RoomActivated, and its updates carry the echo sentinel.
+// A relay must therefore tolerate RoomActivated and Publish before its own
+// Start has returned. If relay.Start returns an error the commit is undone,
+// the server is left UNATTACHED and the call may be retried — it does not
+// latch a partial attach. Rooms that become resident after attach
 // are wired automatically (doc.OnUpdate + awareness.OnUpdate → that room's own
 // outbound lane, drained by its own worker → Publish), so a relay that is slow
 // for one room cannot stall publishing for any other room (#187); the echo
@@ -93,32 +115,39 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 	if r == nil {
 		return ErrNilRelay
 	}
+	// relayMu serialises AttachRelay against itself only; the relay paths
+	// read the attach state atomically and never take it, so Start may
+	// re-enter the Server freely.
 	s.relayMu.Lock()
 	defer s.relayMu.Unlock()
-	if s.relay != nil {
+	if s.relayAttach.Load() != nil {
 		return ErrRelayAlreadyAttached
 	}
 
-	sentinel := &relayOriginSentinel{}
 	ctx, cancel := context.WithCancel(context.Background())
-	// Start before committing any state: a Start failure must leave the server
-	// unattached and retryable.
-	if err := r.Start(ctx, s); err != nil {
-		cancel()
-		return err
-	}
-
-	s.relaySentinel = sentinel
-	s.relayCtx, s.relayCancel = ctx, cancel
 	// Per-room outbound lanes (#187): each room's Publish is driven by its own
 	// worker, so a relay that is slow for one room cannot stall any other
-	// room's publishes — and never the CRDT commit path.
+	// room's publishes — and never the CRDT commit path. Ready before the
+	// state is published, so anything gated on an attached relay (getOrCreateRoom
+	// registering observers) always finds the map.
 	s.relayLanesMu.Lock()
 	s.relayLanes = make(map[string]*relayRoomLane)
 	s.relayLanesMu.Unlock()
-	// Publish s.relay last: anything gated on s.relay != nil (getOrCreateRoom
-	// registering observers) then always sees a ready relayLanes map.
-	s.relay = r
+	s.relayAttach.Store(&relayState{
+		relay:    r,
+		sentinel: &relayOriginSentinel{},
+		ctx:      ctx,
+		cancel:   cancel,
+	})
+
+	// Committed first so delivery from inside Start lands on a wired server;
+	// undone here if Start fails, which keeps the attach retryable.
+	if err := r.Start(ctx, s); err != nil {
+		s.relayAttach.Store(nil)
+		s.retireRelayLanes()
+		cancel()
+		return err
+	}
 	return nil
 }
 
@@ -169,6 +198,10 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 // lane's done; the other observes the map entry no longer matches and skips
 // closing (avoiding a double-close panic).
 func (s *Server) ensureRelayLane(room string) *relayRoomLane {
+	st := s.relayAttach.Load()
+	if st == nil {
+		return nil // no relay attached
+	}
 	s.relayLanesMu.Lock()
 	if s.relayLanes == nil {
 		s.relayLanesMu.Unlock()
@@ -201,7 +234,7 @@ func (s *Server) ensureRelayLane(room string) *relayRoomLane {
 	if hadPrev {
 		close(prev.done)
 	}
-	go s.relayLaneWorker(s.relayCtx, room, l)
+	go s.relayLaneWorker(st.ctx, room, l)
 	return l
 }
 
@@ -349,7 +382,14 @@ func (s *Server) drainRelayLane(ctx context.Context, room string, l *relayRoomLa
 }
 
 func (s *Server) publishRelay(ctx context.Context, room string, kind cluster.Kind, data []byte) {
-	if err := s.relay.Publish(ctx, cluster.Outbound{
+	st := s.relayAttach.Load()
+	if st == nil {
+		// The attach was undone (a failed Start) while this lane still held
+		// a payload: a loss, so count it like any other.
+		s.relayDropped.Add(1)
+		return
+	}
+	if err := st.relay.Publish(ctx, cluster.Outbound{
 		Room: room, Kind: kind, Data: data,
 	}); err != nil {
 		// The payload was already taken off the lane, so a failed Publish
@@ -432,7 +472,11 @@ func (s *Server) stopRelayLane(room string, l *relayRoomLane) {
 // global rooms lock — see server.go). The unsubscribe functions are stored on
 // the room and invoked by teardownRelayRoom.
 func (s *Server) registerRelayObservers(r *room, name string) {
-	sentinel := s.relaySentinel
+	st := s.relayAttach.Load()
+	if st == nil {
+		return // no relay attached
+	}
+	sentinel := st.sentinel
 	// Create the outbound lane before the observers that feed it. This runs
 	// during room creation, NOT on the commit path. Remember exactly which
 	// lane THIS room instance owns (r.relayLane's doc) so teardownRelayRoom
@@ -708,7 +752,8 @@ func changedAwarenessIDs(ev awareness.UpdateEvent) []uint64 {
 // notifies the relay. Safe to call when no relay is attached (no-op) and
 // idempotent per room (relayUnsub is cleared after firing).
 func (s *Server) teardownRelayRoom(r *room, name string) {
-	if s.relay == nil {
+	st := s.relayAttach.Load()
+	if st == nil {
 		return
 	}
 	r.mu.Lock()
@@ -724,7 +769,7 @@ func (s *Server) teardownRelayRoom(r *room, name string) {
 	// doc explains why a name-only lookup here would be unsafe across the
 	// evict-then-reconnect window.
 	s.stopRelayLane(name, relayLane)
-	s.relay.RoomDeactivated(name)
+	st.relay.RoomDeactivated(name)
 }
 
 // Inject applies a remote change delivered by the relay. It satisfies
@@ -752,6 +797,13 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 	if !isValidRoomName(in.Room) {
 		return ErrInvalidRoomName
 	}
+	// One load for the whole call: the origin stamped here must be the same
+	// sentinel the room's echo guard holds, and AttachRelay commits both
+	// before Start, so an inject delivered from inside Start sees them.
+	var sentinel any
+	if st := s.relayAttach.Load(); st != nil {
+		sentinel = st.sentinel
+	}
 
 	switch in.Kind {
 	case cluster.KindSync:
@@ -767,7 +819,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
-		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, s.relaySentinel); err != nil {
+		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, sentinel); err != nil {
 			return err
 		}
 		// Rebroadcast to locally-connected peers. broadcastUpdate re-validates
@@ -788,7 +840,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
-		res, err := rm.awareness.ApplyUpdateWith(in.Data, s.relaySentinel, awareness.ApplyOptions{Foreign: true})
+		res, err := rm.awareness.ApplyUpdateWith(in.Data, sentinel, awareness.ApplyOptions{Foreign: true})
 		if err != nil {
 			return err
 		}

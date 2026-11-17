@@ -1,3 +1,37 @@
+## v1.56.1
+
+**Who is affected: clustered deployments that call `AttachRelay` on a relay
+other nodes are already publishing on.** Attaching before the server takes
+connections — what `cmd/ygo-server` does, and what the docs tell you to do —
+was never exposed.
+
+`AttachRelay` started the relay before recording it on the server. A message
+delivered in that window found the server unattached: the room it created came
+up with no outbound lane, no observers publishing its changes, and no
+`RoomActivated` call. The room stayed unwired until it unloaded, so its peers'
+edits on this node never reached the other nodes, and with a relay that
+subscribes per room the other nodes' edits never reached it either. The room
+silently split across the cluster until the last peer left it. The same window
+also left the echo sentinel nil, and all four attach fields were read without
+the lock that guarded the writes, which the race detector reported.
+
+The attach state is now a single value committed **before** `relay.Start`, and
+undone if `Start` fails — so a failed `Start` still leaves the server
+unattached and the call retryable, as before.
+
+**Behaviour change for relay implementations.** Because the server is wired
+before `Start` runs, a relay can now receive `RoomActivated` and `Publish`
+calls before its own `Start` has returned, and a custom relay that assumes
+`Start` completes first should be checked. Both bundled relays are safe to
+call in that window: `MemRelay`'s callbacks do not depend on `Start`, and the
+Redis relay's `RoomActivated` blocks on the lock `Start` holds and then
+subscribes normally. The one rough edge is the Redis relay's `Publish`, which
+returns `ErrRelayNotStarted` until `Start` sets its started flag — so a local
+edit committed inside that window is counted in `RelayStats.Dropped` and
+logged rather than published, instead of being lost silently as it was before.
+
+No API changes.
+
 ## v1.56.0
 
 **Who is affected: servers that set `Server.OnPeerUpdate` and need to know who

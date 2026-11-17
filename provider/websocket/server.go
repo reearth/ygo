@@ -821,33 +821,28 @@ type Server struct {
 	rooms       map[string]*room
 	persistence PersistenceAdapter
 
-	// relay, when non-nil, mirrors local doc/awareness changes to other server
-	// nodes and applies inbound changes. Set once via AttachRelay. relayCtx /
-	// relayCancel govern the relay's delivery lifetime; cancelled at the END
-	// of Shutdown, after the outbound lanes have been retired, drained and
-	// joined (#202 — see Shutdown's step comment).
-	// relaySentinel is the origin stamped on relay-injected changes so the
-	// per-room observers can drop echoes (identity guard: a *relayOriginSentinel,
-	// see that type's doc comment in cluster.go for why it must never be a
-	// zero-size type).
+	// relayAttach, when non-nil, holds the attached relay plus the echo
+	// sentinel and the delivery context (see relayState in cluster.go). It
+	// is one atomic value rather than four fields because every relay path
+	// reads it off-lock while AttachRelay writes it; its context is
+	// cancelled at the END of Shutdown, after the outbound lanes have been
+	// retired, drained and joined (#202 — see Shutdown's step comment).
 	//
-	// relayMu guards the attach handshake: AttachRelay only commits s.relay
-	// after relay.Start succeeds, so a Start failure leaves the server
-	// unattached and the call is retryable (no sync.Once latching a partial
+	// relayMu serialises AttachRelay against itself. It commits the state
+	// BEFORE relay.Start, so a relay delivering from inside Start finds a
+	// wired server, and undoes the commit if Start fails, leaving the server
+	// unattached and the call retryable (no sync.Once latching a partial
 	// attach). Outbound delivery (#187) is one lane + worker PER ROOM rather
 	// than one shared queue, so a relay that is slow for one room cannot
 	// stall Publish for any other room. relayLanesMu guards relayLanes;
 	// enqueueRelayOutbound (the CRDT commit path) only ever takes its read
 	// side — lane creation (ensureRelayLane, room-creation time) and teardown
 	// (stopRelayLane, room-eviction time) take the write side. See cluster.go.
-	relayMu       sync.Mutex
-	relay         clusterRelay
-	relaySentinel any
-	relayCtx      context.Context
-	relayCancel   context.CancelFunc
-	relayLanesMu  sync.RWMutex
-	relayLanes    map[string]*relayRoomLane
-	relayDropped  atomic.Uint64
+	relayMu      sync.Mutex
+	relayAttach  atomic.Pointer[relayState]
+	relayLanesMu sync.RWMutex
+	relayLanes   map[string]*relayRoomLane
+	relayDropped atomic.Uint64
 
 	// relayWG counts live lane-worker goroutines (one per relayLaneWorker,
 	// Add under relayLanesMu in ensureRelayLane, Done when the worker
@@ -1656,8 +1651,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// (FIX C). No-op when no relay is attached.
 	s.retireRelayLanes()
 	s.waitRelayWorkers(ctx)
-	if s.relayCancel != nil {
-		s.relayCancel()
+	if st := s.relayAttach.Load(); st != nil {
+		st.cancel()
 	}
 	s.waitRelayWorkers(ctx)
 
@@ -1746,10 +1741,10 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, bool,
 		// This goroutine owns the load. It runs with s.rmu released; other
 		// callers (same or different room) never block on it via s.rmu.
 		s.loadRoom(ctx, r, name)
-		if r.loadErr == nil && s.relay != nil {
+		if st := s.relayAttach.Load(); r.loadErr == nil && st != nil {
 			// Off-lock and post-ready: a re-entrant Sink.Inject from RoomActivated
 			// finds the published room and waits on the already-closed ready.
-			s.relay.RoomActivated(name)
+			st.relay.RoomActivated(name)
 		}
 	} else {
 		// Someone else is (or was) loading this room; wait for the barrier.
@@ -1964,7 +1959,7 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 	// may mutate r.doc until ready closes, no local change is missed. No-op when
 	// no relay is attached. RoomActivated is fired by getOrCreateRoom off-lock
 	// after ready closes (#133).
-	if s.relay != nil {
+	if s.relayAttach.Load() != nil {
 		s.registerRelayObservers(r, name)
 	}
 	close(r.ready)

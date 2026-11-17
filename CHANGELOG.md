@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.1] — 2026-11-17
+
+### Fixed
+
+- **`provider/websocket`: a relay that delivers traffic while `AttachRelay`
+  is still running no longer splits that room across nodes.** `AttachRelay`
+  started the relay before recording it on the server, so a message arriving
+  in that window found `s.relay` still nil: the room it created came up with
+  no outbound lane, no observers publishing its changes and no
+  `RoomActivated`, and stayed that way until it unloaded. Edits by that room's
+  peers on this node were never published to the other nodes, and with a relay
+  that subscribes per room the other nodes' edits never arrived either — the
+  room silently diverged across the cluster until everyone left it. The same
+  window left the echo sentinel nil, and all four fields were read off-lock,
+  which the race detector reported. The attach state is now one atomic value
+  committed before `Start` and undone if `Start` fails, so a Start failure
+  still leaves the server unattached and retryable. Attaching to a relay other
+  nodes already publish on is the exposure; `AttachRelay` before the server
+  takes connections was never affected. A relay must now tolerate
+  `RoomActivated` and `Publish` before its own `Start` has returned.
+
 ## [1.56.0] — 2026-11-16
 
 ### Added
