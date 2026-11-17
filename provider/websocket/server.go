@@ -736,6 +736,16 @@ type room struct {
 	// room's mu, set once by registerRelayObservers alongside relayUnsub.
 	relayLane *relayRoomLane
 
+	// relaySentinel is the echo-guard origin THIS room's observers compare
+	// against, remembered because Sink.Inject must stamp its updates with
+	// the same one. Inject can capture a sentinel and then block loading the
+	// room, and the attach it came from may be rolled back and replaced
+	// while it waits; stamping that stale sentinel would leave the new
+	// attach's observers unable to recognise the update as an echo, and
+	// publish a remote change straight back out. Guarded by the room's mu,
+	// set by registerRelayObservers alongside relayUnsub.
+	relaySentinel any
+
 	// idleSince records when this room last went empty while
 	// Server.RoomIdleTimeout > 0 (#183). Zero value means "not idle" — either
 	// the room has peers, or RoomIdleTimeout is 0 (eager-evict mode, in which
@@ -1649,9 +1659,23 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// relay is commonly shared across multiple in-process Servers (the
 	// MemRelay pattern) and Closing it would stop delivery for all of them
 	// (FIX C). No-op when no relay is attached.
+	st := s.relayAttach.Load()
+	if st != nil {
+		select {
+		case <-st.attached:
+		default:
+			// The attach never finished. Its lanes are parked on a gate only
+			// AttachRelay can close, and a relay whose Start runs until its
+			// context dies is waiting for the very cancel below — so joining
+			// those workers first would wait on both forever. Cancelling now
+			// unwedges them; they count their undeliverable backlog, as any
+			// cancelled publish does.
+			st.cancel()
+		}
+	}
 	s.retireRelayLanes(false)
 	s.waitRelayWorkers(ctx)
-	if st := s.relayAttach.Load(); st != nil {
+	if st != nil {
 		st.cancel()
 	}
 	s.waitRelayWorkers(ctx)

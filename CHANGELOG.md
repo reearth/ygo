@@ -32,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — and it does not depend on this server accepting connections yet, since
   the relay itself creates the room. A relay is now offered
   neither `RoomActivated` nor `Publish` before its own `Start` has returned.
+- **`provider/websocket`: `Shutdown` no longer hangs when the attach it is
+  shutting down never finished.** It joined the outbound lane workers before
+  cancelling the relay context, so a lane holding a payload through the
+  attach window waited for a gate only `AttachRelay` can close — and a relay
+  whose `Start` runs until its context dies was waiting for that same cancel.
+  With no deadline on the `Shutdown` context neither side moved. An
+  unfinished attach is now cancelled before the join.
+- **`provider/websocket`: a remote update is no longer published back to the
+  cluster after a failed attach is retried.** `Sink.Inject` stamped its
+  update with the echo-guard origin read when the call began, but loading the
+  room can block, and the attach that delivered it may have been rolled back
+  and replaced by then — the room's observers hold the new attach's sentinel.
+  The update then read as a local edit and was published straight back out.
+  The origin is now read from the room itself, after it is loaded.
 - **`cluster/redis`: `Publish` waits for an in-flight `Start` instead of
   failing it.** `Publish` documents `ErrRelayNotStarted` as the answer for a
   relay `Start` has not been called on, but it also returned it while a

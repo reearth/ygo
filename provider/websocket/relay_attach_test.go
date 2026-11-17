@@ -315,3 +315,59 @@ func TestUnit_AttachRelay_RoomCreatedDuringStartIsActivatedAfterIt(t *testing.T)
 		t.Fatal("the room created during the attach was never activated")
 	}
 }
+
+// blockingStartRelay runs for as long as its Start context lives — a relay
+// whose Start is its own run loop. AttachRelay therefore does not return
+// until the server is shut down.
+type blockingStartRelay struct {
+	entered chan struct{}
+}
+
+func (r *blockingStartRelay) Start(ctx context.Context, _ cluster.Sink) error {
+	close(r.entered)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (r *blockingStartRelay) Publish(context.Context, cluster.Outbound) error { return nil }
+func (r *blockingStartRelay) RoomActivated(string)                            {}
+func (r *blockingStartRelay) RoomDeactivated(string)                          {}
+func (r *blockingStartRelay) Close() error                                    { return nil }
+
+// Shutdown must finish even if the attach never did. A lane holding a
+// payload through the attach window waits for a gate only AttachRelay can
+// close, so joining those workers before cancelling the relay context waits
+// for a relay that is itself waiting for that cancel — and with no deadline
+// on the Shutdown context, neither side ever moves.
+func TestUnit_Shutdown_CompletesWhileAnAttachIsStillRunning(t *testing.T) {
+	relay := &blockingStartRelay{entered: make(chan struct{})}
+
+	srv := ygws.NewServer()
+	attached := make(chan error, 1)
+	go func() { attached <- srv.AttachRelay(relay) }()
+	<-relay.entered
+
+	// A payload on a lane, parked waiting for the attach to finish.
+	require.NoError(t, srv.Apply(context.Background(), "room",
+		func(d *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := d.GetText("t")
+			transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "local", nil) })
+		}))
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Shutdown(context.Background()) }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown never returned: it joined lane workers that were " +
+			"waiting for an attach only its own cancel can end")
+	}
+
+	select {
+	case <-attached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("AttachRelay never returned after Shutdown cancelled the relay context")
+	}
+}

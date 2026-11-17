@@ -271,6 +271,7 @@ func detachRelayRoom(r *room) {
 	unsubs := r.relayUnsub
 	r.relayUnsub = nil
 	r.relayLane = nil
+	r.relaySentinel = nil
 	r.mu.Unlock()
 	for _, u := range unsubs {
 		u()
@@ -661,6 +662,7 @@ func (s *Server) registerRelayObservers(r *room, name string, st *relayState) {
 	r.mu.Lock()
 	r.relayUnsub = append(r.relayUnsub, unsubDoc, unsubAw)
 	r.relayLane = relayLane
+	r.relaySentinel = sentinel
 	r.mu.Unlock()
 
 	// Re-read after storing: a failed Start's rollback may have passed over
@@ -896,6 +898,19 @@ func (s *Server) RelayStats() RelayStats {
 	return out
 }
 
+// roomRelaySentinel returns the echo-guard origin r's own observers compare
+// against, read after the room is loaded rather than when Inject was entered:
+// loading can block, and the attach that delivered the update may have been
+// rolled back and replaced by then. Stamping the attach's sentinel instead
+// would leave the room's observers treating a remote update as a local one
+// and publishing it straight back out. nil when the room has no observers,
+// where there is nothing to guard against.
+func roomRelaySentinel(r *room) any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.relaySentinel
+}
+
 // changedAwarenessIDs returns the union of added/updated/removed client IDs.
 func changedAwarenessIDs(ev awareness.UpdateEvent) []uint64 {
 	ids := make([]uint64, 0, len(ev.Added)+len(ev.Updated)+len(ev.Removed))
@@ -918,6 +933,7 @@ func (s *Server) teardownRelayRoom(r *room, name string) {
 	r.relayUnsub = nil
 	relayLane := r.relayLane
 	r.relayLane = nil
+	r.relaySentinel = nil
 	r.mu.Unlock()
 	for _, u := range unsubs {
 		u()
@@ -957,14 +973,6 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 	if !isValidRoomName(in.Room) {
 		return ErrInvalidRoomName
 	}
-	// One load for the whole call: the origin stamped here must be the same
-	// sentinel the room's echo guard holds, and AttachRelay commits both
-	// before Start, so an inject delivered from inside Start sees them.
-	var sentinel any
-	if st := s.relayAttach.Load(); st != nil {
-		sentinel = st.sentinel
-	}
-
 	switch in.Kind {
 	case cluster.KindSync:
 		rm, _, err := s.getOrCreateRoom(ctx, in.Room)
@@ -979,7 +987,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
-		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, sentinel); err != nil {
+		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, roomRelaySentinel(rm)); err != nil {
 			return err
 		}
 		// Rebroadcast to locally-connected peers. broadcastUpdate re-validates
@@ -1000,7 +1008,8 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
-		res, err := rm.awareness.ApplyUpdateWith(in.Data, sentinel, awareness.ApplyOptions{Foreign: true})
+		res, err := rm.awareness.ApplyUpdateWith(in.Data, roomRelaySentinel(rm),
+			awareness.ApplyOptions{Foreign: true})
 		if err != nil {
 			return err
 		}

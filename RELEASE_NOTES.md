@@ -46,6 +46,13 @@ relay's lock only made them wait out a `Start` that already held it: a room
 activated before `Start` reached the lock was dropped silently and never
 subscribed, and nothing repeats the call.
 
+Two further fixes on the same attach path: `Shutdown` cancelled the relay
+context only after joining the outbound lane workers, so it could hang
+forever on an attach that had not finished, and `Sink.Inject` stamped its
+echo-guard origin before loading the room — if the attach was rolled back and
+retried while that load blocked, the room's observers held a different
+sentinel and published the remote update straight back to the cluster.
+
 No API changes.
 
 ## v1.56.0

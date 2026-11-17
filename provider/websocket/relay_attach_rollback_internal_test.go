@@ -207,3 +207,116 @@ func TestUnit_AttachRelay_TeardownDuringStartTakesTheHeldActivation(t *testing.T
 	require.Empty(t, relay.activated,
 		"activated a room that was torn down before the attach finished")
 }
+
+// blockingLoadPersistence parks the first LoadDoc until the test releases
+// it, holding a room's creation open.
+type blockingLoadPersistence struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingLoadPersistence) LoadDoc(string) ([]byte, error) {
+	p.once.Do(func() {
+		close(p.entered)
+		<-p.release
+	})
+	return nil, nil
+}
+
+func (p *blockingLoadPersistence) StoreUpdate(string, []byte) error { return nil }
+
+// injectFromStartRelay injects from a goroutine inside Start, then fails:
+// the injection is still in flight when the attach is rolled back.
+type injectFromStartRelay struct {
+	data      []byte
+	loading   chan struct{} // closed once the injection is inside the room load
+	injected  chan error    // the injection's result, once it finishes
+	published chan cluster.Outbound
+}
+
+func (r *injectFromStartRelay) Start(_ context.Context, sink cluster.Sink) error {
+	go func() {
+		// Its own context, not Start's: a relay is free to deliver with a
+		// per-message context, and one tied to the attach would simply be
+		// cancelled by the rollback instead of resuming mid-load.
+		r.injected <- sink.Inject(context.Background(), cluster.Inbound{
+			Room: "room", Kind: cluster.KindSync, Data: r.data,
+		})
+	}()
+	<-r.loading // the injection is parked in LoadDoc
+	return errors.New("relay start failed")
+}
+
+func (r *injectFromStartRelay) Publish(_ context.Context, out cluster.Outbound) error {
+	select {
+	case r.published <- out:
+	default:
+	}
+	return nil
+}
+
+func (r *injectFromStartRelay) RoomActivated(string)   {}
+func (r *injectFromStartRelay) RoomDeactivated(string) {}
+func (r *injectFromStartRelay) Close() error           { return nil }
+
+// An injection stamps its update with the echo-guard origin of the attach
+// that delivered it. Loading the room can block, and by the time it resumes
+// that attach may have been rolled back and replaced — the room's observers
+// then hold the NEW attach's sentinel. Stamping the old one makes the
+// observers read a remote update as a local edit and publish it straight
+// back to the cluster.
+func TestUnit_Inject_StampsTheSentinelTheRoomsObserversHold(t *testing.T) {
+	doc := crdt.New(crdt.WithClientID(1))
+	txt := doc.GetText("t")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "remote", nil) })
+
+	persistence := &blockingLoadPersistence{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	failing := &injectFromStartRelay{
+		data:      crdt.EncodeStateAsUpdateV1(doc, nil),
+		loading:   persistence.entered,
+		injected:  make(chan error, 1),
+		published: make(chan cluster.Outbound, 8),
+	}
+
+	srv := NewServerWithPersistence(persistence)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	// The first attach fails with its injection parked mid-load, so the room
+	// it creates is wired by the SECOND attach instead.
+	require.Error(t, srv.AttachRelay(failing))
+
+	retry := &recordingRelay{published: make(chan cluster.Outbound, 8)}
+	require.NoError(t, srv.AttachRelay(retry))
+
+	close(persistence.release)
+	require.NoError(t, <-failing.injected) // the room is loaded and wired
+	require.NoError(t, srv.Shutdown(context.Background()))
+
+	require.Empty(t, retry.published,
+		"a remote update was published back to the cluster: it was stamped "+
+			"with a sentinel the room's own echo guard does not hold")
+	require.Equal(t, "remote", srv.GetDoc("room").GetText("t").ToString())
+}
+
+// recordingRelay starts cleanly and records what it is asked to publish.
+type recordingRelay struct {
+	published chan cluster.Outbound
+}
+
+func (r *recordingRelay) Start(context.Context, cluster.Sink) error { return nil }
+
+func (r *recordingRelay) Publish(_ context.Context, out cluster.Outbound) error {
+	select {
+	case r.published <- out:
+	default:
+	}
+	return nil
+}
+
+func (r *recordingRelay) RoomActivated(string)   {}
+func (r *recordingRelay) RoomDeactivated(string) {}
+func (r *recordingRelay) Close() error           { return nil }
