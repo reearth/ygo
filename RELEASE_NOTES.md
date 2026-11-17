@@ -22,13 +22,14 @@ unattached and the call retryable, as before.
 **Behaviour change for relay implementations.** Because the server is wired
 before `Start` runs, a relay can now receive `RoomActivated` and `Publish`
 calls before its own `Start` has returned, and a custom relay that assumes
-`Start` completes first should be checked. Both bundled relays are safe to
-call in that window: `MemRelay`'s callbacks do not depend on `Start`, and the
-Redis relay's `RoomActivated` blocks on the lock `Start` holds and then
-subscribes normally. The one rough edge is the Redis relay's `Publish`, which
-returns `ErrRelayNotStarted` until `Start` sets its started flag — so a local
-edit committed inside that window is counted in `RelayStats.Dropped` and
-logged rather than published, instead of being lost silently as it was before.
+`Start` completes first should be checked. Both bundled relays handle it.
+`MemRelay`'s callbacks do not depend on `Start`. The Redis relay's
+`RoomActivated` already blocked on the lock `Start` holds and then subscribed
+normally, but its `Publish` returned `ErrRelayNotStarted` for as long as
+`Start` was running — contradicting its own documented contract, which
+reserves that error for a relay `Start` has not been called on. `Publish` now
+waits for an in-flight `Start` and publishes once it finishes; it still fails
+fast when no `Start` has been called, and when the `Start` that ran failed.
 
 No API changes.
 

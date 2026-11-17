@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nodes already publish on is the exposure; `AttachRelay` before the server
   takes connections was never affected. A relay must now tolerate
   `RoomActivated` and `Publish` before its own `Start` has returned.
+- **`cluster/redis`: `Publish` waits for an in-flight `Start` instead of
+  failing it.** `Publish` documents `ErrRelayNotStarted` as the answer for a
+  relay `Start` has not been called on, but it also returned it while a
+  `Start` was running — its started flag is only set once `Start` has
+  subscribed and spawned its delivery goroutines. A local edit committed in
+  that window was rejected rather than published. It now blocks until the
+  attempt finishes, and still fails fast when no `Start` has been called or
+  when the one that ran failed. `RoomActivated` and `RoomDeactivated` needed
+  no change: they take the lock `Start` holds, so they already waited.
 
 ## [1.56.0] — 2026-11-16
 
