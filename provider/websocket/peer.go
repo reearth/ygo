@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -34,7 +35,7 @@ type peer struct {
 	// was full under SlowPeerResync. runWriter clears it and sends a full-state
 	// resync once the queue drains, so the peer converges without a reconnect.
 	needsResync       bool
-	closeCode         int           // #104: WS close code queued via enqueueClose (0 = none)
+	closeCode         int           // #104: WS close code queued via enqueueClose or sent for a cancel cause (0 = none); see closingLocked
 	closeReason       string        // #104: WS close reason accompanying closeCode
 	limiter           *rate.Limiter // per-peer inbound-message rate limiter; nil = unlimited (#51)
 	readOnly          bool          // #59: drop this peer's inbound writes (sync step-2/update + awareness)
@@ -445,25 +446,101 @@ func (p *peer) enqueueClose(code int, reason string) {
 		select {
 		case p.writeCh <- nil:
 		default:
-			// Queue full: best-effort direct close (ordering already at risk).
+			// Queue full: the close frame goes out now, ahead of the queued
+			// frames, which are never written after it (see writeToConn),
+			// and the closing handshake still runs.
 			p.sendCloseFrame()
 		}
 	}()
 }
 
-// sendCloseFrame writes the queued WS close control frame then closes the
-// connection. Called only from the writer goroutine (via runWriter) or the
+// closeHandshakeTimeout is how long a peer that has been sent a close frame
+// has to answer with its own before the server closes the connection anyway.
+// Writing the close frame returns once it is in the socket's send buffer, so a
+// peer that is slow to read, such as a browser applying a large state, first
+// reads everything queued ahead of it in the buffers at both ends; a peer that
+// is closed before it answers, and sends anything meanwhile, loses the frame
+// to the reset that follows. Until the read loop ends, the peer keeps its
+// connection and its place in its room, so one that never answers must not
+// keep them long. Five seconds leaves a slow reader time to reach the frame,
+// and holds a peer that never answers for half of what one write may take
+// (writeTimeout).
+const closeHandshakeTimeout = 5 * time.Second
+
+// sendCloseFrame writes the queued WS close control frame and leaves the
+// connection to the closing handshake (RFC 6455, section 1.4): the read loop,
+// which drops input from enqueueClose on, reads until the peer's close frame
+// arrives or closeHandshakeTimeout passes, and its teardown then closes the
+// connection. Closing right after the frame lost it whenever the peer had sent
+// frames the server had not read: a socket closed with input unread, or that
+// input reaches after the close, is reset, and the reset discards what the
+// peer had not yet received, the close frame among it. A close frame already
+// sent for a cancel cause (closeForCause) begins the same handshake. With no
+// close frame to send, or one that cannot be written, the connection is closed
+// at once. Called only from the writer goroutine (via runWriter) or the
 // enqueueClose full-queue fallback.
 func (p *peer) sendCloseFrame() {
 	p.wmu.Lock()
 	code, reason := p.closeCode, p.closeReason
 	p.wmu.Unlock()
-	if code != 0 {
-		_ = p.conn.WriteControl(gws.CloseMessage,
-			gws.FormatCloseMessage(code, reason),
-			time.Now().Add(writeTimeout))
+	if code == 0 {
+		_ = p.conn.Close()
+		return
 	}
-	_ = p.conn.Close()
+	err := p.conn.WriteControl(gws.CloseMessage,
+		gws.FormatCloseMessage(code, reason),
+		time.Now().Add(writeTimeout))
+	if err == nil || errors.Is(err, gws.ErrCloseSent) {
+		err = p.conn.SetReadDeadline(time.Now().Add(closeHandshakeTimeout))
+	}
+	if err != nil {
+		_ = p.conn.Close()
+	}
+}
+
+// closeForCause sends the peer the close frame for a cancel cause (see
+// Server.ServeHTTP) and waits out the closing handshake, as sendCloseFrame
+// leaves its close to it: until the read loop ends on the peer's close frame,
+// closeHandshakeTimeout passes, or the server shuts down. The caller closes the
+// connection then. It runs on the connection's own context-watcher goroutine,
+// so the wait holds up no caller. The frame goes out at once, ahead of the
+// queued frames, which are never written after it (see writeToConn), and
+// nothing is queued for the peer from here on (see closingLocked). The read
+// loop drops the peer's input from here on too, since WriteControl can wait on
+// a writer stuck on a peer that has stopped reading. A frame that cannot be
+// written within closeFrameTimeout ends the wait at once. The wait is a timer,
+// not sendCloseFrame's read deadline, because this runs beside the read loop,
+// which clears its read deadline on a peer's first frame.
+func (p *peer) closeForCause(code int, reason string) {
+	p.inputClosed.Store(true)
+	p.wmu.Lock()
+	if p.closeCode == 0 {
+		p.closeCode, p.closeReason = code, reason
+	}
+	p.wmu.Unlock()
+	err := p.conn.WriteControl(gws.CloseMessage,
+		gws.FormatCloseMessage(code, reason),
+		time.Now().Add(closeFrameTimeout))
+	if err != nil && !errors.Is(err, gws.ErrCloseSent) {
+		return
+	}
+	timer := time.NewTimer(closeHandshakeTimeout)
+	defer timer.Stop()
+	select {
+	case <-p.done:
+	case <-p.server.shutdownCh:
+	case <-timer.C:
+	}
+}
+
+// closingLocked reports, with wmu held, whether a close frame is queued for the
+// peer or has been sent to it. No data frame is queued for a closing peer: each
+// enqueue site asks this first, so nothing is queued to be dropped later. RFC
+// 6455 (section 5.5.1) lets an endpoint send no data frame after its Close
+// frame, and frames queued during the closing handshake would fill the queue
+// and close the connection as a slow peer's before the peer had answered.
+func (p *peer) closingLocked() bool {
+	return p.closeCode != 0
 }
 
 // applyAwareness applies an awareness frame from this peer, recording which
@@ -857,9 +934,10 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 	for _, other := range targets {
 		// Guard against sending to a closed channel: check p.closed under
 		// wmu before attempting the channel send. handleDisconnect sets closed
-		// under wmu before closing writeCh, so this is race-free.
+		// under wmu before closing writeCh, so this is race-free. A closing
+		// peer is skipped too (closingLocked).
 		other.wmu.Lock()
-		if other.closed {
+		if other.closed || other.closingLocked() {
 			other.wmu.Unlock()
 			continue
 		}
@@ -890,13 +968,14 @@ func (p *peer) broadcast(data []byte, excludeSelf bool) {
 
 // write enqueues a raw binary message for delivery to this peer via the
 // per-peer writer goroutine. H2: skips the write if the peer has already
-// been marked closed. If the queue is full the peer is disconnected:
-// a dropped handshake reply (sendSync / sendAwareness) leaves the remote
-// peer hung waiting for a response it will never receive. Closing the
-// connection forces a reconnect-and-resync, matching the broadcast contract.
+// been marked closed, or is closing (closingLocked). If the queue is full
+// the peer is disconnected: a dropped handshake reply (sendSync /
+// sendAwareness) leaves the remote peer hung waiting for a response it will
+// never receive. Closing the connection forces a reconnect-and-resync,
+// matching the broadcast contract.
 func (p *peer) write(data []byte) {
 	p.wmu.Lock()
-	if p.closed {
+	if p.closed || p.closingLocked() {
 		p.wmu.Unlock()
 		return
 	}
@@ -955,7 +1034,9 @@ func (p *peer) runWriter() {
 // is the sole goroutine that ever calls conn.WriteMessage (all sends funnel
 // through writeCh), and gorilla/websocket permits conn.Close() — used by the
 // disconnect path and teardown — to run concurrently with a write. Returns false
-// when the writer goroutine should exit.
+// when the writer goroutine should exit. A write refused because a close frame
+// went out first is not logged as a failure: that close's handshake ends the
+// connection.
 func (p *peer) writeToConn(data []byte) bool {
 	p.wmu.Lock()
 	closed := p.closed
@@ -974,6 +1055,18 @@ func (p *peer) writeToConn(data []byte) bool {
 		return false
 	}
 	if err := p.conn.WriteMessage(gws.BinaryMessage, data); err != nil {
+		if errors.Is(err, gws.ErrCloseSent) {
+			// The close frame went out ahead of this frame, from enqueueClose's
+			// full-queue fallback or for a cancel cause (closeForCause), and
+			// gorilla writes nothing after it. What is still queued is dropped
+			// now rather than held until the handshake ends; a closing peer is
+			// queued nothing more (closingLocked), and handleDisconnect closes
+			// writeCh, which ends this loop.
+			p.server.log().Debug("close frame sent ahead of queued frames; dropping them", "room", p.roomName)
+			for range p.writeCh {
+			}
+			return false
+		}
 		p.server.log().Warn("write to peer failed; closing", "room", p.roomName, "err", err)
 		return false
 	}
