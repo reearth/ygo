@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -60,18 +61,14 @@ const closeFrameTimeout = time.Second
 // frame payload is at most 125 bytes, two of them the code.
 const maxCloseReasonBytes = 123
 
-// closeFrameFor returns the close frame a cancel cause asks for, or nil when
-// the cause names no sendable close code.
-func closeFrameFor(cause error) []byte {
+// causeClose returns the close code and reason a cancel cause asks for; ok is
+// false when the cause names no sendable close code.
+func causeClose(cause error) (code int, reason string, ok bool) {
 	var cc interface{ CloseCode() (int, string) }
 	if !errors.As(cause, &cc) {
-		return nil
+		return 0, "", false
 	}
-	code, reason, ok := sendableClose(cc.CloseCode())
-	if !ok {
-		return nil
-	}
-	return gws.FormatCloseMessage(code, reason)
+	return sendableClose(cc.CloseCode())
 }
 
 // sendableClose returns the code and reason a close frame carries for code
@@ -2049,7 +2046,10 @@ func (s *Server) failRoomLoad(r *room, name string, loadErr error) {
 // CloseCode() (int, string), directly or wrapped, ServeHTTP first sends the
 // peer a close frame with that code and reason, so an embedder can end one
 // session with an application close code (4000–4999) such as "session
-// revoked". Only 1000 and 3000–4999 are sent; the reason is truncated to 123
+// revoked", and waits up to five seconds for the peer's own close frame
+// before it closes the socket (RFC 6455's closing handshake), since a socket
+// closed while the peer is still sending is reset and the peer then loses the
+// frame. Only 1000 and 3000–4999 are sent; the reason is truncated to 123
 // bytes and invalid UTF-8 is dropped from it. The peer's input is ignored from
 // the cancel on. Any other cause, or an unsendable code, closes the socket
 // without a close frame, as before.
@@ -2245,12 +2245,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			// A cause naming a close code is sent to the peer before the socket
-			// closes. The read loop drops input meanwhile, since WriteControl can
-			// wait on a writer stuck on a peer that has stopped reading.
-			if frame := closeFrameFor(context.Cause(ctx)); frame != nil {
-				p.inputClosed.Store(true)
-				_ = ws.WriteControl(gws.CloseMessage, frame, time.Now().Add(closeFrameTimeout))
+			// A cause naming a close code is sent to the peer, with the closing
+			// handshake, before the socket closes (closeForCause).
+			if code, reason, ok := causeClose(context.Cause(ctx)); ok {
+				p.closeForCause(code, reason)
 			}
 			_ = ws.Close() // close errors during teardown are expected; not logged
 		case <-s.shutdownCh:
@@ -2285,15 +2283,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	firstMessage := true
 	for {
-		_, data, err := ws.ReadMessage()
+		_, msg, err := ws.NextReader()
 		if err != nil {
 			break
 		}
 		if p.inputClosed.Load() {
 			// A close is queued or sent: nothing more from this peer lands.
-			// continue, not break: the deferred teardown would drop the
-			// queued close frame or race the one being sent.
+			// Its input is dropped as it is read, through io.Discard's small
+			// pooled buffer: until the peer's close frame ends the loop, a peer
+			// could otherwise make the server hold a frame as large as
+			// MaxMessageBytes for nothing. continue, not break: the deferred
+			// teardown would drop the queued close frame or race the one being
+			// sent.
+			if _, err := io.Copy(io.Discard, msg); err != nil {
+				break
+			}
 			continue
+		}
+		data, err := io.ReadAll(msg)
+		if err != nil {
+			break
 		}
 		if firstMessage {
 			// Clear the handshake deadline; subsequent reads can take as long

@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.3] — 2026-11-17
+
+### Fixed
+
+- **`provider/websocket`: a peer the server closes with a code receives the
+  code even while it is still sending.** The server wrote the close frame and
+  closed the socket straight after. Frames the peer had sent that the server
+  had not read, such as awareness a browser sends while it applies a large
+  SyncStep2, then reached a closed socket, which resets the connection, and the
+  reset discarded what the peer had not yet received, the close frame among it:
+  the peer saw an abnormal closure (1006) and not the code of the
+  `OnPeerUpdate` refusal, failed token auth or malformed sync message that
+  closed it. The server now does RFC 6455's closing handshake: it writes the
+  close frame, reads and drops what the peer sends until the peer's own close
+  frame arrives or five seconds pass, then closes the connection. A close frame
+  that cannot be written closes the connection at once, as before. Frames for
+  a peer being closed are dropped rather than queued, since nothing after the
+  close frame is written, so the room's broadcasts cannot fill its write queue
+  and close it as a slow peer before it answers. The close for a cancel cause
+  that names a close code (`ServeHTTP`) and the close the server writes at once
+  when the peer's write queue is full do the same handshake. What a peer being
+  closed sends is dropped as it is read, through a small buffer, so the wait
+  never holds a frame as large as `MaxMessageBytes`.
+
 ## [1.56.2] — 2026-11-17
 
 ### Fixed

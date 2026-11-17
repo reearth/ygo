@@ -1,3 +1,31 @@
+## v1.56.3
+
+**Who is affected: servers that close a peer with a code while the peer is
+still sending.** The server closes a peer with a code when `OnPeerUpdate`
+refuses it, when its token auth fails, when it sends a malformed sync
+message, and when an embedder cancels `ServeHTTP`'s request context with a
+cause that names a close code. It wrote the close frame and closed the socket
+straight after. A browser that had sent frames the server had not yet read,
+such as awareness it sends while it applies a large SyncStep2, had them
+arrive at a closed socket. That resets the connection, and the reset discards
+whatever the browser had not yet received, the close frame among it, so the
+browser reported 1006 (abnormal closure) and not the code. A client that
+tells refusals apart by their code, to stop retrying a permanent one or to
+back off a transient one, could not tell them apart.
+
+The server now does the WebSocket closing handshake: it writes the close
+frame, reads and drops what the peer sends until the peer's own close frame
+arrives, then closes the connection. A peer that has not answered within five
+seconds is closed anyway. Frames for a peer being closed are dropped
+meanwhile, since nothing after the close frame is written, so the room's
+broadcasts cannot fill its write queue and close it as a slow peer before it
+answers. The close the server writes at once when the peer's write queue is
+full does the same handshake, and the frames still queued behind it are
+dropped as soon as it is written. While the server waits for a peer's answer,
+it drops what the peer sends as it reads it, through a small buffer, so a peer
+cannot make it hold a frame as large as `MaxMessageBytes` for nothing. There
+are no API or wire format changes.
+
 ## v1.56.2
 
 **Who is affected: clustered deployments whose rooms can be evicted and
