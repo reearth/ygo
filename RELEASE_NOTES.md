@@ -1,9 +1,11 @@
 ## v1.56.1
 
 **Who is affected: clustered deployments that call `AttachRelay` on a relay
-other nodes are already publishing on.** Attaching before the server takes
-connections — what `cmd/ygo-server` does, and what the docs tell you to do —
-was never exposed.
+other nodes are already publishing on.** What matters is whether the relay
+delivers anything while `Start` runs, not whether this server is taking
+connections yet: the delivery itself creates the room, so attaching before
+you serve — what `cmd/ygo-server` does — narrows the window but does not
+close it.
 
 `AttachRelay` started the relay before recording it on the server. A message
 delivered in that window found the server unattached: the room it created came

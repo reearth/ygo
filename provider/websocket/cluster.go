@@ -130,25 +130,59 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 	// room's publishes — and never the CRDT commit path. Ready before the
 	// state is published, so anything gated on an attached relay (getOrCreateRoom
 	// registering observers) always finds the map.
+	// Map and state go in together: ensureRelayLane reads both under this
+	// lock, so it never installs a lane against an attach that has gone.
 	s.relayLanesMu.Lock()
 	s.relayLanes = make(map[string]*relayRoomLane)
-	s.relayLanesMu.Unlock()
 	s.relayAttach.Store(&relayState{
 		relay:    r,
 		sentinel: &relayOriginSentinel{},
 		ctx:      ctx,
 		cancel:   cancel,
 	})
+	s.relayLanesMu.Unlock()
 
 	// Committed first so delivery from inside Start lands on a wired server;
 	// undone here if Start fails, which keeps the attach retryable.
 	if err := r.Start(ctx, s); err != nil {
-		s.relayAttach.Store(nil)
-		s.retireRelayLanes()
+		// Clear the state before unwiring, so a room created from here on
+		// finds no relay and nothing re-wires behind the rollback.
+		s.retireRelayLanes(true)
+		s.detachRelayRooms()
 		cancel()
 		return err
 	}
 	return nil
+}
+
+// detachRelayRooms unsubscribes the relay observers of every resident room
+// and forgets its lane. Only AttachRelay's rollback needs it: a room the
+// failed attempt wired would otherwise keep feeding a retired lane, and a
+// later attach reuses the existing room rather than registering observers
+// again, so every local edit in it would be enqueued, find no lane and be
+// counted as a relay drop for as long as the room stayed resident.
+//
+// A room whose registerRelayObservers is already past its own state load can
+// still finish wiring behind this; it is an error path of an error path, and
+// the alternative is blocking the rollback on a room load.
+func (s *Server) detachRelayRooms() {
+	s.rmu.RLock()
+	rooms := make([]*room, 0, len(s.rooms))
+	for _, r := range s.rooms {
+		rooms = append(rooms, r)
+	}
+	s.rmu.RUnlock()
+
+	for _, r := range rooms {
+		r.mu.Lock()
+		unsubs := r.relayUnsub
+		r.relayUnsub = nil
+		r.relayLane = nil
+		r.mu.Unlock()
+		for _, u := range unsubs {
+			u()
+		}
+	}
 }
 
 // ensureRelayLane creates and starts a FRESH outbound lane for room, for the
@@ -198,12 +232,13 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 // lane's done; the other observes the map entry no longer matches and skips
 // closing (avoiding a double-close panic).
 func (s *Server) ensureRelayLane(room string) *relayRoomLane {
-	st := s.relayAttach.Load()
-	if st == nil {
-		return nil // no relay attached
-	}
 	s.relayLanesMu.Lock()
-	if s.relayLanes == nil {
+	// Both under this lock: a state loaded before it could belong to an
+	// attach that has since been rolled back, and the worker below would
+	// then start on an already-cancelled context and exit at once, leaving
+	// the room a lane nothing drains.
+	st := s.relayAttach.Load()
+	if st == nil || s.relayLanes == nil {
 		s.relayLanesMu.Unlock()
 		return nil // no relay attached
 	}
@@ -351,8 +386,15 @@ func (s *Server) discardRelayLane(room string, l *relayRoomLane) {
 // this snapshot, and only that call closes its done); one that arrives after
 // finds s.relayLanes[room] no longer matching (nil map) and skips its own
 // close — never a double close.
-func (s *Server) retireRelayLanes() {
+// detach also clears the attach state under the same lock, so no lane can be
+// installed against an attach that is going away (see ensureRelayLane).
+// Shutdown passes false: the relay stays attached, its context is what stops
+// delivery.
+func (s *Server) retireRelayLanes(detach bool) {
 	s.relayLanesMu.Lock()
+	if detach {
+		s.relayAttach.Store(nil)
+	}
 	lanes := s.relayLanes
 	s.relayLanes = nil
 	for _, l := range lanes {

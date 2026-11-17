@@ -1649,7 +1649,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// relay is commonly shared across multiple in-process Servers (the
 	// MemRelay pattern) and Closing it would stop delivery for all of them
 	// (FIX C). No-op when no relay is attached.
-	s.retireRelayLanes()
+	s.retireRelayLanes(false)
 	s.waitRelayWorkers(ctx)
 	if st := s.relayAttach.Load(); st != nil {
 		st.cancel()

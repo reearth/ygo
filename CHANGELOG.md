@@ -21,9 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window left the echo sentinel nil, and all four fields were read off-lock,
   which the race detector reported. The attach state is now one atomic value
   committed before `Start` and undone if `Start` fails, so a Start failure
-  still leaves the server unattached and retryable. Attaching to a relay other
-  nodes already publish on is the exposure; `AttachRelay` before the server
-  takes connections was never affected. A relay must now tolerate
+  still leaves the server unattached and retryable. The exposure is a relay that
+  delivers during `Start` — attaching to a bus other nodes already publish on
+  — and it does not depend on this server accepting connections yet, since
+  the relay itself creates the room. A relay must now tolerate
   `RoomActivated` and `Publish` before its own `Start` has returned.
 - **`cluster/redis`: `Publish` waits for an in-flight `Start` instead of
   failing it.** `Publish` documents `ErrRelayNotStarted` as the answer for a
