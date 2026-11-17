@@ -235,12 +235,12 @@ type injectFromStartRelay struct {
 	published chan cluster.Outbound
 }
 
-func (r *injectFromStartRelay) Start(_ context.Context, sink cluster.Sink) error {
+func (r *injectFromStartRelay) Start(ctx context.Context, sink cluster.Sink) error {
 	go func() {
-		// Its own context, not Start's: a relay is free to deliver with a
-		// per-message context, and one tied to the attach would simply be
-		// cancelled by the rollback instead of resuming mid-load.
-		r.injected <- sink.Inject(context.Background(), cluster.Inbound{
+		// Start's own context, which the rollback cancels. That does not
+		// save the injection: cancellation is only observed after the update
+		// has been applied, so it is still stamped and still echoed.
+		r.injected <- sink.Inject(ctx, cluster.Inbound{
 			Room: "room", Kind: cluster.KindSync, Data: r.data,
 		})
 	}()
@@ -293,13 +293,16 @@ func TestUnit_Inject_StampsTheSentinelTheRoomsObserversHold(t *testing.T) {
 	require.NoError(t, srv.AttachRelay(retry))
 
 	close(persistence.release)
-	require.NoError(t, <-failing.injected) // the room is loaded and wired
+	// Cancelled by the rollback, but only once the update is already
+	// applied — which is exactly why the stamped origin has to be right.
+	require.ErrorIs(t, <-failing.injected, context.Canceled)
 	require.NoError(t, srv.Shutdown(context.Background()))
 
 	require.Empty(t, retry.published,
 		"a remote update was published back to the cluster: it was stamped "+
 			"with a sentinel the room's own echo guard does not hold")
-	require.Equal(t, "remote", srv.GetDoc("room").GetText("t").ToString())
+	require.Equal(t, "remote", srv.GetDoc("room").GetText("t").ToString(),
+		"the update was applied despite the cancellation")
 }
 
 // recordingRelay starts cleanly and records what it is asked to publish.

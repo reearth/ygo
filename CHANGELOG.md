@@ -45,7 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   room can block, and the attach that delivered it may have been rolled back
   and replaced by then — the room's observers hold the new attach's sentinel.
   The update then read as a local edit and was published straight back out.
-  The origin is now read from the room itself, after it is loaded.
+  Cancelling the first attach does not prevent this: an injection carrying
+  that attach's context observes the cancellation only after the update has
+  been applied. The origin is now read from the room itself, after it is
+  loaded.
 - **`cluster/redis`: `Publish` waits for an in-flight `Start` instead of
   failing it.** `Publish` documents `ErrRelayNotStarted` as the answer for a
   relay `Start` has not been called on, but it also returned it while a
