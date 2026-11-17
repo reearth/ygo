@@ -351,6 +351,55 @@ func (d *Doc) SetApplyReport(report func(origin any, report ApplyReport)) {
 	d.applyReport = report
 }
 
+// WithApplyCheck sets check, which judges what each remote apply (ApplyUpdate
+// and its V1 and V2 forms) leaves the document holding, for a bound that an
+// update's bytes do not show: where an item lands, and what a deleted format
+// leaves formatted, depend on what the document already holds. check runs
+// under the document's lock once the apply has integrated the update's
+// structs and applied its delete set, before the transaction commits, with
+// the apply's origin and an ApplyView of the document. It is not called for an
+// apply that changed nothing, or for a local transaction.
+//
+// An error from check refuses the update: the apply is rolled back, the
+// document is left as it was, byte for byte, no observer fires, and the apply
+// returns ErrApplyCheck and the check's error in a RefusedUpdateError. What
+// the drain of the parked queue lands is checked on its own, since other
+// updates parked it: a refusal rolls back the drain alone and parks its
+// structs again, as for a drain the apply budget stops, and the apply returns
+// ErrApplyCheckDrain with the check's error while the update stands. Each
+// later apply tries those structs again and checks them again. A panic in
+// check rolls back the apply, or the drain, and is raised once the
+// transaction has committed.
+//
+// A document with a check applies remote updates whole or not at all, as
+// with WithWholeOrNothingApplies, so it refuses every remote update that
+// carries a move or a subdocument, and every failed remote apply on it returns
+// a RefusedUpdateError.
+//
+// The cost is the record and the count each apply keeps, as for
+// WithWholeOrNothingApplies and WithApplyBudget, and the call of check.
+// Every reader and writer of the document waits for check, so it must cost
+// in proportion to the change (ApplyView.ChangedTypes), not to the document.
+func WithApplyCheck(check func(origin any, view *ApplyView) error) DocOption {
+	return func(d *Doc) { d.applyCheck = check }
+}
+
+// SetApplyCheck sets the check of WithApplyCheck on a document already made,
+// or with nil removes it, for an owner that loads trusted state first. It
+// takes the document's lock.
+func (d *Doc) SetApplyCheck(check func(origin any, view *ApplyView) error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.applyCheck = check
+}
+
+// appliesWholeOrNothing is whether d rolls back a remote apply that fails:
+// with WithWholeOrNothingApplies, or with an apply check, whose refusal comes
+// once the update has integrated. Its caller holds d.mu.
+func (d *Doc) appliesWholeOrNothing() bool {
+	return d.wholeOrNothing || d.applyCheck != nil
+}
+
 // updateSub pairs a unique subscription ID with its callback so that
 // unsubscribe closures can find and remove the right entry even when
 // callbacks are removed out-of-order.
@@ -407,17 +456,22 @@ type Doc struct {
 	// with whole-or-nothing applies, or nil.
 	applying *applyJournal
 	// applyBudget is the budget of WithApplyBudget, allowedRoots the list of
-	// WithAllowedRoots, refusedContent the kinds of WithRefusedContent and
-	// applyReport the callback of WithApplyReport, each nil for none;
-	// counting is the tally of the remote apply in progress on a document
-	// with any of them, or nil, and reporting the tally of an apply whose
-	// commit is to report it, from the apply's end to the report, or nil.
+	// WithAllowedRoots, refusedContent the kinds of WithRefusedContent,
+	// applyReport the callback of WithApplyReport and applyCheck the check of
+	// WithApplyCheck, each nil for none; counting is the tally of the remote
+	// apply in progress on a document with any of them, or nil, and reporting
+	// the tally of an apply whose commit is to report it, from the apply's end
+	// to the report, or nil.
 	applyBudget    func(origin any) ApplyBudget
 	allowedRoots   func(origin any) []string
 	refusedContent func(origin any) []ContentKind
 	applyReport    func(origin any, report ApplyReport)
+	applyCheck     func(origin any, view *ApplyView) error
 	counting       *applyTally
 	reporting      *applyTally
+	// checkPanic is what the apply check of the transaction running on the
+	// document panicked with, kept for the commit to raise, or nil.
+	checkPanic any
 	// parkedBy is what the document keeps of the apply that parked each
 	// parked struct, on a document with a budget or a roots list, and nil
 	// when nothing is parked; rootsDropped counts, by client, the parked
@@ -1064,6 +1118,14 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			d.reporting = nil
 			if r == nil {
 				r = reportApplyRecovered(txn, report)
+			}
+		}
+		// A panic of the apply check, kept while the apply or its drain was
+		// rolled back, is raised after the unlock too (WithApplyCheck).
+		if checked := d.checkPanic; checked != nil {
+			d.checkPanic = nil
+			if r == nil {
+				r = checked
 			}
 		}
 

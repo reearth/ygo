@@ -612,8 +612,11 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		if applying {
 			retErr = drainAfterApply(txn, retErr)
 		}
-		endRemoteApply(txn, retErr != nil)
+		drainRefused := endRemoteApply(txn, retErr != nil)
 		retErr = endApplyTally(txn, retErr)
+		if retErr == nil {
+			retErr = drainRefused
+		}
 	}()
 
 	sv := txn.doc.store.StateVector()
@@ -790,7 +793,8 @@ func applyV2Txn(txn *Transaction, update []byte) (retErr error) {
 		return err
 	}
 
-	return nil
+	// The apply check judges what the update left, before the drain.
+	return checkApply(txn)
 }
 
 func decodeItemV2(dec *v2Decoder, doc *Doc, client ClientID, clock uint64, info byte) (*Item, uint64, error) {
@@ -1016,7 +1020,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentAny(vals...), nil
 
 	case wireDoc:
-		if doc.wholeOrNothing {
+		if doc.appliesWholeOrNothing() {
 			return nil, errWholeOrNothingContent
 		}
 		guid, err := dec.readString()
@@ -1031,7 +1035,7 @@ func decodeContentV2(dec *v2Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentDoc(newSubdocFromOpts(guid, optsAny)), nil
 
 	case wireMove:
-		if doc.wholeOrNothing {
+		if doc.appliesWholeOrNothing() {
 			return nil, errWholeOrNothingContent
 		}
 		clientU, err := dec.restDec.ReadVarUint()

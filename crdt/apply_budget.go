@@ -24,13 +24,13 @@ var ErrRootNotAllowed = fmt.Errorf("%w: it writes under a root the document does
 
 // RefusedUpdateError is the error a remote apply (ApplyUpdate and its V1 and
 // V2 forms) returns on a document with WithApplyBudget, WithAllowedRoots,
-// WithRefusedContent or WithApplyReport when the apply fails, for any
-// reason, with what it did before it stopped.
+// WithRefusedContent, WithApplyReport or WithApplyCheck when the apply fails,
+// for any reason, with what it did before it stopped.
 //
 // Err is why it failed: ErrApplyBudget, ErrRootNotAllowed,
-// ErrContentNotAllowed, or any other error of a remote apply, such as
-// ErrIntegrateScanBudget or one wrapping ErrInvalidUpdate. Unwrap returns it,
-// so errors.Is matches it, and Error is its message.
+// ErrContentNotAllowed, ErrApplyCheck, or any other error of a remote apply,
+// such as ErrIntegrateScanBudget or one wrapping ErrInvalidUpdate. Unwrap
+// returns it, so errors.Is matches it, and Error is its message.
 //
 // Decoded is the values the apply read, the run that passed the budget
 // included. Structs and Bytes are the structs of the update the apply added
@@ -116,8 +116,8 @@ func over(limit, used int) bool {
 }
 
 // tally is the tally of the remote apply running on d, or nil when none runs,
-// when d has no budget, roots list, refused content kinds or report, or when
-// d is nil.
+// when d has no budget, roots list, refused content kinds, report or apply
+// check, or when d is nil.
 func (d *Doc) tally() *applyTally {
 	if d == nil {
 		return nil
@@ -126,11 +126,11 @@ func (d *Doc) tally() *applyTally {
 }
 
 // beginApplyTally starts the tally of txn's apply when its document has a
-// budget, a roots list, refused content kinds or a report, asking each
-// callback once, with the apply's origin.
+// budget, a roots list, refused content kinds, a report or an apply check,
+// asking each callback once, with the apply's origin.
 func beginApplyTally(txn *Transaction) {
 	d := txn.doc
-	if d.applyBudget == nil && d.allowedRoots == nil && d.refusedContent == nil && d.applyReport == nil {
+	if d.applyBudget == nil && d.allowedRoots == nil && d.refusedContent == nil && d.applyReport == nil && d.applyCheck == nil {
 		return
 	}
 	// The tally starts before the callbacks run, so an apply whose callback
@@ -169,7 +169,7 @@ func endApplyTally(txn *Transaction, err error) error {
 		return err
 	}
 	d.counting = nil
-	if len(t.rootDrops) > 0 && (err == nil || !d.wholeOrNothing) {
+	if len(t.rootDrops) > 0 && (err == nil || !d.appliesWholeOrNothing()) {
 		if d.rootsDropped == nil {
 			d.rootsDropped = make(map[ClientID]int)
 		}

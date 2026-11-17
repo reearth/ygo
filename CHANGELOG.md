@@ -96,6 +96,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WithWholeOrNothingApplies` takes back leaves none of its splits in
   `Split`. The option bounds and refuses nothing, and a panic of its callback
   reaches the apply's caller once the commit has finished.
+- **`crdt`: `WithApplyCheck` refuses a remote update by what it leaves the
+  document holding.** Its check, also set by `Doc.SetApplyCheck`, is called
+  under the document's lock once a remote apply has integrated the update's
+  structs and applied its delete set, before the transaction commits, with
+  the apply's origin and an `ApplyView` of the document. An error from it
+  refuses the update: the apply is rolled back, the document is left byte for
+  byte as it was, no observer fires, and the apply returns `ErrApplyCheck`,
+  which wraps `ErrInvalidUpdate`, and the check's error in a
+  `RefusedUpdateError`. What the drain of the parked queue lands is checked
+  on its own: a refusal rolls back the drain alone and parks its structs
+  again, and the apply returns `ErrApplyCheckDrain` with the check's error
+  while the update stands. A panic in the check rolls back the apply, or the
+  drain, and reaches the caller once the transaction has committed.
+  `ApplyView` reads the document without its lock (`TextString`,
+  `TextDelta`, `MapGet`, `MapEntries`, `ArraySlice`, `ChangedTypes`), cannot
+  write, reads only its own document and panics once the check has returned.
+  A document with a check applies remote updates whole or nothing, as with
+  `WithWholeOrNothingApplies`.
 
 ### Changed
 

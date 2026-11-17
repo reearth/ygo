@@ -55,9 +55,10 @@ type integrateScanBudgetExceeded struct{ left uint32 }
 
 // drainStopped is the panic drainPending raises again, for drainParked, when
 // the scan bound, the apply budget or the allowed roots stop the drain rather
-// than fail it. scan is whether the scan bound stopped it, and left is then
-// what the bound left the scan that tripped; dropped is the error of a parked
-// struct the drain dropped before it stopped.
+// than fail it, and the panic checkDrain raises when the apply check refuses
+// what the drain landed. scan is whether the scan bound stopped it, and left
+// is then what the bound left the scan that tripped; dropped is the error of a
+// parked struct the drain dropped before it stopped.
 type drainStopped struct {
 	scan    bool
 	left    uint32
@@ -674,8 +675,11 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		if applying {
 			retErr = drainAfterApply(txn, retErr)
 		}
-		endRemoteApply(txn, retErr != nil)
+		drainRefused := endRemoteApply(txn, retErr != nil)
 		retErr = endApplyTally(txn, retErr)
+		if retErr == nil {
+			retErr = drainRefused
+		}
 	}()
 
 	dec := encoding.NewDecoder(update)
@@ -741,7 +745,8 @@ func applyV1Txn(txn *Transaction, update []byte) (retErr error) {
 		return err
 	}
 
-	return nil
+	// 3. The apply check judges what the update left, before the drain.
+	return checkApply(txn)
 }
 
 // drainAfterApply drains the pending queue last in every apply that began to
@@ -1157,13 +1162,15 @@ func (txn *Transaction) drainable() bool {
 // roots stop the drain, it keeps what it integrated, or on such a document is
 // rolled back to where it began, and parks the rest again without failing the
 // apply, whose sender did not send the parked items; a later apply, from any
-// sender, tries them again (drainable).
+// sender, tries them again (drainable). A drain whose result the apply check
+// refuses is stopped the same way (checkDrain).
 func drainParked(txn *Transaction, drain func(*Transaction) error) (err error) {
 	s := txn.doc.store
 	j := txn.doc.applying
 	t := txn.doc.tally()
-	// Only a drain that tries the parked items can change them or trip the bound.
-	journaled := j != nil && txn.drainable()
+	// Only a drain that tries the parked items can change them or trip the
+	// bound; under an apply check, a retry of parked deletes is checked too.
+	journaled := j != nil && (txn.drainable() || j.check != nil && len(s.pendingDs.clients) > 0)
 	from := txn.scanLeft
 	var counted drainCount
 	if journaled {
@@ -1225,7 +1232,10 @@ func drainParked(txn *Transaction, drain func(*Transaction) error) (err error) {
 			retryPendingDsUntilStopped(txn)
 		}
 	}()
-	return drain(txn)
+	if err = drain(txn); err == nil && journaled {
+		checkDrain(txn, j)
+	}
+	return err
 }
 
 // retryPendingDsUntilStopped is retryPendingDs for after a drain stopped: a
@@ -1552,7 +1562,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentAny(vals...), nil
 
 	case wireDoc:
-		if doc.wholeOrNothing {
+		if doc.appliesWholeOrNothing() {
 			return nil, errWholeOrNothingContent
 		}
 		// A guid that is not UTF-8 is refused here, where WithGUID would panic.
@@ -1568,7 +1578,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		return NewContentDoc(newSubdocFromOpts(guid, optsAny)), nil
 
 	case wireMove:
-		if doc.wholeOrNothing {
+		if doc.appliesWholeOrNothing() {
 			return nil, errWholeOrNothingContent
 		}
 		clientU, err := dec.ReadVarUint()

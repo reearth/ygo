@@ -206,9 +206,9 @@ document and returns `crdt.ErrApplyBudget` or `crdt.ErrRootNotAllowed` in a
 that waits on a missing clock counts when it parks, so a sender cannot pass
 the budget by writing behind a clock it never sends. The document keeps what
 the apply integrated before it stopped, as for the scan bound, and keeps
-nothing on a document with `WithWholeOrNothingApplies`, which is the one
-option that rolls an apply back. A budget that limits nothing, or a list that
-names every root an update writes, changes nothing an apply does.
+nothing on a document with `WithWholeOrNothingApplies` or `WithApplyCheck`,
+the two options that roll an apply back. A budget that limits nothing, or a
+list that names every root an update writes, changes nothing an apply does.
 
 **Kinds of content a document refuses.**
 `crdt.WithRefusedContent(func(origin any) []crdt.ContentKind)` names, per
@@ -234,6 +234,25 @@ what the document kept of it, with the counts of the `RefusedUpdateError` it
 returns; one that leaves the document as it was, as every refusal does with
 `WithWholeOrNothingApplies`, reports nothing. The option bounds nothing and
 refuses nothing.
+
+**A check of what each remote update leaves the document holding.** An
+update's bytes do not show what it does to a document: where each item lands,
+and what a deleted format leaves formatted, depend on what the document
+already holds. `crdt.WithApplyCheck(func(origin any, view *crdt.ApplyView)
+error)` is called once a remote apply has integrated, before its transaction
+commits, with the apply's origin and a view of the document as the update left
+it. An error refuses the update: the apply is rolled back, so the document is
+left byte for byte as it was, no observer fires and nothing is relayed, and
+the apply returns `crdt.ErrApplyCheck` and the check's error in a
+`crdt.RefusedUpdateError`. What the drain of the parked queue lands was parked
+by other updates, so it is checked on its own: a refusal rolls back the drain
+alone, and the apply returns `crdt.ErrApplyCheckDrain` while the update
+stands. A panic in the check rolls back the apply, or the drain, and then
+reaches the caller. The view reads without the document's lock, which the
+apply holds, cannot write, and reads nothing once the check returns. A
+document with a check applies remote updates whole or not at all, as with
+`WithWholeOrNothingApplies`. The check runs under the document's lock, so it
+must cost in proportion to the change (`ApplyView.ChangedTypes`).
 
 **Who is affected:** servers that apply updates from peers, where one update
 places many items among the ones a document holds.

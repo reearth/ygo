@@ -1106,6 +1106,11 @@ func (txt *YText) ToDelta() []Delta {
 		doc.mu.RLock()
 		defer doc.mu.RUnlock()
 	}
+	return txt.toDeltaLocked()
+}
+
+// toDeltaLocked is ToDelta for a caller that holds the document's lock.
+func (txt *YText) toDeltaLocked() []Delta {
 	var deltas []Delta
 	currentAttrs := make(Attributes)
 

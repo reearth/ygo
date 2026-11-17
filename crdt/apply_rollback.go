@@ -32,6 +32,11 @@ type applyJournal struct {
 	// grew, as the apply found it (keepQueueFor).
 	slotsCopied bool
 	queuedAs    map[*Item]Item
+	// check is the document's apply check, read as the apply begins, and
+	// drainRefused its refusal of the drain, which was rolled back while the
+	// update stands (checkDrain).
+	check        func(origin any, view *ApplyView) error
+	drainRefused error
 }
 
 // applyPoint is a point of an apply that a rollback can return the document to.
@@ -104,26 +109,31 @@ type formatFlags struct {
 	gen        uint64
 }
 
-// beginRemoteApply starts txn's journal when its document has whole-or-nothing
-// applies; sv is the store's state vector as the apply begins.
+// beginRemoteApply starts txn's journal when its document applies remote
+// updates whole or not at all; sv is the store's state vector as the apply
+// begins.
 func beginRemoteApply(txn *Transaction, sv StateVector) {
-	if !txn.doc.wholeOrNothing {
+	if !txn.doc.appliesWholeOrNothing() {
 		return
 	}
-	j := &applyJournal{start: pointNow(txn, sv)}
+	j := &applyJournal{start: pointNow(txn, sv), check: txn.doc.applyCheck}
 	txn.doc.applying = j
 }
 
 // endRemoteApply ends txn's journal, and rolls the apply back when it failed.
-func endRemoteApply(txn *Transaction, failed bool) {
+// It returns the apply check's refusal of a drain it rolled back while the
+// update stands, or nil.
+func endRemoteApply(txn *Transaction, failed bool) error {
 	j := txn.doc.applying
 	if j == nil {
-		return
+		return nil
 	}
 	txn.doc.applying = nil
 	if failed {
 		j.rollBack(txn)
+		return nil
 	}
+	return j.drainRefused
 }
 
 // pointNow is txn's apply as it stands, with sv the store's state vector.
