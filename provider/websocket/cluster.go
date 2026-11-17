@@ -88,8 +88,20 @@ type relayState struct {
 	// the call. AttachRelay issues them once Start succeeds. nil once
 	// released, which is what tells a later caller to activate inline.
 	pendingMu sync.Mutex
-	pending   map[string]struct{}
+	pending   map[string]*heldActivation
 	released  bool
+}
+
+// heldActivation is one room's RoomActivated, held while the attach window
+// is open. Releasing them is not instantaneous — each is a call into the
+// relay — so an entry stays in the map until its own call has been made,
+// and issued closes when its fate is settled: activated says whether the
+// call was actually made, which is what tells a teardown whether there is
+// anything to undo.
+type heldActivation struct {
+	issued    chan struct{}
+	releasing bool
+	activated bool
 }
 
 // deferActivation holds room's activation back if the attach window is still
@@ -103,28 +115,39 @@ func (st *relayState) deferActivation(room string) bool {
 		return false
 	}
 	if st.pending == nil {
-		st.pending = make(map[string]struct{})
+		st.pending = make(map[string]*heldActivation)
 	}
-	st.pending[room] = struct{}{}
+	st.pending[room] = &heldActivation{issued: make(chan struct{})}
 	return true
 }
 
-// takeActivation removes room's held-back activation, reporting whether one
-// was there. A teardown that finds one skips its RoomDeactivated: the
-// matching RoomActivated was never issued, and issuing only the deactivation
-// would push the relay's room refcount below where it started.
+// takeActivation reports whether the caller's RoomDeactivated should be
+// skipped. A held activation that has not started releasing is simply
+// removed and never issued: the matching RoomActivated never happened, and
+// issuing only the deactivation would push the relay's room refcount below
+// where it started. One already being released is waited out instead, so the
+// deactivation follows its activation rather than racing ahead of it.
 func (st *relayState) takeActivation(room string) bool {
 	st.pendingMu.Lock()
-	defer st.pendingMu.Unlock()
-	_, ok := st.pending[room]
-	delete(st.pending, room)
-	return ok
+	h, ok := st.pending[room]
+	if !ok {
+		st.pendingMu.Unlock()
+		return false
+	}
+	if !h.releasing {
+		delete(st.pending, room)
+		st.pendingMu.Unlock()
+		return true
+	}
+	st.pendingMu.Unlock()
+	<-h.issued
+	return !h.activated
 }
 
-// releaseActivations closes the window and returns the rooms held in it, for
-// AttachRelay to activate now that Start has returned. Every later caller
-// activates inline.
-func (st *relayState) releaseActivations() []string {
+// beginReleaseActivations closes the window and hands back the rooms held in
+// it, still in the map. Every later caller activates inline. The caller
+// claims each one in turn and settles it with finishActivation.
+func (st *relayState) beginReleaseActivations() []string {
 	st.pendingMu.Lock()
 	defer st.pendingMu.Unlock()
 	st.released = true
@@ -132,8 +155,32 @@ func (st *relayState) releaseActivations() []string {
 	for room := range st.pending {
 		rooms = append(rooms, room)
 	}
-	st.pending = nil
 	return rooms
+}
+
+// claimActivation marks room's held activation as the caller's to issue,
+// reporting whether it is still there — a teardown that got in first while
+// an earlier room's RoomActivated was in flight has already removed it.
+// Marking here rather than for the whole batch is what lets such a teardown
+// take an entry whose turn has not come instead of waiting for it.
+func (st *relayState) claimActivation(room string) (*heldActivation, bool) {
+	st.pendingMu.Lock()
+	defer st.pendingMu.Unlock()
+	h, ok := st.pending[room]
+	if ok {
+		h.releasing = true
+	}
+	return h, ok
+}
+
+// finishActivation settles a held activation, releasing any teardown waiting
+// on it. activated says whether RoomActivated was actually called.
+func (st *relayState) finishActivation(room string, h *heldActivation, activated bool) {
+	st.pendingMu.Lock()
+	h.activated = activated
+	delete(st.pending, room)
+	st.pendingMu.Unlock()
+	close(h.issued)
 }
 
 // ErrRelayAlreadyAttached is returned by AttachRelay if a relay is already set.
@@ -216,8 +263,13 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 		s.retireRelayLanes(true)
 		s.detachRelayRooms()
 		// Nothing started, so the held activations are simply dropped —
-		// their rooms are unwired by detachRelayRooms above.
-		st.releaseActivations()
+		// their rooms are unwired by detachRelayRooms above. Each is still
+		// settled, as unactivated, to release any teardown waiting on it.
+		for _, room := range st.beginReleaseActivations() {
+			if h, ok := st.claimActivation(room); ok {
+				st.finishActivation(room, h, false)
+			}
+		}
 		// Released only now: a lane held in the attach window must not wake
 		// to a state that still looks attached and publish to a relay whose
 		// Start failed. Past this close every waiter sees the state gone and
@@ -229,8 +281,13 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 	// The attach window is over. Activations held in it go first, so a room
 	// is subscribed before its backlog starts publishing, and both happen
 	// off the lock Start just released.
-	for _, room := range st.releaseActivations() {
+	for _, room := range st.beginReleaseActivations() {
+		h, ok := st.claimActivation(room)
+		if !ok {
+			continue // torn down while an earlier activation was in flight
+		}
 		r.RoomActivated(room)
+		st.finishActivation(room, h, true)
 	}
 	// Release the lanes held in the window. Start does not wait on them, so
 	// this cannot deadlock against itself.

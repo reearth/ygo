@@ -320,3 +320,97 @@ func (r *recordingRelay) Publish(_ context.Context, out cluster.Outbound) error 
 func (r *recordingRelay) RoomActivated(string)   {}
 func (r *recordingRelay) RoomDeactivated(string) {}
 func (r *recordingRelay) Close() error           { return nil }
+
+// blockingActivationRelay parks inside RoomActivated, naming the room it is
+// activating, until the test releases it. It records every lifecycle call.
+type blockingActivationRelay struct {
+	entered  chan struct{}
+	release  chan struct{}
+	start    chan struct{} // closed by the test to let Start return
+	entering chan string   // the room whose activation is in flight
+
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *blockingActivationRelay) Start(context.Context, cluster.Sink) error {
+	close(r.entered)
+	<-r.start
+	return nil
+}
+
+func (r *blockingActivationRelay) Publish(context.Context, cluster.Outbound) error { return nil }
+
+func (r *blockingActivationRelay) RoomActivated(room string) {
+	select {
+	case r.entering <- room:
+		<-r.release // only the first call parks
+	default:
+	}
+	r.record("activated:" + room)
+}
+
+func (r *blockingActivationRelay) RoomDeactivated(room string) {
+	r.record("deactivated:" + room)
+}
+
+func (r *blockingActivationRelay) record(ev string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, ev)
+}
+
+func (r *blockingActivationRelay) seen() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+func (r *blockingActivationRelay) Close() error { return nil }
+
+// Releasing the held activations is not instantaneous: each RoomActivated is
+// a call into the relay, and a room torn down while an earlier one is still
+// in flight must not be activated afterwards. Clearing the whole set up
+// front loses that: the teardown finds nothing held, issues a
+// RoomDeactivated the relay ignores for a room it never activated, and the
+// release then subscribes a room that is gone — a subscription nothing will
+// ever undo.
+func TestUnit_AttachRelay_TeardownDuringActivationReleaseIsNotActivated(t *testing.T) {
+	relay := &blockingActivationRelay{
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+		start:    make(chan struct{}),
+		entering: make(chan string, 1),
+	}
+
+	srv := NewServer()
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	attached := make(chan error, 1)
+	go func() { attached <- srv.AttachRelay(relay) }()
+	<-relay.entered
+
+	rooms := map[string]*room{}
+	for _, name := range []string{"a", "b"} {
+		r, _, err := srv.getOrCreateRoom(context.Background(), name)
+		require.NoError(t, err)
+		rooms[name] = r
+	}
+
+	close(relay.start) // Start returns; the release of held activations begins
+
+	// One activation is in flight. Tear the other room down underneath it.
+	inFlight := <-relay.entering
+	other := "a"
+	if inFlight == "a" {
+		other = "b"
+	}
+	srv.teardownRelayRoom(rooms[other], other)
+
+	close(relay.release)
+	require.NoError(t, <-attached)
+
+	require.NotContains(t, relay.seen(), "activated:"+other,
+		"activated a room torn down while the held activations were being released")
+	require.NotContains(t, relay.seen(), "deactivated:"+other,
+		"deactivated a room the relay was never told about")
+}
