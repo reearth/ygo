@@ -21,6 +21,11 @@ The attach state is now a single value committed **before** `relay.Start`, and
 undone if `Start` fails — so a failed `Start` still leaves the server
 unattached and the call retryable, as before.
 
+A room created in that window keeps its outbound backlog on its lane until
+`Start` returns. Publishing to a relay that has not finished starting invites
+a refusal, and the payload is already off the lane by then, so the edit would
+be lost rather than retried.
+
 **Behaviour change for relay implementations.** Because the server is wired
 before `Start` runs, a relay can now receive `RoomActivated` and `Publish`
 calls before its own `Start` has returned, and a custom relay that assumes

@@ -73,6 +73,13 @@ type relayState struct {
 	sentinel *relayOriginSentinel
 	ctx      context.Context
 	cancel   context.CancelFunc
+
+	// attached is closed when Start returns, however it returned. The state
+	// is published before Start is called, so a room created in that window
+	// gets a live lane and can reach Publish while the relay is still
+	// starting — and a relay is entitled to refuse one. publishRelay waits
+	// here rather than spending the payload on that refusal.
+	attached chan struct{}
 }
 
 // ErrRelayAlreadyAttached is returned by AttachRelay if a relay is already set.
@@ -134,17 +141,23 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 	// lock, so it never installs a lane against an attach that has gone.
 	s.relayLanesMu.Lock()
 	s.relayLanes = make(map[string]*relayRoomLane)
-	s.relayAttach.Store(&relayState{
+	st := &relayState{
 		relay:    r,
 		sentinel: &relayOriginSentinel{},
 		ctx:      ctx,
 		cancel:   cancel,
-	})
+		attached: make(chan struct{}),
+	}
+	s.relayAttach.Store(st)
 	s.relayLanesMu.Unlock()
 
 	// Committed first so delivery from inside Start lands on a wired server;
 	// undone here if Start fails, which keeps the attach retryable.
-	if err := r.Start(ctx, s); err != nil {
+	err := r.Start(ctx, s)
+	// Either way the attach window is over: release the lanes held in it.
+	// Start does not wait on them, so this cannot deadlock against itself.
+	close(st.attached)
+	if err != nil {
 		// Clear the state before unwiring, so a room created from here on
 		// finds no relay and nothing re-wires behind the rollback.
 		s.retireRelayLanes(true)
@@ -431,6 +444,23 @@ func (s *Server) publishRelay(ctx context.Context, room string, kind cluster.Kin
 		s.relayDropped.Add(1)
 		return
 	}
+	// A lane created inside AttachRelay's window can get here before Start
+	// has returned, where a relay may legitimately refuse the publish — and
+	// the payload is already off the lane, so that refusal would lose it.
+	// Wait the attach out; the lane holds the rest of the backlog meanwhile.
+	select {
+	case <-st.attached:
+	case <-ctx.Done():
+		s.relayDropped.Add(1)
+		return
+	}
+	if s.relayAttach.Load() != st {
+		// Start failed and the attach was rolled back while this payload
+		// waited. Nothing to publish it to: count the loss.
+		s.relayDropped.Add(1)
+		return
+	}
+
 	if err := st.relay.Publish(ctx, cluster.Outbound{
 		Room: room, Kind: kind, Data: data,
 	}); err != nil {

@@ -21,7 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window left the echo sentinel nil, and all four fields were read off-lock,
   which the race detector reported. The attach state is now one atomic value
   committed before `Start` and undone if `Start` fails, so a Start failure
-  still leaves the server unattached and retryable. The exposure is a relay that
+  still leaves the server unattached and retryable. A room created in that
+  window holds its outbound backlog on its lane until `Start` returns, rather
+  than spending it on a relay that has not started yet and may refuse it.
+  The exposure is a relay that
   delivers during `Start` — attaching to a bus other nodes already publish on
   — and it does not depend on this server accepting connections yet, since
   the relay itself creates the room. A relay must now tolerate

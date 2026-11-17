@@ -808,10 +808,12 @@ func (r *Relay) runSubscriber(ctx context.Context) {
 type startAttempt struct{ done chan struct{} }
 
 // awaitStart blocks while a Start attempt is in flight. A relay being
-// attached is not a relay nobody started: provider/websocket's AttachRelay
-// wires the server before calling Start, so a room created in that window
-// can commit a local edit and reach Publish before Start has returned, and
-// failing it there would drop that edit for no reason. Returns
+// started is not a relay nobody started: a caller that reaches Publish while
+// Start is running gets what it asked for rather than an error. It covers
+// only an attempt already marked — before that there is nothing to wait for,
+// so a caller racing the very front of Start still fails fast.
+// provider/websocket does not rely on this: its lanes hold their backlog
+// until AttachRelay returns, which covers the whole attach. Returns
 // ErrRelayNotStarted when no attempt is running, or when the one that was
 // running did not leave the relay started.
 func (r *Relay) awaitStart(ctx context.Context) error {

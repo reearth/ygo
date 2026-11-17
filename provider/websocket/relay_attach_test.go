@@ -7,7 +7,9 @@ package websocket_test
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -165,4 +167,78 @@ func TestUnit_AttachRelay_FailedStartUnwiresTheRoomsItCreated(t *testing.T) {
 
 	assert.Zero(t, srv.RelayStats().Dropped,
 		"a room left wired to the rolled-back attach drops its edits")
+}
+
+// rejectUntilStartedRelay refuses to publish until its Start has returned —
+// what any relay that gates Publish on its own startup does, cluster/redis
+// included. Start blocks until release is closed, so the test owns the whole
+// attach window.
+type rejectUntilStartedRelay struct {
+	entered   chan struct{} // closed on entry to Start: the state is published
+	release   chan struct{} // closed by the test to let Start return
+	started   atomic.Bool
+	attempts  atomic.Uint64 // Publish calls, accepted or not
+	published chan cluster.Outbound
+}
+
+func (r *rejectUntilStartedRelay) Start(context.Context, cluster.Sink) error {
+	close(r.entered)
+	<-r.release
+	r.started.Store(true)
+	return nil
+}
+
+func (r *rejectUntilStartedRelay) Publish(_ context.Context, out cluster.Outbound) error {
+	r.attempts.Add(1)
+	if !r.started.Load() {
+		return errors.New("relay not started")
+	}
+	select {
+	case r.published <- out:
+	default:
+	}
+	return nil
+}
+
+func (r *rejectUntilStartedRelay) RoomActivated(string)   {}
+func (r *rejectUntilStartedRelay) RoomDeactivated(string) {}
+func (r *rejectUntilStartedRelay) Close() error           { return nil }
+
+// An edit made while AttachRelay is still inside Start must not be published
+// to a relay that has not started: the payload is already off the lane, so a
+// rejected Publish loses it for good and the other nodes never see the edit.
+// The lane holds it until the attach finishes instead.
+func TestUnit_AttachRelay_EditDuringStartIsNotPublishedBeforeTheRelayStarts(t *testing.T) {
+	relay := &rejectUntilStartedRelay{
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+		published: make(chan cluster.Outbound, 8),
+	}
+
+	srv := ygws.NewServer()
+	attached := make(chan error, 1)
+	go func() { attached <- srv.AttachRelay(relay) }()
+
+	// Start has been entered, so the attach state is published and rooms
+	// created from here on get a live outbound lane.
+	<-relay.entered
+
+	require.NoError(t, srv.Apply(context.Background(), "room",
+		func(d *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := d.GetText("t")
+			transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "local", nil) })
+		}))
+
+	// The lane worker has the payload. It must not hand it to a relay whose
+	// Start has not returned.
+	time.Sleep(100 * time.Millisecond)
+	require.Zero(t, relay.attempts.Load(),
+		"the edit was published before the relay started; a rejection there loses it")
+
+	close(relay.release)
+	require.NoError(t, <-attached)
+	require.NoError(t, srv.Shutdown(context.Background()))
+
+	assert.Zero(t, srv.RelayStats().Dropped, "the edit was dropped")
+	require.Len(t, relay.published, 1, "the edit never reached the relay")
 }
