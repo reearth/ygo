@@ -176,8 +176,10 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 // counted as a relay drop for as long as the room stayed resident.
 //
 // A room whose registerRelayObservers is already past its own state load can
-// still finish wiring behind this; it is an error path of an error path, and
-// the alternative is blocking the rollback on a room load.
+// finish wiring behind this pass, which would leave it subscribed with
+// nothing to unsubscribe it. It is not left to this function: the registrar
+// re-reads the attach after storing and undoes itself, so the two orderings
+// meet in detachRelayRoom, which is idempotent.
 func (s *Server) detachRelayRooms() {
 	s.rmu.RLock()
 	rooms := make([]*room, 0, len(s.rooms))
@@ -187,14 +189,21 @@ func (s *Server) detachRelayRooms() {
 	s.rmu.RUnlock()
 
 	for _, r := range rooms {
-		r.mu.Lock()
-		unsubs := r.relayUnsub
-		r.relayUnsub = nil
-		r.relayLane = nil
-		r.mu.Unlock()
-		for _, u := range unsubs {
-			u()
-		}
+		detachRelayRoom(r)
+	}
+}
+
+// detachRelayRoom unsubscribes r's relay observers and forgets its lane.
+// Idempotent: the rollback's pass and a registration undoing its own wiring
+// can both reach the same room, and the second finds nothing left.
+func detachRelayRoom(r *room) {
+	r.mu.Lock()
+	unsubs := r.relayUnsub
+	r.relayUnsub = nil
+	r.relayLane = nil
+	r.mu.Unlock()
+	for _, u := range unsubs {
+		u()
 	}
 }
 
@@ -244,16 +253,16 @@ func (s *Server) detachRelayRooms() {
 // runs first "wins" the delete/replace and is the one that closes that
 // lane's done; the other observes the map entry no longer matches and skips
 // closing (avoiding a double-close panic).
-func (s *Server) ensureRelayLane(room string) *relayRoomLane {
+func (s *Server) ensureRelayLane(st *relayState, room string) *relayRoomLane {
 	s.relayLanesMu.Lock()
-	// Both under this lock: a state loaded before it could belong to an
-	// attach that has since been rolled back, and the worker below would
-	// then start on an already-cancelled context and exit at once, leaving
-	// the room a lane nothing drains.
-	st := s.relayAttach.Load()
-	if st == nil || s.relayLanes == nil {
+	// Checked under this lock, against the caller's own attach: a lane for
+	// an attach that has since been rolled back (or replaced by a retry)
+	// would be installed in the wrong map, and its worker would start on an
+	// already-cancelled context and exit at once, leaving a lane nothing
+	// drains.
+	if s.relayAttach.Load() != st || s.relayLanes == nil {
 		s.relayLanesMu.Unlock()
-		return nil // no relay attached
+		return nil // no relay attached, or not this one any more
 	}
 	prev, hadPrev := s.relayLanes[room]
 	l := &relayRoomLane{lane: relaylane.New(0), done: make(chan struct{})}
@@ -543,17 +552,13 @@ func (s *Server) stopRelayLane(room string, l *relayRoomLane) {
 // decode but BEFORE close(r.ready), with s.rmu released (loadRoom runs off the
 // global rooms lock — see server.go). The unsubscribe functions are stored on
 // the room and invoked by teardownRelayRoom.
-func (s *Server) registerRelayObservers(r *room, name string) {
-	st := s.relayAttach.Load()
-	if st == nil {
-		return // no relay attached
-	}
+func (s *Server) registerRelayObservers(r *room, name string, st *relayState) {
 	sentinel := st.sentinel
 	// Create the outbound lane before the observers that feed it. This runs
 	// during room creation, NOT on the commit path. Remember exactly which
 	// lane THIS room instance owns (r.relayLane's doc) so teardownRelayRoom
 	// can retire it by identity rather than by name alone.
-	relayLane := s.ensureRelayLane(name)
+	relayLane := s.ensureRelayLane(st, name)
 
 	unsubDoc := r.doc.OnUpdate(func(update []byte, origin any) {
 		if origin == sentinel {
@@ -587,6 +592,16 @@ func (s *Server) registerRelayObservers(r *room, name string) {
 	r.relayUnsub = append(r.relayUnsub, unsubDoc, unsubAw)
 	r.relayLane = relayLane
 	r.mu.Unlock()
+
+	// Re-read after storing: a failed Start's rollback may have passed over
+	// this room while the observers above were being built, in which case
+	// its detachRelayRooms found nothing and nothing else ever will — the
+	// room stays resident, so a retry takes createRoomPlaceholder's
+	// existing-room branch and never re-registers it. Undoing here makes the
+	// registration whole-or-nothing against the attach it wired to.
+	if s.relayAttach.Load() != st {
+		detachRelayRoom(r)
+	}
 }
 
 // enqueueRelayOutbound is the observer-side hand-off to the room's outbound

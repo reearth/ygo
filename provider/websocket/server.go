@@ -1959,8 +1959,8 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 	// may mutate r.doc until ready closes, no local change is missed. No-op when
 	// no relay is attached. RoomActivated is fired by getOrCreateRoom off-lock
 	// after ready closes (#133).
-	if s.relayAttach.Load() != nil {
-		s.registerRelayObservers(r, name)
+	if st := s.relayAttach.Load(); st != nil {
+		s.registerRelayObservers(r, name, st)
 	}
 	close(r.ready)
 }
