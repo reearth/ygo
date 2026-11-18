@@ -460,8 +460,23 @@ func TestConnAwarenessCap_PurgeCannotOpenTheGate(t *testing.T) {
 	}
 	nullFrame, staleFrame := awFrame(nulls...), awFrame(stale...)
 
+	// How many of the n IDs the room still knows, tombstones included. The
+	// sweep is what drives this down, so sampling it proves the purge path
+	// actually ran while the connection was hammering stale assertions —
+	// without that, this test passes whether or not a purge ever happens.
+	known := func() int {
+		k := 0
+		for id := uint64(1_000_000); id < 1_000_000+n; id++ {
+			if _, ok := rm.awareness.Meta(id); ok {
+				k++
+			}
+		}
+		return k
+	}
+
 	// Tombstone every ID, then keep asserting them at a lower clock across
 	// several purge cycles.
+	minKnown := n
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) && maxLive.Load() <= 4 {
 		sendAwFrame(t, conn, nullFrame)
@@ -469,7 +484,12 @@ func TestConnAwarenessCap_PurgeCannotOpenTheGate(t *testing.T) {
 		for time.Now().Before(end) {
 			sendAwFrame(t, conn, staleFrame)
 		}
+		if k := known(); k < minKnown {
+			minKnown = k
+		}
 	}
+	require.Less(t, minKnown, n,
+		"no tombstone was ever purged, so this test never exercised the race it guards")
 	require.LessOrEqual(t, maxLive.Load(), int64(4), "the purge let a connection past its cap")
 }
 
