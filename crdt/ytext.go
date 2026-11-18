@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -575,14 +576,73 @@ func isContentFormat(item *Item) bool {
 	return ok
 }
 
-// attrEqual reports whether two attribute values are equal, treating a missing
-// key and a nil value as the same "no formatting" state. reflect.DeepEqual is
-// used so JSON-decoded composite values (maps/slices) compare without panicking.
+// attrEqual reports whether a format changes anything. It is Yjs's equalAttrs
+// — JS === , or a compare of two objects' entries — with one deliberate
+// difference: Yjs compares a nested object by identity, and ygo cannot.
+// textValueAt copies every map and slice a caller passes, so the document
+// never holds the caller's object and no two values ever share one. Comparing
+// nested objects by identity would make every re-format of a nested attribute
+// write a marker, including the case Yjs settles with === on the caller's own
+// object. Entries therefore compare by content, which keeps that case a no-op,
+// as it is in Yjs. A missing key and a nil value are the same "no formatting"
+// state.
 func attrEqual(a, b any) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
+	if jsStrictEqual(a, b) {
+		return true
 	}
-	return reflect.DeepEqual(a, b)
+	ea, ok := jsEntries(a)
+	if !ok {
+		return false
+	}
+	eb, ok := jsEntries(b)
+	if !ok || len(ea) != len(eb) {
+		return false
+	}
+	for k, v := range ea {
+		w, has := eb[k]
+		if !has || !attrEqual(v, w) {
+			return false
+		}
+	}
+	return true
+}
+
+// jsEntries returns v's own enumerable properties as JS sees them: a map's
+// keys, or a slice's indices as decimal strings. It reports false for a value
+// that is not a JS object, which `typeof x === 'object'` excludes from the
+// flat compare.
+func jsEntries(v any) (map[string]any, bool) {
+	switch t := v.(type) {
+	case nil:
+		return nil, false
+	case map[string]any:
+		return t, true
+	case []byte:
+		out := make(map[string]any, len(t))
+		for i, b := range t {
+			out[strconv.Itoa(i)] = float64(b)
+		}
+		return out, true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Map:
+		if rv.Type().Key().Kind() != reflect.String {
+			return nil, false
+		}
+		out := make(map[string]any, rv.Len())
+		for iter := rv.MapRange(); iter.Next(); {
+			out[iter.Key().String()] = iter.Value().Interface()
+		}
+		return out, true
+	case reflect.Slice, reflect.Array:
+		out := make(map[string]any, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			out[strconv.Itoa(i)] = rv.Index(i).Interface()
+		}
+		return out, true
+	}
+	return nil, false
 }
 
 // attrState is an attribute map that iterates in insertion order, like the JS

@@ -3,6 +3,7 @@
 package anycodec
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"math"
@@ -314,10 +315,13 @@ func (d *Decoder) readAny(bigInt func(int64) any, depth int, skip bool) (any, er
 		return d.ReadVarString()
 	case 116:
 		b, err := d.ReadVarBytes()
-		if skip {
+		if skip || err != nil {
 			return nil, err
 		}
-		return b, err
+		// Copied: ReadVarBytes aliases the update buffer, and this value is
+		// kept in the document, which must not change when its caller reuses
+		// that buffer. ContentBinary copies for the same reason.
+		return bytes.Clone(b), nil
 	case 117:
 		n, err := d.ReadVarUint()
 		if err != nil {

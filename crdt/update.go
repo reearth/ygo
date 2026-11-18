@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strconv"
 
 	"github.com/reearth/ygo/encoding"
 )
@@ -1351,6 +1352,7 @@ func fmtValToJSON(v any) string {
 	if v == nil {
 		return "null"
 	}
+	v = binaryAsObject(v)
 	s, err := encodeJSONText(v)
 	if err != nil {
 		if s, err = encodeJSONText(nullNonFinite(v)); err != nil {
@@ -1358,6 +1360,41 @@ func fmtValToJSON(v any) string {
 		}
 	}
 	return s
+}
+
+// binaryAsObject rewrites every []byte in v as the index-keyed object
+// JSON.stringify makes of a Uint8Array, where encoding/json writes base64.
+// The keys are raw JSON in index order: encoding/json sorts a map's keys as
+// strings, which would put "10" before "2".
+func binaryAsObject(v any) any {
+	switch t := v.(type) {
+	case []byte:
+		var b []byte
+		b = append(b, '{')
+		for i, c := range t {
+			if i > 0 {
+				b = append(b, ',')
+			}
+			b = append(b, '"')
+			b = strconv.AppendInt(b, int64(i), 10)
+			b = append(b, '"', ':')
+			b = strconv.AppendUint(b, uint64(c), 10)
+		}
+		return json.RawMessage(append(b, '}'))
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = binaryAsObject(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = binaryAsObject(e)
+		}
+		return out
+	}
+	return v
 }
 
 func encodeJSONText(v any) (string, error) {
