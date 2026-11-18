@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`crdt`: a pending queue with emptied slots builds its cover and struct
+  index again.** A merge into the queue empties slots in place, and a
+  rollback restores them, so the queue's items may hold nil entries.
+  `sortedSpans` and `structIndex` read every slot and failed on such a
+  queue once its caches had to be built again. They now skip the emptied
+  slots and keep the others' slot numbers.
 - **`crdt`: logical span lengths and offsets do not depend on the build's
   integer width.** Coalesced GC and deleted spans retain their lengths on
   32-bit builds. V1 and V2 accept the same wide spans, including offsets
