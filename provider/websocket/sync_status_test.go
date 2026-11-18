@@ -329,6 +329,26 @@ func watcherSyncBytes(t *testing.T, conn *gws.Conn, doc *crdt.Doc) int {
 	}
 }
 
+// watcherSyncFrames reads conn's frames up to the Pong of a Ping it sends,
+// applies every sync frame to doc, and returns the sync frames' bodies.
+func watcherSyncFrames(t *testing.T, conn *gws.Conn, doc *crdt.Doc) [][]byte {
+	t.Helper()
+	hpSend(t, conn, "room", tagPing, nil)
+	var bodies [][]byte
+	for {
+		tag, body, err := hpRead(conn, "room", 2*time.Second)
+		require.NoError(t, err)
+		switch tag {
+		case tagPong:
+			return bodies
+		case tagSync:
+			bodies = append(bodies, body)
+			_, err := ygsync.ApplySyncMessage(doc, body, nil)
+			require.NoError(t, err)
+		}
+	}
+}
+
 // A read-only peer's Update is answered SyncStatus(0) and the room is
 // unchanged, as @hocuspocus/server answers it.
 func TestInteg_SyncStatus_ReadOnlyUpdateAnsweredZero(t *testing.T) {

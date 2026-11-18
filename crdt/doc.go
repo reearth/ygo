@@ -641,8 +641,11 @@ func collectAndEncodeLocked(d *Doc, txn *Transaction) (update []byte) {
 	if d.gc && d.undoManagerCount == 0 {
 		gcTxnDeleteSet(d, txn)
 	}
-	if len(d.onUpdate) > 0 && txn.changesDoc() {
+	if (len(d.onUpdate) > 0 || txn.integrated != nil) && txn.changesDoc() {
 		update = encodeV1Locked(d, txn.beforeState, cloneDeleteSet(txn.deleteSet))
+	}
+	if txn.integrated != nil {
+		*txn.integrated = update
 	}
 	if txn.landed != nil {
 		*txn.landed = encodeTxnV1Locked(txn)

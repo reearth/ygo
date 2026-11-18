@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.58.0] — 2026-11-18
+
+### Added
+
+- **`crdt.ApplyUpdateV1Outcome` and `crdt.ApplyOutcome`.** It is
+  `ApplyUpdateV1Held` that also reports, read under the apply's lock, what
+  the commit integrated (`Integrated`, the update the document's `OnUpdate`
+  observers are handed, with what the drain of the pending queue landed and
+  nothing that parked) and whether the update was applied with part of it
+  parked (`Parked`: a struct it carries, or a clock it deletes, past the
+  clocks the store holds of its client).
+- **`provider/websocket`: `Server.RelayIntegratedOnly`**, off by default,
+  relays a peer's update to the room's other peers as what its apply
+  integrated, instead of the sync message the peer sent. A frame whose
+  structs park is relayed without them, and the frame that fills their gap
+  relays them with its own. A frame whose apply fails partway relays what it
+  integrated, without what it parked.
+- **`provider/websocket`: `Server.AnswerParkedNotApplied`**, off by default,
+  answers `SyncStatus(0)` for a peer's update the room applied but left part
+  of parked, so a client that keeps an edit until it is answered applied
+  sends it again. The room answers 1 once it holds it.
+
 ## [1.57.0] — 2026-11-18
 
 ### Added

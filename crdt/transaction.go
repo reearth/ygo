@@ -73,6 +73,10 @@ type Transaction struct {
 	// landed, when set, receives ApplyUpdateV1Landed's update of what this
 	// failed apply integrated, encoded after the GC as OnUpdate's update is.
 	landed *[]byte
+	// integrated, when set, receives ApplyUpdateV1Outcome's copy of the
+	// commit's own update, the slice OnUpdate observers are handed, when the
+	// commit changed the document (collectAndEncodeLocked).
+	integrated *[]byte
 	// deletedFormats holds, per client and sorted, the clocks of the format
 	// markers this remote transaction deleted, recorded for the format
 	// cleanup before the GC.

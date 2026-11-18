@@ -1007,11 +1007,38 @@ type Server struct {
 	// connection; when the hook refused it, the peer is then closed, with the
 	// code of a *PeerClose the hook's error is or wraps and with 4205 "Reset
 	// Connection" otherwise. An update apply applied is broadcast and answered
-	// SyncStatus(1) whatever the hook returns. A read-only peer's update never
-	// reaches the hook. Nil keeps the behaviour without a hook. See
-	// PeerUpdateHook.
+	// as without a hook whatever the hook returns: SyncStatus(1), unless
+	// AnswerParkedNotApplied answers 0 for it, and relayed as
+	// RelayIntegratedOnly says. A read-only peer's update never reaches the
+	// hook. Nil keeps the behaviour without a hook. See PeerUpdateHook.
 	OnPeerUpdate PeerUpdateHook
 
+	// RelayIntegratedOnly, when true, relays a peer's update to the room's
+	// other peers as what its apply integrated - the commit's own update,
+	// the bytes the room's OnUpdate observers are handed
+	// (crdt.ApplyOutcome.Integrated) - instead of the sync message the peer
+	// sent. So a frame whose structs park in the room's pending queue,
+	// waiting for a struct the room lacks, is relayed without them, or not
+	// at all when nothing of it integrated, and the commit that lands them,
+	// the apply of the frame that fills their gap, relays them with that
+	// frame's own; a frame the room already held relays nothing, as without
+	// the option; and a frame whose apply fails partway relays what it
+	// integrated, without what it parked. It applies to the SyncStep2 and
+	// Update frames peers send, not to updates the cluster relay delivers.
+	// It is off by default: the room relays the sync message the peer sent,
+	// parked content included, so the other peers park it as the room does.
+	RelayIntegratedOnly bool
+
+	// AnswerParkedNotApplied, when true, answers SyncStatus(0) for a peer's
+	// update the room applied but left part of parked: a struct of the update,
+	// or a clock it deletes, that waits in the room's pending queue for a
+	// struct the room lacks (crdt.ApplyOutcome.Parked). What did integrate
+	// stands and is relayed. A client that keeps an edit until it is answered
+	// applied sends it again, and once the room holds it the room answers 1.
+	// It changes only the answer, which a connection using Hocuspocus framing
+	// is sent. It is off by default: the room answers 1 for every update it
+	// applied, parked content included, as @hocuspocus/server does.
+	AnswerParkedNotApplied bool
 	// OnTokenAuth, if non-nil, validates the token from a Hocuspocus in-band
 	// Auth message (tag 2). A nil error accepts the connection and replies
 	// Authenticated (scope from the returned ConnectionConfig.ReadOnly); a

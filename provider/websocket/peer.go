@@ -235,9 +235,11 @@ func (p *peer) handleMessage(data []byte) {
 // content) that a peer sent under Sync (tag 0) or SyncReply (tag 4): it applies
 // the update to the room, through Server.OnPeerUpdate when one is set, and
 // broadcasts payload to the room's other peers once the room has applied it,
-// unless the room already held all of it. A read-only peer's update is neither
-// applied nor broadcast (#59). An update the hook refused is not broadcast, and
-// the peer is then closed (see PeerUpdateHook).
+// unless the room already held all of it. With Server.RelayIntegratedOnly it
+// broadcasts what the apply integrated instead (crdt.ApplyOutcome.Integrated),
+// when it integrated anything. A read-only peer's update is neither applied
+// nor broadcast (#59). An update the hook refused is not broadcast, and the
+// peer is then closed (see PeerUpdateHook).
 //
 // On a connection using Hocuspocus framing it answers every such frame with
 // exactly one SyncStatus (tag 8), in the order the frames arrived, so a client
@@ -252,8 +254,10 @@ func (p *peer) handleMessage(data []byte) {
 // does not. Whatever part of such an update did integrate is still broadcast,
 // on either framing. (2) A read-only peer's SyncStep2 whose update does not
 // decode is answered 0, where @hocuspocus/server closes with 4403, which would
-// stop @hocuspocus/provider from reconnecting. A sync message whose own framing
-// does not decode never reaches here: see discardMalformedSync.
+// stop @hocuspocus/provider from reconnecting. With
+// Server.AnswerParkedNotApplied, an applied update the room left part of
+// parked is answered 0 too (crdt.ApplyOutcome.Parked). A sync message whose
+// own framing does not decode never reaches here: see discardMalformedSync.
 func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 	if p.readOnly {
 		if p.hocuspocusFraming {
@@ -261,7 +265,7 @@ func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 		}
 		return
 	}
-	applied, held, closeWith := p.applyPeerUpdate(update)
+	applied, out, closeWith := p.applyPeerUpdate(update)
 	if !applied {
 		p.sendSyncStatus(false)
 		if closeWith != nil {
@@ -269,23 +273,46 @@ func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 		}
 		return
 	}
-	if !held {
+	switch {
+	case p.server.RelayIntegratedOnly:
+		if out.Integrated != nil {
+			p.broadcastSync(ygsync.EncodeUpdate(out.Integrated))
+		}
+	case !out.Held:
 		p.broadcastSync(payload)
 	}
-	p.sendSyncStatus(true)
+	p.sendSyncStatus(!p.server.AnswerParkedNotApplied || !out.Parked)
 }
 
-// applyToRoom applies update to the room's document and reports whether the
-// room already held all of it. ApplyUpdateV1 integrates item by item, so an
+// applyToRoom applies update to the room's document and reports what the
+// apply did with it: whether the room already held all of it, and, under
+// Server.RelayIntegratedOnly or Server.AnswerParkedNotApplied, what the
+// commit integrated and whether part of the update parked
+// (crdt.ApplyUpdateV1Outcome). ApplyUpdateV1 integrates item by item, so an
 // update that overflows MaxPendingItems can leave part of itself in the room;
 // when it fails, applyToRoom broadcasts that part, and only that part, to the
-// room's other peers.
-func (p *peer) applyToRoom(update []byte) (bool, error) {
-	landed, held, err := crdt.ApplyUpdateV1Held(p.room.doc, update, p)
-	if err != nil && landed != nil {
-		p.broadcastSync(ygsync.EncodeUpdate(landed))
+// room's other peers. Under RelayIntegratedOnly that part is only what
+// integrated, as the room's other peers are sent nothing that parked.
+func (p *peer) applyToRoom(update []byte) (crdt.ApplyOutcome, error) {
+	var (
+		out crdt.ApplyOutcome
+		err error
+	)
+	if p.server.RelayIntegratedOnly || p.server.AnswerParkedNotApplied {
+		out, err = crdt.ApplyUpdateV1Outcome(p.room.doc, update, p)
+	} else {
+		out.Landed, out.Held, err = crdt.ApplyUpdateV1Held(p.room.doc, update, p)
 	}
-	return held, err
+	if err != nil {
+		relay := out.Landed
+		if p.server.RelayIntegratedOnly {
+			relay = out.Integrated
+		}
+		if relay != nil {
+			p.broadcastSync(ygsync.EncodeUpdate(relay))
+		}
+	}
+	return out, err
 }
 
 // roomHolds reports whether the room's document already holds everything the

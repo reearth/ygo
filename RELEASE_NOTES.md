@@ -1,3 +1,30 @@
+## v1.58.0
+
+- **New: two `provider/websocket` options for a frame whose structs park.**
+  An update a peer sends can carry structs the room cannot integrate yet,
+  because their client's earlier clocks, or an item they name, have not
+  reached the room. The room parks them until the update that fills the gap
+  arrives. The server relays such a frame to the other peers as it was sent,
+  so they park it too, and answers the sender `SyncStatus(1)`, so a client
+  that keeps an edit until it is answered applied drops it. Both options are
+  off by default, and a server that sets neither behaves as before.
+  - `Server.RelayIntegratedOnly` relays each peer update as what its apply
+    integrated: the commit's own update, the bytes the room's `OnUpdate`
+    observers are handed. A frame that only parked is relayed to nobody, and
+    the frame that fills its gap is relayed with what the drain of the queue
+    landed with it. Updates the cluster relay delivers are relayed as
+    before.
+  - `Server.AnswerParkedNotApplied` answers `SyncStatus(0)` for a peer update
+    the room applied but left part of parked. What did integrate stays and is
+    relayed. The client sends the edit again, and once the room holds it the
+    room answers 1.
+- **New: `crdt.ApplyUpdateV1Outcome`**, which both options read. It is
+  `ApplyUpdateV1Held` with an `ApplyOutcome`: `Integrated` is the commit's
+  update, and `Parked` says whether a struct the update carries, or a clock
+  it deletes, is past the clocks the store holds of its client. To report it,
+  the function reads the update's structs and delete set once more, without
+  decoding their content.
+
 ## v1.57.0
 
 - **New: `crdt.ApplyUpdateV1Held`.** It applies a V1 update as
