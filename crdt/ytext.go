@@ -399,7 +399,9 @@ func (txt *YText) Delete(txn *Transaction, index, length int) {
 		txt.buffer(func(txn *Transaction) { txt.Delete(txn, index, length) })
 		return
 	}
-	if length == 0 || index > txt.length {
+	// Yjs's YText.delete guards length > 0: a negative length must not reach
+	// the gap cleanup, whose deletions a no-op delete has no business making.
+	if length <= 0 || index > txt.length {
 		return
 	}
 	// The cursor Yjs's findPosition gives: right after the character before
@@ -421,7 +423,9 @@ func (txt *YText) Delete(txn *Transaction, index, length int) {
 // deleteText deletes length characters from the cursor pos, then the format
 // markers that the deletion leaves redundant (cleanupDeleteGap). A non-nil
 // cur, the attributes at pos, ends as Yjs leaves the cursor's attributes;
-// ApplyDelta reads them for its next op. Mirrors Yjs deleteText.
+// ApplyDelta reads them for its next op. Mirrors Yjs deleteText. Moves are
+// out of scope: only YArray.Move makes a ContentMove, so a text never holds
+// one, and the default branch counts it as kept content.
 func (t *abstractType) deleteText(txn *Transaction, pos *itemTextPos, length int, cur *attrState) {
 	origLen := length
 	start := pos.right

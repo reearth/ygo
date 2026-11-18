@@ -279,8 +279,8 @@ for (const [a, b] of [[1, 2], [2, 1]]) {
 		{ k: 'sync', from: 'B', to: 'A' },
 		{ k: 'sync', from: 'A', to: 'B' },
 	]))
-	// The receiver's cleanup visits deletions in the update's delete set
-	// order, clients descending.
+	// The receiver's cleanup visits deletions in the delete set's own order,
+	// which for a decoded update is the order the update lists its clients.
 	multis.push(multi('remote_cleanup_follows_deletion_order' + tag, c, [
 		{ p: 'A', k: 'ins', i: 0, s: 'x', a: { italic: true } },
 		{ p: 'B', k: 'ins', i: 0, s: 'p', a: B },

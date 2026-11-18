@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`crdt`: `YText.Delete` ignores a negative length, as Yjs does.** Yjs's
+  `YText.delete` runs only for a positive length; ygo returned early only for
+  zero, so a negative length deleted nothing but still ran the format-marker
+  gap cleanup, which can delete markers.
 - **`crdt`: a panic while committing a transaction no longer wedges the
   document.** The commit released `d.mu` with a plain statement, so a panic
   raised between taking the lock and that statement left the write lock held

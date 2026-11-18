@@ -269,6 +269,9 @@ func sortedStateClients(sv StateVector) []ClientID {
 // storeRange calls fn for every stored item of client overlapping clocks
 // [from, to).
 func storeRange(store *StructStore, client ClientID, from, to uint64, fn func(*Item)) {
+	if from >= to {
+		return // an empty range, as Yjs's afterClock === clock skip
+	}
 	items := store.clients[client]
 	i := sort.Search(len(items), func(i int) bool { return items[i].ID.Clock > from }) - 1
 	if i < 0 {
