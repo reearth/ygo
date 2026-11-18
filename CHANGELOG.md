@@ -33,9 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   neither form restores the Go `[]byte` on a replica. A Yjs peer reads the old
   form as the string `"AQI="` and the new one as an index-keyed object, which
   is what it reads from its own peers. Binary values inside `ContentJSON` take
-  the same V1 path and change with it. V2 uses `WriteAny`, carries the type
-  and is unchanged, so a document holding such a value from an older V1 update
-  re-encodes to V2 as the object it now holds, not as the old base64 string.
+  the same V1 path and change with it. V2 uses `WriteAny` and is unchanged: it
+  still carries a `[]byte` as one. A document that loaded an older V1 update
+  holds the base64 string, not a `[]byte`, so it keeps writing that string —
+  through a V1 or a V2 re-encode alike.
 
 ## [1.57.0] — 2026-11-18
 
