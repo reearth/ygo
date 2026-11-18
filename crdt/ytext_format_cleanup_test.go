@@ -152,7 +152,7 @@ func TestUnit_YText_RemoteCleanupPanicUnlocks(t *testing.T) {
 	assert.Equal(t, 1, countLiveContentFormat(c), "the cleanup's deletion reached the peer")
 }
 
-// The cleanup and the remote change's GC run even when an observer of the
+// The cleanup and the remote change's GC run even when a deep observer of the
 // change panics, as Yjs runs every cleanup step; the panic then reaches the
 // caller with the document unlocked.
 func TestUnit_YText_FormatCleanup_AfterObserverPanic(t *testing.T) {
@@ -164,8 +164,8 @@ func TestUnit_YText_FormatCleanup_AfterObserverPanic(t *testing.T) {
 	b.Transact(func(txn *Transaction) { bt.Format(txn, 2, 1, Attributes{"bold": true}) })
 	var origins []any
 	b.OnUpdate(func(_ []byte, origin any) { origins = append(origins, origin) })
-	bt.Observe(func(e YTextEvent) {
-		if !e.Txn.Local {
+	bt.ObserveDeep(func(txn *Transaction) {
+		if !txn.Local {
 			assert.Equal(t, 2, countLiveContentFormat(b), "the observer runs before the cleanup")
 			panic("observer")
 		}
@@ -173,7 +173,7 @@ func TestUnit_YText_FormatCleanup_AfterObserverPanic(t *testing.T) {
 
 	assert.PanicsWithValue(t, "observer", func() { syncText(t, a, b, "remote") })
 	assert.Equal(t, 1, countLiveContentFormat(b))
-	assert.Equal(t, []any{nil}, origins, "the cleanup's update; the panic skipped the remote one's")
+	assert.Equal(t, []any{"remote", nil}, origins, "the remote change's update, then the cleanup's")
 	for _, it := range b.store.clients[1] {
 		assert.IsType(t, &ContentDeleted{}, it.Content, "the remote deletion is GC'd")
 	}
@@ -301,24 +301,33 @@ func TestUnit_YText_FormatCleanup_PendingDeleteOrder(t *testing.T) {
 }
 
 // Attribute values compare as JavaScript's === does: scalars by value, and a
-// composite value only to itself, each marker holding its own object as a
-// decoded Yjs marker does.
+// map or slice by identity, so two markers share an object only when one
+// value was copied from the other, as in a local Yjs document.
 func TestUnit_YText_FormatCleanup_ValueIdentity(t *testing.T) {
 	f := func(v any) *ContentFormat { return NewContentFormat("k", v) }
 	buf := []byte{1, 2, 3}
 	m := map[string]any{"a": 1}
+	l := []any{1}
 	same := f([]any{})
+	emptyBytes := f([]byte{})
 	for _, tc := range []struct {
 		name string
 		a, b *ContentFormat
 		want bool
 	}{
-		{"byte views of one buffer", f(buf[:2]), f(buf[:2]), false},
+		{"one byte view in two markers", f(buf[:2]), f(buf[:2]), true},
+		{"two views of one buffer", f(buf[:2]), f(buf[:3]), false},
+		{"equal byte slices", f([]byte{1}), f([]byte{1}), false},
 		{"empty slices", f([]any{}), f([]any{}), false},
 		{"empty byte slices", f([]byte{}), f([]byte{}), false},
 		{"empty maps", f(map[string]any{}), f(map[string]any{}), false},
-		{"one map in two markers", f(m), f(m), false},
+		{"equal maps", f(map[string]any{"a": 1}), f(map[string]any{"a": 1}), false},
+		{"one map in two markers", f(m), f(m), true},
+		{"one slice in two markers", f(l), f(l), true},
 		{"one marker", same, same, true},
+		{"a marker made from another's empty slice", same, f(same.Val), true},
+		{"a marker made from another's empty byte slice", emptyBytes, f(emptyBytes.Val), true},
+		{"nil slices", f([]any(nil)), f([]any(nil)), false},
 		{"integer and float", f(int64(1)), f(1.0), true},
 		{"NaN", f(math.NaN()), f(math.NaN()), false},
 		{"strings", f("x"), f("x"), true},

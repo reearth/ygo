@@ -36,7 +36,17 @@ type PersistenceAdapter interface {
 `LoadDoc` is called once when the first peer connects to a room.  The returned
 bytes are passed to `crdt.ApplyUpdateV1` to seed the in-memory document.
 
-`StoreUpdate` is called on every committed transaction via `doc.OnUpdate`.
+`StoreUpdate` is driven by `doc.OnUpdate`, which fires for every committed
+transaction that changes the doc.  A transaction that changes nothing fires no
+`OnUpdate` and is never stored.
+
+By default the server does **not** call `StoreUpdate` once per such
+transaction: it coalesces buffered updates into one merged write.
+`PersistCoalesceWindow` is a debounce of 2s, which each new update resets, so
+under sustained editing the flush is driven by `PersistCoalesceMaxWait`
+(default 10s) instead.  Set a negative `PersistCoalesceWindow` for one
+`StoreUpdate` per update.
+
 For durability the implementation should write to stable storage before
 returning; the server does not retry failed writes.
 
@@ -579,10 +589,13 @@ srv := websocket.NewServerWithPersistence(persistence.NewLegacyAdapter(store))
 ```
 
 The mapping: `LoadDoc` → `Load().Update` (materialised head), `StoreUpdate` →
-`AppendUpdate` (the assigned `Version` is dropped). Because the provider calls
-`StoreUpdate` once per committed transaction, **every transaction becomes one
-version** — you get the full history for free. `LegacyAdapter` also implements
-the optional `StoreUpdateContext` (see below), and `NewLegacyAdapterContext`
+`AppendUpdate` (the assigned `Version` is dropped), so **every `StoreUpdate`
+becomes one version**. With the default coalescing that is one version per
+merged batch, not per transaction; a version then holds every change of its
+window. Set a negative `PersistCoalesceWindow` for one version per changing
+transaction, and the full history.
+`LegacyAdapter` also implements the optional `StoreUpdateContext` (see
+below), and `NewLegacyAdapterContext`
 threads a shutdown context through every store call. Reach the versioned API
 (history, snapshots, prune) via `adapter.Store()` or by keeping a reference to
 the underlying store.

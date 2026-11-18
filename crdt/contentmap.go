@@ -36,7 +36,7 @@ func contentIDsFromStructs(perClient map[ClientID][]*Item, ds DeleteSet) Content
 // update with attribution (issue #56). Skip structs are placeholders and are
 // excluded.
 func ContentIDsFromUpdateV1(update []byte) (ContentIDs, error) {
-	perClient, ds, err := decodeStructsV1(New(), update)
+	perClient, ds, err := decodeStructsV1(newScratchDoc(), update)
 	if err != nil {
 		return ContentIDs{}, err
 	}

@@ -78,11 +78,7 @@ func (a *YArray) prepareFire(txn *Transaction, _ map[string]struct{}) func() {
 	snap := make([]arraySub, len(a.observers))
 	copy(snap, a.observers)
 	e := YArrayEvent{Target: a, Txn: txn, Delta: delta}
-	return func() {
-		for _, s := range snap {
-			s.fn(e)
-		}
-	}
+	return func() { callAll(snap, func(s arraySub) { s.fn(e) }) }
 }
 
 // computeDelta builds a Quill-compatible delta for the array changes in
@@ -726,7 +722,7 @@ func (a *YArray) Move(txn *Transaction, fromIndex, toIndex int) {
 	moveItem.integrate(txn, 0)
 }
 
-// deleteRange is shared by YArray and YText to delete a logical range.
+// deleteRange deletes a logical range of a YArray.
 func deleteRange(t *abstractType, txn *Transaction, index, length int) {
 	if length <= 0 {
 		return

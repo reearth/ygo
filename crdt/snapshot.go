@@ -132,7 +132,7 @@ func EqualSnapshots(a, b *Snapshot) bool {
 // without being integrated; one that does not decode returns an error
 // wrapping ErrInvalidUpdate. Matches Yjs snapshotContainsUpdate.
 func SnapshotContainsUpdateV1(snap *Snapshot, update []byte) (bool, error) {
-	structs, ds, err := decodeStructsV1(New(), update)
+	structs, ds, err := decodeStructsV1(newScratchDoc(), update)
 	if err != nil {
 		return false, err
 	}
@@ -162,26 +162,32 @@ func SnapshotContainsUpdateV1(snap *Snapshot, update []byte) (bool, error) {
 // one forward pass per client. update is not integrated; one that does not
 // decode returns an error wrapping ErrInvalidUpdate.
 func DocContainsUpdateV1(doc *Doc, update []byte) (bool, error) {
-	structs, ds, err := decodeStructsV1(New(), update)
+	structs, ds, err := decodeStructsV1(newScratchDoc(), update)
 	if err != nil {
 		return false, err
 	}
 	doc.mu.RLock()
 	defer doc.mu.RUnlock()
+	return storeContains(doc.store, structs, ds), nil
+}
+
+// storeContains reports whether store holds every struct and deletion of a
+// decoded update. Caller must hold the document lock.
+func storeContains(store *StructStore, structs map[ClientID][]*Item, ds DeleteSet) bool {
 	for client, items := range structs {
-		held := doc.store.NextClock(client)
+		held := store.NextClock(client)
 		for _, item := range items {
 			if item.ID.Clock+uint64(item.Content.Len()) > held {
-				return false, nil
+				return false
 			}
 		}
 	}
 	for client, ranges := range ds.clients {
-		if !storeDeletes(doc.store.clients[client], ranges) {
-			return false, nil
+		if !storeDeletes(store.clients[client], ranges) {
+			return false
 		}
 	}
-	return true, nil
+	return true
 }
 
 // storeDeletes reports whether every clock in ranges is held by a deleted
@@ -331,7 +337,8 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 			groups = append(groups, clientGroup{client, relevant})
 		}
 	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i].client < groups[j].client })
+	// Yjs writes clients in descending order.
+	sort.Slice(groups, func(i, j int) bool { return groups[i].client > groups[j].client })
 
 	enc.WriteVarUint(uint64(len(groups)))
 	for _, g := range groups {
@@ -349,8 +356,8 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 	return enc.Bytes()
 }
 
-// gcTxnDeleteSet is the per-transaction counterpart to RunGC (#78 H1, v1.15.0).
-// Called from transactInternal under the doc lock, after buildPhase2 has
+// gcTxnDeleteSet is the per-transaction counterpart to RunGC.
+// Called from collectAndEncodeLocked under the doc lock, after buildPhase2 has
 // captured observer deltas. For every item tombstoned in this transaction,
 // replaces its Content with a length-only ContentDeleted placeholder so
 // long-running documents don't retain full content for items that will

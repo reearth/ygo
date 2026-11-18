@@ -231,10 +231,26 @@ type ContentFormat struct {
 	Val any
 }
 
-func NewContentFormat(key string, val any) *ContentFormat { return &ContentFormat{key, val} }
-func (c *ContentFormat) Len() int                         { return 1 }
-func (c *ContentFormat) IsCountable() bool                { return false }
-func (c *ContentFormat) Copy() Content                    { return &ContentFormat{c.Key, c.Val} }
+// NewContentFormat returns a format marker for key and val. An empty slice
+// gets its own backing array, so a marker made from another marker's value
+// shares that array, as a JavaScript object is shared, and jsIdentical can
+// tell it from an empty slice made separately.
+func NewContentFormat(key string, val any) *ContentFormat {
+	switch s := val.(type) {
+	case []any:
+		if s != nil && cap(s) == 0 {
+			val = make([]any, 0, 1)
+		}
+	case []byte:
+		if s != nil && cap(s) == 0 {
+			val = make([]byte, 0, 1)
+		}
+	}
+	return &ContentFormat{key, val}
+}
+func (c *ContentFormat) Len() int          { return 1 }
+func (c *ContentFormat) IsCountable() bool { return false }
+func (c *ContentFormat) Copy() Content     { return &ContentFormat{c.Key, c.Val} }
 func (c *ContentFormat) Splice(_ int) Content {
 	panic("crdt: ContentFormat is not splittable")
 }
