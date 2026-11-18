@@ -597,10 +597,7 @@ func TestUndoYjsConformanceAuthorByteIdentical(t *testing.T) {
 
 			assertUndoJSON(t, toJSON, f.ExpectedJSON)
 			if f.JSONOnly {
-				// A known regression: main wrote Yjs's V1 bytes for these, and this
-				// undo code does not until ygo merges every neighbour at the end of
-				// a transaction. The check fails once the bytes match again, so the
-				// entry is removed on purpose.
+				// Remove an undoBytesRegressed entry once its V1 bytes match Yjs again.
 				if undoBytesRegressed[f.Name] {
 					if got := hex.EncodeToString(doc.EncodeStateAsUpdate()); got == f.UpdateV1 {
 						t.Errorf("V1 bytes match yjs again: remove %q from undoBytesRegressed", f.Name)
@@ -618,8 +615,37 @@ func TestUndoYjsConformanceAuthorByteIdentical(t *testing.T) {
 	}
 }
 
-// undoBytesRegressed names the jsonOnly fixtures whose V1 bytes main wrote as
-// Yjs does.
+// undoBytesRegressed names the jsonOnly fixtures whose V1 bytes differ from
+// Yjs's until ygo merges every neighbour at the end of a transaction.
 var undoBytesRegressed = map[string]bool{
 	"undo_after_redo_keeps_the_intermediate_copy_whole": true,
+}
+
+// UndoRegressedReplay is one undoBytesRegressed fixture replayed by its Go
+// builder, for the Yjs decode check in package crdt_test.
+type UndoRegressedReplay struct {
+	Name, Root, Kind, ExpectedJSON string
+	V1, V2                         []byte
+}
+
+// UndoRegressedReplays replays every undoBytesRegressed fixture and returns
+// the updates ygo encodes for it.
+func UndoRegressedReplays(t *testing.T) []UndoRegressedReplay {
+	t.Helper()
+	var out []UndoRegressedReplay
+	for _, f := range loadUndoFixtures(t) {
+		if !undoBytesRegressed[f.Name] {
+			continue
+		}
+		doc := New(WithClientID(ClientID(f.ClientID)))
+		st, _ := undoFixtureRoot(doc, f)
+		um := NewUndoManager(doc, []SharedType{st})
+		undoBuilders[f.Name](doc, st, um)
+		um.Destroy()
+		out = append(out, UndoRegressedReplay{
+			Name: f.Name, Root: f.Root, Kind: f.Kind, ExpectedJSON: f.ExpectedJSON,
+			V1: doc.EncodeStateAsUpdate(), V2: EncodeStateAsUpdateV2(doc, nil),
+		})
+	}
+	return out
 }

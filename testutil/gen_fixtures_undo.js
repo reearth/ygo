@@ -707,8 +707,7 @@ const fixtures = [
       um.undo()
     }
   ),
-  // main wrote Yjs's bytes for this one; the Go test lists it in
-  // undoBytesRegressed.
+  // The Go test lists this one in undoBytesRegressed.
   authored(
     'undo_after_redo_keeps_the_intermediate_copy_whole',
     'An undo of a restored run after a redo leaves the copy in between as one struct, which Yjs splits when a later trace walks it.',
