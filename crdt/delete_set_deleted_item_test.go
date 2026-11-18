@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -98,4 +99,25 @@ func TestUnit_DeleteSet_DeletedSurrogatePairStaysWhole(t *testing.T) {
 			require.Equal(t, "x😀y", txt.ToString())
 		})
 	}
+}
+
+// A delete set over items that are all deleted already deletes nothing, so it
+// leaves the text's search markers in place, as Yjs leaves a deleted struct
+// untouched.
+func TestUnit_DeleteSet_DeletedItemsKeepSearchMarkers(t *testing.T) {
+	t.Parallel()
+	doc := New(WithClientID(1), WithGC(false))
+	txt := doc.GetText("t")
+	for range 100 {
+		doc.Transact(func(txn *Transaction) { txt.Insert(txn, 0, "a", nil) })
+	}
+	// Typed at the front, the character at index i has clock 99-i.
+	doc.Transact(func(txn *Transaction) { txt.Delete(txn, 10, 20) })
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 60, "b", nil) })
+	require.NotEmpty(t, txt.markers, "the insert left a search marker")
+	markers := slices.Clone(txt.markers)
+
+	require.NoError(t, ApplyUpdateV1(doc, deleteSetUpdate(1, 70, 20), nil))
+	require.Equal(t, markers, txt.markers)
+	require.Equal(t, 81, txt.Len())
 }

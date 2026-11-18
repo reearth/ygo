@@ -160,6 +160,10 @@ func retryPendingDs(txn *Transaction) {
 // This is the pending-aware variant of applyTo, used by applyV1Txn
 // and applyV2Txn to defer deletes that target not-yet-integrated items.
 //
+// A live item is split at the range's ends before it is deleted, so content
+// outside the range stays live. A deleted item is left whole and not deleted
+// again, as in Yjs readAndApplyDeleteSet: deleting it would delete nothing.
+//
 // invariant: store.clients[client] is contiguous from clock 0.
 // If a future change relaxes contiguity, the applied-prefix math
 // may under-park ranges spanning a gap.
@@ -201,32 +205,31 @@ func (ds *DeleteSet) applyToPartial(txn *Transaction) DeleteSet {
 				if item.ID.Clock >= r.Clock+r.Len {
 					break
 				}
-				end := r.Clock + r.Len
+				rangeEnd := r.Clock + r.Len
 				itemEnd := item.ID.Clock + uint64(item.Content.Len())
-				// Split at the range end only on reaching the item, as Yjs does,
-				// since deleting an earlier item can cascade into it.
-				if !item.Deleted && itemEnd > end {
-					splitItem(txn, item, int(end-item.ID.Clock))
-					items = txn.doc.store.clients[client]
+				if !item.Deleted {
+					// Split at the range end only on reaching the item, as Yjs
+					// does, since deleting an earlier item can cascade into it.
+					if itemEnd > rangeEnd {
+						splitItem(txn, item, int(rangeEnd-item.ID.Clock))
+						items = txn.doc.store.clients[client]
+					}
+					item.delete(txn)
+					// Search-marker invalidation for the remote delete-apply path
+					// (the v1.31.6 stale-cache class, #181). item.delete clears only
+					// when !txn.Local, and Local is a caller-writable field, so do
+					// not rely on it here. The rendered index of the tombstoned item is not
+					// tracked by this delete-set walk, so a precise
+					// updateMarkerChanges(index, -len) is not available — we clear all
+					// markers, which is always safe (the next lookup repopulates via a
+					// cold walk). Without this, still-live markers after the tombstone
+					// would keep an index that is now too high and mis-resolve the next
+					// local positioned insert (#160).
+					if item.Parent != nil && item.Content.IsCountable() {
+						item.Parent.clearMarkers()
+					}
 				}
-				if itemEnd < end {
-					end = itemEnd
-				}
-				item.delete(txn)
-				// Search-marker invalidation for the remote delete-apply path
-				// (the v1.31.6 stale-cache class, #181). item.delete clears only
-				// when !txn.Local, and Local is a caller-writable field, so do
-				// not rely on it here. The rendered index of the tombstoned item is not
-				// tracked by this delete-set walk, so a precise
-				// updateMarkerChanges(index, -len) is not available — we clear all
-				// markers, which is always safe (the next lookup repopulates via a
-				// cold walk). Without this, still-live markers after the tombstone
-				// would keep an index that is now too high and mis-resolve the next
-				// local positioned insert (#160).
-				if item.Parent != nil && item.Content.IsCountable() {
-					item.Parent.clearMarkers()
-				}
-				applied = end - r.Clock
+				applied = min(itemEnd, rangeEnd) - r.Clock
 			}
 			// Park the uncovered suffix of the range, if any.
 			if applied < r.Len {
