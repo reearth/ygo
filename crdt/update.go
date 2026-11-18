@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strconv"
 
 	"github.com/reearth/ygo/encoding"
 )
@@ -1351,6 +1352,7 @@ func fmtValToJSON(v any) string {
 	if v == nil {
 		return "null"
 	}
+	v = binaryAsObject(v)
 	s, err := encodeJSONText(v)
 	if err != nil {
 		if s, err = encodeJSONText(nullNonFinite(v)); err != nil {
@@ -1358,6 +1360,34 @@ func fmtValToJSON(v any) string {
 		}
 	}
 	return s
+}
+
+// binaryAsObject rewrites every []byte in v as an object keyed by index, which
+// is what JSON.stringify makes of a Uint8Array. encoding/json would write
+// base64, which no Yjs peer reads back. JSON has no binary type, so the value
+// a replica reads is an object either way; this picks the one Yjs reads.
+func binaryAsObject(v any) any {
+	switch t := v.(type) {
+	case []byte:
+		out := make(map[string]any, len(t))
+		for i, b := range t {
+			out[strconv.Itoa(i)] = float64(b)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = binaryAsObject(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = binaryAsObject(e)
+		}
+		return out
+	}
+	return v
 }
 
 func encodeJSONText(v any) (string, error) {

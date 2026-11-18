@@ -1,3 +1,25 @@
+## v1.57.1
+
+**Who is affected: anyone storing binary or composite values in text
+formatting attributes, and anyone that reuses the buffer it hands to
+`ApplyUpdateV2`.**
+
+- **A binary value decoded from a V2 update is copied.** It used to point into
+  the caller's update buffer, so reusing or pooling that buffer changed the
+  document underneath you. Nothing in the API said the buffer had to outlive
+  the call, and it no longer has to.
+- **Attribute values compare as Yjs compares them.** The old comparison was
+  `reflect.DeepEqual`, which disagrees with Yjs in both directions, and each
+  disagreement produced or dropped a format marker. If you rely on the exact
+  markers a document holds, a document edited by this version can differ from
+  one edited by an earlier one.
+- **A binary attribute goes into a V1 update in Yjs's form.** It went out as
+  base64, which no Yjs peer read back. Note that V1 format values are JSON and
+  JSON has no binary type: a replica reads an object keyed by index, not a
+  `[]byte`, exactly as a Yjs replica does. V2 is unaffected and still carries
+  the type. Documents written before this version keep the base64 string they
+  already hold.
+
 ## v1.57.0
 
 - **New: `crdt.ApplyUpdateV1Held`.** It applies a V1 update as

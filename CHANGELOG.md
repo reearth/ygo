@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.57.1] — 2026-11-18
+
+### Fixed
+
+- **`crdt`: a binary value decoded from a V2 update no longer points into the
+  caller's buffer.** `ApplyUpdateV2` kept the decoded `[]byte` of an `Any`
+  value — a format or embed attribute, a map or array value — as a slice of
+  the update it was given, so a caller that reused or pooled that buffer
+  silently changed what the document held. The value is copied now, as
+  `ContentBinary` and the V2 stream reader already did.
+- **`crdt`: attribute values compare as Yjs's `equalAttrs` compares them.**
+  `reflect.DeepEqual` decided whether a format changed anything, which is both
+  stricter and looser than Yjs: `int64(1)` and `float64(1)` were different
+  where Yjs sees one number, `[]` and `{}` were different where Yjs sees two
+  empty objects, and two separately built nested objects were equal where Yjs
+  compares them by identity. Each disagreement produced a format marker Yjs
+  does not produce, or dropped one it does. The comparison is now `===`, or a
+  one-level compare of two objects, and shares its `===` with the format
+  cleanup's `jsIdentical`.
+- **`crdt`: a binary attribute is written to a V1 update as Yjs writes it.**
+  `JSON.stringify` of a `Uint8Array` is an object keyed by index, but
+  `encoding/json` writes base64 for a Go `[]byte`, so `{"0":1,"1":2}` went out
+  as `"AQI="` and no Yjs peer read the value back. V1 format values are JSON,
+  which has no binary type, so a replica reads an object rather than a
+  `[]byte` — as a Yjs replica does. V2 carries the type and is unchanged.
+
 ## [1.57.0] — 2026-11-18
 
 ### Added
