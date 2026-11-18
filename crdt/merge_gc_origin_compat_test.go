@@ -26,7 +26,10 @@ func TestCompat_MergeUpdates_GCOriginsMatchYjs(t *testing.T) {
 	a.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "hello", nil) })
 	hello := crdt.EncodeStateAsUpdateV1(a, nil)
 	a.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 2, "ZZ", nil) })
-	gc := []byte{1, 1, 5, 5, 0, 2, 0} // one GC struct over client 5's "ZZ"
+	// One GC struct over client 5's "ZZ": these are the struct bytes a gc:true
+	// Yjs document writes for clocks 5-6 once it deletes their parent type,
+	// here with an empty delete set.
+	gc := []byte{1, 1, 5, 5, 0, 2, 0}
 
 	type row struct {
 		Name   string   `json:"name"`

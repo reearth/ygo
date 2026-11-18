@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the item had none, so a receiver showed content that Yjs stores as a
   GC struct. This affected `MergeUpdatesV1/V2`, `DiffUpdateV1/V2`,
   `UpdateV1ToV2`, `UpdateV2ToV1`, and `EncodeStateAsUpdateV1/V2` of a document
-  that holds a parked item.
+  that holds a parked item. A state an earlier ygo stored this way is not
+  repaired: it still holds the edit in a root type named `""`.
 
 ## [1.56.2] — 2026-11-17
 

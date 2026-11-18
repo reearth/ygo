@@ -14,8 +14,12 @@ clients' updates put the edit into a root type named `""`.
 
 `MergeUpdatesV1/V2`, `DiffUpdateV1/V2`, `UpdateV1ToV2`, `UpdateV2ToV1` and
 `EncodeStateAsUpdateV1/V2` now keep every origin, as Yjs's `Item.write` does.
-A state that an earlier ygo wrote carries no such origin and loads as before.
 No API or wire format changes.
+
+**This stops new corruption. It does not repair a stored state.** A state that
+an earlier ygo merged or encoded this way loads as before, with the edit still
+in a root type named `""`. To find an affected document, look for a root type
+named `""`.
 
 ## v1.56.2
 
