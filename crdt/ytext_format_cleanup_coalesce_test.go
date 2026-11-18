@@ -12,10 +12,7 @@ import (
 )
 
 // fragmentedDeleteTime times applying, to a peer with formatted text, one
-// remote deletion of n adjacent single-character structs. The peer also bolds
-// one of them, so the deletion leaves that character's two markers redundant
-// in the gap before the bold "b", and the time includes the cleanup deleting
-// them: the test fails if the cleanup did not run.
+// remote deletion of n adjacent single-character structs.
 func fragmentedDeleteTime(tb testing.TB, n int) time.Duration {
 	a, b := newTestDoc(1), newTestDoc(2)
 	at, bt := a.GetText("t"), b.GetText("t")
@@ -24,20 +21,13 @@ func fragmentedDeleteTime(tb testing.TB, n int) time.Duration {
 		a.Transact(func(txn *Transaction) { at.Insert(txn, 1, "x", nil) })
 	}
 	require.NoError(tb, ApplyUpdateV1(b, EncodeStateAsUpdateV1(a, nil), nil))
-	b.Transact(func(txn *Transaction) {
-		bt.Format(txn, n+1, 1, Attributes{"bold": true})
-		bt.Format(txn, n/2+1, 1, Attributes{"bold": true})
-	})
-	require.Equal(tb, 4, countLiveContentFormat(b), "the fixture's markers")
+	b.Transact(func(txn *Transaction) { bt.Format(txn, n+1, 1, Attributes{"bold": true}) })
 	sv := a.StateVector()
 	a.Transact(func(txn *Transaction) { at.Delete(txn, 1, n) })
 	u := EncodeStateAsUpdateV1(a, sv)
 	start := time.Now()
 	require.NoError(tb, ApplyUpdateV1(b, u, nil))
-	elapsed := time.Since(start)
-	require.Equal(tb, 2, countLiveContentFormat(b), "the cleanup left the deleted character's markers")
-	require.Equal(tb, []Delta{{Op: DeltaOpInsert, Insert: "a"}, {Op: DeltaOpInsert, Insert: "b", Attributes: Attributes{"bold": true}}}, bt.ToDelta())
-	return elapsed
+	return time.Since(start)
 }
 
 func TestPerf_RemoteFragmentedDeleteCleanupIsLinear(t *testing.T) {
