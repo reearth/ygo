@@ -65,7 +65,7 @@ func TestUnit_DropSquashed_Boundaries(t *testing.T) {
 				}
 			}
 			got := dropSquashed(store, removed)
-			require.Equal(t, len(want), len(got))
+			require.Len(t, got, len(want))
 			for i := range want {
 				require.Same(t, want[i], got[i], "item %d", i)
 			}
