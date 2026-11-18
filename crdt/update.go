@@ -206,12 +206,13 @@ func EncodeStateAsUpdateV2(doc *Doc, sv StateVector) []byte {
 // the clocks below, which the apply never takes from a parked struct, and the
 // merge keeps them for doc's structs too. Cut there, a parked struct never
 // meets doc's own structs in the merge, so SplitStateAsUpdateV1 can send
-// those as they are.
+// those as they are. A document whose parked content is out of its state
+// (SetParkedOutOfState) merges none of it.
 func withParked(doc *Doc, sv StateVector, state []byte,
 	encode func(map[ClientID][]*Item, DeleteSet, StateVector) []byte,
 	merge func(...[]byte) ([]byte, error)) []byte {
 	s := doc.store
-	if s.pending == nil && len(s.pendingDs.clients) == 0 {
+	if s.parkedOutOfState || s.pending == nil && len(s.pendingDs.clients) == 0 {
 		return state
 	}
 	var parts [][]byte

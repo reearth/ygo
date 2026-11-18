@@ -263,6 +263,15 @@ above the state's length in either form the encode writes, so it can bound a
 document's state without an encode per apply. An apply that fails partway
 counts what the document kept of it.
 
+**Parked content outside the document's state.** A struct that waits for
+one the document lacks, and a deletion of a struct it lacks, are parked,
+and every encode of the state carries them, as Yjs's does: a joiner answered
+with the state then holds content the document has not integrated, and
+parks it in turn. `Doc.SetParkedOutOfState(true)` leaves the pending queue
+and the pending deletes out of `EncodeStateAsUpdateV1`, `V2` and
+`SplitStateAsUpdateV1`, and out of `ApplyReport.StateBytes`. What is parked
+is kept and still drains when its gap fills.
+
 **A refused drain discards what it released.** A document that applies
 remote updates whole or nothing rolls back a drain of its pending queue that
 the apply check refuses, or that passes the scan bound or the apply budget,

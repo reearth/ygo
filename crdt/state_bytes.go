@@ -419,13 +419,20 @@ type stateCount struct {
 	// kept before the apply's first write into them (keepPendingDs).
 	parkedDeletes []ClientID
 	pendingKept   map[ClientID][]DeleteRange
+	// parkedOut is whether the document keeps its parked content out of its
+	// state (SetParkedOutOfState), so the count reads no queue and counts no
+	// park, and a struct a drain lands counts as an append.
+	parkedOut bool
 }
 
 // beginStateCount starts the count of an apply on a document that reports,
-// whose store is s.
+// whose store is s. A queue out of the state bounds nothing.
 func (t *applyTally) beginStateCount(s *StructStore) {
 	t.stateOn, t.stateClients = true, -1
-	t.held = s.pending.heldStructs()
+	t.parkedOut = s.parkedOutOfState
+	if !t.parkedOut {
+		t.held = s.pending.heldStructs()
+	}
 	t.fresh = t.held == 0
 }
 
@@ -763,10 +770,15 @@ func fillGrowth(pc *queuedClocks, stored bool, from, to uint64) (bytes, entries 
 
 // queue is the pending queue as the apply's current step finds it: during a
 // drain, the queue the drain began from, whose structs are either still in it
-// or landing; at any other time the store's.
+// or landing; at any other time the store's. It is nil on a document whose
+// parked content is out of its state (SetParkedOutOfState), whose state the
+// queue adds nothing to.
 func (t *applyTally) queue(s *StructStore) *pendingUpdate {
-	if t.drainQueue != nil {
+	switch {
+	case t.drainQueue != nil:
 		return t.drainQueue
+	case t.parkedOut:
+		return nil
 	}
 	return s.pending
 }
@@ -872,7 +884,8 @@ type freshPark struct {
 // holds, and the byte a varuint boundary can cost.
 func noteStatePark(txn *Transaction, item *Item) {
 	t := txn.doc.tally()
-	if t == nil || !t.stateOn {
+	if t == nil || !t.stateOn || t.parkedOut {
+		// A park adds nothing to a state that leaves parked content out.
 		return
 	}
 	s := txn.doc.store
@@ -991,7 +1004,7 @@ func storeBytesIn(s *StructStore, c ClientID, from, to uint64) int {
 // start clock, that the dropped struct stood in.
 func measureQueueMerge(txn *Transaction, pl mergePlan) queueMerge {
 	t := txn.doc.tally()
-	if t == nil || !t.stateOn {
+	if t == nil || !t.stateOn || t.parkedOut {
 		return queueMerge{}
 	}
 	s, start := txn.doc.store, txn.beforeState
@@ -1207,7 +1220,9 @@ type stateAtDrain struct{ state, clients int }
 // store's clocks as the drain began tell the structs it adds (drained).
 func (t *applyTally) beginStateDrain(s *StructStore) stateAtDrain {
 	t.drainKept, t.drainKeptBy, t.drainMoved = 0, nil, nil
-	if t.stateOn && s.pending != nil {
+	// Out of the state, the queue holds nothing the drain's landings move:
+	// each struct it lands is counted as an append (noteStateAppend).
+	if t.stateOn && s.pending != nil && !t.parkedOut {
 		t.drainQueue, t.drainSV = s.pending, s.StateVector()
 	}
 	return stateAtDrain{t.state, t.stateClients}
@@ -1246,6 +1261,9 @@ func (t *applyTally) takeBackStateDrain(at stateAtDrain, s *StructStore) {
 // known (queuedEntries), whether a parked struct shares those clocks, and how
 // many structs the queue holds.
 func commitShare(s *StructStore, c ClientID, from, to uint64) (queued int, known, overlaps bool, held int) {
+	if s.parkedOutOfState {
+		return 0, true, false, 0
+	}
 	pc := s.pending.parkedCover()[c]
 	if pc == nil || pc.spans.len() == 0 {
 		return 0, true, false, 0
@@ -1283,6 +1301,11 @@ func deleteSetGrowth(txn *Transaction, t *applyTally) int {
 	s := txn.doc.store
 	after := s.pendingDs.clients
 	arrived, parkedTo := t.arrivedDeleted.clients, t.parkedDeletes
+	if t.parkedOut {
+		// The state's delete set is the store's alone: a parked range adds to
+		// it only once a retry applies it, which txn's delete set then holds.
+		after, parkedTo = nil, nil
+	}
 	if len(txn.deleteSet.clients)+len(arrived)+len(parkedTo) == 0 {
 		return 0
 	}
@@ -1295,6 +1318,9 @@ func deleteSetGrowth(txn *Transaction, t *applyTally) int {
 		seen[c] = struct{}{}
 		deleted := joinRanges(txn.deleteSet.clients[c], arrived[c], s.NextClock(c))
 		held, parked := t.pendingBefore(s, c), after[c]
+		if t.parkedOut {
+			held = nil
+		}
 		added := deleted
 		if len(held) > 0 || len(parked) > 0 {
 			added = joinRanges(subtractRanges(deleted, held), subtractRanges(parked, held), math.MaxUint64)

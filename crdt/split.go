@@ -77,7 +77,8 @@ func SplitUpdateV1(update []byte, sv StateVector, maxBytes int) ([][]byte, error
 // clock in doc, so that they follow doc's own structs. They are written and
 // read back alone, and merged among themselves as that merge merges them (see
 // parkedMerge), so what this allocates for them grows with what doc parks, not
-// with its structs.
+// with its structs. A document whose parked content is out of its state
+// (SetParkedOutOfState) writes none of it.
 func SplitStateAsUpdateV1(doc *Doc, sv StateVector, maxBytes int) ([][]byte, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
@@ -85,7 +86,7 @@ func SplitStateAsUpdateV1(doc *Doc, sv StateVector, maxBytes int) ([][]byte, err
 	ds := buildDeleteSet(store)
 	var p *parkedMerge
 	clients := len(store.clients) // the most queues the split can have
-	if store.pending != nil || len(store.pendingDs.clients) > 0 {
+	if !store.parkedOutOfState && (store.pending != nil || len(store.pendingDs.clients) > 0) {
 		p = readParked(store, sv, &ds)
 		for c := range p.parked {
 			if _, ok := store.clients[c]; !ok {

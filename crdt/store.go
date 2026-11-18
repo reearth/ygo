@@ -25,6 +25,10 @@ type StructStore struct {
 	// pendingDsMoved holds the parked clients given a struct since the last
 	// retry, the only ones whose ranges can apply.
 	pendingDsMoved map[ClientID]struct{}
+	// parkedOutOfState is Doc.SetParkedOutOfState's setting: pending and
+	// pendingDs are kept out of every encode of the document's state and out
+	// of what an apply report counts of it (ApplyReport.StateBytes).
+	parkedOutOfState bool
 
 	// pendingMoves holds, per target client, the ContentMove items whose target
 	// had not integrated when the move did (e.g. a fresh peer applying a merged

@@ -130,6 +130,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or above the state in both forms the encode writes; where the document
   keeps no count of a part the state writes, the report takes the most that
   part can add.
+- **`crdt`: `Doc.SetParkedOutOfState(bool)` and `Doc.ParkedOutOfState()`
+  leave what a document holds parked out of every encode of its state.**
+  Off by default. On, `EncodeStateAsUpdateV1`, `EncodeStateAsUpdateV2` and
+  `SplitStateAsUpdateV1` (the answer to a sync step 1) carry no parked
+  struct and no pending delete, and `ApplyReport.StateBytes` counts none: a
+  park adds nothing, and the drain that integrates a parked struct counts it
+  as an append. The queue is kept and still drains when its gap fills.
+  `PendingStats` and `ApplyReport.DocStructs` still count it, as memory the
+  document holds.
 - **`crdt`: `Doc.SetDiscardRefusedDrain(bool)` discards what a refused drain
   released.** Off by default. On a document that applies remote updates
   whole or nothing, a drain of the pending queue that is rolled back (the
