@@ -901,3 +901,204 @@ func TestUnit_ApplyCheck_GeneratedUpdatesRefuseByteForByte(t *testing.T) {
 		t.Fatalf("only %d of %d generated updates reached the check", refusals, iterations)
 	}
 }
+
+// The check is called for every apply that changes the document, whichever
+// of the document's many clients holds the change, and sees the change: an
+// update of the whole state whose one new struct is a held client's, one
+// whose only struct is a GC struct, which changes no type, one from a client
+// the document never saw, a delete alone, and one that lands for three
+// clients at once, in both wire formats. Only the delete deletes anything,
+// so the others show only in the clocks of the clients they touched, and
+// whether an apply changed anything is asked only of the clients it added
+// structs for (updateLanded): each must be among them. An update the
+// document holds whole, across all its clients, is still not checked.
+func TestUnit_ApplyCheck_ItSeesEveryClientAnApplyTouches(t *testing.T) {
+	state := manyClientsState(t, checkBase(t), 100, 40)
+	// asWriter is the update of what a peer holding state writes as client,
+	// a client state may already hold: the whole state then, or only what
+	// edit wrote.
+	asWriter := func(client ClientID, whole bool, edit func(peer *Doc, txn *Transaction)) []byte {
+		t.Helper()
+		peer := New()
+		if err := ApplyUpdateV1(peer, state, nil); err != nil {
+			t.Fatal(err)
+		}
+		sv := peer.StateVector()
+		peer.setClientID(client)
+		peer.Transact(func(txn *Transaction) { edit(peer, txn) })
+		if whole {
+			sv = nil
+		}
+		return EncodeStateAsUpdateV1(peer, sv)
+	}
+	cases := []struct {
+		name   string
+		update []byte
+		sees   func(v *ApplyView, text *YText, m *YMap) bool
+	}{
+		{
+			"the one new struct of a held client, in the whole state",
+			asWriter(120, true, func(_ *Doc, txn *Transaction) { txn.GetMap("m").Set(txn, "k120", "again") }),
+			func(v *ApplyView, _ *YText, m *YMap) bool { got, _ := v.MapGet(m, "k120"); return got == "again" },
+		},
+		{
+			"a GC struct alone, which changes no type",
+			// Client 99, clock 0: one GC struct of length 1, and no deletes.
+			[]byte{1, 1, 99, 0, 0, 1, 0},
+			func(v *ApplyView, _ *YText, _ *YMap) bool { return len(v.ChangedTypes()) == 0 },
+		},
+		{
+			"a client the document never saw",
+			asWriter(300, false, func(_ *Doc, txn *Transaction) { txn.GetText("t").Insert(txn, 0, "Q", nil) }),
+			func(v *ApplyView, text *YText, _ *YMap) bool { return strings.HasPrefix(v.TextString(text), "Q") },
+		},
+		{
+			"a delete alone",
+			asWriter(301, false, func(_ *Doc, txn *Transaction) { txn.GetText("t").Delete(txn, 0, 1) }),
+			func(v *ApplyView, text *YText, _ *YMap) bool { return v.TextString(text) == "ello world" },
+		},
+		{
+			"three clients at once",
+			asWriter(105, false, func(peer *Doc, txn *Transaction) {
+				m := txn.GetMap("m")
+				m.Set(txn, "k105", "x")
+				peer.setClientID(139)
+				m.Set(txn, "k139", "y")
+				peer.setClientID(302)
+				txn.GetText("t").Insert(txn, 0, "R", nil)
+			}),
+			func(v *ApplyView, text *YText, m *YMap) bool {
+				x, _ := v.MapGet(m, "k105")
+				y, _ := v.MapGet(m, "k139")
+				return x == "x" && y == "y" && strings.HasPrefix(v.TextString(text), "R")
+			},
+		},
+	}
+	for _, c := range cases {
+		for _, v2 := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/v2=%t", c.name, v2), func(t *testing.T) {
+				doc := checkedDoc(t, state)
+				text, m := doc.GetText("t"), doc.GetMap("m")
+				calls, saw := 0, false
+				doc.SetApplyCheck(func(_ any, v *ApplyView) error {
+					calls++
+					saw = c.sees(v, text, m)
+					return nil
+				})
+				apply := func() error { return ApplyUpdateV1(doc, c.update, nil) }
+				if v2 {
+					u, err := UpdateV1ToV2(c.update)
+					if err != nil {
+						t.Fatal(err)
+					}
+					apply = func() error { return ApplyUpdateV2(doc, u, nil) }
+				}
+				if err := apply(); err != nil {
+					t.Fatal(err)
+				}
+				if calls != 1 || !saw {
+					t.Fatalf("the check was called %d times and saw the change: %t; want once, seeing it", calls, saw)
+				}
+				// Held now, the update and the whole state change nothing.
+				if err := apply(); err != nil {
+					t.Fatal(err)
+				}
+				if err := ApplyUpdateV1(doc, state, nil); err != nil {
+					t.Fatal(err)
+				}
+				if calls != 1 {
+					t.Fatalf("an update the document held whole was checked (%d calls)", calls)
+				}
+			})
+		}
+	}
+}
+
+// A drain that finds something parked is still judged by what it landed: a
+// parked struct the update releases, and a parked delete alone, which the
+// update's struct lets land, each have the drain checked and, refused,
+// rolled back while the update stands. A drain that finds the queue and the
+// pending deletes empty, or holding only what the update does not release,
+// lands nothing, and the apply is checked once, for the update.
+func TestUnit_ApplyCheck_ADrainThatFindsSomethingParkedIsStillChecked(t *testing.T) {
+	t.Run("a parked struct the update releases", func(t *testing.T) {
+		s := newDrainScenario(t)
+		calls, evil := 0, refuseEvil(s.doc.GetText("t"))
+		s.doc.SetApplyCheck(func(origin any, v *ApplyView) error { calls++; return evil(origin, v) })
+		requireDrainRefused(t, ApplyUpdateV1(s.doc, s.y, nil))
+		if calls != 2 {
+			t.Fatalf("the update and its drain were checked %d times, want 2", calls)
+		}
+		if got, want := s.doc.GetText("t").ToString(), "hello worldy"; got != want {
+			t.Fatalf("the text is %q, want %q with the drain rolled back", got, want)
+		}
+		if got := s.doc.PendingStats().Items; got != 1 {
+			t.Fatalf("%d structs parked, want EVIL parked again", got)
+		}
+	})
+	t.Run("a parked delete the update lets land", func(t *testing.T) {
+		base := checkBase(t)
+		y := peerEdit(t, base, 5, func(txn *Transaction) { txn.GetText("t").Insert(txn, 11, "y", nil) })
+		holder := New(WithClientID(6))
+		for _, u := range [][]byte{base, y} {
+			if err := ApplyUpdateV1(holder, u, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		sv := holder.StateVector()
+		holder.Transact(func(txn *Transaction) { txn.GetText("t").Delete(txn, 11, 1) })
+		deleteY := EncodeStateAsUpdateV1(holder, sv)
+
+		doc := checkedDoc(t, base)
+		text := doc.GetText("t")
+		calls := 0
+		doc.SetApplyCheck(func(_ any, v *ApplyView) error {
+			calls++
+			if !strings.Contains(v.TextString(text), "y") {
+				return errCheckRefused
+			}
+			return nil
+		})
+		if err := ApplyUpdateV1(doc, deleteY, nil); err != nil {
+			t.Fatal(err)
+		}
+		if stats := doc.PendingStats(); calls != 0 || stats.Items != 0 || stats.DeleteRanges != 1 {
+			t.Fatalf("a delete of what the document lacks was checked %d times and left %+v parked, want no check and one range", calls, stats)
+		}
+		requireDrainRefused(t, ApplyUpdateV1(doc, y, nil))
+		if calls != 2 {
+			t.Fatalf("the update and its drain were checked %d times, want 2", calls)
+		}
+		if got, want := text.ToString(), "hello worldy"; got != want {
+			t.Fatalf("the text is %q, want %q with the drain's delete rolled back", got, want)
+		}
+		if got := doc.PendingStats().DeleteRanges; got != 1 {
+			t.Fatalf("%d delete ranges parked, want the one parked again", got)
+		}
+	})
+	t.Run("an empty queue", func(t *testing.T) {
+		base := checkBase(t)
+		doc := checkedDoc(t, base)
+		calls := 0
+		doc.SetApplyCheck(func(any, *ApplyView) error { calls++; return nil })
+		typed := peerEdit(t, base, 5, func(txn *Transaction) { txn.GetText("t").Insert(txn, 0, "y", nil) })
+		if err := ApplyUpdateV1(doc, typed, nil); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 {
+			t.Fatalf("an apply with nothing parked was checked %d times, want once", calls)
+		}
+	})
+	t.Run("a parked struct the update does not release", func(t *testing.T) {
+		s := newDrainScenario(t)
+		calls := 0
+		s.doc.SetApplyCheck(func(any, *ApplyView) error { calls++; return nil })
+		typed := peerEdit(t, s.base, 6, func(txn *Transaction) { txn.GetText("t").Insert(txn, 0, "Q", nil) })
+		if err := ApplyUpdateV1(s.doc, typed, nil); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 || s.doc.PendingStats().Items != 1 {
+			t.Fatalf("the apply was checked %d times with %d structs parked, want once and EVIL still parked", calls, s.doc.PendingStats().Items)
+		}
+	})
+}

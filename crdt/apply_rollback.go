@@ -37,6 +37,26 @@ type applyJournal struct {
 	// update stands (checkDrain).
 	check        func(origin any, view *ApplyView) error
 	drainRefused error
+	// touched is the clients the update added a struct for, kept beside a
+	// check (touch); touchedBuf holds a keystroke's few without allocating.
+	touched    []ClientID
+	touchedBuf [4]ClientID
+}
+
+// touch records client, whose struct the update is about to add to the store
+// (noteIntegrated), as one whose clock the apply can move (updateLanded).
+// A run of one client's structs is recorded once, and nothing without a check.
+func (j *applyJournal) touch(client ClientID) {
+	if j == nil || j.check == nil {
+		return
+	}
+	if n := len(j.touched); n > 0 && j.touched[n-1] == client {
+		return
+	}
+	if j.touched == nil {
+		j.touched = j.touchedBuf[:0]
+	}
+	j.touched = append(j.touched, client)
 }
 
 // applyPoint is a point of an apply that a rollback can return the document to.

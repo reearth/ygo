@@ -258,9 +258,10 @@ func (t *applyTally) nestedAll(vals []any) {
 // it does: it refuses the apply when item would hang under a root the list
 // does not allow (checkItemRoot), or, parked, under one the list of the apply
 // that sent it does not allow (checkParkedRoot), and when the update's own
-// structs or bytes would pass the budget with it, and otherwise counts it. A
-// struct the drain of the parked queue adds is checked against the lists but
-// not counted: the update that parked it was charged for it (noteParked).
+// structs or bytes would pass the budget with it, and otherwise counts it and
+// records its client for the apply check (touch). A struct the drain of the
+// parked queue adds is checked against the lists but not counted: the update
+// that parked it was charged for it (noteParked).
 func noteIntegrated(txn *Transaction, item *Item) {
 	d := txn.doc
 	checkParkedRoot(d, item)
@@ -271,6 +272,7 @@ func noteIntegrated(txn *Transaction, item *Item) {
 	t.checkItemRoot(d, item.Parent)
 	if !t.draining {
 		t.count(item)
+		d.applying.touch(item.ID.Client)
 	}
 }
 

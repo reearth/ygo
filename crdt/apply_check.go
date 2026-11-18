@@ -95,10 +95,10 @@ func (v *ApplyView) reads(t *abstractType) {
 
 // checkApply runs the apply check on what the update left, before the drain,
 // where its refusal can still roll the whole apply back (endRemoteApply). An
-// apply that changed nothing is not checked.
+// apply that changed nothing is not checked (updateLanded).
 func checkApply(txn *Transaction) error {
 	j := txn.doc.applying
-	if j == nil || j.check == nil || !landedSince(txn, &j.start) {
+	if j == nil || j.check == nil || !j.updateLanded(txn) {
 		return nil
 	}
 	switch panicked, err := runCheck(txn, j.check); {
@@ -138,6 +138,22 @@ func landedSince(txn *Transaction, point *applyPoint) bool {
 	s := txn.doc.store
 	for client := range s.clients {
 		if s.NextClock(client) != point.sv.Clock(client) {
+			return true
+		}
+	}
+	return false
+}
+
+// updateLanded is landedSince the apply's start, asked only of the clients
+// the update added a struct for (touched): no other client's clock moves
+// before the drain, so it costs what the update carries, not the document.
+func (j *applyJournal) updateLanded(txn *Transaction) bool {
+	if deletedSpan(txn.deleteSet) != deletedSpan(j.start.deleted) {
+		return true
+	}
+	s := txn.doc.store
+	for _, client := range j.touched {
+		if s.NextClock(client) != j.start.sv.Clock(client) {
 			return true
 		}
 	}
