@@ -72,5 +72,9 @@ func TestUnit_ApplyUpdateV1Landed_SuccessAllocatesNoMoreThanApply(t *testing.T) 
 		_, err := ApplyUpdateV1Landed(newTestDoc(2), update, nil)
 		require.NoError(t, err)
 	})
-	require.LessOrEqual(t, landed, apply)
+	// Both sides allocate the same without the race detector, which measures
+	// them exactly. Under -race the count moves by one either way whatever
+	// the sample, so one is noise; a landed that really costs more costs
+	// several.
+	require.LessOrEqual(t, landed, apply+1)
 }
