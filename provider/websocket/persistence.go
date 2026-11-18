@@ -130,21 +130,22 @@ func (s *Server) persistStranded(r *room, name string, extra []byte) {
 	defer r.persistFallbackMu.Unlock()
 
 	store := func(update []byte) {
+		var (
+			stored bool
+			err    error
+		)
 		defer func() {
 			if rv := recover(); rv != nil {
 				log.Printf("ygo/websocket: StoreUpdate panic for retired room %q: %v", name, rv)
+				stored = false
 			}
+			s.noteStored(r, update, stored && err == nil)
 		}()
 		// context.Background, never the worker's ctx: that ctx is cancelled by
 		// the very signal (shutdown / stop) that retired the worker, so using it
 		// would make every ctx-aware adapter discard exactly the writes this
 		// function exists to save.
-		var err error
-		if pac, ok := s.persistence.(PersistenceAdapterContext); ok {
-			err = pac.StoreUpdateContext(context.Background(), name, update)
-		} else {
-			err = s.persistence.StoreUpdate(name, update)
-		}
+		stored, err = s.storeOne(context.Background(), name, update)
 		if err != nil {
 			log.Printf("ygo/websocket: StoreUpdate for retired room %q: %v", name, err)
 		}
@@ -332,19 +333,24 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 
 		// store issues one backing-store write for a single update using the
 		// given ctx and returns whether it failed. Panics are contained and
-		// reported as a non-nil error; errors are logged (no retry).
-		store := func(ctx context.Context, update []byte) (err error) {
+		// reported as a non-nil error; errors are logged (no retry). Under
+		// AnswerOnceStored it then tells the answer waiting on update, or on
+		// each of covers when update is their merge, whether it was stored
+		// (noteStored), a write that failed or panicked as not stored.
+		store := func(ctx context.Context, update []byte, covers ...[]byte) (err error) {
+			stored := false
 			defer func() {
 				if rv := recover(); rv != nil {
 					log.Printf("ygo/websocket: StoreUpdate panic for room %q: %v", name, rv)
 					err = fmt.Errorf("StoreUpdate panic for room %q: %v", name, rv)
 				}
+				ok := stored && err == nil
+				s.noteStored(r, update, ok)
+				for _, u := range covers {
+					s.noteStored(r, u, ok)
+				}
 			}()
-			if pac, ok := s.persistence.(PersistenceAdapterContext); ok {
-				err = pac.StoreUpdateContext(ctx, name, update)
-			} else {
-				err = s.persistence.StoreUpdate(name, update)
-			}
+			stored, err = s.storeOne(ctx, name, update)
 			if err != nil {
 				log.Printf("ygo/websocket: StoreUpdate for room %q: %v", name, err)
 				return err
@@ -382,7 +388,7 @@ func (s *Server) startPersistenceWorker(r *room, name string) {
 				}
 				return ok
 			}
-			return store(ctx, merged) == nil
+			return store(ctx, merged, batch...) == nil
 		}
 
 		// Strict per-update path (coalescing disabled): one store per update.

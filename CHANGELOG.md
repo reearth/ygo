@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.58.0] — 2026-11-18
+
+### Added
+
+- **`provider/websocket`: `Server.AnswerOnceStored`**, off by default. On a
+  server with persistence, the `SyncStatus` a peer is answered for an update
+  waits until the room's persistence has stored the commit that update made,
+  and is 0 when it was not stored, so a client that keeps an edit until it
+  is answered applied keeps it until it is stored. Only the answer waits:
+  the update is relayed to the room's other peers as soon as the room
+  applies it. Each peer's answers still go out in the order its frames
+  arrived, and the answers to the frames one coalesced write stores wait for
+  that write.
+- **`provider/websocket`: `PersistenceAdapterStored`**, an optional adapter
+  extension. `StoreUpdateStored` says whether each update is stored once the
+  call returns. Under `AnswerOnceStored` the worker calls it in place of
+  `StoreUpdateContext` and `StoreUpdate`, so an adapter that returns nil for
+  an update it dropped is not taken as having stored it.
+- **`provider/websocket`: `Server.ClosePeer(origin, code, reason)`** closes
+  the peer whose updates carry `origin` as their transaction origin
+  (`PeerUpdateInfo.Origin`), from any goroutine, and reports whether it was
+  an open peer of the server. Under `AnswerOnceStored` the close goes out
+  after the answers the peer is owed for the frames it sent before the call.
+- **`provider/websocket`: `Server.ResyncPeer(origin)`** sends that peer the
+  room's `SyncStep1`, which its provider answers with a `SyncStep2` the room
+  applies and answers, and reports whether it was an open peer of the
+  server. It is safe from any goroutine, with the room's document locked
+  too. Under `AnswerOnceStored` the `SyncStep1` goes out after the answers
+  the peer is owed for the frames it sent before the call.
+
 ## [1.57.0] — 2026-11-18
 
 ### Added

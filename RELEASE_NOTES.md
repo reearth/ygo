@@ -1,3 +1,27 @@
+## v1.58.0
+
+- **New: `Server.AnswerOnceStored` answers an edit applied once it is
+  stored.** A peer is answered `SyncStatus(1)` as soon as the room applies
+  its update, before the room's persistence worker has stored it. A client
+  that keeps an edit until it is answered applied then drops it, and when
+  the store fails, or the server stops first, the edit is lost. With the
+  option, on a server with persistence, the answer waits until the commit
+  the update made is stored, and is 0 when it was not stored: the adapter
+  call returned an error or panicked, or an adapter that implements the new
+  `PersistenceAdapterStored` says it did not store it. The client keeps the
+  edit and sends it again. Only the answer waits: the update is relayed to
+  the room's other peers as soon as the room applies it. Each peer's answers
+  still go out in the order its frames arrived. Off, the default, nothing
+  changes.
+- **New: `Server.ClosePeer` and `Server.ResyncPeer` act on one peer.**
+  `ClosePeer(origin, code, reason)` closes the peer whose updates carry
+  `origin`, the `PeerUpdateInfo.Origin` an `OnPeerUpdate` hook is handed,
+  from any goroutine. `ResyncPeer(origin)` sends that peer the room's
+  `SyncStep1`, so its provider sends what it holds and the room lacks, which
+  the room applies and answers as any other update. Under
+  `AnswerOnceStored`, each goes out after the answers the peer is owed for
+  the frames it sent before the call.
+
 ## v1.57.0
 
 - **New: `crdt.ApplyUpdateV1Held`.** It applies a V1 update as

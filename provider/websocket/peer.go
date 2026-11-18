@@ -41,6 +41,12 @@ type peer struct {
 	identity          any           // ConnectionConfig.Identity, handed to OnPeerUpdate; set and read on the read loop
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
 	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
+	// answers is what the peer is owed under Server.AnswerOnceStored, in the
+	// order its frames arrived, and storeWait is the store wait of the apply
+	// in hand, which the room's persistence observer takes for that apply's
+	// commit (armStoreWait).
+	answers   peerAnswers
+	storeWait *storeWait
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -254,25 +260,53 @@ func (p *peer) handleMessage(data []byte) {
 // decode is answered 0, where @hocuspocus/server closes with 4403, which would
 // stop @hocuspocus/provider from reconnecting. A sync message whose own framing
 // does not decode never reaches here: see discardMalformedSync.
+//
+// Under Server.AnswerOnceStored the answer to a frame whose apply changed the
+// room waits until the room's persistence has stored that commit, and is 0
+// when it was not stored; the relay does not wait. The answers still go out
+// in the order the frames arrived, a read-only peer's included (a peer an
+// in-band Auth made read-only can still be owed answers), and the close of a
+// peer whose update the hook refused goes out after them (resolveAnswer).
 func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 	if p.readOnly {
 		if p.hocuspocusFraming {
-			p.sendSyncStatus(subType == ygsync.MsgSyncStep2 && p.roomHolds(update))
+			held := subType == ygsync.MsgSyncStep2 && p.roomHolds(update)
+			if p.server.answersOnceStored() {
+				p.resolveAnswer(p.reserveAnswer(), held, nil)
+			} else {
+				p.sendSyncStatus(held)
+			}
 		}
 		return
 	}
+	var answer *peerAnswer
+	if p.server.answersOnceStored() {
+		answer = p.reserveAnswer()
+		p.storeWait = &storeWait{}
+	}
 	applied, held, closeWith := p.applyPeerUpdate(update)
-	if !applied {
-		p.sendSyncStatus(false)
+	wait := p.storeWait
+	p.storeWait = nil
+	if applied && !held {
+		p.broadcastSync(payload)
+	}
+	if answer == nil {
+		p.sendSyncStatus(applied)
 		if closeWith != nil {
 			p.enqueueClose(closeWith.Code, closeWith.Reason)
 		}
 		return
 	}
-	if !held {
-		p.broadcastSync(payload)
+	if closeWith != nil {
+		// Nothing more from the connection lands, though the close itself
+		// waits for the answers before it.
+		p.inputClosed.Store(true)
 	}
-	p.sendSyncStatus(true)
+	if wait.taken {
+		wait.whenStored(func(stored bool) { p.resolveAnswer(answer, applied && stored, closeWith) })
+		return
+	}
+	p.resolveAnswer(answer, applied, closeWith)
 }
 
 // applyToRoom applies update to the room's document and reports whether the
