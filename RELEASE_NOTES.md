@@ -1,5 +1,8 @@
 ## v1.56.3
 
+**Who is affected: code that undoes and redoes edits of nested arrays, and
+code that compares or stores the encoded state of such a document.**
+
 - **An undo that follows restored copies splits only the last one, as Yjs
   does.** When an undo deleted an item that earlier undos had restored more
   than once as part of a longer copy, every copy on the way was split at that
@@ -12,6 +15,18 @@
   ygo restored the whole run, so after that undo the document held different
   content from a Yjs peer after the same undo. Undo now copies the content
   after the traces, as Yjs does.
+
+**This does not make undo match Yjs everywhere.** In a differential run of
+1,500 seeded sessions against Yjs 13.6.30, 3 sessions still differ in content
+with this release, against 4 before it. In each one ygo restores content that
+Yjs does not, or the same elements in another order. It never loses content.
+The differential test now in the repository, `TestDifferential_UndoMatchesYjs`,
+finds 2 such sessions on v1.56.2 and none with this release.
+
+**Byte parity with Yjs does not improve.** ygo still encodes these documents
+to other V1 and V2 bytes than Yjs, because it does not merge adjacent deleted
+structs before it encodes (#274). In one case, an undo after a redo of the
+same run, v1.56.2 wrote Yjs's bytes and this release does not.
 
 ## v1.56.2
 

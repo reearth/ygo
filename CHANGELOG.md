@@ -23,8 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restored the whole run: different content from Yjs after that undo, and
   other V1 and V2 bytes. A trace that passes through an earlier copy still
   restores the whole run. An undo after a redo of the same run also leaves
-  the copy in between as one struct, where Yjs splits it, until ygo merges
-  every neighbour at the end of a transaction, as Yjs does.
+  the copy in between as one struct, where Yjs splits it: v1.56.2 wrote
+  Yjs's bytes there, and this release does not, until ygo merges every
+  neighbour at the end of a transaction, as Yjs does. Undo still differs from
+  Yjs in a few sessions, always by restoring more content or the same
+  content in another order, never by losing content. Byte parity with Yjs
+  does not improve (#274).
 
 ## [1.56.2] — 2026-11-17
 
