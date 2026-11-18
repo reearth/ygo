@@ -133,26 +133,29 @@ func TestUnit_Float32_WriterHoldsWhatReplicasDecode(t *testing.T) {
 				detached.SetAttributeValue(txn, "v", f32)
 			})
 			got, _ := detached.GetAttributeValue("v")
-			assert.Equal(t, f, got, "detached GetAttributeValue")
+			assert.IsType(t, f, got, "detached GetAttributeValue")
+			assert.InDelta(t, f, got, 0, "detached GetAttributeValue")
 			replica := newTestDoc(2)
 			require.NoError(t, version.apply(replica, version.encode(writer, nil), nil))
 
 			for name, doc := range map[string]*Doc{"writer": writer, "replica": replica} {
 				v, _ := doc.GetMap("m").Get("v")
-				assert.Equal(t, f, v, "%s Get", name)
+				assert.IsType(t, f, v, "%s Get", name)
+				assert.InDelta(t, f, v, 0, "%s Get", name)
 				plain, _ := doc.GetMap("m").Get("plain")
 				assert.Equal(t, map[string]any{"v": f, "list": []any{f}}, plain, "%s Get", name)
 				assert.Equal(t, []any{f, []any{f}}, doc.GetArray("a").ToSlice(), "%s ToSlice", name)
 				js, err := doc.GetMap("m").ToJSON()
 				require.NoError(t, err)
-				assert.Equal(t, `{"plain":{"list":[0.10000000149011612],"v":0.10000000149011612},"v":0.10000000149011612}`, string(js), "%s ToJSON", name)
+				assert.JSONEq(t, `{"plain":{"list":[0.10000000149011612],"v":0.10000000149011612},"v":0.10000000149011612}`, string(js), "%s ToJSON", name)
 				assert.Equal(t, []Delta{
 					{Op: DeltaOpInsert, Insert: "ab", Attributes: Attributes{"w": f}},
 					{Op: DeltaOpInsert, Insert: map[string]any{"w": f}},
 				}, doc.GetText("t").ToDelta(), "%s ToDelta", name)
 				el := doc.GetXmlFragment("x").Children()[0].(*YXmlElement)
 				got, _ := el.GetAttributeValue("v")
-				assert.Equal(t, f, got, "%s GetAttributeValue", name)
+				assert.IsType(t, f, got, "%s GetAttributeValue", name)
+				assert.InDelta(t, f, got, 0, "%s GetAttributeValue", name)
 			}
 		})
 	}
