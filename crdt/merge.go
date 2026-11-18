@@ -93,11 +93,12 @@ func sliceItemFront(item *Item, offset uint64) {
 
 // dedupClientStructs sorts a client's structs by clock and removes/slices
 // overlaps so the result is non-overlapping and clock-ascending. Clock GAPS are
-// preserved (the encoder emits skip structs for them).
+// preserved (the encoder emits skip structs for them). buildMergeStore hands
+// it a client's structs only when no update carries one below the end of an
+// earlier update's; mergeOverlapping takes the others.
 func dedupClientStructs(items []*Item) []*Item {
-	// Sort by clock, longest-first on ties, so the merge is deterministic when
-	// two inputs carry overlapping ranges starting at the same clock (the longer
-	// struct is kept and shorter duplicates are dropped/sliced consistently).
+	// Sort by clock, longest-first on ties, so the longer of two structs on
+	// one clock is kept. mergeOverlapping sorts in this order too.
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].ID.Clock != items[j].ID.Clock {
 			return items[i].ID.Clock < items[j].ID.Clock
@@ -120,6 +121,148 @@ func dedupClientStructs(items []*Item) []*Item {
 		hasCov = true
 	}
 	return out
+}
+
+// carriedStruct is a struct an update carried, with its place among its
+// client's structs in the order the updates carried them, and its clocks as
+// carried.
+type carriedStruct struct {
+	item       *Item
+	seq        int
+	clock, end uint64
+	done       bool // kept, or covered by kept structs
+}
+
+// mergeOverlapping is dedupClientStructs for a client whose updates carry
+// structs over clocks that an earlier update's structs carry. items holds them
+// in the order the updates carried them. Wherever a struct must start, the
+// struct dedupClientStructs would keep is kept, cut there, unless it names
+// there another origin, right origin, parent or key than the struct the
+// earliest update carried among those holding that clock. The two are then
+// different insertions, and the earlier update's struct is kept instead, as
+// an apply of the updates in order integrates from a later struct only the
+// clocks past those it holds. The struct that lost is cut at the end of the
+// one kept, and the choice is made again there. So a struct that a later
+// update carries over an earlier one's clocks and that names otherwise, such
+// as one parked on a struct no update carries, keeps only the clocks past
+// them.
+func mergeOverlapping(items []*Item) []*Item {
+	carried := make([]carriedStruct, len(items))
+	for i, it := range items {
+		carried[i] = carriedStruct{item: it, seq: i, clock: it.ID.Clock, end: it.ID.Clock + it.Content.Len()}
+	}
+	// dedupClientStructs' order, to the same permutation, so that this keeps
+	// the struct it would keep wherever no earlier insertion names otherwise.
+	sort.Slice(carried, func(i, j int) bool {
+		if carried[i].clock != carried[j].clock {
+			return carried[i].clock < carried[j].clock
+		}
+		return carried[i].end > carried[j].end
+	})
+	var covEnd uint64
+	held := func(i int) bool { return carried[i].done || carried[i].end <= covEnd }
+	// earliest holds, by the order the updates carried them, the structs that
+	// start at or before covEnd; held ones leave it once at its top.
+	earliest := candidateHeap{less: func(a, b int) bool { return carried[a].seq < carried[b].seq }}
+	out := items[:0]
+	first := 0 // the first struct in dedupClientStructs' order not held
+	for next := 0; next < len(carried); {
+		// The first struct, or one after a gap: as in dedupClientStructs, the
+		// first there is kept even when it has length zero.
+		covEnd = carried[next].clock
+		if carried[next].end == covEnd {
+			carried[next].done = true
+			out = append(out, carried[next].item)
+		}
+		for {
+			for ; next < len(carried) && carried[next].clock <= covEnd; next++ {
+				earliest.push(next)
+			}
+			for first < next && held(first) {
+				first++
+			}
+			if first == next {
+				break
+			}
+			for held(earliest.idx[0]) {
+				earliest.pop()
+			}
+			keep := first
+			if e := earliest.idx[0]; e != first && !sameInsertionAt(carried[first].item, carried[e].item, covEnd) {
+				keep = e
+			}
+			carried[keep].done = true
+			it := carried[keep].item
+			if it.ID.Clock < covEnd {
+				sliceItemFront(it, covEnd-it.ID.Clock)
+			}
+			out = append(out, it)
+			covEnd = carried[keep].end
+		}
+	}
+	return out
+}
+
+// sameInsertionAt reports whether two structs that both hold clock at name
+// the same origin there, and the same right origin, parent and key, as two
+// copies of one insertion do. A struct that starts before at names there the
+// clock before at, as it will once cut at at; a GC struct names nothing.
+func sameInsertionAt(a, b *Item, at uint64) bool {
+	ao, aHas := originAt(a, at)
+	bo, bHas := originAt(b, at)
+	return aHas == bHas && ao == bo && a.Parent == b.Parent && a.isGCOrphan() == b.isGCOrphan() &&
+		originIDEquals(a.OriginRight, b.OriginRight) && originIDEquals(a.parentID, b.parentID) &&
+		(a.ParentSub == nil) == (b.ParentSub == nil) && (a.ParentSub == nil || *a.ParentSub == *b.ParentSub)
+}
+
+// originAt is the origin it names at clock at, as sliceItemFront would set it.
+func originAt(it *Item, at uint64) (ID, bool) {
+	switch {
+	case it.ID.Clock < at && !it.isGCOrphan():
+		return ID{Client: it.ID.Client, Clock: at - 1}, true
+	case it.Origin != nil:
+		return *it.Origin, true
+	}
+	return ID{}, false
+}
+
+// candidateHeap is a binary heap of indexes into a merge's carried structs,
+// least first.
+type candidateHeap struct {
+	idx  []int
+	less func(a, b int) bool
+}
+
+func (h *candidateHeap) push(i int) {
+	h.idx = append(h.idx, i)
+	for c := len(h.idx) - 1; c > 0; {
+		p := (c - 1) / 2
+		if !h.less(h.idx[c], h.idx[p]) {
+			break
+		}
+		h.idx[c], h.idx[p] = h.idx[p], h.idx[c]
+		c = p
+	}
+}
+
+func (h *candidateHeap) pop() {
+	last := len(h.idx) - 1
+	h.idx[0] = h.idx[last]
+	h.idx = h.idx[:last]
+	for p := 0; ; {
+		least := p
+		if l := 2*p + 1; l < len(h.idx) && h.less(h.idx[l], h.idx[least]) {
+			least = l
+		}
+		if r := 2*p + 2; r < len(h.idx) && h.less(h.idx[r], h.idx[least]) {
+			least = r
+		}
+		if least == p {
+			return
+		}
+		h.idx[p], h.idx[least] = h.idx[least], h.idx[p]
+		p = least
+	}
 }
 
 // encodeStructStoreV1 encodes per-client struct slices (clock-ordered,
@@ -206,6 +349,10 @@ func encodeStructStoreV1(perClient map[ClientID][]*Item, ds DeleteSet, sv StateV
 func buildMergeStore(updates [][]byte, decode func(*Doc, []byte) (map[ClientID][]*Item, DeleteSet, error)) (map[ClientID][]*Item, DeleteSet, error) {
 	scratch := New()
 	perClient := make(map[ClientID][]*Item)
+	// The clients an update carries structs of below the end of an earlier
+	// update's. An update's structs of one client ascend without overlapping,
+	// so every other client's structs ascend as carried.
+	var overlapping map[ClientID]bool
 	mergedDS := newDeleteSet()
 	for _, u := range updates {
 		structs, ds, err := decode(scratch, u)
@@ -213,12 +360,24 @@ func buildMergeStore(updates [][]byte, decode func(*Doc, []byte) (map[ClientID][
 			return nil, DeleteSet{}, err
 		}
 		for c, items := range structs {
+			if have := perClient[c]; len(have) > 0 && len(items) > 0 {
+				if last := have[len(have)-1]; items[0].ID.Clock < last.ID.Clock+last.Content.Len() {
+					if overlapping == nil {
+						overlapping = make(map[ClientID]bool)
+					}
+					overlapping[c] = true
+				}
+			}
 			perClient[c] = append(perClient[c], items...)
 		}
 		mergedDS.Merge(ds)
 	}
 	for c, items := range perClient {
-		perClient[c] = dedupClientStructs(items)
+		if overlapping[c] {
+			perClient[c] = mergeOverlapping(items)
+		} else {
+			perClient[c] = dedupClientStructs(items)
+		}
 	}
 	return perClient, mergedDS, nil
 }

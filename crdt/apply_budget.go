@@ -107,6 +107,9 @@ type applyTally struct {
 	// root its Root.
 	decoded, structs, bytes, split int
 	root                           string
+	// stateCount is what the apply adds to the encoded state, on a document
+	// that reports (ApplyReport.StateBytes, state_bytes.go).
+	stateCount
 }
 
 // over reports whether used passes limit, a field of ApplyBudget, where zero
@@ -154,6 +157,9 @@ func beginApplyTally(txn *Transaction) {
 	if d.refusedContent != nil {
 		t.refused = d.callRefusedContent(txn.Origin)
 	}
+	if d.applyReport != nil {
+		t.beginStateCount(d.store)
+	}
 }
 
 // endApplyTally ends txn's tally and returns err, the apply's error, as a
@@ -178,6 +184,11 @@ func endApplyTally(txn *Transaction, err error) error {
 		}
 	}
 	if d.applyReport != nil && !txn.refused && !txn.rolledBack {
+		// The apply's deletions are all made, so the delete set's growth is
+		// read here; the commit takes off what its merges remove (stateDue).
+		if t.stateOn {
+			t.state += deleteSetGrowth(txn, t)
+		}
 		d.reporting = t
 	}
 	if err == nil {
@@ -188,22 +199,26 @@ func endApplyTally(txn *Transaction, err error) error {
 
 // drainCount is the count as a drain of the pending queue began, which a
 // drain taken back returns to (takeBackDrain).
-type drainCount struct{ split int }
+type drainCount struct {
+	split int
+	state stateAtDrain
+}
 
-// beginDrain is the count as the drain of the parked queue begins.
-func (t *applyTally) beginDrain() drainCount {
+// beginDrain is the count as the drain of s's parked queue begins.
+func (t *applyTally) beginDrain(s *StructStore) drainCount {
 	if t == nil {
 		return drainCount{}
 	}
-	return drainCount{t.split}
+	return drainCount{split: t.split, state: t.beginStateDrain(s)}
 }
 
 // takeBackDrain returns the counts to at, where the drain began, once
-// WithWholeOrNothingApplies has taken the drain back: the document keeps
-// none of its splits.
-func (t *applyTally) takeBackDrain(at drainCount) {
+// WithWholeOrNothingApplies has taken the drain back and the store is where
+// the drain began: the document keeps none of its splits.
+func (t *applyTally) takeBackDrain(at drainCount, s *StructStore) {
 	if t != nil {
 		t.split = at.split
+		t.takeBackStateDrain(at.state, s)
 	}
 }
 

@@ -25,5 +25,6 @@ func reportApply(txn *Transaction, t *applyTally) {
 		Bytes:      t.bytes,
 		Split:      t.split,
 		Decoded:    t.decoded,
+		StateBytes: t.state,
 	})
 }

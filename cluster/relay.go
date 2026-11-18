@@ -178,6 +178,11 @@ type Relay interface {
 	// shipped relays are unaffected: cluster/redis's RoomDeactivated only
 	// UNSUBSCRIBEs, which is inbound-only and never consulted by Publish;
 	// MemRelay no-ops both calls.
+	//
+	// The websocket provider makes no RoomActivated or RoomDeactivated call
+	// once Server.Shutdown has begun, so a room still active then gets no
+	// RoomDeactivated: release per-room state in Close, which for a relay that
+	// several Servers share runs only after the last of them shuts down.
 	RoomDeactivated(room string)
 	// Close stops the relay and releases its resources. After Close, Publish
 	// returns ErrRelayClosed and no further inbound changes are delivered.

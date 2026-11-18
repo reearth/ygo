@@ -362,6 +362,10 @@ func encodeFromSnapshotLocked(doc *Doc, snap *Snapshot) []byte {
 // whole-document RunGC entry point.
 func gcTxnDeleteSet(doc *Doc, txn *Transaction) {
 	var contents gcContents
+	// A report's encoded state loses what the collection takes out: a
+	// collected item's content becomes its length, and an item under a
+	// collected type a GC struct (stateDue).
+	state := txn.stateDue()
 	for client, ranges := range txn.deleteSet.clients {
 		items := doc.store.clients[client]
 		if len(items) == 0 {
@@ -390,8 +394,11 @@ func gcTxnDeleteSet(doc *Doc, txn *Transaction) {
 					continue
 				case *ContentType:
 					if c.Type != nil {
-						gcTypeItems(c.Type, &contents)
+						gcTypeItems(c.Type, &contents, state, doc.store)
 					}
+				}
+				if state != nil {
+					*state += collectedGrowth(doc.store, item, false)
 				}
 				item.Content = contents.get(item.Content.Len())
 			}
@@ -422,7 +429,8 @@ func (g *gcContents) get(length uint64) *ContentDeleted {
 }
 
 // gcTypeItems turns every item under root into a GC struct without recursion, so nesting depth does not grow the stack.
-func gcTypeItems(root *abstractType, contents *gcContents) {
+// A non-nil state is the report's StateBytes, which each item's collection shrinks (collectedGrowth).
+func gcTypeItems(root *abstractType, contents *gcContents, state *int, s *StructStore) {
 	t, child := root, root.start
 	for {
 		if child == nil {
@@ -438,6 +446,9 @@ func gcTypeItems(root *abstractType, contents *gcContents) {
 			continue
 		}
 		next := child.Right
+		if state != nil {
+			*state += collectedGrowth(s, child, true)
+		}
 		if _, ok := child.Content.(*ContentDeleted); !ok {
 			child.Content = contents.get(child.Content.Len())
 		}

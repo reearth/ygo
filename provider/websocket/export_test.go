@@ -23,7 +23,7 @@ func MemoryPersistenceRecordCount(m *MemoryPersistence, room string) int {
 // must know the committer has registered before it lets the worker exit,
 // otherwise it is asserting against the acknowledged residual (a commit that
 // starts after Shutdown has read the counter) rather than against the join.
-func StrandedWritesInFlight(s *Server) int64 { return s.strandedInFlight.Load() }
+func StrandedWritesInFlight(s *Server) int64 { return s.stranded.n.Load() }
 
 // MemoryPersistencePendingRooms reports how many rooms hold un-compacted
 // bookkeeping. Test-only: proves the pending map is deleted, not zeroed.
@@ -75,4 +75,40 @@ func MemoryPersistenceBackoffState(m *MemoryPersistence, room string) (failures 
 		return 0, 0
 	}
 	return l.failures, l.retryAt
+}
+
+// WriteTimeout is the deadline writeToConn sets on each write.
+const WriteTimeout = writeTimeout
+
+// StateFrameBytes is the cap on each frame a peer's SyncStep1 is answered
+// with. Test-only: a test asserting the cap must assert against the one the
+// server uses, not a copy of the number.
+const StateFrameBytes = stateFrameBytes
+
+// DefaultPeerWriteQueueSize is the per-peer write queue's capacity when
+// PeerWriteQueueSize is unset. Test-only: the frames of one state answer have
+// to fit in it, and that is arithmetic on this number.
+const DefaultPeerWriteQueueSize = defaultPeerWriteQueueSize
+
+// PeerQueuedBytes reports the bytes charged to room's peers and its peer
+// count, or (0, 0) for a room the server does not hold.
+func PeerQueuedBytes(s *Server, room string) (bytes int64, peers int) {
+	s.rmu.RLock()
+	rm, ok := s.rooms[room]
+	s.rmu.RUnlock()
+	if !ok {
+		return 0, 0
+	}
+	rm.mu.Lock()
+	targets := make([]*peer, 0, len(rm.peers))
+	for p := range rm.peers {
+		targets = append(targets, p)
+	}
+	rm.mu.Unlock()
+	for _, p := range targets {
+		p.wmu.Lock()
+		bytes += p.queuedBytes
+		p.wmu.Unlock()
+	}
+	return bytes, len(targets)
 }

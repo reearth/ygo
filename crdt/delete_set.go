@@ -213,6 +213,7 @@ func retryPendingDs(txn *Transaction) {
 	store := txn.doc.store
 	if len(store.pendingDsMoved) > 0 {
 		ownPendingDs(txn, nil)
+		noteStateRetry(txn)
 	}
 	ready := store.takeReadyDeletes()
 	if ready.clients == nil {

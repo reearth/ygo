@@ -238,6 +238,11 @@ func integrateClientRuns(txn *Transaction, pending []*Item, step int, done []boo
 // go on to drainParked, and the item stays parked. A parked struct the
 // allowed roots refuse is dropped, as one that panics is.
 func tryIntegrateOrDrop(txn *Transaction, item *Item, dropped *error) (ok bool, waitsOn ClientID, err error) {
+	// A struct that leaves the queue takes what it held in the encoded state
+	// a report keeps with it (measureLeaving); deferred first, it reads ok
+	// once a recovered panic below has set it.
+	leaving := measureLeaving(txn, item)
+	defer func() { leaving.note(ok) }()
 	if dropped == nil {
 		return tryIntegrate(txn, item)
 	}
@@ -276,7 +281,11 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			// the queue the apply found.
 			j.keepQueueFor(s.pending, pl)
 		}
+		// What the merge changes of the encoded state is a report's
+		// (measureQueueMerge).
+		merged := measureQueueMerge(txn, pl)
 		pending = s.pending.apply(pl, pending, s.parked != nil && len(s.parked.items) > 0)
+		merged.note(pl, s.pending)
 	}
 	from := 0
 	if s.pending != nil {
@@ -299,6 +308,7 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 		// and counts against its budget here (noteParked).
 		noteParked(txn, item)
 		noteParkedRoot(txn, item)
+		noteStatePark(txn, item)
 		if s.pending == nil {
 			s.pending = &pendingUpdate{missing: make(StateVector), tailClient: item.ID.Client, tailValid: true}
 		}

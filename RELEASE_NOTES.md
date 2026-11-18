@@ -255,6 +255,14 @@ document with a check applies remote updates whole or not at all, as with
 `WithWholeOrNothingApplies`. The check runs under the document's lock, so it
 must cost in proportion to the change (`ApplyView.ChangedTypes`).
 
+`ApplyReport.StateBytes` is the bytes each remote apply added to the
+document's encoded state, signed, counted as the apply makes each change
+rather than by encoding. An owner that encodes a document once, while
+nothing is parked, and adds each report's `StateBytes` holds a total at or
+above the state's length in either form the encode writes, so it can bound a
+document's state without an encode per apply. An apply that fails partway
+counts what the document kept of it.
+
 **Who is affected:** servers that apply updates from peers, where one update
 places many items among the ones a document holds.
 
@@ -273,6 +281,166 @@ once per item: 2,000 of them into a 40,000-item list allocated 4,511 MiB. The
 scans of one transaction now mark the items they pass in one map, so the same
 update allocates 2.7 MiB and takes less than half the time. Placement is
 unchanged.
+
+**Who is affected: every `provider/websocket` server.** No wire format
+changes.
+
+- `CloseRoomWithinContext(ctx, name, doc, force)` can cancel a room-load wait
+  without closing the room. `CloseRoomWithin` retains its signature and uses
+  a background context. Once close starts, teardown runs to completion.
+
+- **`Server.PeerWriteQueueBytes` bounds the bytes waiting for a peer.** A
+  peer's write queue is bounded in frames (`PeerWriteQueueSize`, 512 by
+  default), not in bytes, and the server answers each SyncStep1 with the
+  room's full state on the sender's own queue. In 1.55.0, which sent that
+  answer as one frame, a peer that never read could make the server keep 512
+  copies of the document. Set a budget above the largest room state:
+
+  ```go
+  srv := ygws.NewServer()
+  srv.PeerWriteQueueBytes = 64 << 20 // 64 MiB waiting per peer
+  ```
+
+  When the frames that wait for a peer reach the budget, the next frame
+  closes the peer, whatever `SlowPeerPolicy` is set, and the close is logged
+  at Warn as `peer queued bytes over budget`. A frame that arrives while the
+  budget or more waits closes even a peer that reads. Zero, the default,
+  changes nothing.
+- **A failed write closes the connection.** Each write to a peer has a
+  10-second deadline. When a write failed, the peer's writer stopped but the
+  connection stayed open, so a peer that kept sending stayed in its room and
+  `OnLastPeer` did not fire. The server now closes the connection and removes
+  the peer.
+- **A peer that the server closes has its unread input dropped.** When the
+  server closed a connection itself (a full write queue, a Hocuspocus close
+  message, a cancelled request context without a close code, `Shutdown` or
+  `CloseRoom(name, true)`), the read loop still handled the messages in its
+  read buffer, and applied and stored the updates among them. It now drops
+  them. Updates the server had not read when it closed the connection are not
+  saved. A client that reconnects sends them again in the sync exchange.
+- **A joining peer receives the room's state once.** The server sent the
+  room's full state on connect and again in its answer to the peer's
+  SyncStep1. It now sends the state only in that answer, and awareness on
+  connect only when the room holds awareness states, as the y-websocket and
+  Hocuspocus servers do. `y-websocket`, `@hocuspocus/provider` and ygo's
+  `provider/client` send SyncStep1 on connect and need no change. **A custom
+  client that waits for the server's state without sending SyncStep1 now
+  receives no snapshot**, only the updates broadcast after it joins. A client
+  whose Hocuspocus token `OnTokenAuth` rejects, and that sends the token
+  before its SyncStep1, no longer receives the snapshot either, but updates
+  broadcast before the rejection can still reach it: withhold content with
+  `AuthFunc` or `Authorize`.
+- **`Shutdown` waits for the connections it serves.** A hook that ran on a
+  connection, or that its teardown fires, could still run after `Shutdown`
+  returned `nil`, so the usual `srv.Shutdown(ctx); return` could exit the
+  process with a hook half done. `Shutdown` now waits, bounded by `ctx`, until
+  every `ServeHTTP` call in progress has returned. **A hook that does not
+  return now holds `Shutdown` until `ctx` expires**, and `Shutdown` then
+  returns `ctx.Err()` where it returned `nil` before. Pass a `ctx` with a
+  deadline, and stop accepting connections before you call `Shutdown`. Once
+  `Shutdown` has begun, the server no longer calls a relay's `RoomActivated` or
+  `RoomDeactivated`, so a room still active then gets no `RoomDeactivated`:
+  release per-room relay state in `Close`.
+- **A queue close is logged once.** A peer closed for a full write queue or
+  for its byte budget logged a Warn for each frame that reached it before its
+  teardown. It now logs one.
+- A failed join now reclaims an existing empty room in eager eviction mode
+  when its last peer left during the join. Idle-resident rooms and rooms
+  with another caller remain resident. Rejected joins do not force a
+  persistence flush for an active room.
+- **The last peer's leave no longer evicts a room an `Apply` is inside.**
+  With the default `RoomIdleTimeout == 0`, such a room now stays resident,
+  as a room `Apply` created does, until a later last-peer leave or
+  `CloseRoom` evicts it.
+- **`CloseRoom` no longer evicts a room an `Apply` is inside.** It evicted
+  a room even while an `Apply` callback was inside it, so whatever the
+  callback wrote afterwards landed on a document the server no longer held,
+  and with no persistence adapter it was lost. `CloseRoom` now returns the new
+  `ErrRoomInUse` and keeps the room resident while a caller is inside it: an
+  `Apply` callback, a relay `Inject`, or a websocket join between the room
+  lookup and peer registration. `force=true` refuses as well. When the caller
+  is inside before the call, no peer is closed; one that enters while `force`
+  closes the peers leaves those peers closed. The refusal is transient, so a
+  closer that treats `ErrRoomInUse` like `ErrRoomHasPeers` and retries will
+  succeed.
+
+  Code that closes a room from inside its own `Apply` on that room calls the
+  new `Server.CloseRoomWithin(name, doc, force)`, as the callback's last act:
+
+  ```go
+  err := server.Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+      // ... decide to close ...
+      closeErr = server.CloseRoomWithin(room, doc, true)
+  })
+  ```
+
+  `doc` names the room instance the callback is writing. If the name holds a
+  different instance by then, nothing is closed and the call returns
+  `ErrRoomNotFound`. A second `Apply`, a relay `Inject` or a joining peer still
+  gives `ErrRoomInUse`. Called with nobody inside the room, it closes nothing
+  and returns the new `ErrNotInApply`. **What to change:** an admin path that
+  treats a non-nil `CloseRoom` error as fatal should retry on `ErrRoomInUse`,
+  and a caller that closed a room from inside its own `Apply` switches that
+  call to `CloseRoomWithin`, passing the callback's `doc`.
+
+**Who is affected: every `provider/websocket` server whose rooms hold large
+documents.** No wire format changes: every frame is an ordinary y-protocols
+sync message, and no caller has to change anything.
+
+A client joining a large room was sent the room's whole state as one
+SyncStep2. A browser applies one Yjs update in one main-thread task: for a
+1.22 MB state, a 406,319-character text one client wrote, replayed through
+yjs 13.6.32 in Chromium with the CPU throttled 4x, that task took 355 ms, the
+median of 9 runs after 2 warm-ups. The answer to a SyncStep1 is now the same
+state in frames of at most 64 KiB: Update messages, and then one SyncStep2,
+last. Each Update integrates on its own, so the receiver applies the state
+one frame per task; the cut is made over the update's structs, so a struct
+is never cut in half or sent before what it names, and a text item longer
+than a frame is cut at a character boundary. Deletions ride in the frame that
+carries the structs they name. The frames of one answer are queued together,
+in order, so a client that marks a document synced at its first SyncStep2 -
+`@hocuspocus/provider` does - sees it only once every Update is in. The
+answer is charged to `Server.PeerWriteQueueBytes` as the single frame it
+replaces was, and the peer's write queue (`Server.PeerWriteQueueSize`) must
+hold every frame of it, or the peer is closed. With nothing else queued, the
+512-frame default held a state of up to 33,470,582 bytes of one client's
+text, but only 511 map values of 32,800 characters (16,768,471 bytes), one
+to a frame: a map value cannot be cut, and two of these do not fit in one. A
+struct that cannot be cut and is longer than 64 KiB goes out in one frame of
+its own size, so no single state size covers every room. `crdt.SplitUpdateV1`
+is the cut itself, for a caller with its own transport,
+`crdt.SplitStateAsUpdateV1` is the same cut of a document's state, read from
+its structs where they are, and `sync.EncodeSyncStep2Split` is the answer as
+sync messages; `sync.EncodeSyncStep2` is unchanged. Cutting the answer costs
+the server up to 11% more CPU time than the single SyncStep2 did for a room
+of 20,000 characters typed into the middle, and 43% more for a room of
+16,000 small structs: map entries, XML elements and attributes, formatted
+text.
+
+**Who is affected: stores that merge the updates a document took, and
+documents that hold a struct parked over clocks they hold.** A merge in which
+no two insertions claim one clock returns the same bytes as before.
+
+A struct that names a struct the document lacks parks until that struct
+arrives, even when the document holds the struct's own clocks, as in Yjs.
+`MergeUpdatesV1` and `MergeUpdatesV2` kept, on each clock, the struct that
+started first and was longest, so such a struct took the clocks from the
+structs that held them. A reader of the merge parked it again, and everything
+of its client after it. A stored log of 1,000 keystrokes and one
+1,000-character update of that kind read back as 3 characters.
+`EncodeStateAsUpdateV1` and `EncodeStateAsUpdateV2`, which merge a document's
+parked structs into its state, read the same keystrokes back as 5 characters,
+with 993 structs parked.
+
+Where the struct the old rule keeps names another origin, right origin,
+parent or key than the struct the earliest update carried on that clock, the
+two are different insertions, and the earlier update's struct is now kept.
+The other keeps only the clocks past it, as an apply of the updates in order
+integrates only those. A stored log in which such an update follows the
+clocks it overlaps now reads back whole. A merge cannot tell which struct a
+document integrated, so a log that holds the parked struct before those
+clocks still merges as before; a document that applies the log encodes its
+state whole.
 
 ## v1.55.0
 

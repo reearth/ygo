@@ -111,6 +111,7 @@ func (item *Item) integrate(txn *Transaction, offset uint64) {
 		if right != nil && right.isGCOrphan() {
 			item.markGCOrphan()
 			noteIntegrated(txn, item)
+			noteStateAppend(txn, item)
 			txn.doc.store.Append(item)
 			txn.doc.store.resolvePendingMoves(txn, item.ID.Client)
 			return
@@ -262,7 +263,9 @@ func (item *Item) integrate(txn *Transaction, offset uint64) {
 		}
 	}
 
-	// Register in the document store.
+	// Register in the document store, counted in the encoded state a report
+	// keeps (noteStateAppend).
+	noteStateAppend(txn, item)
 	txn.doc.store.Append(item)
 
 	// As Yjs ContentDeleted.integrate does, an item that arrives with deleted
@@ -568,6 +571,10 @@ func splitItem(txn *Transaction, item *Item, offset uint64) *Item {
 	// A remote apply's split budget is checked before the split cuts anything,
 	// so a refused split leaves the item whole (countSplit).
 	countSplit(txn)
+	// A split adds a struct to the encoded state a report keeps: the right
+	// half's header and the length prefix of each half's content, the content
+	// itself moving (measureSplit).
+	measured := measureSplit(txn, item)
 	rightContent := item.Content.Splice(offset) // mutates item.Content → [0, offset)
 	right := &Item{
 		ID:          ID{Client: item.ID.Client, Clock: item.ID.Clock + offset},
@@ -588,6 +595,7 @@ func splitItem(txn *Transaction, item *Item, offset uint64) *Item {
 	}
 	item.Right = right
 	txn.doc.store.insertItem(right)
+	measured.note(item, right)
 	// A key's entry is its rightmost unit, so Set's origin stays the run's end.
 	if item.ParentSub != nil && item.Parent != nil && item.Parent.itemMap[*item.ParentSub] == item {
 		item.Parent.itemMap[*item.ParentSub] = right

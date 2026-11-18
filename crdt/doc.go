@@ -316,6 +316,47 @@ type ApplyReport struct {
 	// Decoded is the values the apply read, as ApplyBudget.Decoded counts
 	// them.
 	Decoded int
+	// StateBytes is the bytes the apply's transaction added to the
+	// document's encoded state, as EncodeStateAsUpdateV1(doc, nil) measures
+	// it, so an owner that encodes the document once and adds each report's
+	// StateBytes to that length holds the state's length, or more, without
+	// encoding again. It is a signed delta: below zero where the commit
+	// collects deleted content, merges split runs back or the drain drops a
+	// parked struct. An apply that fails partway counts what the document
+	// kept of it. Bytes is not this number: a GC struct, a split half and a
+	// delete range add state and carry no content.
+	//
+	// The sum is at or above the state in both forms the encode writes, the
+	// direct form while nothing is parked and a merge with the parked parts
+	// otherwise. Two classes of value are counted at their longer form: an
+	// integer outside int32 that a float32 holds exactly, nine bytes direct
+	// and five merged, and an integer in an embed or format value that a
+	// float64 rounds up a digit, a byte longer merged, which only a V2
+	// update or a local write holds. Where the document does not keep a
+	// count the state writes, the report takes the most it can add: the
+	// range count of a client of more than 254 structs, which can read a
+	// byte over; a struct appended, split or merged at clocks a parked
+	// struct also holds, as when an update re-sends what the document holds
+	// parked, 2 x (the varuint of its client + the varuint of the clock it
+	// ends at) over and the parked copy's length until it leaves the queue;
+	// the section of a client the queue holds structs of while a drain
+	// that dropped one of them runs; and a parked struct the drain drops,
+	// which is taken off less the skip that may stand for its clocks and
+	// its client's section header, which the state may drop with it.
+	//
+	// It covers the apply's own transaction. The format cleanup that may
+	// follow a remote apply is a local transaction of its own, which no
+	// report covers, and the collection that then waits for it, which only
+	// takes bytes out, is counted by neither, so the sum stays above the
+	// state.
+	//
+	// It is counted as the apply makes each change, at a cost that follows
+	// what the apply changes rather than the document's size, with two
+	// exceptions: the first apply to find structs parked in a queue reads
+	// what the queue holds of each client once, which later parks keep up,
+	// and an apply's first delete in a client holding no deleted struct
+	// walks that client's structs.
+	StateBytes int
 }
 
 // WithApplyReport calls report once for each remote apply (ApplyUpdate and

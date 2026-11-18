@@ -178,6 +178,7 @@ func parkedMissing(txn *Transaction) StateVector {
 // yet, into the pending deletes, under a journal into a set of its own
 // (ownPendingDs).
 func parkDeletes(txn *Transaction, ds DeleteSet) {
+	noteStateParkDeletes(txn, ds)
 	ownPendingDs(txn, ds.clients)
 	txn.doc.store.parkDeletes(ds)
 }
@@ -321,9 +322,9 @@ func (j *applyJournal) rollBack(txn *Transaction) {
 		for item, as := range j.queuedAs {
 			*item = as
 		}
-		// The apply's parks changed the queue's cover in place; the next park
-		// that needs it builds it again from the items kept.
-		p.cover = nil
+		// The apply's parks changed the queue's covers in place; the next
+		// park that needs one builds it again from the items kept.
+		p.cover, p.stateCover = nil, nil
 	}
 	if s := txn.doc.store; s.parked != nil {
 		*s.parked = transactionParked{}
