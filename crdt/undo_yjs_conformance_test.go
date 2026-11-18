@@ -597,6 +597,15 @@ func TestUndoYjsConformanceAuthorByteIdentical(t *testing.T) {
 
 			assertUndoJSON(t, toJSON, f.ExpectedJSON)
 			if f.JSONOnly {
+				// A known regression: main wrote Yjs's V1 bytes for these, and this
+				// undo code does not until ygo merges every neighbour at the end of
+				// a transaction. The check fails once the bytes match again, so the
+				// entry is removed on purpose.
+				if undoBytesRegressed[f.Name] {
+					if got := hex.EncodeToString(doc.EncodeStateAsUpdate()); got == f.UpdateV1 {
+						t.Errorf("V1 bytes match yjs again: remove %q from undoBytesRegressed", f.Name)
+					}
+				}
 				return
 			}
 			if got := hex.EncodeToString(doc.EncodeStateAsUpdate()); got != f.UpdateV1 {
@@ -607,4 +616,10 @@ func TestUndoYjsConformanceAuthorByteIdentical(t *testing.T) {
 			}
 		})
 	}
+}
+
+// undoBytesRegressed names the jsonOnly fixtures whose V1 bytes main wrote as
+// Yjs does.
+var undoBytesRegressed = map[string]bool{
+	"undo_after_redo_keeps_the_intermediate_copy_whole": true,
 }
