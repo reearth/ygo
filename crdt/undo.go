@@ -162,6 +162,10 @@ func NewUndoManager(doc *Doc, scope []SharedType, opts ...UndoManagerOption) *Un
 // pushed onto the undo stack (isRedo=false) or the redo stack (isRedo=true).
 // Use this to attach cursor metadata (e.g. selection before/after) to each
 // stack item via item.Meta.
+//
+// fn runs with no UndoManager lock held, so it may call back into the manager
+// or edit the document. Callbacks from concurrent transactions may overlap, so
+// fn must synchronise any state of its own.
 func (u *UndoManager) OnStackItemAdded(fn func(*StackItem, bool)) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -265,8 +269,9 @@ func (u *UndoManager) pop(redo bool) bool {
 		default:
 			u.redoStack = append(u.redoStack, inverse)
 		}
-		u.fireOnStackItemAdded(inverse, !redo)
+		fns := u.onStackItemAdded
 		u.mu.Unlock()
+		fireStackItemAdded(fns, inverse, !redo)
 		return true
 	}
 }
@@ -337,9 +342,9 @@ func (u *UndoManager) captureTransaction(txn *Transaction) {
 	}
 
 	u.mu.Lock()
-	defer u.mu.Unlock()
 
 	now := time.Now()
+	added := false
 	if len(u.undoStack) > 0 && !u.lastTxnTime.IsZero() && now.Sub(u.lastTxnTime) <= u.captureTimeout {
 		// Copy-on-write: a concurrent Undo may be reading a snapshot of
 		// top.deletions.
@@ -350,13 +355,20 @@ func (u *UndoManager) captureTransaction(txn *Transaction) {
 		top.deletions = merged
 	} else {
 		u.undoStack = append(u.undoStack, item)
-		u.fireOnStackItemAdded(item, false)
+		added = true
 	}
 	u.lastTxnTime = now
 	u.captures++
 
 	// Any new local edit invalidates the redo stack.
 	u.redoStack = u.redoStack[:0]
+	fns := u.onStackItemAdded
+	u.mu.Unlock()
+
+	// Yjs emits stack-item-added last, once the stacks are settled.
+	if added {
+		fireStackItemAdded(fns, item, false)
+	}
 }
 
 // applyStackItem executes the inverse of item as a new local transaction and
@@ -844,10 +856,11 @@ func cloneDeleteSet(ds DeleteSet) DeleteSet {
 	return out
 }
 
-// fireOnStackItemAdded calls all registered OnStackItemAdded callbacks.
-// Must be called with u.mu held.
-func (u *UndoManager) fireOnStackItemAdded(item *StackItem, redo bool) {
-	for _, fn := range u.onStackItemAdded {
+// fireStackItemAdded calls fns, which the caller read under u.mu and must
+// invoke with the lock released: a callback may use the manager that fired it
+// or edit its document, and u.mu is not reentrant.
+func fireStackItemAdded(fns []func(*StackItem, bool), item *StackItem, redo bool) {
+	for _, fn := range fns {
 		fn(item, redo)
 	}
 }

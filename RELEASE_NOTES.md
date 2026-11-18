@@ -1,3 +1,36 @@
+## v1.56.3
+
+**Who is affected: anyone registering an `UndoManager.OnStackItemAdded`
+callback that does more than read the `StackItem` it is handed.**
+
+The callback ran while the manager held its own mutex. That mutex is not
+reentrant, so a callback that called back into the manager that fired it —
+`UndoStackSize`, `RedoStackSize`, `StopCapturing`, `Clear` or
+`OnStackItemAdded` — blocked forever, as did one that opened a transaction
+touching a type in the manager's scope. Because the blocked goroutine kept the
+mutex, every later call on that `UndoManager` queued behind it and the undo
+history stopped responding.
+
+The behaviour looked intermittent: a callback that edited a type *outside* the
+manager's scope returned normally, since the capture path gives up before it
+takes the mutex.
+
+Callbacks now run with the mutex released, which is what Yjs does — it fires
+`stack-item-added` with no lock held. If you worked around this by deferring
+callback work to another goroutine, that workaround is still correct and needs
+no change.
+
+Two smaller consequences worth knowing:
+
+- A callback now observes the stacks as they will be once the edit settles.
+  Yjs emits `stack-item-added` last, after recording the change time and
+  clearing the redo stack. ygo fired it mid-update, so a callback that read
+  `RedoStackSize` saw entries the same edit was about to discard.
+- Callbacks are no longer serialised by the manager's mutex. Two concurrent
+  transactions can now run their callbacks at the same time. A callback that
+  mutates state of your own needs its own synchronisation — as it already did
+  for anything it touched outside the manager.
+
 ## v1.56.2
 
 **Who is affected: clustered deployments whose rooms can be evicted and
