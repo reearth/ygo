@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`crdt`: `Doc.OpenUpdateLog` records committed updates in commit order.**
+  OnUpdate observers run after the transaction releases the document lock, so
+  the observers of two transactions that commit close together on different
+  goroutines run in either order, and nothing they are handed says which
+  committed first. An `UpdateLog` is appended to under the document lock, at
+  the point where the commit already encodes its update for OnUpdate, so an
+  observer that drains it finds its own transaction's update after every
+  update committed before it. The first commit after the log opens also
+  records the document's whole state just before it, parked structs included
+  (the log's base). Each logged update is the very slice its `OnUpdate`
+  observers get, and, in `LoggedUpdate.Parked`, what the commit parked:
+  structs and deletions that wait for something the document lacks, which
+  `OnUpdate` leaves out as Yjs does. A reader that applies the base and then
+  each update's `Update` and `Parked` holds the document as it stood after
+  each commit, what it holds parked included. A remote update's format cleanup is a commit of its own
+  and is logged like one. `Drain`, `Pending`, `Reset` (start again from a
+  fresh base) and `Close` complete it, and `Destroy` closes every open log.
+  Neither an observer nor a reader may modify a logged `Update`. Without an
+  open log nothing changes: a commit encodes its update only for OnUpdate
+  observers, as before.
+- **`crdt`: `Doc.Clone(opts ...DocOption) *Doc`** returns a new document
+  holding an independent copy of the state of the one it is called on,
+  built by copying the structures: no update is encoded, no bytes are
+  parsed, and no struct is integrated. It is the copy
+  `nd := New(opts...); ApplyUpdateV1(nd, EncodeStateAsUpdateV1(d, nil), nil)`
+  makes, for a caller that wants a document to write to, such as a server
+  that copies a live room to serve one write. It copies every struct and
+  link, the delete state, the pending queue (parked structs, the clocks
+  they wait on, parked delete ranges and deferred moves) and the named root
+  types. It copies no observer, no undo manager and no cache, and takes
+  `New`'s options, not the source's. It takes the document's read lock.
 - **`crdt`: `Doc.SetMaxPendingItems(n)`** sets the pending cap after
   construction, so stored state over a cap can load first.
 - **`crdt`: `WithIntegrateScanBudget` bounds the conflict scans of a remote
@@ -168,6 +199,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   apply newly parked**, and is pruned by the ranges it holds, so a frame sent
   again does not grow it.
 
+- **`crdt`: `Doc.StructCount` returns how many structs the document holds.**
+  Every client's items count, deleted items and garbage-collected placeholders
+  included. Structs parked until a missing dependency arrives do not count
+  until they integrate (`PendingStats` reports them), and a subdocument's
+  structs count in its own `Doc`. A struct is a run of content, and the count
+  is this replica's: text typed one character per transaction is a struct per
+  character on the writer and on a replica that applied each transaction's
+  update, and one struct on a replica that loads the writer's state in one
+  update. The call takes the document's read lock, so it must not be made
+  inside a `Transact` callback; it walks the clients, not the structs, and
+  allocates nothing. `StructStore.Count` is the same count on the store.
+
 - `provider/websocket`: add `Server.CloseRoomWithinContext` to cancel a room-load
   wait without closing the room. `CloseRoomWithin` retains its signature and
   uses a background context. Once close starts, teardown runs to completion.
@@ -219,6 +262,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Update messages (type 2) and then one SyncStep2 (type 1), last. A receiver
   that applies them in order holds exactly what `EncodeSyncStep2`'s one
   message would have left it holding.
+- **`provider/websocket`: `Server.OnStateAnswer`** (`StateAnswerHook`,
+  `StateAnswerInfo`) runs just before the server answers a peer's SyncStep1
+  with the room's state, so a server can bound how many of those answers run
+  at once: each builds frames carrying all of what the peer is missing. It is
+  handed the room name, its document, the SyncStep1, and how many structs the
+  document holds, parked ones included
+  (`StateAnswerInfo.Structs`; `StructsNow` reads the figure again). A nil
+  error admits the answer, and the release returned with it runs once the
+  server is done with the answer. A non-nil error sends no answer and closes
+  the peer, with the code and reason of a `*PeerClose` it is or wraps and
+  with 4205 "Reset Connection" otherwise. A hook or release that panics is
+  recovered and logged. Nil keeps the behaviour without a hook.
 
 ### Changed
 
@@ -270,6 +325,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`crdt`: a pending queue with emptied slots builds its cover and struct
+  index again.** A merge into the queue empties slots in place, and a
+  rollback restores them, so the queue's items may hold nil entries.
+  `sortedSpans` and `structIndex` read every slot and failed on such a
+  queue once its caches had to be built again. They now skip the emptied
+  slots and keep the others' slot numbers.
 - **`crdt`: a merge keeps an earlier update's struct where a later update
   names other content on its clocks.** A struct that names a struct no update
   carries parks, also over clocks the document holds, because the apply looks

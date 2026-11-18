@@ -604,6 +604,11 @@ type Doc struct {
 	// Deleted=false on items it captured — which requires their original
 	// Content to still be present. Mutated under d.mu.
 	undoManagerCount int
+
+	// updateLogs are the open update logs (OpenUpdateLog). A committing
+	// transaction appends its update to each under d.mu; a closed log is
+	// dropped at the next commit.
+	updateLogs []*UpdateLog
 }
 
 // ClientID returns the document's client identifier. A remote transaction
@@ -1014,10 +1019,14 @@ func buildPhase2(d *Doc, txn *Transaction) func() {
 		return nil
 	}
 	// Encode the incremental update and snapshot observer slices while still
-	// holding the lock so we get a consistent view.
+	// holding the lock so we get a consistent view. The update logs take the
+	// update here, under the lock, so they hold updates in commit order.
 	var updateBytes []byte
-	if len(d.onUpdate) > 0 {
+	if d.wantsUpdateBytes() {
 		updateBytes = encodeV1Locked(d, txn.beforeState)
+		if len(d.updateLogs) > 0 {
+			d.appendUpdateLogs(updateBytes, parkedUpdate(d), txn.Origin)
+		}
 	}
 
 	// Snapshot per-type observer closures while the write lock is held.
@@ -1280,6 +1289,12 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		}
 	}()
 
+	// An update log opened (or Reset) since the last commit records the
+	// state as it stands before fn, under the lock: its base.
+	if len(d.updateLogs) > 0 {
+		d.recordUpdateLogBases()
+	}
+
 	retErr = fn(txn)
 	// An observer that keeps the *Transaction must not keep the scans' marks.
 	txn.scanMarks = nil
@@ -1517,6 +1532,28 @@ func (d *Doc) StateVector() StateVector {
 	return d.store.StateVector()
 }
 
+// StructCount returns how many structs the document holds: the items of every
+// client, deleted items and the placeholders of garbage-collected ones
+// included. A struct holds a run of content, not one element, and an insert or
+// a delete inside a run splits it, so the count follows how the content was
+// edited and how it arrived, not only what it is. It is this replica's count:
+// text typed one character per transaction is a struct per character on the
+// writer and on a replica that applied each transaction's update, and one
+// struct on a replica that loads the writer's state in one update.
+//
+// Structs parked until a missing dependency arrives are not counted until they
+// integrate (PendingStats reports them), and a subdocument's structs are
+// counted by its own Doc.
+//
+// StructCount walks the document's clients, not its structs, and allocates
+// nothing. It takes the document's read lock, and so must not be called
+// inside a Transact callback (see Transact and GetText).
+func (d *Doc) StructCount() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.store.Count()
+}
+
 // EncodeStateAsUpdate encodes the full document state as a V1 binary update.
 func (d *Doc) EncodeStateAsUpdate() []byte {
 	return EncodeStateAsUpdateV1(d, nil)
@@ -1652,13 +1689,18 @@ func (d *Doc) PendingStats() PendingStats {
 	return stats
 }
 
-// Destroy detaches all observers and clears internal state, releasing
-// references held by the document. After Destroy the document must not be used.
+// Destroy detaches all observers, closes the open update logs and clears
+// internal state, releasing references held by the document. After Destroy
+// the document must not be used.
 func (d *Doc) Destroy() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onUpdate = nil
 	d.onAfterTxn = nil
+	for _, l := range d.updateLogs {
+		l.Close()
+	}
+	d.updateLogs = nil
 	d.share = make(map[string]sharedType)
 	d.store = newStructStore()
 	d.linkMu.Lock()

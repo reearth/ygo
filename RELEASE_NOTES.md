@@ -71,6 +71,15 @@ the same document.
   17.2 times their bytes at the default cap, where 1.55.0 allocated up to
   137.3.
 
+**A copy of a document without an encode.** A server that wants a copy of a
+live document to write to has encoded its whole state and applied it to a
+fresh document, which allocates the update, parses it back and integrates
+every struct again. `Doc.Clone(opts...)` copies the structures instead and
+returns the document that copy builds. On a 395 KB document of 400
+paragraphs with marks, `Clone` allocates 1.74 MB in 12,038 allocations
+against the encode-and-apply copy's 6.5 to 6.9 MB in about 74,435
+(`BenchmarkDocCopy`).
+
 **Who is affected: servers that receive GC structs, which Yjs peers send for
 the content of a deleted nested type.**
 
@@ -470,6 +479,88 @@ clocks it overlaps now reads back whole. A merge cannot tell which struct a
 document integrated, so a log that holds the parked struct before those
 clocks still merges as before; a document that applies the log encodes its
 state whole.
+
+**Who is affected: nobody, unless you choose to be.** Nothing that exists
+changes.
+
+**`Doc.StructCount` reports how many structs a document holds.** What a
+document costs follows its structs as well as its content. The same 10,000
+characters typed in one transaction are one struct, a 10,011-byte state that
+a new document loads with 36 allocations and 13 KB. Typed one character per
+transaction, each at the front, they are 10,000 structs, a 59,878-byte state
+that a new document loads with 40,088 allocations and 2.5 MB. The store is
+unexported, and until now no method reported this count.
+
+The count takes in every client's items, deleted items and garbage-collected
+placeholders. It leaves out structs parked until a missing dependency arrives,
+which `PendingStats` reports, and a subdocument's structs, which its own `Doc`
+counts. It is this replica's count: text typed one character per transaction
+is a struct per character on the writer and on a server that applied each
+keystroke's update as it arrived, and one struct on a replica that loads the
+writer's state in one update.
+
+`StructCount` takes the document's read lock, so call it outside `Transact`.
+It walks the document's clients rather than its structs and allocates nothing.
+
+**Who is affected: `provider/websocket` servers that must bound the memory
+used to answer peers that join at the same time.** A server that does not set
+`Server.OnStateAnswer` is unchanged.
+
+Each answer to a SyncStep1 costs the server memory in proportion to what the
+peer is missing: the server builds every frame of the answer before it queues
+them. The answers to peers that join at the same time are built at the same
+time. `Server.OnStateAnswer`, if set, runs just before each of those answers,
+read-only peers included. It is handed the room name, its document, the
+SyncStep1, and `Structs`, how many structs the document holds, parked ones
+included; `StructsNow` reads that figure again for a hook that waited. The
+hook admits the answer, makes it wait, or refuses it:
+
+| The hook | Result |
+|---|---|
+| returns a nil error | the answer is sent; the release returned with it runs once, after the answer's frames are queued, or after an answer that could not be encoded was dropped |
+| returns or wraps a `*PeerClose{Code, Reason}`, Code 1000 or 3000-4999 | no answer; the peer is closed with Code and Reason |
+| returns any other error, or panics | no answer; the peer is closed with 4205 "Reset Connection" |
+
+A release that panics is recovered and logged. The hook runs on the peer's
+read loop, so the peer's next frame, its teardown and `Server.Shutdown` wait
+for it, and a hook that waits must bound its wait. It must not write to the
+document: a write that does not go through `Server.Apply` is broadcast to no
+peer.
+
+**Who is affected: nobody, unless you open an update log.** This release adds
+`Doc.OpenUpdateLog` to `crdt`. A document with no open log commits exactly as
+before.
+
+**Why.** `OnUpdate` observers run after the transaction has released the
+document lock, so another goroutine can commit before they run. When two
+transactions commit close together, their observers can run in either order:
+the second commit's observer can run while the first commit's has not yet
+started. An application that renders or classifies each update against a
+copy of the document cannot tell, from `OnUpdate` alone, which update came
+first, or whether a later observer has already caught its copy up.
+
+**What it gives.** An `UpdateLog` receives each committed transaction's update
+and origin while the document lock is still held. An observer that calls
+`Drain` therefore finds its own transaction's update, after every update
+committed before it, whatever order the observers run in. `Update` is the
+very slice its `OnUpdate` observers are handed, so neither they nor a reader
+may modify it. `Parked` is a V1 update of
+what the transaction parked, nil when it parked nothing: structs and
+deletions that wait for something the document lacks, which `OnUpdate` leaves
+out, as Yjs does. The first transaction to commit after the log opens also
+records the document's whole state just before it, parked structs and
+deletions included, as a V1 update. Applying that base and then each logged
+update's `Update` and `Parked`, in order, reproduces the document as it stood after each
+commit, what it holds parked included: a copy rebuilt from a stored log
+integrates a parked struct once the struct's missing predecessor arrives, as
+the document does. The format cleanup a remote update can trigger is a commit
+of its own and is logged like one. `Pending` counts what no `Drain` has
+taken, `Reset` hands that over and starts again from a fresh base (for a
+reader whose copy failed to apply an update), and `Close` stops logging.
+`Destroy` closes every open log.
+
+A log keeps everything until it is drained, so drain it (from an `OnUpdate`
+observer, typically) or close it.
 
 ## v1.55.0
 

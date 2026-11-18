@@ -85,6 +85,12 @@ func drainStop(r any) (drainStopped, bool) {
 func EncodeStateAsUpdateV1(doc *Doc, sv StateVector) []byte {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
+	return encodeStateAsUpdateV1Locked(doc, sv)
+}
+
+// encodeStateAsUpdateV1Locked is EncodeStateAsUpdateV1's body, for a caller
+// that holds doc.mu.
+func encodeStateAsUpdateV1Locked(doc *Doc, sv StateVector) []byte {
 	return withParked(doc, sv, encodeV1Locked(doc, sv), encodeStructStoreV1, MergeUpdatesV1)
 }
 

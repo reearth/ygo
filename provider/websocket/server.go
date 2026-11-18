@@ -135,7 +135,8 @@ const (
 	wsReasonUnauthorized = "Unauthorized"
 
 	// wsCodeResetConnection and wsReasonResetConnection close a peer whose
-	// update Server.OnPeerUpdate refused without a sendable *PeerClose.
+	// update Server.OnPeerUpdate, or whose SyncStep1 Server.OnStateAnswer,
+	// refused without a sendable *PeerClose.
 	// Matches Hocuspocus's CloseEvents.ResetConnection, which
 	// @hocuspocus/server closes with on a beforeHandleMessage rejection.
 	wsCodeResetConnection   = 4205
@@ -992,6 +993,20 @@ type Server struct {
 	// PeerUpdateHook.
 	OnPeerUpdate PeerUpdateHook
 
+	// OnStateAnswer, if non-nil, runs just before the room answers a peer's
+	// SyncStep1 (Sync, tag 0) with the room's state, read-only peers
+	// included, so the embedder can bound how many of those answers run at
+	// once: each builds frames carrying all of what the peer is missing. It is
+	// handed the room name, its document, the SyncStep1, and how many structs
+	// the document holds, parked ones included. A nil error admits the
+	// answer, and the release returned with it runs once the server is done
+	// with the answer; a non-nil error sends no answer and closes the peer,
+	// as a refused OnPeerUpdate does. The hook must not write to the
+	// document, and must bound any wait, since the peer's read loop and
+	// Server.Shutdown wait for it. Nil keeps the behaviour without a hook.
+	// See StateAnswerHook.
+	OnStateAnswer StateAnswerHook
+
 	// OnTokenAuth, if non-nil, validates the token from a Hocuspocus in-band
 	// Auth message (tag 2). A nil error accepts the connection and replies
 	// Authenticated (scope from the returned ConnectionConfig.ReadOnly); a
@@ -1505,14 +1520,15 @@ func NewServer() *Server {
 //
 // It waits for every ServeHTTP call in progress to return, so no hook that
 // ServeHTTP calls (Authorize or AuthFunc, OnLoadDocument, OnFirstPeer,
-// OnTokenAuth, OnPeerUpdate, OnStateless, OnLastPeer, OnUnloadDocument) is
-// still running when it returns nil. A ServeHTTP call that begins after that
-// wait is not covered, so stop accepting connections first. A hook that never
-// returns holds Shutdown until ctx expires, and Shutdown then returns
-// ctx.Err(). So does a relay RoomActivated or RoomDeactivated call that a
-// connection started before Shutdown began and that waits on the relay
-// context, which Shutdown cancels only after this wait. A hook that calls
-// Shutdown waits for its own connection, so it must pass a ctx that expires.
+// OnTokenAuth, OnPeerUpdate, OnStateAnswer and its release, OnStateless,
+// OnLastPeer, OnUnloadDocument) is still running when it returns nil. A
+// ServeHTTP call that begins after that wait is not covered, so stop
+// accepting connections first. A hook that never returns holds Shutdown
+// until ctx expires, and Shutdown then returns ctx.Err(). So does a relay
+// RoomActivated or RoomDeactivated call that a connection started before
+// Shutdown began and that waits on the relay context, which Shutdown cancels
+// only after this wait. A hook that calls Shutdown waits for its own
+// connection, so it must pass a ctx that expires.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
 

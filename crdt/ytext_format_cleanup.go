@@ -81,6 +81,11 @@ func (d *Doc) afterRemoteObservers(remote *Transaction) {
 // a panicking Transact, a panicking cleanup still emits the deletions it
 // made. It must run under d.mu before remote's deleted content is GC'd.
 func (d *Doc) formattingCleanupLocked(remote *Transaction) (phase2 func(), panicked any) {
+	// The cleanup commits like any transaction, so an update log waiting for
+	// its base records the state before it.
+	if len(d.updateLogs) > 0 {
+		d.recordUpdateLogBases()
+	}
 	txn := &Transaction{
 		doc:         d,
 		Local:       true,

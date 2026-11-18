@@ -96,13 +96,7 @@ func (p *peer) handleMessage(data []byte) {
 		// Peer sent step-1 — send the room's state only to them, cut into the
 		// frames stateFrameBytes allows so that the receiver applies it one
 		// frame per task. Read-only peers may still request state (#59).
-		reply, err := ygsync.EncodeSyncStep2Split(p.room.doc, payload, p.stateMessageBytes())
-		if err != nil {
-			p.server.log().Debug("discarded unappliable sync message",
-				"room", p.roomName, "err", err)
-			return
-		}
-		p.sendSyncSeries(reply)
+		p.answerSyncStep1(payload)
 
 	case msgAwareness:
 		if p.readOnly {

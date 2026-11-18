@@ -42,8 +42,8 @@ func (p *pendingUpdate) coverOf() *pendingCover {
 	return p.cover
 }
 
-// sortedSpans is the merged spans of items per client, built in one pass for
-// structs in clock order.
+// sortedSpans is the merged spans of non-nil items per client, built in one
+// pass for structs in clock order. A pending queue can have emptied slots.
 func sortedSpans(items []*Item) map[ClientID][]clockSpan {
 	spans := make(map[ClientID][]clockSpan)
 	var unsorted map[ClientID]bool
@@ -51,6 +51,9 @@ func sortedSpans(items []*Item) map[ClientID][]clockSpan {
 	var list []clockSpan
 	have := false
 	for _, it := range items {
+		if it == nil {
+			continue
+		}
 		start := it.ID.Clock
 		end := start + it.Content.Len()
 		if end <= start {
@@ -160,6 +163,9 @@ func (p *pendingUpdate) structIndex() *pendingCover {
 	if c.structs == nil {
 		lists := make(map[ClientID][]queued)
 		for slot, it := range p.items {
+			if it == nil {
+				continue
+			}
 			lists[it.ID.Client] = append(lists[it.ID.Client], queued{it, slot})
 		}
 		c.structs = make(map[ClientID]seq[queued], len(lists))

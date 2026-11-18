@@ -12,6 +12,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestUnit_PendingQueue_RebuildSparseIndexes(t *testing.T) {
+	it := &Item{ID: ID{Client: 2, Clock: 5}, Content: NewContentDeleted(1)}
+	other := &Item{ID: ID{Client: 2, Clock: 7}, Content: NewContentDeleted(1)}
+	t.Run("cover", func(t *testing.T) {
+		p := &pendingUpdate{items: []*Item{nil, it, other}, dead: 1}
+		require.Equal(t, []clockSpan{{5, 6}, {7, 8}}, p.coverOf().spans[2].slice())
+	})
+	t.Run("struct index with cached cover", func(t *testing.T) {
+		p := &pendingUpdate{items: []*Item{nil, it, other}, dead: 1,
+			cover: &pendingCover{spans: map[ClientID]seq[clockSpan]{2: seqOf([]clockSpan{{5, 6}, {7, 8}})}}}
+		c := p.structIndex()
+		require.Equal(t, []ClientID{2}, c.clients.slice())
+		require.Equal(t, []queued{{it, 1}, {other, 2}}, c.structs[2].slice())
+	})
+}
+
 // parkedTail returns client 2's per-keystroke updates after client 9's "ab", their combined tail, "ab" itself, and the writer.
 func parkedTail(t *testing.T, n int) (keystrokes [][]byte, tail, ab []byte, writer *Doc) {
 	t.Helper()
