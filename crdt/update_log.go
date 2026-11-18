@@ -63,7 +63,8 @@ type UpdateLog struct {
 // The first transaction to commit after the log opens also records d's
 // whole state as of just before that transaction: a V1 update, what
 // EncodeStateAsUpdateV1(d, nil) would return at that moment, parked structs
-// and deletions included. It is captured under d's lock before the
+// and deletions included unless d leaves them out of its state
+// (SetParkedOutOfState). It is captured under d's lock before the
 // transaction's fn runs, so a reader that applies that base and then each
 // logged update's Update and Parked in order holds d as it stood after each
 // commit in turn, including what d holds parked: a replica rebuilt from the

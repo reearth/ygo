@@ -131,6 +131,9 @@ package crdt
 // delete set; their encodings differ in the collected content alone. With no
 // UndoManager attached - every other document - the source has collected it
 // already and clone and copy are byte-identical.
+//
+// The clone keeps d's SetParkedOutOfState setting, so it encodes as d does;
+// it holds d's parked structs and deletions either way.
 func (d *Doc) Clone(opts ...DocOption) *Doc {
 	nd := New(opts...)
 	d.mu.RLock()
@@ -141,6 +144,7 @@ func (d *Doc) Clone(opts ...DocOption) *Doc {
 		types: make(map[*abstractType]*abstractType, len(d.share)),
 	}
 	c.run()
+	nd.store.parkedOutOfState = d.store.parkedOutOfState
 	if nd.store.NextClock(nd.clientID) != 0 {
 		nd.setClientID(NewClientID())
 	}

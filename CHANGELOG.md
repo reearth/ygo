@@ -169,7 +169,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   park adds nothing, and the drain that integrates a parked struct counts it
   as an append. The queue is kept and still drains when its gap fills.
   `PendingStats` and `ApplyReport.DocStructs` still count it, as memory the
-  document holds.
+  document holds. The base an update log records (`OpenUpdateLog`) leaves
+  the parked content out too, `Clone` copies the setting, and
+  `provider/websocket`'s `StateAnswerInfo.Structs` leaves parked structs out
+  of an answer's weight under it.
 - **`crdt`: `Doc.SetDiscardRefusedDrain(bool)` discards what a refused drain
   released.** Off by default. On a document that applies remote updates
   whole or nothing, a drain of the pending queue that is rolled back (the

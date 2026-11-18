@@ -279,7 +279,9 @@ with the state then holds content the document has not integrated, and
 parks it in turn. `Doc.SetParkedOutOfState(true)` leaves the pending queue
 and the pending deletes out of `EncodeStateAsUpdateV1`, `V2` and
 `SplitStateAsUpdateV1`, and out of `ApplyReport.StateBytes`. What is parked
-is kept and still drains when its gap fills.
+is kept and still drains when its gap fills. The base an update log records
+leaves it out too, `Doc.Clone` copies the setting, and `OnStateAnswer`'s
+`StateAnswerInfo.Structs` leaves parked structs out of an answer's weight.
 
 **A refused drain discards what it released.** A document that applies
 remote updates whole or nothing rolls back a drain of its pending queue that

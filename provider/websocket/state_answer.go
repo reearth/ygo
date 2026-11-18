@@ -18,10 +18,11 @@ type StateAnswerInfo struct {
 	// through Server.Apply is broadcast to no peer.
 	Doc *crdt.Doc
 	// Structs is how many structs Doc holds, those parked in its pending
-	// queue included. It is the most structs the answer carries, and the
-	// answer to a peer that holds nothing yet carries all of them. It is read
-	// just before the hook is called; a hook that waits before it admits the
-	// answer reads StructsNow.
+	// queue included unless Doc keeps its parked content out of its state
+	// (crdt.Doc.SetParkedOutOfState). It is the most structs the answer
+	// carries, and the answer to a peer that holds nothing yet carries all of
+	// them. It is read just before the hook is called; a hook that waits
+	// before it admits the answer reads StructsNow.
 	Structs int
 	// Step1 is the SyncStep1 message the peer sent. The hook must not modify
 	// or retain it.
@@ -35,10 +36,14 @@ func (i StateAnswerInfo) StructsNow() int {
 }
 
 // answerStructs counts parked structs too, because the answer carries them
-// (crdt.SplitStateAsUpdateV1). A nil doc holds no structs.
+// (crdt.SplitStateAsUpdateV1), unless doc keeps its parked content out of
+// its state (crdt.Doc.SetParkedOutOfState). A nil doc holds no structs.
 func answerStructs(doc *crdt.Doc) int {
 	if doc == nil {
 		return 0
+	}
+	if doc.ParkedOutOfState() {
+		return doc.StructCount()
 	}
 	return doc.StructCount() + doc.PendingStats().Items
 }
