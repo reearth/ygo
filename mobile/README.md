@@ -196,7 +196,7 @@ under a lock. Marshal to the main thread before touching UI (a Kotlin
 thread.
 
 - **`DocObserver.onChange(updateV1, local)`** fires after each committed
-  transaction. `updateV1` is the incremental V1 update (feed it straight to your
+  transaction that changes the `Doc`. `updateV1` is the incremental V1 update (feed it straight to your
   server/peers); `local == true` marks a change that originated from a mobile
   mutator on this `Doc` (vs a remote `applyUpdate`), so you can **skip
   re-broadcasting your own edits** and avoid echo loops when also syncing to a

@@ -27,7 +27,9 @@
   update, and does not send a peer's update to the other peers when the room
   already held all of it; an update the room parks still goes to them.
   `Server.Apply` returns `ErrNoChanges` when `fn`'s transactions change
-  nothing.
+  nothing. Treat it as a benign outcome rather than a failure: the document
+  already held what `fn` asked for. A caller that retries, alarms or answers
+  5xx on any non-nil error should single it out with `errors.Is`.
 - **The update is encoded after the transaction's GC.** Content that one
   transaction both inserted and deleted went out in full, where Yjs sends a
   `ContentDeleted` tombstone; relays sent it to peers and persistence stored
