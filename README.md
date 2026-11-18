@@ -570,6 +570,30 @@ server.Authorize = func(r *http.Request) (ygws.ConnectionConfig, bool) {
 }
 ```
 
+`ConnectionConfig.Identity` (v1.56.0) attaches whatever names the connection's user, a user ID or a session. ygo never reads it; `Server.OnPeerUpdate` receives it as `PeerUpdateInfo.Identity` with each update that connection sends, so the hook can tell which authenticated connection a frame arrived on:
+
+```go
+server.Authorize = func(r *http.Request) (ygws.ConnectionConfig, bool) {
+    user, ok := authenticate(r)
+    if !ok {
+        return ygws.ConnectionConfig{}, false
+    }
+    return ygws.ConnectionConfig{ReadOnly: !user.CanEdit, Identity: user.ID}, true
+}
+server.OnPeerUpdate = func(info ygws.PeerUpdateInfo, apply func() error) error {
+    if err := apply(); err != nil {
+        return err
+    }
+    userID, _ := info.Identity.(string)
+    rateLimitWrites(userID)
+    return nil
+}
+```
+
+**`Identity` names the connection that transmitted the update, not the author of the items inside it.** A reconnecting client answers sync step-1 with a step-2 carrying everything it holds, including items other users authored, and that frame reaches the hook under the reconnecting connection's identity. Treat it as "this connection sent these bytes" — for per-item authorship, read the client IDs in `info.Update`, which are the CRDT's own and are not an authenticated identity either.
+
+Two more limits worth knowing. `OnPeerUpdate` fires only for peers connected to this node: updates relayed in from other cluster nodes, and `Server.Apply`, bypass the hook and carry no identity, so what a single node records is not the whole document's history. And an in-band token accepted by `Server.OnTokenAuth` replaces the connection's `ConnectionConfig` whole — its `Identity`, and also its `ReadOnly`, which reverts to false unless the hook sets it.
+
 ### Graceful shutdown
 
 `Server.Shutdown(ctx)` drains pending writes and closes peers. Adapters that implement `PersistenceAdapterContext` (v1.7.0) receive a context derived from the shutdown signal so they can abort in-flight DB calls instead of waiting for the driver's timeout.

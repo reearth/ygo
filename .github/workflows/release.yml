@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -23,7 +23,7 @@ jobs:
         with:
           go-version: "1.23"
           cache: true
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "22"
           cache: "npm"
@@ -51,14 +51,12 @@ jobs:
           fi
           echo "Publishing $(wc -l < "$notes") lines of notes for $GITHUB_REF_NAME."
       # Nothing used to check CHANGELOG.md at tag time, so a release could ship
-      # with no entry at all, or with a heading date left over from whenever the
-      # PR was written — v1.44.0 was authored 08-02 and tagged 08-04, and the
-      # stale date was caught by hand. A tag is immutable, so the date it
-      # records is wrong forever; failing the job is the recoverable option.
+      # with no entry at all. A tag is immutable; failing the job is the
+      # recoverable option.
       #
-      # The date must be the job's UTC date or the day before. The one-day
-      # window absorbs timezone skew: a maintainer tagging in the evening west
-      # of UTC writes their local date, which is already "yesterday" in UTC.
+      # The heading must carry a date, but not the tag day: releases are cut
+      # when PRs land, not on a schedule, so the date is whenever the entry
+      # was finalised in its PR.
       - name: Verify the CHANGELOG entry for this tag
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -68,15 +66,10 @@ jobs:
             exit 1
           fi
           heading=$(grep -m1 -F "## [$version]" CHANGELOG.md)
-          today=$(date -u +%F)
-          yesterday=$(date -u -d '1 day ago' +%F)
-          case "$heading" in
-            *"$today"* | *"$yesterday"*) ;;
-            *)
-              echo "::error file=CHANGELOG.md::Heading \"$heading\" does not carry the release date. Expected $today (or $yesterday for timezone skew). Update the date, then re-push the tag."
-              exit 1
-              ;;
-          esac
+          if ! printf '%s\n' "$heading" | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+            echo "::error file=CHANGELOG.md::Heading \"$heading\" carries no date. Use \"## [$version] — YYYY-MM-DD\", then re-push the tag."
+            exit 1
+          fi
           echo "CHANGELOG heading OK: $heading"
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:

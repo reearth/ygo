@@ -7,6 +7,7 @@ package websocket
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/cluster"
@@ -59,6 +60,136 @@ type relayRoomLane struct {
 // value.
 type relayOriginSentinel struct{ _ byte }
 
+// relayState is the whole attach handshake, published as one value.
+//
+// These four fields are read without a lock from every relay path — room
+// creation, the lane workers, teardown, Inject — so they cannot live as
+// separate fields: AttachRelay's writes would race those reads, and a reader
+// could see a half-built attach (a committed relay with a nil sentinel). One
+// atomic store of a fully-built state makes a reader see all of it or none of
+// it, at no cost on the read side. Treat an instance as immutable once
+// stored; nil means no relay is attached.
+type relayState struct {
+	relay    clusterRelay
+	sentinel *relayOriginSentinel
+	ctx      context.Context
+	cancel   context.CancelFunc
+
+	// attached is closed when Start returns, however it returned. The state
+	// is published before Start is called, so a room created in that window
+	// gets a live lane and can reach Publish while the relay is still
+	// starting — and a relay is entitled to refuse one. publishRelay waits
+	// here rather than spending the payload on that refusal.
+	attached chan struct{}
+
+	// pending holds the rooms created during that same window, whose
+	// RoomActivated was therefore held back: a relay that subscribes per
+	// room cannot accept one before Start has returned, and nothing repeats
+	// the call. AttachRelay issues them once Start succeeds. nil once
+	// released, which is what tells a later caller to activate inline.
+	// Keyed by room instance, not by name: a room leaves s.rooms before its
+	// teardown runs, so a replacement under the same name can hold its own
+	// activation while its predecessor's teardown is still pending, and each
+	// must be settled by the instance that holds it.
+	pendingMu sync.Mutex
+	pending   map[*room]*heldActivation
+	released  bool
+}
+
+// heldActivation is one room's RoomActivated, held while the attach window
+// is open. Releasing them is not instantaneous — each is a call into the
+// relay — so an entry stays in the map until its own call has been made,
+// and issued closes when its fate is settled: activated says whether the
+// call was actually made, which is what tells a teardown whether there is
+// anything to undo.
+type heldActivation struct {
+	name      string
+	issued    chan struct{}
+	releasing bool
+	activated bool
+}
+
+// deferActivation holds rm's activation back if the attach window is still
+// open, reporting whether it did. The caller activates inline when it did
+// not. Taking this before the relay call, rather than after, is what keeps
+// a synchronous Inject from inside Start off a relay that cannot serve it.
+func (st *relayState) deferActivation(rm *room, name string) bool {
+	st.pendingMu.Lock()
+	defer st.pendingMu.Unlock()
+	if st.released {
+		return false
+	}
+	if st.pending == nil {
+		st.pending = make(map[*room]*heldActivation)
+	}
+	st.pending[rm] = &heldActivation{name: name, issued: make(chan struct{})}
+	return true
+}
+
+// takeActivation reports whether rm's RoomDeactivated should be skipped. A
+// held activation that has not started releasing is simply removed and never
+// issued: the matching RoomActivated never happened, and issuing only the
+// deactivation would push the relay's room refcount below where it started.
+// One already being released is waited out instead, so the deactivation
+// follows its activation rather than racing ahead of it. Only this room
+// instance's own entry is taken — a replacement resident under the same name
+// keeps its activation and is still offered to the relay.
+func (st *relayState) takeActivation(rm *room) bool {
+	st.pendingMu.Lock()
+	h, ok := st.pending[rm]
+	if !ok {
+		st.pendingMu.Unlock()
+		return false
+	}
+	if !h.releasing {
+		delete(st.pending, rm)
+		st.pendingMu.Unlock()
+		return true
+	}
+	st.pendingMu.Unlock()
+	<-h.issued
+	return !h.activated
+}
+
+// beginReleaseActivations closes the window and hands back the rooms held in
+// it, still in the map. Every later caller activates inline. The caller
+// claims each one in turn and settles it with finishActivation.
+func (st *relayState) beginReleaseActivations() []*room {
+	st.pendingMu.Lock()
+	defer st.pendingMu.Unlock()
+	st.released = true
+	rooms := make([]*room, 0, len(st.pending))
+	for rm := range st.pending {
+		rooms = append(rooms, rm)
+	}
+	return rooms
+}
+
+// claimActivation marks rm's held activation as the caller's to issue,
+// reporting whether it is still there — a teardown that got in first while
+// an earlier room's RoomActivated was in flight has already removed it.
+// Marking here rather than for the whole batch is what lets such a teardown
+// take an entry whose turn has not come instead of waiting for it.
+func (st *relayState) claimActivation(rm *room) (*heldActivation, bool) {
+	st.pendingMu.Lock()
+	defer st.pendingMu.Unlock()
+	h, ok := st.pending[rm]
+	if ok {
+		h.releasing = true
+	}
+	return h, ok
+}
+
+// finishActivation settles a held activation, releasing any teardown waiting
+// on it. activated says whether RoomActivated was actually called.
+func (st *relayState) finishActivation(rm *room, h *heldActivation, activated bool) {
+	st.pendingMu.Lock()
+	h.activated = activated
+	delete(st.pending, rm)
+	st.pendingMu.Unlock()
+	close(h.issued)
+}
+
 // ErrRelayAlreadyAttached is returned by AttachRelay if a relay is already set.
 var ErrRelayAlreadyAttached = errors.New("ygo/websocket: relay already attached")
 
@@ -75,9 +206,17 @@ var _ cluster.Sink = (*Server)(nil)
 // ErrRelayAlreadyAttached.
 //
 // AttachRelay starts the relay (relay.Start(ctx, s)) with a context that is
-// cancelled when Server.Shutdown is called. If relay.Start returns an error the
-// server is left UNATTACHED (s.relay stays nil) and the call may be retried —
-// it does not latch a partial attach. Rooms that become resident after attach
+// cancelled when Server.Shutdown is called. The attach state is committed
+// BEFORE Start, so a relay that delivers traffic from inside Start — the
+// normal case when attaching to a bus other nodes already publish on — finds
+// a server that is fully wired: rooms it creates get their observers, their
+// outbound lane and RoomActivated, and its updates carry the echo sentinel.
+// Neither RoomActivated nor Publish is offered to the relay before its own
+// Start has returned, though: activations made in that window are held back
+// and issued once Start succeeds, and a room's outbound backlog waits on its
+// lane. If relay.Start returns an error the commit is undone,
+// the server is left UNATTACHED and the call may be retried — it does not
+// latch a partial attach. Rooms that become resident after attach
 // are wired automatically (doc.OnUpdate + awareness.OnUpdate → that room's own
 // outbound lane, drained by its own worker → Publish), so a relay that is slow
 // for one room cannot stall publishing for any other room (#187); the echo
@@ -93,33 +232,114 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 	if r == nil {
 		return ErrNilRelay
 	}
+	// relayMu serialises AttachRelay against itself only; the relay paths
+	// read the attach state atomically and never take it, so Start may
+	// re-enter the Server freely.
 	s.relayMu.Lock()
 	defer s.relayMu.Unlock()
-	if s.relay != nil {
+	if s.relayAttach.Load() != nil {
 		return ErrRelayAlreadyAttached
 	}
 
-	sentinel := &relayOriginSentinel{}
 	ctx, cancel := context.WithCancel(context.Background())
-	// Start before committing any state: a Start failure must leave the server
-	// unattached and retryable.
-	if err := r.Start(ctx, s); err != nil {
+	// Per-room outbound lanes (#187): each room's Publish is driven by its own
+	// worker, so a relay that is slow for one room cannot stall any other
+	// room's publishes — and never the CRDT commit path. Ready before the
+	// state is published, so anything gated on an attached relay (getOrCreateRoom
+	// registering observers) always finds the map.
+	// Map and state go in together: ensureRelayLane reads both under this
+	// lock, so it never installs a lane against an attach that has gone.
+	s.relayLanesMu.Lock()
+	s.relayLanes = make(map[string]*relayRoomLane)
+	st := &relayState{
+		relay:    r,
+		sentinel: &relayOriginSentinel{},
+		ctx:      ctx,
+		cancel:   cancel,
+		attached: make(chan struct{}),
+	}
+	s.relayAttach.Store(st)
+	s.relayLanesMu.Unlock()
+
+	// Committed first so delivery from inside Start lands on a wired server;
+	// undone here if Start fails, which keeps the attach retryable.
+	err := r.Start(ctx, s)
+	if err != nil {
+		// Clear the state before unwiring, so a room created from here on
+		// finds no relay and nothing re-wires behind the rollback.
+		s.retireRelayLanes(true)
+		s.detachRelayRooms()
+		// Nothing started, so the held activations are simply dropped —
+		// their rooms are unwired by detachRelayRooms above. Each is still
+		// settled, as unactivated, to release any teardown waiting on it.
+		for _, rm := range st.beginReleaseActivations() {
+			if h, ok := st.claimActivation(rm); ok {
+				st.finishActivation(rm, h, false)
+			}
+		}
+		// Released only now: a lane held in the attach window must not wake
+		// to a state that still looks attached and publish to a relay whose
+		// Start failed. Past this close every waiter sees the state gone and
+		// counts its payload as the loss it is.
+		close(st.attached)
 		cancel()
 		return err
 	}
-
-	s.relaySentinel = sentinel
-	s.relayCtx, s.relayCancel = ctx, cancel
-	// Per-room outbound lanes (#187): each room's Publish is driven by its own
-	// worker, so a relay that is slow for one room cannot stall any other
-	// room's publishes — and never the CRDT commit path.
-	s.relayLanesMu.Lock()
-	s.relayLanes = make(map[string]*relayRoomLane)
-	s.relayLanesMu.Unlock()
-	// Publish s.relay last: anything gated on s.relay != nil (getOrCreateRoom
-	// registering observers) then always sees a ready relayLanes map.
-	s.relay = r
+	// The attach window is over. Activations held in it go first, so a room
+	// is subscribed before its backlog starts publishing, and both happen
+	// off the lock Start just released.
+	for _, rm := range st.beginReleaseActivations() {
+		h, ok := st.claimActivation(rm)
+		if !ok {
+			continue // torn down while an earlier activation was in flight
+		}
+		r.RoomActivated(h.name)
+		st.finishActivation(rm, h, true)
+	}
+	// Release the lanes held in the window. Start does not wait on them, so
+	// this cannot deadlock against itself.
+	close(st.attached)
 	return nil
+}
+
+// detachRelayRooms unsubscribes the relay observers of every resident room
+// and forgets its lane. Only AttachRelay's rollback needs it: a room the
+// failed attempt wired would otherwise keep feeding a retired lane, and a
+// later attach reuses the existing room rather than registering observers
+// again, so every local edit in it would be enqueued, find no lane and be
+// counted as a relay drop for as long as the room stayed resident.
+//
+// A room whose registerRelayObservers is already past its own state load can
+// finish wiring behind this pass, which would leave it subscribed with
+// nothing to unsubscribe it. It is not left to this function: the registrar
+// re-reads the attach after storing and undoes itself, so the two orderings
+// meet in detachRelayRoom, which is idempotent.
+func (s *Server) detachRelayRooms() {
+	s.rmu.RLock()
+	rooms := make([]*room, 0, len(s.rooms))
+	for _, r := range s.rooms {
+		rooms = append(rooms, r)
+	}
+	s.rmu.RUnlock()
+
+	for _, r := range rooms {
+		detachRelayRoom(r)
+	}
+}
+
+// detachRelayRoom unsubscribes r's relay observers and forgets its lane.
+// Idempotent: the rollback's pass and a registration undoing its own wiring
+// can both reach the same room, and the second finds nothing left.
+func detachRelayRoom(r *room) {
+	r.mu.Lock()
+	unsubs := r.relayUnsub
+	r.relayUnsub = nil
+	r.relayLane = nil
+	r.relaySentinel = nil
+	r.mu.Unlock()
+	for _, u := range unsubs {
+		u()
+	}
 }
 
 // ensureRelayLane creates and starts a FRESH outbound lane for room, for the
@@ -168,11 +388,16 @@ func (s *Server) AttachRelay(r cluster.Relay) error {
 // runs first "wins" the delete/replace and is the one that closes that
 // lane's done; the other observes the map entry no longer matches and skips
 // closing (avoiding a double-close panic).
-func (s *Server) ensureRelayLane(room string) *relayRoomLane {
+func (s *Server) ensureRelayLane(st *relayState, room string) *relayRoomLane {
 	s.relayLanesMu.Lock()
-	if s.relayLanes == nil {
+	// Checked under this lock, against the caller's own attach: a lane for
+	// an attach that has since been rolled back (or replaced by a retry)
+	// would be installed in the wrong map, and its worker would start on an
+	// already-cancelled context and exit at once, leaving a lane nothing
+	// drains.
+	if s.relayAttach.Load() != st || s.relayLanes == nil {
 		s.relayLanesMu.Unlock()
-		return nil // no relay attached
+		return nil // no relay attached, or not this one any more
 	}
 	prev, hadPrev := s.relayLanes[room]
 	l := &relayRoomLane{lane: relaylane.New(0), done: make(chan struct{})}
@@ -201,7 +426,7 @@ func (s *Server) ensureRelayLane(room string) *relayRoomLane {
 	if hadPrev {
 		close(prev.done)
 	}
-	go s.relayLaneWorker(s.relayCtx, room, l)
+	go s.relayLaneWorker(st.ctx, room, l)
 	return l
 }
 
@@ -318,8 +543,15 @@ func (s *Server) discardRelayLane(room string, l *relayRoomLane) {
 // this snapshot, and only that call closes its done); one that arrives after
 // finds s.relayLanes[room] no longer matching (nil map) and skips its own
 // close — never a double close.
-func (s *Server) retireRelayLanes() {
+// detach also clears the attach state under the same lock, so no lane can be
+// installed against an attach that is going away (see ensureRelayLane).
+// Shutdown passes false: the relay stays attached, its context is what stops
+// delivery.
+func (s *Server) retireRelayLanes(detach bool) {
 	s.relayLanesMu.Lock()
+	if detach {
+		s.relayAttach.Store(nil)
+	}
 	lanes := s.relayLanes
 	s.relayLanes = nil
 	for _, l := range lanes {
@@ -349,7 +581,31 @@ func (s *Server) drainRelayLane(ctx context.Context, room string, l *relayRoomLa
 }
 
 func (s *Server) publishRelay(ctx context.Context, room string, kind cluster.Kind, data []byte) {
-	if err := s.relay.Publish(ctx, cluster.Outbound{
+	st := s.relayAttach.Load()
+	if st == nil {
+		// The attach was undone (a failed Start) while this lane still held
+		// a payload: a loss, so count it like any other.
+		s.relayDropped.Add(1)
+		return
+	}
+	// A lane created inside AttachRelay's window can get here before Start
+	// has returned, where a relay may legitimately refuse the publish — and
+	// the payload is already off the lane, so that refusal would lose it.
+	// Wait the attach out; the lane holds the rest of the backlog meanwhile.
+	select {
+	case <-st.attached:
+	case <-ctx.Done():
+		s.relayDropped.Add(1)
+		return
+	}
+	if s.relayAttach.Load() != st {
+		// Start failed and the attach was rolled back while this payload
+		// waited. Nothing to publish it to: count the loss.
+		s.relayDropped.Add(1)
+		return
+	}
+
+	if err := st.relay.Publish(ctx, cluster.Outbound{
 		Room: room, Kind: kind, Data: data,
 	}); err != nil {
 		// The payload was already taken off the lane, so a failed Publish
@@ -431,13 +687,13 @@ func (s *Server) stopRelayLane(room string, l *relayRoomLane) {
 // decode but BEFORE close(r.ready), with s.rmu released (loadRoom runs off the
 // global rooms lock — see server.go). The unsubscribe functions are stored on
 // the room and invoked by teardownRelayRoom.
-func (s *Server) registerRelayObservers(r *room, name string) {
-	sentinel := s.relaySentinel
+func (s *Server) registerRelayObservers(r *room, name string, st *relayState) {
+	sentinel := st.sentinel
 	// Create the outbound lane before the observers that feed it. This runs
 	// during room creation, NOT on the commit path. Remember exactly which
 	// lane THIS room instance owns (r.relayLane's doc) so teardownRelayRoom
 	// can retire it by identity rather than by name alone.
-	relayLane := s.ensureRelayLane(name)
+	relayLane := s.ensureRelayLane(st, name)
 
 	unsubDoc := r.doc.OnUpdate(func(update []byte, origin any) {
 		if origin == sentinel {
@@ -470,7 +726,18 @@ func (s *Server) registerRelayObservers(r *room, name string) {
 	r.mu.Lock()
 	r.relayUnsub = append(r.relayUnsub, unsubDoc, unsubAw)
 	r.relayLane = relayLane
+	r.relaySentinel = sentinel
 	r.mu.Unlock()
+
+	// Re-read after storing: a failed Start's rollback may have passed over
+	// this room while the observers above were being built, in which case
+	// its detachRelayRooms found nothing and nothing else ever will — the
+	// room stays resident, so a retry takes createRoomPlaceholder's
+	// existing-room branch and never re-registers it. Undoing here makes the
+	// registration whole-or-nothing against the attach it wired to.
+	if s.relayAttach.Load() != st {
+		detachRelayRoom(r)
+	}
 }
 
 // enqueueRelayOutbound is the observer-side hand-off to the room's outbound
@@ -695,6 +962,19 @@ func (s *Server) RelayStats() RelayStats {
 	return out
 }
 
+// roomRelaySentinel returns the echo-guard origin r's own observers compare
+// against, read after the room is loaded rather than when Inject was entered:
+// loading can block, and the attach that delivered the update may have been
+// rolled back and replaced by then. Stamping the attach's sentinel instead
+// would leave the room's observers treating a remote update as a local one
+// and publishing it straight back out. nil when the room has no observers,
+// where there is nothing to guard against.
+func roomRelaySentinel(r *room) any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.relaySentinel
+}
+
 // changedAwarenessIDs returns the union of added/updated/removed client IDs.
 func changedAwarenessIDs(ev awareness.UpdateEvent) []uint64 {
 	ids := make([]uint64, 0, len(ev.Added)+len(ev.Updated)+len(ev.Removed))
@@ -708,7 +988,8 @@ func changedAwarenessIDs(ev awareness.UpdateEvent) []uint64 {
 // notifies the relay. Safe to call when no relay is attached (no-op) and
 // idempotent per room (relayUnsub is cleared after firing).
 func (s *Server) teardownRelayRoom(r *room, name string) {
-	if s.relay == nil {
+	st := s.relayAttach.Load()
+	if st == nil {
 		return
 	}
 	r.mu.Lock()
@@ -716,6 +997,7 @@ func (s *Server) teardownRelayRoom(r *room, name string) {
 	r.relayUnsub = nil
 	relayLane := r.relayLane
 	r.relayLane = nil
+	r.relaySentinel = nil
 	r.mu.Unlock()
 	for _, u := range unsubs {
 		u()
@@ -724,7 +1006,10 @@ func (s *Server) teardownRelayRoom(r *room, name string) {
 	// doc explains why a name-only lookup here would be unsafe across the
 	// evict-then-reconnect window.
 	s.stopRelayLane(name, relayLane)
-	s.relay.RoomDeactivated(name)
+	if st.takeActivation(r) {
+		return // its RoomActivated is still held back: nothing to undo
+	}
+	st.relay.RoomDeactivated(name)
 }
 
 // Inject applies a remote change delivered by the relay. It satisfies
@@ -752,7 +1037,6 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 	if !isValidRoomName(in.Room) {
 		return ErrInvalidRoomName
 	}
-
 	switch in.Kind {
 	case cluster.KindSync:
 		rm, _, err := s.getOrCreateRoom(ctx, in.Room)
@@ -767,7 +1051,7 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
-		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, s.relaySentinel); err != nil {
+		if err := crdt.ApplyUpdateV1(rm.doc, in.Data, roomRelaySentinel(rm)); err != nil {
 			return err
 		}
 		// Rebroadcast to locally-connected peers. broadcastUpdate re-validates
@@ -788,12 +1072,16 @@ func (s *Server) Inject(ctx context.Context, in cluster.Inbound) error {
 		rm.clearIdle() // #183: relay activity mutates immediately; no registration delay.
 		// see markIdleIfEmpty
 		defer s.markIdleIfEmpty(rm)
-		if err := rm.awareness.ApplyUpdate(in.Data, s.relaySentinel); err != nil {
+		res, err := rm.awareness.ApplyUpdateWith(in.Data, roomRelaySentinel(rm),
+			awareness.ApplyOptions{Foreign: true})
+		if err != nil {
 			return err
 		}
 		// Fan the awareness update out to local peers (the OnUpdate-driven relay
 		// observer dropped it as a sentinel echo, so peers won't otherwise see it).
-		s.broadcastAwarenessToPeers(rm, in.Data)
+		if out := awarenessFanout(rm.awareness, in.Data, res); out != nil {
+			s.broadcastAwarenessToPeers(rm, out)
+		}
 		return nil
 
 	default:

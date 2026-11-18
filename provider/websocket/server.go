@@ -205,6 +205,21 @@ const (
 // builds the removal slice (N-H4).
 const maxAwarenessClientsPerPeer = 10_000
 
+// defaultMaxAwarenessClientsPerConn is the per-connection introduction cap used
+// when MaxAwarenessClientsPerConn is unset. A browser tab speaks for one client
+// ID; 64 leaves room for reconnect churn and multi-document clients while still
+// containing a flood.
+const defaultMaxAwarenessClientsPerConn = 64
+
+// maxAwarenessClientsPerConn returns the configured per-connection
+// introduction cap or the default. Negative disables the gate.
+func (s *Server) maxAwarenessClientsPerConn() int {
+	if s.MaxAwarenessClientsPerConn == 0 {
+		return defaultMaxAwarenessClientsPerConn
+	}
+	return s.MaxAwarenessClientsPerConn
+}
+
 // defaultPeerWriteQueueSize is the default capacity of each peer's broadcast
 // write channel when PeerWriteQueueSize is not set. 512 gives transiently-slow
 // peers more slack before the queue overflows (matching the yrs shared broadcast
@@ -721,6 +736,16 @@ type room struct {
 	// room's mu, set once by registerRelayObservers alongside relayUnsub.
 	relayLane *relayRoomLane
 
+	// relaySentinel is the echo-guard origin THIS room's observers compare
+	// against, remembered because Sink.Inject must stamp its updates with
+	// the same one. Inject can capture a sentinel and then block loading the
+	// room, and the attach it came from may be rolled back and replaced
+	// while it waits; stamping that stale sentinel would leave the new
+	// attach's observers unable to recognise the update as an echo, and
+	// publish a remote change straight back out. Guarded by the room's mu,
+	// set by registerRelayObservers alongside relayUnsub.
+	relaySentinel any
+
 	// idleSince records when this room last went empty while
 	// Server.RoomIdleTimeout > 0 (#183). Zero value means "not idle" — either
 	// the room has peers, or RoomIdleTimeout is 0 (eager-evict mode, in which
@@ -786,6 +811,16 @@ type ConnectionConfig struct {
 	// awareness broadcasts but its inbound writes are dropped server-side. See
 	// Server.Authorize for the exact semantics.
 	ReadOnly bool
+
+	// Identity is whatever the embedder uses to name who opened the
+	// connection: a user ID, a session, a claims struct. ygo never reads it;
+	// it hands it back as PeerUpdateInfo.Identity with each update the
+	// connection sends, so an OnPeerUpdate hook can tell which authenticated
+	// connection sent it. Nil (the default) attaches nothing.
+	//
+	// It identifies the sender of an update, not the author of the items in
+	// it: see PeerUpdateInfo.Identity.
+	Identity any
 }
 
 // Server is a net/http-compatible WebSocket handler.
@@ -796,33 +831,28 @@ type Server struct {
 	rooms       map[string]*room
 	persistence PersistenceAdapter
 
-	// relay, when non-nil, mirrors local doc/awareness changes to other server
-	// nodes and applies inbound changes. Set once via AttachRelay. relayCtx /
-	// relayCancel govern the relay's delivery lifetime; cancelled at the END
-	// of Shutdown, after the outbound lanes have been retired, drained and
-	// joined (#202 — see Shutdown's step comment).
-	// relaySentinel is the origin stamped on relay-injected changes so the
-	// per-room observers can drop echoes (identity guard: a *relayOriginSentinel,
-	// see that type's doc comment in cluster.go for why it must never be a
-	// zero-size type).
+	// relayAttach, when non-nil, holds the attached relay plus the echo
+	// sentinel and the delivery context (see relayState in cluster.go). It
+	// is one atomic value rather than four fields because every relay path
+	// reads it off-lock while AttachRelay writes it; its context is
+	// cancelled at the END of Shutdown, after the outbound lanes have been
+	// retired, drained and joined (#202 — see Shutdown's step comment).
 	//
-	// relayMu guards the attach handshake: AttachRelay only commits s.relay
-	// after relay.Start succeeds, so a Start failure leaves the server
-	// unattached and the call is retryable (no sync.Once latching a partial
+	// relayMu serialises AttachRelay against itself. It commits the state
+	// BEFORE relay.Start, so a relay delivering from inside Start finds a
+	// wired server, and undoes the commit if Start fails, leaving the server
+	// unattached and the call retryable (no sync.Once latching a partial
 	// attach). Outbound delivery (#187) is one lane + worker PER ROOM rather
 	// than one shared queue, so a relay that is slow for one room cannot
 	// stall Publish for any other room. relayLanesMu guards relayLanes;
 	// enqueueRelayOutbound (the CRDT commit path) only ever takes its read
 	// side — lane creation (ensureRelayLane, room-creation time) and teardown
 	// (stopRelayLane, room-eviction time) take the write side. See cluster.go.
-	relayMu       sync.Mutex
-	relay         clusterRelay
-	relaySentinel any
-	relayCtx      context.Context
-	relayCancel   context.CancelFunc
-	relayLanesMu  sync.RWMutex
-	relayLanes    map[string]*relayRoomLane
-	relayDropped  atomic.Uint64
+	relayMu      sync.Mutex
+	relayAttach  atomic.Pointer[relayState]
+	relayLanesMu sync.RWMutex
+	relayLanes   map[string]*relayRoomLane
+	relayDropped atomic.Uint64
 
 	// relayWG counts live lane-worker goroutines (one per relayLaneWorker,
 	// Add under relayLanesMu in ensureRelayLane, Done when the worker
@@ -917,7 +947,8 @@ type Server struct {
 	// precedence over AuthFunc. A read-only peer receives document and awareness
 	// broadcasts but its inbound writes (SyncStep2/Update and awareness updates)
 	// are dropped; it can still request state (SyncStep1 is answered) and query
-	// awareness. Stateless signals are not gated by read-only.
+	// awareness. Stateless signals are not gated by read-only. The returned
+	// Identity reaches OnPeerUpdate with each update the connection sends.
 	Authorize func(r *http.Request) (ConnectionConfig, bool)
 
 	// AllowedOrigins is the list of origins permitted to open WebSocket
@@ -986,6 +1017,11 @@ type Server struct {
 	// Authenticated (scope from the returned ConnectionConfig.ReadOnly); a
 	// non-nil error replies PermissionDenied(err) and closes with WS 4401.
 	// When nil, tag-2 frames are silently ignored (unchanged legacy behavior).
+	// An accepted token replaces the connection's ConnectionConfig whole, as
+	// Authorize set it: its ReadOnly and its Identity, a nil Identity included,
+	// so the hook returns the identity the token names. A hook that returns
+	// only an Identity therefore clears ReadOnly, making a read-only
+	// connection read-write; return both.
 	//
 	// OnTokenAuth complements the HTTP-boundary AuthFunc/Authorize; it does not
 	// replace them. IMPORTANT: it is NOT a document-confidentiality gate — the
@@ -1241,6 +1277,52 @@ type Server struct {
 	// memory. Previously-unseen client IDs past this cap are dropped. Zero (the
 	// default) disables the cap. Suggested production value: 10,000.
 	MaxAwarenessClientsPerRoom int
+
+	// MaxForeignAwarenessClients caps the live awareness entries admitted into
+	// one room from presence injected over the cluster relay, so a presence
+	// flood on one node cannot take the room budget from clients connected to
+	// this one. It is a threshold on all live entries in the room, local and
+	// relayed alike: relayed presence is refused once the room holds this many,
+	// while local presence is admitted up to MaxAwarenessClientsPerRoom. Zero
+	// (the default) disables the sub-cap and relayed presence shares the whole
+	// room budget. A value at or above a non-zero MaxAwarenessClientsPerRoom
+	// has no effect, and the sub-cap is honoured when that room cap is
+	// unlimited. In an N-node cluster legitimate foreign presence is about
+	// (N-1)/N of a room, so size this as a large fraction of
+	// MaxAwarenessClientsPerRoom, not a minority quota.
+	MaxForeignAwarenessClients int
+
+	// MaxAwarenessClientsPerConn caps how many awareness client IDs one
+	// connection may hold live in its room at once, containing a flood of
+	// presence at the connection that sends it. An entry that would introduce
+	// one more is refused — not applied, and not forwarded to other peers or
+	// the relay — while the rest of its frame still applies. Zero (the
+	// default) selects 64; a negative value disables the gate and keeps the
+	// previous 10,000-ID tracking ceiling on the disconnect removal slice,
+	// tracking every ID named by entries the room applied. Note the inverted
+	// convention: unlike the caps above, zero does not disable this one.
+	//
+	// Only IDs this connection introduced and that are still live count, so
+	// removals and a full-state echo of IDs the room holds are free, while
+	// reviving an ID that has left spends a slot again. The cap bounds
+	// concurrent presence, not how many IDs a connection creates over time:
+	// each one it introduces and retires leaves a tombstone, which
+	// MaxAwarenessClientsPerRoom bounds and AwarenessExpiry reclaims; set both
+	// if untrusted peers can reach this server. A browser tab needs one ID; a
+	// trusted bridge fanning many users through one socket needs as many as it
+	// carries, and since the setting is server-wide, raising it for the bridge
+	// raises it for everyone. A positive value is also the ceiling on the IDs a
+	// connection is tracked as owning, so disable the gate with a negative
+	// value, not a huge positive one.
+	//
+	// With the gate on, peers cannot assert state for client ID 0, the room's
+	// own awareness client, which no removal from the wire could retire. A
+	// connection's departure removes the IDs it introduced and has not itself
+	// removed; presence it only updated stays with whoever introduced it. If
+	// one of its IDs stops being live without it (another connection's null,
+	// expiry, the relay) and another connection introduces it again, both
+	// answer for it, and the first to leave removes it.
+	MaxAwarenessClientsPerConn int
 
 	// AwarenessExpiry, when > 0, starts a per-room background sweep that marks a
 	// remote client's presence as removed if no update for it arrives within this
@@ -1577,10 +1659,24 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// relay is commonly shared across multiple in-process Servers (the
 	// MemRelay pattern) and Closing it would stop delivery for all of them
 	// (FIX C). No-op when no relay is attached.
-	s.retireRelayLanes()
+	st := s.relayAttach.Load()
+	if st != nil {
+		select {
+		case <-st.attached:
+		default:
+			// The attach never finished. Its lanes are parked on a gate only
+			// AttachRelay can close, and a relay whose Start runs until its
+			// context dies is waiting for the very cancel below — so joining
+			// those workers first would wait on both forever. Cancelling now
+			// unwedges them; they count their undeliverable backlog, as any
+			// cancelled publish does.
+			st.cancel()
+		}
+	}
+	s.retireRelayLanes(false)
 	s.waitRelayWorkers(ctx)
-	if s.relayCancel != nil {
-		s.relayCancel()
+	if st != nil {
+		st.cancel()
 	}
 	s.waitRelayWorkers(ctx)
 
@@ -1669,10 +1765,14 @@ func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, bool,
 		// This goroutine owns the load. It runs with s.rmu released; other
 		// callers (same or different room) never block on it via s.rmu.
 		s.loadRoom(ctx, r, name)
-		if r.loadErr == nil && s.relay != nil {
+		if st := s.relayAttach.Load(); r.loadErr == nil && st != nil {
 			// Off-lock and post-ready: a re-entrant Sink.Inject from RoomActivated
 			// finds the published room and waits on the already-closed ready.
-			s.relay.RoomActivated(name)
+			// Held back while the attach window is open — AttachRelay issues it
+			// once Start has returned and the relay can accept it.
+			if !st.deferActivation(r, name) {
+				st.relay.RoomActivated(name)
+			}
 		}
 	} else {
 		// Someone else is (or was) loading this room; wait for the barrier.
@@ -1743,6 +1843,9 @@ func (s *Server) createRoomPlaceholder(name string) (*room, bool, error) {
 	}
 	if s.MaxAwarenessClientsPerRoom > 0 {
 		aw.SetMaxClients(s.MaxAwarenessClientsPerRoom)
+	}
+	if s.MaxForeignAwarenessClients > 0 {
+		aw.SetMaxForeignClients(s.MaxForeignAwarenessClients)
 	}
 	if s.AwarenessExpiry > 0 {
 		// Background sweep; stopped via aw.Destroy() when the room is evicted, or
@@ -1884,8 +1987,8 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 	// may mutate r.doc until ready closes, no local change is missed. No-op when
 	// no relay is attached. RoomActivated is fired by getOrCreateRoom off-lock
 	// after ready closes (#133).
-	if s.relay != nil {
-		s.registerRelayObservers(r, name)
+	if st := s.relayAttach.Load(); st != nil {
+		s.registerRelayObservers(r, name, st)
 	}
 	close(r.ready)
 }
@@ -1954,7 +2057,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Authorize (issue #59) takes precedence over AuthFunc when both are set: it
 	// both accepts/rejects and reports per-connection config (read-only). AuthFunc
 	// grants read-write. Rejecting either way is a 401 before the upgrade.
-	var readOnly bool
+	var (
+		readOnly bool
+		identity any
+	)
 	switch {
 	case s.Authorize != nil:
 		cfg, ok := s.Authorize(r)
@@ -1962,7 +2068,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		readOnly = cfg.ReadOnly
+		readOnly, identity = cfg.ReadOnly, cfg.Identity
 	case s.AuthFunc != nil:
 		if !s.AuthFunc(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -2068,6 +2174,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writerDone:        make(chan struct{}),
 		limiter:           s.newPeerLimiter(),
 		readOnly:          readOnly,
+		identity:          identity,
 		hocuspocusFraming: s.HocuspocusFraming,
 	}
 

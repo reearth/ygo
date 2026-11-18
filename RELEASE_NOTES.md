@@ -1,4 +1,4 @@
-## v1.54.1
+## v1.56.3
 
 **Who is affected: anyone who uses `UndoManager` with a long undo or redo
 history.**
@@ -9,6 +9,234 @@ undoing 32,000 separate edits one by one took 20 s. It now takes 172 ms,
 the same per call at every depth, as in Yjs. Removed stack items are also
 freed now, not kept by the stack. Undo and redo results do not change. No
 API or wire format changes.
+
+## v1.56.2
+
+**Who is affected: clustered deployments whose rooms can be evicted and
+re-created while `AttachRelay` is still running.** The exposure is the same
+attach window v1.56.1 addressed — a relay that delivers traffic from inside
+`Start` — with a room that leaves and comes back inside it.
+
+v1.56.1 holds a room's `RoomActivated` back for the length of the attach
+window and issues it once `Start` returns. Those held activations were
+tracked by room name. A room leaves `s.rooms` before its teardown runs — the
+teardown first waits for the room's persistence goroutine to drain — so a
+replacement under the same name can be created, and hold its own activation,
+while its predecessor's teardown is still pending. The predecessor's teardown
+then took whatever entry sat under that name, which was the replacement's: the
+resident room was never offered to the relay, and with a relay that subscribes
+per room it stayed unsubscribed for as long as it was resident. Edits from the
+other nodes never arrived, and the room silently diverged across the cluster.
+The mirror case cost a subscription the other way, with the teardown waiting
+out an in-flight activation and then issuing a `RoomDeactivated` that
+unsubscribed the room still using it.
+
+Held activations are now keyed by room instance, so a teardown settles only
+its own room's activation and a replacement keeps its own. The rest of the
+attach handshake is unchanged.
+
+## v1.56.1
+
+**Who is affected: clustered deployments that call `AttachRelay` on a relay
+other nodes are already publishing on.** What matters is whether the relay
+delivers anything while `Start` runs, not whether this server is taking
+connections yet: the delivery itself creates the room, so attaching before
+you serve — what `cmd/ygo-server` does — narrows the window but does not
+close it.
+
+`AttachRelay` started the relay before recording it on the server. A message
+delivered in that window found the server unattached: the room it created came
+up with no outbound lane, no observers publishing its changes, and no
+`RoomActivated` call. The room stayed unwired until it unloaded, so its peers'
+edits on this node never reached the other nodes, and with a relay that
+subscribes per room the other nodes' edits never reached it either. The room
+silently split across the cluster until the last peer left it. The same window
+also left the echo sentinel nil, and all four attach fields were read without
+the lock that guarded the writes, which the race detector reported.
+
+The attach state is now a single value committed **before** `relay.Start`, and
+undone if `Start` fails — so a failed `Start` still leaves the server
+unattached and the call retryable, as before.
+
+A room created in that window keeps its outbound backlog on its lane until
+`Start` returns, and its `RoomActivated` is held back and issued once `Start`
+succeeds — a relay that subscribes per room cannot accept an activation
+before then, and nothing repeats the call, so the room would never be
+subscribed. Publishing to a relay that has not finished starting invites
+a refusal, and the payload is already off the lane by then, so the edit would
+be lost rather than retried.
+
+**Behaviour change for relay implementations.** Because the server is wired
+before `Start` runs, a relay can now receive `RoomActivated` and `Publish`
+calls before its own `Start` has returned, and a custom relay that assumes
+`Start` completes first should be checked. Both bundled relays handle it.
+`MemRelay`'s callbacks do not depend on `Start`. The Redis relay's
+`RoomActivated` already blocked on the lock `Start` holds and then subscribed
+normally, but its `Publish` returned `ErrRelayNotStarted` for as long as
+`Start` was running — contradicting its own documented contract, which
+reserves that error for a relay `Start` has not been called on. `Publish` now
+waits for an in-flight `Start` and publishes once it finishes; it still fails
+fast when no `Start` has been called, and when the `Start` that ran failed.
+
+`RoomActivated` and `RoomDeactivated` now wait one out as well. Taking the
+relay's lock only made them wait out a `Start` that already held it: a room
+activated before `Start` reached the lock was dropped silently and never
+subscribed, and nothing repeats the call.
+
+Two further fixes on the same attach path: `Shutdown` cancelled the relay
+context only after joining the outbound lane workers, so it could hang
+forever on an attach that had not finished, and `Sink.Inject` stamped its
+echo-guard origin before loading the room — if the attach was rolled back and
+retried while that load blocked, the room's observers held a different
+sentinel and published the remote update straight back to the cluster.
+
+No API changes.
+
+## v1.56.0
+
+**Who is affected: servers that set `Server.OnPeerUpdate` and need to know who
+sent each update.** Everyone else sees no change.
+
+`ConnectionConfig` gains `Identity any`. Return it from `Server.Authorize`
+with whatever names the connection's user, and `Server.OnPeerUpdate` receives
+it as `PeerUpdateInfo.Identity` with every update that connection sends. ygo
+never reads the value.
+
+**It identifies the sender, not the author.** A reconnecting client answers
+sync step-1 with a step-2 carrying everything it holds, items other users
+authored included, and that frame reaches the hook under the reconnecting
+connection's identity. `OnPeerUpdate` also fires only for peers on this node:
+updates relayed from other cluster nodes, and `Server.Apply`, bypass it. An
+audit log built on `Identity` alone will therefore both misattribute and miss
+edits; for per-item authorship read the client IDs in `PeerUpdateInfo.Update`,
+which are the CRDT's own and are not an authenticated identity either.
+
+`Server.OnTokenAuth` replaces the connection's whole `ConnectionConfig` when it
+accepts a token, as it already did for `ReadOnly`. A hook that returns no
+`Identity` therefore clears the one `Authorize` attached, and one that returns
+only an `Identity` clears `ReadOnly` — making a read-only connection
+read-write. Return both. Connections accepted by `AuthFunc`, or with no auth
+hook, carry a nil `Identity` until an accepted token supplies one.
+
+## v1.55.0
+
+**Who is affected: servers that bridge many awareness clients over a single
+websocket connection.** Everyone else sees no change.
+
+`Server.MaxAwarenessClientsPerConn` is new and on by default. A client can claim
+any awareness client ID, so one connection could fill a room's presence budget
+and, with a relay attached, have the fabricated IDs fanned to every node that
+holds the room. Each entry of a frame is now judged as the room applies it: an
+entry that would take a connection past the cap is refused, logged at debug,
+and reaches neither the room, its other peers nor the relay, while the rest of
+the frame applies.
+
+`0`, the default, selects 64. A negative value disables the gate and restores
+the previous behaviour, and a positive value is used as given. This inverts the
+`0 = unlimited` convention of `MaxAwarenessBytesPerRoom` and
+`MaxAwarenessClientsPerRoom`.
+
+The cap is not a limit on room size. Only client IDs the connection introduced
+that are still live count against it. A browser tab introduces one. The
+timeout-removal broadcasts y-protocols clients send, which name other clients'
+IDs as nulls, and the full-state echoes they send, which re-assert IDs the room
+already holds, cost nothing.
+
+Because a removal frees the slot, the cap bounds concurrent presence rather
+than how many IDs a connection creates over its lifetime: each ID a connection
+introduces and retires leaves a tombstone. `MaxAwarenessClientsPerRoom` bounds
+tombstones, and `AwarenessExpiry` reclaims them; neither is on by default, so
+set both if untrusted peers can reach the server.
+
+An embedder that fans many users through one connection introduces as many IDs
+as it carries, so it must raise the cap or disable it. The setting is
+server-wide: a trusted bridge beside untrusted browsers raises it for all of
+them.
+
+With the gate on, peers can no longer claim client ID `0`, the room's own
+awareness client: no removal from the wire could retire it, so it stayed until
+the room was evicted. Disconnect behaviour also narrows. A connection's
+departure removes the awareness IDs it introduced and has not itself removed,
+where before it removed every ID the connection had ever named in a frame.
+Presence a connection only updated — an ID another connection or the relay
+introduced — stays with whoever introduced it until that owner leaves,
+`AwarenessExpiry` sweeps it, or the room is evicted. Set `AwarenessExpiry` if your clients take
+over each other's IDs. Disabling the gate with a negative value keeps the old
+tracking ceiling, but tracks only IDs named by entries the room applied.
+
+**Who is affected: servers that set `MaxAwarenessClientsPerRoom`.**
+
+Removal tombstones count toward the cap, so churn could fill a room with them
+and lock new clients out until `AwarenessExpiry` reclaimed them, or for good
+without it. Now a new client asserting presence at the cap reclaims the oldest
+tombstone instead. An unseen client's removal is still refused at the cap, and
+so is a newcomer when every entry is live. The reclaimed tombstone's clock is
+forgotten early, the same trade-off `PurgeTombstones` makes after its grace
+period, though here it can happen without `AwarenessExpiry`: a delayed stale
+update for that client is then accepted as new.
+
+**Who is affected: clustered servers that want to keep relayed presence from
+crowding out local clients.** Opt-in; nothing changes unless you set it.
+
+`Server.MaxForeignAwarenessClients` refuses presence relayed from another node,
+for a client ID that is not currently live (new, or removed and returning), once
+the room holds this many live awareness entries. A client that is live keeps
+updating. `0`, the default, disables it, and a value at or above a bounded
+`MaxAwarenessClientsPerRoom` has no effect.
+
+Sizing needs care, because a number that looks safe shuts out most of a room:
+
+- Set it as a large fraction of `MaxAwarenessClientsPerRoom`. Reserving
+  roughly 1/8 of the cap for local clients is a reasonable starting point.
+- In an N-node cluster, relayed presence is legitimately about (N-1)/N of a
+  room's users, so the reservation you want is the small side. A sub-cap sized
+  like a minority quota shuts out most of the room.
+- `Inject` creates a room with no local peers when it is not resident, and all
+  presence in it is relayed. There the sub-cap is that node's entire presence
+  ceiling for the room. Without it the ceiling is `MaxAwarenessClientsPerRoom`,
+  or none when that is unset.
+- The threshold counts all live entries, local and relayed, so once local
+  clients fill the room, relayed presence is shut out sooner than a true
+  per-origin quota would shut it out.
+
+A refused entry is skipped without an error, so the relay does not see a routine
+refusal as a delivery failure.
+
+Local peers now receive an awareness frame as sent only when the room applied
+it exactly; otherwise they get the room's state for the clients it applied, so
+presence the room refused, discarded as stale or dropped as invalid no longer
+reaches them. It also stops the server re-broadcasting the equal-clock echoes
+y-websocket clients send of every awareness update they apply, so an update
+costs about N frames in a room of N clients rather than N².
+
+New exported API in `awareness`: `Awareness.ApplyUpdateWith` with
+`ApplyOptions`, `AdmitEntry` and `ApplyResult`, which the server uses for both
+caps, and `Awareness.SetMaxForeignClients`. `docs/CLUSTERING.md` covers both
+settings.
+
+**`YText.WalkFormatting` exposes live formatting boundaries.** Concurrent
+formatting and deletion can leave formatting markers without visible text.
+`ToDelta` describes visible text, so those markers are absent from its output.
+Applications that validate formatting keys and values or account for live CRDT
+items can inspect them through the new callback. `YXmlText` inherits the method.
+
+The walk holds the document read lock. Call it outside transactions, and do not
+mutate values or call document APIs from the callback. Returning an error stops
+the walk and returns that error unchanged. The helper does not modify the
+document or change merging, encoding, or existing readers.
+
+Closes #317.
+
+**Accessing a root as a different type now panics instead of discarding it.**
+The first accessor fixes a named root's type for the document's lifetime.
+`GetText("x")` after `GetMap("x")` used to replace the map and lose its
+contents; it now panics with an error wrapping the new `crdt.ErrRootTypeMismatch`
+and leaves the map unchanged. A root that has only arrived in a peer's update
+has no type yet, so the first local accessor still decides it, as in Yjs. Code
+that relied on the silent replacement now panics. The mobile bindings recover
+the panic: methods with an error return return one wrapping
+`crdt.ErrRootTypeMismatch`, and `GetText` returns `""`, so a mismatch cannot
+crash the iOS or Android host app. Closes #293.
 
 ## v1.54.0
 

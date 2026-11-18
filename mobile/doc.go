@@ -6,7 +6,9 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
-// Doc is a gomobile-safe wrapper around *crdt.Doc.
+// Doc is a gomobile-safe wrapper around *crdt.Doc. Methods that read or mutate
+// named roots return an error if a root already has a different shared type;
+// GetText returns an empty string for that mismatch.
 type Doc struct {
 	mu sync.RWMutex
 	d  *crdt.Doc // nil after Close
@@ -116,7 +118,8 @@ func (m *Doc) EncodeStateVector() []byte {
 
 // GetText returns the plain-text content of the named YText root ("" after Close
 // or for an absent/empty root).
-func (m *Doc) GetText(name string) string {
+func (m *Doc) GetText(name string) (text string) {
+	defer recoverRootTypeMismatch(nil)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
@@ -131,7 +134,8 @@ func (m *Doc) GetText(name string) string {
 // attributes (a full-content read yields insert ops only). An absent/empty root
 // returns `[]` (never `null`), so a JS consumer can iterate it unconditionally.
 // Returns ErrClosed after Close.
-func (m *Doc) GetTextJSON(name string) ([]byte, error) {
+func (m *Doc) GetTextJSON(name string) (result []byte, err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
@@ -141,7 +145,8 @@ func (m *Doc) GetTextJSON(name string) ([]byte, error) {
 }
 
 // GetMapJSON returns the named YMap root as JSON.
-func (m *Doc) GetMapJSON(name string) ([]byte, error) {
+func (m *Doc) GetMapJSON(name string) (result []byte, err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
@@ -151,7 +156,8 @@ func (m *Doc) GetMapJSON(name string) ([]byte, error) {
 }
 
 // GetArrayJSON returns the named YArray root as JSON.
-func (m *Doc) GetArrayJSON(name string) ([]byte, error) {
+func (m *Doc) GetArrayJSON(name string) (result []byte, err error) {
+	defer recoverRootTypeMismatch(&err)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.d == nil {
