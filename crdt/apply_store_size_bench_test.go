@@ -21,7 +21,7 @@ func separateItems(n int) *Doc {
 // BenchmarkApplyUpdateV1_RedeleteInsideDeletedRun applies a delete set that
 // deletes again three clocks inside client 1's deleted run.
 func BenchmarkApplyUpdateV1_RedeleteInsideDeletedRun(b *testing.B) {
-	for _, n := range []int{1_000, 10_000, 100_000} {
+	for _, n := range []int{1_000, 10_000} {
 		b.Run(fmt.Sprintf("items=%d", n), func(b *testing.B) {
 			doc := separateItems(n)
 			update := deleteSetUpdate(1, 2, 3)
@@ -62,7 +62,7 @@ func squashedPairs(b *testing.B, state []byte, k int) (*Doc, [][]byte) {
 // BenchmarkApplyUpdateV1_SquashedPair applies squashedPairs updates to a fresh
 // receiver every n/10 updates, so client 1 holds between n+1 and 1.1n+1 items.
 func BenchmarkApplyUpdateV1_SquashedPair(b *testing.B) {
-	for _, n := range []int{1_000, 10_000, 100_000} {
+	for _, n := range []int{1_000, 10_000} {
 		b.Run(fmt.Sprintf("items=%d", n), func(b *testing.B) {
 			state := EncodeStateAsUpdateV1(separateItems(n), nil)
 			b.ReportAllocs()

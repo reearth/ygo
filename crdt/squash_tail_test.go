@@ -33,3 +33,45 @@ func TestUnit_SquashRuns_KeepsTheItemsBeforeTheRun(t *testing.T) {
 	require.Equal(t, "kj", items[len(before)].Content.(*ContentString).Str)
 	require.Equal(t, wt.ToString(), doc.GetText("t").ToString())
 }
+
+// dropSquashed drops exactly the squashed items wherever the first of them
+// sits, and clears the slots it frees.
+func TestUnit_DropSquashed_Boundaries(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		removed []int // indexes into the store's five items
+	}{
+		{"the first item", []int{0}},
+		{"the first two items", []int{0, 1}},
+		{"one item in the middle", []int{2}},
+		{"two items apart", []int{1, 3}},
+		{"the last item", []int{4}},
+		{"every item", []int{0, 1, 2, 3, 4}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := make([]*Item, 5)
+			for i := range store {
+				store[i] = &Item{ID: ID{Client: 1, Clock: uint64(i)}, Content: NewContentString("a")}
+			}
+			all := slices.Clone(store)
+			var removed, want []*Item
+			for i, it := range all {
+				if slices.Contains(tc.removed, i) {
+					removed = append(removed, it)
+				} else {
+					want = append(want, it)
+				}
+			}
+			got := dropSquashed(store, removed)
+			require.Equal(t, len(want), len(got))
+			for i := range want {
+				require.Same(t, want[i], got[i], "item %d", i)
+			}
+			for i := len(got); i < len(store); i++ {
+				require.Nil(t, store[i], "freed slot %d", i)
+			}
+		})
+	}
+}

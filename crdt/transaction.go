@@ -276,27 +276,32 @@ func squashRuns(txn *Transaction) {
 		}
 	}
 
-	// Squashed items are new in this transaction, so they sit in the tail of the
-	// clock-sorted slice: one two-pointer pass from the first of them drops them.
 	for client, removed := range removedByClient {
-		storeItems := store.clients[client]
-		first := removed[0].ID.Clock
-		n := sort.Search(len(storeItems), func(i int) bool { return storeItems[i].ID.Clock >= first })
-		ri := 0
-		for _, item := range storeItems[n:] {
-			if ri < len(removed) && item == removed[ri] {
-				ri++ // skip this squashed item
-			} else {
-				storeItems[n] = item
-				n++
-			}
-		}
-		// Zero out the tail to release GC references.
-		for k := n; k < len(storeItems); k++ {
-			storeItems[k] = nil
-		}
-		store.clients[client] = storeItems[:n]
+		store.clients[client] = dropSquashed(store.clients[client], removed)
 	}
+}
+
+// dropSquashed removes removed, which ascend by clock and are all in the
+// clock-sorted storeItems, from storeItems in place. Squashed items are new in
+// this transaction, so they sit in the tail of the slice: one two-pointer pass
+// from the first of them drops them.
+func dropSquashed(storeItems, removed []*Item) []*Item {
+	first := removed[0].ID.Clock
+	n := sort.Search(len(storeItems), func(i int) bool { return storeItems[i].ID.Clock >= first })
+	ri := 0
+	for _, item := range storeItems[n:] {
+		if ri < len(removed) && item == removed[ri] {
+			ri++ // skip this squashed item
+		} else {
+			storeItems[n] = item
+			n++
+		}
+	}
+	// Zero out the tail to release GC references.
+	for k := n; k < len(storeItems); k++ {
+		storeItems[k] = nil
+	}
+	return storeItems[:n]
 }
 
 // addChanged records that a type was modified, optionally under a specific key.
