@@ -190,26 +190,27 @@ func TestUnit_Float64_NaN(t *testing.T) {
 
 func TestUnit_Any_AllVariants(t *testing.T) {
 	cases := []struct {
-		name string
-		val  any
+		name     string
+		val      any
+		wantRead any
 	}{
-		{"nil", nil},
-		{"bool_true", true},
-		{"bool_false", false},
-		{"int_zero", int64(0)},
-		{"int_positive", int64(42)},
-		{"int_negative", int64(-99)},
-		{"float32", float32(1.5)},
-		{"float64_pi", math.Pi},
-		{"string_empty", ""},
-		{"string_ascii", "hello world"},
-		{"string_unicode", "日本語"},
-		{"bytes_empty", []byte{}},
-		{"bytes", []byte{0xde, 0xad, 0xbe, 0xef}},
-		{"array_empty", []any{}},
-		{"array_mixed", []any{int64(1), "two", true, nil}},
-		{"map_empty", map[string]any{}},
-		{"map_basic", map[string]any{"key": "val", "n": int64(7)}},
+		{"nil", nil, nil},
+		{"bool_true", true, true},
+		{"bool_false", false, false},
+		{"int_zero", int64(0), int64(0)},
+		{"int_positive", int64(42), int64(42)},
+		{"int_negative", int64(-99), int64(-99)},
+		{"float32", float32(1.5), float64(1.5)}, // tag 124 reads back as the float64 it holds
+		{"float64_pi", math.Pi, math.Pi},
+		{"string_empty", "", ""},
+		{"string_ascii", "hello world", "hello world"},
+		{"string_unicode", "日本語", "日本語"},
+		{"bytes_empty", []byte{}, []byte{}},
+		{"bytes", []byte{0xde, 0xad, 0xbe, 0xef}, []byte{0xde, 0xad, 0xbe, 0xef}},
+		{"array_empty", []any{}, []any{}},
+		{"array_mixed", []any{int64(1), "two", true, nil}, []any{int64(1), "two", true, nil}},
+		{"map_empty", map[string]any{}, map[string]any{}},
+		{"map_basic", map[string]any{"key": "val", "n": int64(7)}, map[string]any{"key": "val", "n": int64(7)}},
 	}
 
 	for _, tc := range cases {
@@ -218,11 +219,7 @@ func TestUnit_Any_AllVariants(t *testing.T) {
 			e.WriteAny(tc.val)
 			got, err := encoding.NewDecoder(e.Bytes()).ReadAny()
 			require.NoError(t, err)
-			want := tc.val
-			if f, ok := tc.val.(float32); ok {
-				want = float64(f) // tag 124 reads back as the float64 it holds
-			}
-			assert.Equal(t, want, got)
+			assert.Equal(t, tc.wantRead, got)
 		})
 	}
 }

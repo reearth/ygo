@@ -11,7 +11,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 )
 
-// A Go integer is written as lib0 0.2.119's writeAny writes the same value as
+// A Go integer is written as lib0 0.2.117's writeAny writes the same value as
 // a JavaScript Number: tag 125 while |v| <= 2^31-1, then tag 124 (float32)
 // when a float32 holds the value exactly, then tag 123 (float64). The bytes
 // below are lib0's own, from writeAny in Node, so the test pins the wire form
@@ -21,7 +21,7 @@ func TestUnit_Any_IntegerOutsideInt32_IsWrittenAsLib0Writes(t *testing.T) {
 	cases := []struct {
 		name string
 		v    any
-		lib0 string // lib0 0.2.119 writeAny(encoder, Number(v)), hex
+		lib0 string // lib0 0.2.117 writeAny(encoder, Number(v)), hex
 	}{
 		{"2^31-1", int64(math.MaxInt32), "7dbfffffff0f"},
 		{"-(2^31-1)", int64(-math.MaxInt32), "7dffffffff0f"},

@@ -1,3 +1,5 @@
+//go:build benchheavy
+
 package crdt
 
 // Each reader benchmark below runs on a "writer" document built in Go and on a
@@ -6,8 +8,6 @@ package crdt
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -242,63 +242,21 @@ var replicaBenchVersions = []struct {
 	{"V2", EncodeStateAsUpdateV2, ApplyUpdateV2},
 }
 
-func replicaBenchFixturePath(doc, version string) string {
-	dir := os.Getenv("YGO_REPLICA_BENCH_FIXTURES")
-	if dir == "" {
-		return ""
-	}
-	return filepath.Join(dir, doc+"-"+version+".bin")
-}
-
-// TestReplicaBench_WriteFixtures writes the "fixed" updates into
-// $YGO_REPLICA_BENCH_FIXTURES when $YGO_WRITE_REPLICA_BENCH_FIXTURES is set, so
-// that two revisions can decode the same bytes.
-func TestReplicaBench_WriteFixtures(t *testing.T) {
-	if os.Getenv("YGO_WRITE_REPLICA_BENCH_FIXTURES") == "" {
-		t.Skip("YGO_WRITE_REPLICA_BENCH_FIXTURES not set")
-	}
-	for _, d := range replicaBenchApplyDocs {
-		doc := d.doc()
-		for _, v := range replicaBenchVersions {
-			if err := os.WriteFile(replicaBenchFixturePath(d.name, v.name), v.encode(doc, nil), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-}
-
-// BenchmarkApplyUpdate_Replica applies the update this revision encodes ("own")
-// and, when $YGO_REPLICA_BENCH_FIXTURES is set, the update read from there
-// ("fixed").
+// BenchmarkApplyUpdate_Replica applies the update this revision encodes.
 func BenchmarkApplyUpdate_Replica(b *testing.B) {
 	for _, d := range replicaBenchApplyDocs {
 		doc := d.doc()
 		for _, v := range replicaBenchVersions {
-			updates := []struct {
-				name string
-				u    []byte
-			}{{"own", v.encode(doc, nil)}}
-			if p := replicaBenchFixturePath(d.name, v.name); p != "" {
-				u, err := os.ReadFile(p)
-				if err != nil {
-					b.Fatal(err)
-				}
-				updates = append(updates, struct {
-					name string
-					u    []byte
-				}{"fixed", u})
-			}
-			for _, u := range updates {
-				b.Run(d.name+"/"+v.name+"/"+u.name, func(b *testing.B) {
-					b.ReportAllocs()
-					b.SetBytes(int64(len(u.u)))
-					for range b.N {
-						if err := v.apply(newTestDoc(9), u.u, nil); err != nil {
-							b.Fatal(err)
-						}
+			u := v.encode(doc, nil)
+			b.Run(d.name+"/"+v.name, func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(int64(len(u)))
+				for range b.N {
+					if err := v.apply(newTestDoc(9), u, nil); err != nil {
+						b.Fatal(err)
 					}
-				})
-			}
+				}
+			})
 		}
 	}
 }

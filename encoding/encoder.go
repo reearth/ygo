@@ -263,7 +263,7 @@ func (e *Encoder) WriteAny(v any) {
 }
 
 // writeAnyInt dispatches an int64 to the lib0 Any tag lib0's writeAny gives
-// the same value as a JavaScript Number (encoding.js, lib0 0.2.119):
+// the same value as a JavaScript Number (encoding.js, lib0 0.2.117):
 //
 //   - |v| <= 2^31-1 → tag 125 (int) + VarInt. lib0 tests the magnitude, so
 //     -2^31 is not in this range: it goes on to the float32 check.
