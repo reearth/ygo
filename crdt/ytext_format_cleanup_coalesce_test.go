@@ -226,7 +226,16 @@ func TestPerf_FormatCleanupLongDeletedRunIsPerStruct(t *testing.T) {
 		require.NoError(t, ApplyUpdateV1(b, u, nil))
 		return time.Since(start)
 	}
-	small, large := apply(1_000), apply(1_000_000) // 1000x the characters, same structs
+	// The minimum of several runs: a GC pause or a preemption in the large
+	// run is not part of the cost being measured.
+	best := func(n int) time.Duration {
+		d := apply(n)
+		for range 2 {
+			d = min(d, apply(n))
+		}
+		return d
+	}
+	small, large := best(1_000), best(1_000_000) // 1000x the characters, same structs
 	t.Logf("%v -> %v", small, large)
 	require.Less(t, large, 50*small+5*time.Millisecond, "the cleanup cost grows with the deleted characters")
 }

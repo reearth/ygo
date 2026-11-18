@@ -1,8 +1,10 @@
 package websocket_test
 
 import (
+	"bytes"
 	"context"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -37,6 +39,19 @@ func (s *keepingStore) stored() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.updates)
+}
+
+// endsWith reports whether update is the last one stored.
+func (s *keepingStore) endsWith(update []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.updates) > 0 && bytes.Equal(s.updates[len(s.updates)-1], update)
+}
+
+func (s *keepingStore) snapshot() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.updates)
 }
 
 // noOpSetup is a room setup under test: without persistence, with a store
@@ -108,10 +123,12 @@ func TestInteg_ResentUpdateReachesNoPeerAndNoStore(t *testing.T) {
 			assert.Equal(t, u[1], nextRelayedUpdate(t, receiver), "the re-sent update is not relayed")
 
 			if tc.store != nil {
-				// The store writes in order, so the re-sent update would be
-				// stored before the second one.
-				require.Eventually(t, func() bool { return tc.store.stored() >= 2 }, 2*time.Second, 5*time.Millisecond)
-				assert.Equal(t, 2, tc.store.stored(), "the re-sent update is not stored")
+				// The store writes in order, so a re-sent update would sit
+				// before u[1]. Waiting for u[1] itself, rather than for a
+				// count, leaves no window in which the re-sent update is
+				// still on its way to the store.
+				require.Eventually(t, func() bool { return tc.store.endsWith(u[1]) }, 2*time.Second, 5*time.Millisecond)
+				assert.Equal(t, [][]byte{u[0], u[1]}, tc.store.snapshot(), "the re-sent update is not stored")
 			}
 		})
 	}

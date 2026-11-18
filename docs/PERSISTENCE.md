@@ -36,8 +36,12 @@ type PersistenceAdapter interface {
 `LoadDoc` is called once when the first peer connects to a room.  The returned
 bytes are passed to `crdt.ApplyUpdateV1` to seed the in-memory document.
 
-`StoreUpdate` is called on every committed transaction that changes the doc,
-via `doc.OnUpdate`.
+`StoreUpdate` is driven by `doc.OnUpdate`, which fires for every committed
+transaction that changes the doc.  By default the server coalesces those
+updates into one write per `PersistCoalesceWindow`, so a write carries the
+merged updates of the transactions that landed in the window rather than one
+transaction each.  A transaction that changes nothing fires no `OnUpdate` and
+is never stored.
 For durability the implementation should write to stable storage before
 returning; the server does not retry failed writes.
 

@@ -160,8 +160,8 @@ func TestObserve_NoOpTransactionAfterADeletionDoesNotFire(t *testing.T) {
 	sub := d.Observe(rec)
 	defer sub.Close()
 
-	// The no-op's update carries no deletions, so the bridge drops it as it
-	// does on a document that never deleted anything.
+	// A transaction that changes nothing fires no OnUpdate, so the bridge
+	// has nothing to deliver.
 	if err := d.InsertText("t", 0, ""); err != nil {
 		t.Fatal(err)
 	}
