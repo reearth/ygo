@@ -141,25 +141,28 @@ type carriedStruct struct {
 }
 
 // mergeOverlapping is dedupClientStructs for a client whose updates carry
-// structs over clocks that an earlier update's structs carry. items holds them
-// in the order the updates carried them. Wherever a struct must start, the
-// struct dedupClientStructs would keep is kept, cut there, unless it names
-// there another origin, right origin, parent or key than the struct the
-// earliest update carried among those holding that clock. The two are then
-// different insertions, and the earlier update's struct is kept instead, as
-// an apply of the updates in order integrates from a later struct only the
-// clocks past those it holds. The struct that lost is cut at the end of the
-// one kept, and the choice is made again there. So a struct that a later
-// update carries over an earlier one's clocks and that names otherwise, such
-// as one parked on a struct no update carries, keeps only the clocks past
-// them.
+// structs over clocks an earlier update's structs carry, with items in the
+// order the updates carried them. Where two different insertions (see
+// sameInsertionAt) claim one clock, it keeps the earlier update's struct;
+// elsewhere it keeps the struct dedupClientStructs keeps. It cuts the struct
+// it keeps at that clock, and chooses again at the struct's end.
+//
+// For example, keystrokes a, b, c and d at clocks 0-3, one struct each, then
+// a struct P at clocks 1-5 whose right origin no update carries:
+// dedupClientStructs keeps a and P, Yjs's mergeUpdatesV2 keeps a, b and P cut
+// at 2, and this keeps a, b, c, d and P cut at 4. A reader then holds "abcd",
+// as a document that applies the updates in order does. Keeping more than Yjs
+// here is deliberate.
+//
+// Two groups of one client in one update never reach here: decode keeps the
+// last of them, as Yjs's apply does.
 func mergeOverlapping(items []*Item) []*Item {
 	carried := make([]carriedStruct, len(items))
 	for i, it := range items {
 		carried[i] = carriedStruct{item: it, seq: i, clock: it.ID.Clock, end: it.ID.Clock + uint64(it.Content.Len())}
 	}
-	// dedupClientStructs' order, to the same permutation, so that this keeps
-	// the struct it would keep wherever no earlier insertion names otherwise.
+	// Sort as dedupClientStructs does, so both keep the same struct where no
+	// two insertions claim a clock.
 	sort.Slice(carried, func(i, j int) bool {
 		if carried[i].clock != carried[j].clock {
 			return carried[i].clock < carried[j].clock
@@ -168,14 +171,14 @@ func mergeOverlapping(items []*Item) []*Item {
 	})
 	var covEnd uint64
 	held := func(i int) bool { return carried[i].done || carried[i].end <= covEnd }
-	// earliest holds, by the order the updates carried them, the structs that
-	// start at or before covEnd; held ones leave it once at its top.
+	// earliest orders by update the structs that start at or before covEnd. A
+	// held one leaves it when it reaches the top.
 	earliest := candidateHeap{less: func(a, b int) bool { return carried[a].seq < carried[b].seq }}
 	out := items[:0]
 	first := 0 // the first struct in dedupClientStructs' order not held
 	for next := 0; next < len(carried); {
-		// The first struct, or one after a gap: as in dedupClientStructs, the
-		// first there is kept even when it has length zero.
+		// At the start, or after a gap, a first struct of length zero is kept,
+		// as dedupClientStructs keeps it.
 		covEnd = carried[next].clock
 		if carried[next].end == covEnd {
 			carried[next].done = true
@@ -191,6 +194,7 @@ func mergeOverlapping(items []*Item) []*Item {
 			if first == next {
 				break
 			}
+			// first is in the heap and not held, so this never empties it.
 			for held(earliest.idx[0]) {
 				earliest.pop()
 			}
@@ -360,7 +364,11 @@ func buildMergeStore(updates [][]byte, decode func(*Doc, []byte) (map[ClientID][
 	perClient := make(map[ClientID][]*Item)
 	// The clients an update carries structs of below the end of an earlier
 	// update's. An update's structs of one client ascend without overlapping,
-	// so every other client's structs ascend as carried.
+	// so every other client's structs ascend as carried. Comparing with the
+	// last struct alone also flags an update that only fills a gap, which
+	// mergeOverlapping merges as dedupClientStructs would. A hostile update
+	// whose structs do not ascend can go unflagged, and dedupClientStructs
+	// then merges its client as before.
 	var overlapping map[ClientID]bool
 	mergedDS := newDeleteSet()
 	for _, u := range updates {

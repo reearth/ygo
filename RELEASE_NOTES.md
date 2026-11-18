@@ -1,29 +1,40 @@
 ## v1.56.3
 
-**Who is affected: stores that merge the updates a document took, and
-documents that hold a struct parked over clocks they hold.** A merge in which
-no two insertions claim one clock returns the same bytes as before.
+**Who is affected: servers that save or send the state of a document that
+holds a struct parked over its own clocks, and stores that merge the updates
+such a document took.** A merge in which no two insertions claim one clock
+returns the same bytes as before.
 
 A struct parks while it names a struct the document lacks. It can stay parked
-over clocks the document holds: an update can carry it after those clocks,
-or fill the gap behind it while it still waits. `MergeUpdatesV1` and
-`MergeUpdatesV2` kept, on each clock, the struct that started first and was
-longest, so such a struct took the clocks from the structs that held them. A
-reader of the merge parked it again, and everything of its client after it. A
-stored log of 1,000 keystrokes and one 1,000-character update of that kind
-read back as 3 characters. `EncodeStateAsUpdateV1` and
-`EncodeStateAsUpdateV2`, which merge a document's parked structs into its
-state, lost text the same way.
+over clocks the document holds. `EncodeStateAsUpdateV1` and
+`EncodeStateAsUpdateV2` merge a document's parked structs into its state, and
+the merge kept, on each clock, the struct that started first and was longest.
+The parked struct took the clocks from the document's own structs. A reader of
+the state parked it again, and everything of its client after it: the state
+of a document that held 1,000 typed characters read back as 3. The
+persistence adapters, websocket sync and the cluster relay all save or send
+that state. `MergeUpdatesV1` and `MergeUpdatesV2` used the same rule.
 
-Where the struct the old rule keeps names another origin, right origin,
-parent or key than the struct the earliest update carried on that clock, the
-two are different insertions, and the earlier update's struct is now kept.
-The other keeps only the clocks past it, as an apply of the updates in order
-integrates only those. A stored log in which such an update follows the
-clocks it overlaps now reads back whole. A merge cannot tell which struct a
-document integrated, so a log that holds the parked struct before those
-clocks still merges as before; a document that applies the log encodes its
-state whole.
+Where two different insertions claim one clock, a merge now keeps the earlier
+update's struct, and the other keeps only the clocks past it, as an apply of
+the updates in order integrates only those.
+
+This rule is deliberately not Yjs's. Yjs's `mergeUpdates` keeps the earlier
+update's struct where two start on one clock, but a parked struct that starts
+earlier then takes the clocks of the structs after it. Merging 1,000
+keystrokes and then one such struct, the old rule kept 3 characters, Yjs
+keeps 4, and this rule keeps all 1,000.
+
+**Some logs now keep less than before.** When the parked struct comes first
+in a merge's input and starts on the clock of a longer struct, the merge now
+keeps the parked struct, as Yjs does, and a reader parks the longer struct
+behind it. Over 60 shapes of such a log, this lost text that the old rule
+kept in 2 (10 characters down to none), and kept more text than the old rule
+in 13.
+
+A document parks a struct over its own clocks only after it takes a
+hand-made update, an update from a peer that reuses clocks, or a damaged
+stored update. Ordinary out-of-order delivery does not leave one parked.
 
 ## v1.56.2
 
