@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.55.1] — 2026-11-14
+## [1.56.3] — 2026-11-18
 
 ### Fixed
 
@@ -14,6 +14,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and new values with `!=` to decide whether to release a staged shared type,
   so a second `Set` of a key that held a map or a slice panicked with
   "comparing uncomparable type". It now compares only a staged shared type.
+
+## [1.56.2] — 2026-11-17
+
+### Fixed
+
+- **`provider/websocket`: a room re-created during the attach window is no
+  longer left unsubscribed from the relay.** The activations held back for
+  the length of `AttachRelay` (v1.56.1) were tracked by room name. A room
+  leaves `s.rooms` before its teardown runs — the teardown waits for the
+  room's persistence goroutine to drain first — so a replacement under the
+  same name can be created, and hold its own activation, while the
+  predecessor's teardown is still pending. That teardown then took the
+  replacement's entry: the resident room was never offered to the relay, and
+  with a relay that subscribes per room it stayed unsubscribed for as long as
+  it was resident, silently diverging from the other nodes. The mirror
+  ordering cost the subscription the other way, the teardown waiting out an
+  in-flight activation and then issuing a `RoomDeactivated` for the room still
+  using it. Held activations are now keyed by room instance, so a teardown
+  settles only its own room's and a replacement keeps its own.
+
+## [1.56.1] — 2026-11-17
+
+### Fixed
+
+- **`provider/websocket`: a relay that delivers traffic while `AttachRelay`
+  is still running no longer splits that room across nodes.** `AttachRelay`
+  started the relay before recording it on the server, so a message arriving
+  in that window found `s.relay` still nil: the room it created came up with
+  no outbound lane, no observers publishing its changes and no
+  `RoomActivated`, and stayed that way until it unloaded. Edits by that room's
+  peers on this node were never published to the other nodes, and with a relay
+  that subscribes per room the other nodes' edits never arrived either — the
+  room silently diverged across the cluster until everyone left it. The same
+  window left the echo sentinel nil, and all four fields were read off-lock,
+  which the race detector reported. The attach state is now one atomic value
+  committed before `Start` and undone if `Start` fails, so a Start failure
+  still leaves the server unattached and retryable. A room created in that
+  window holds its outbound backlog on its lane until `Start` returns, rather
+  than spending it on a relay that has not started yet and may refuse it.
+  Its `RoomActivated` is held back for the same window and issued once
+  `Start` succeeds, since a relay that subscribes per room cannot accept one
+  before then and `getOrCreateRoom` issues exactly one per room.
+  The exposure is a relay that
+  delivers during `Start` — attaching to a bus other nodes already publish on
+  — and it does not depend on this server accepting connections yet, since
+  the relay itself creates the room. A relay is now offered
+  neither `RoomActivated` nor `Publish` before its own `Start` has returned.
+- **`provider/websocket`: `Shutdown` no longer hangs when the attach it is
+  shutting down never finished.** It joined the outbound lane workers before
+  cancelling the relay context, so a lane holding a payload through the
+  attach window waited for a gate only `AttachRelay` can close — and a relay
+  whose `Start` runs until its context dies was waiting for that same cancel.
+  With no deadline on the `Shutdown` context neither side moved. An
+  unfinished attach is now cancelled before the join.
+- **`provider/websocket`: a remote update is no longer published back to the
+  cluster after a failed attach is retried.** `Sink.Inject` stamped its
+  update with the echo-guard origin read when the call began, but loading the
+  room can block, and the attach that delivered it may have been rolled back
+  and replaced by then — the room's observers hold the new attach's sentinel.
+  The update then read as a local edit and was published straight back out.
+  Cancelling the first attach does not prevent this: an injection carrying
+  that attach's context observes the cancellation only after the update has
+  been applied. The origin is now read from the room itself, after it is
+  loaded.
+- **`cluster/redis`: `Publish` waits for an in-flight `Start` instead of
+  failing it.** `Publish` documents `ErrRelayNotStarted` as the answer for a
+  relay `Start` has not been called on, but it also returned it while a
+  `Start` was running — its started flag is only set once `Start` has
+  subscribed and spawned its delivery goroutines. A local edit committed in
+  that window was rejected rather than published. It now blocks until the
+  attempt finishes, and still fails fast when no `Start` has been called or
+  when the one that ran failed. `RoomActivated` and `RoomDeactivated` wait one
+  out too: taking the lock only made them wait out a `Start` that already held
+  it, so an activation that arrived first was dropped and the room was left
+  with no Redis subscription.
+
+## [1.56.0] — 2026-11-16
+
+### Added
+
+- **`provider/websocket`: `ConnectionConfig.Identity` and
+  `PeerUpdateInfo.Identity` say which authenticated user sent an update.**
+  `Server.Authorize` can attach any value naming the connection's user (a user
+  ID, a session); ygo never reads it and hands it to `Server.OnPeerUpdate` with
+  each update the connection sends. It names the connection that transmitted
+  the update, not the author of the items in it: a reconnecting client's
+  `SyncStep2` re-sends items other users authored under its own identity, and
+  updates relayed from other cluster nodes or applied with `Server.Apply` never
+  reach the hook at all. An in-band token accepted by `Server.OnTokenAuth`
+  replaces the connection's `ConnectionConfig` whole, as it already did for
+  `ReadOnly`, so its `Identity` replaces the one `Authorize` attached, a nil one
+  included. Connections accepted by `AuthFunc`, or with no auth hook, carry a
+  nil `Identity` until an accepted token supplies one.
 
 ## [1.55.0] — 2026-10-31
 
