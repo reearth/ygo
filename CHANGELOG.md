@@ -24,14 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with an attribute value it received as V2, such as `{size: 1.5}`, no longer
   adds format markers, because the `float32(1.5)` it held compared unequal to
   `1.5`. Code that type-switches on a decoded value must take `float64` where
-  it took `float32`. A `float32` that a caller stores is still written as tag
-  124, and its writer still prints it as `encoding/json` prints a `float32`.
+  it took `float32`. A `float32` that a caller stores in a `YMap`, a `YArray`,
+  a text attribute or embed, or an XML attribute, also inside a `[]any` or
+  `map[string]any`, is now held as the `float64` that every reader decodes,
+  so its writer reads and prints what its replicas do: `float32(0.1)` prints
+  as `0.10000000149011612` on every peer, where ygo printed `0.1`.
 - **`encoding`: `WriteAny` writes a Go integer as lib0 writes the same Number.**
   An integer outside int32 within ±2^53 was tag 123, 9 bytes, where lib0 writes
   one that a float32 holds exactly, such as 2^31, 2^40 or 2^53, as tag 124, 5
   bytes. -2^31 was tag 125, where lib0, which tests the magnitude against
-  2^31-1, writes tag 124. Both now match lib0 0.2.119 byte for byte, and so
-  does a `uint64` above `math.MaxInt64`. An integer past ±2^53 is still tag 122
+  2^31-1, writes tag 124. Both now match lib0 0.2.117 byte for byte, and so
+  does a `uint64` above `math.MaxInt64`. A `float64` zero and NaN still differ
+  (#408): ygo writes ±0 as tag 124 where lib0 writes tag 125, and Go's NaN has
+  another payload than V8's. An integer past ±2^53 is still tag 122
   (BigInt). Read back, each such integer is a `float64`, as before, except
   -2^31, which read back as an `int64`. This reverses the "large-integer
   float32-vs-float64 `Any` tag" that the 1.22.0 entry left as-is: a replica

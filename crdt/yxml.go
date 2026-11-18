@@ -493,11 +493,11 @@ func (e *YXmlElement) setAttributeValue(op string, txn *Transaction, key string,
 	checkAnyUTF8(op, "value", value)
 	t := &e.abstractType
 	if t.detached() {
-		// Store the wire-normalised value (int -> int64, the same transform
-		// NewContentAny applies below) so a detached GetAttributeValue reads
-		// back the exact type it would after attach. flushPrelim re-applies
-		// this value, so the encoded bytes are unaffected.
-		value = normalizeAnyScalar(value)
+		// Store the value as a reader decodes it (storedAny, the transform
+		// newStoredContentAny applies below) so a detached GetAttributeValue
+		// reads back the exact value it would after attach. flushPrelim
+		// re-applies this value, so the encoded bytes are unaffected.
+		value = storedAny(value)
 		for i := range e.prelimAttrs {
 			if e.prelimAttrs[i].key == key {
 				e.prelimAttrs[i].value = value
@@ -520,7 +520,7 @@ func (e *YXmlElement) setAttributeValue(op string, txn *Transaction, key string,
 		Left:      left,
 		Parent:    t,
 		ParentSub: strPtr(key),
-		Content:   NewContentAny(value),
+		Content:   newStoredContentAny(value),
 	}
 	item.integrate(txn, 0)
 }

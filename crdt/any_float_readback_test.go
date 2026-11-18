@@ -107,6 +107,57 @@ func TestUnit_Tag124_TextValuesV2ThenV1KeepTheWrittenNumber(t *testing.T) {
 	}
 }
 
+// A float32 travels as tag 124, which every reader, ygo or Yjs, decodes to a
+// float64. Its writer holds that float64 too: at the top level and inside
+// plain maps and arrays, in a text attribute and embed, and in an XML
+// attribute, also one set before the element is in a document. So the writer
+// reads and prints what its replicas do.
+func TestUnit_Float32_WriterHoldsWhatReplicasDecode(t *testing.T) {
+	const f32 = float32(0.1)
+	f := float64(f32) // 0.10000000149011612
+	for _, version := range tag124UpdateVersions {
+		t.Run(version.name, func(t *testing.T) {
+			writer := newTestDoc(1)
+			m, arr, txt := writer.GetMap("m"), writer.GetArray("a"), writer.GetText("t")
+			frag := writer.GetXmlFragment("x")
+			detached := NewYXmlElement("d")
+			writer.Transact(func(txn *Transaction) {
+				m.Set(txn, "v", f32)
+				m.Set(txn, "plain", map[string]any{"v": f32, "list": []any{f32}})
+				arr.Push(txn, []any{f32, []any{f32}})
+				txt.Insert(txn, 0, "ab", Attributes{"w": f32})
+				txt.InsertEmbed(txn, 2, map[string]any{"w": f32}, nil)
+				el := NewYXmlElement("e")
+				frag.InsertElement(txn, 0, el)
+				el.SetAttributeValue(txn, "v", f32)
+				detached.SetAttributeValue(txn, "v", f32)
+			})
+			got, _ := detached.GetAttributeValue("v")
+			assert.Equal(t, f, got, "detached GetAttributeValue")
+			replica := newTestDoc(2)
+			require.NoError(t, version.apply(replica, version.encode(writer, nil), nil))
+
+			for name, doc := range map[string]*Doc{"writer": writer, "replica": replica} {
+				v, _ := doc.GetMap("m").Get("v")
+				assert.Equal(t, f, v, "%s Get", name)
+				plain, _ := doc.GetMap("m").Get("plain")
+				assert.Equal(t, map[string]any{"v": f, "list": []any{f}}, plain, "%s Get", name)
+				assert.Equal(t, []any{f, []any{f}}, doc.GetArray("a").ToSlice(), "%s ToSlice", name)
+				js, err := doc.GetMap("m").ToJSON()
+				require.NoError(t, err)
+				assert.Equal(t, `{"plain":{"list":[0.10000000149011612],"v":0.10000000149011612},"v":0.10000000149011612}`, string(js), "%s ToJSON", name)
+				assert.Equal(t, []Delta{
+					{Op: DeltaOpInsert, Insert: "ab", Attributes: Attributes{"w": f}},
+					{Op: DeltaOpInsert, Insert: map[string]any{"w": f}},
+				}, doc.GetText("t").ToDelta(), "%s ToDelta", name)
+				el := doc.GetXmlFragment("x").Children()[0].(*YXmlElement)
+				got, _ := el.GetAttributeValue("v")
+				assert.Equal(t, f, got, "%s GetAttributeValue", name)
+			}
+		})
+	}
+}
+
 // A replica that formats text with a value it already holds from a V2 update
 // adds nothing, as in Yjs: it holds the writer's float64, not a float32.
 func TestUnit_Tag124_FormatWithTheHeldValueAddsNothing(t *testing.T) {

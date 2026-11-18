@@ -242,7 +242,7 @@ func (a *YArray) Insert(txn *Transaction, index int, vals []any) {
 // and Push; the two differ only in how left is chosen (Insert uses the
 // live-index neighbour, Push uses the physical tail).
 func (a *YArray) insertAfterItem(txn *Transaction, left *Item, vals []any, hintIndex int) {
-	a.insertContentAfterItem(txn, left, NewContentAny(vals...), hintIndex)
+	a.insertContentAfterItem(txn, left, newStoredContentAny(vals...), hintIndex)
 }
 
 // insertContentAfterItem anchors a new item carrying content immediately after

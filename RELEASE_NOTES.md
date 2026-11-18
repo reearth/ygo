@@ -16,7 +16,7 @@ What to change:
 
 - A type switch or type assertion on a decoded number must take `float64`
   where it took `float32`. No value that ygo decodes is a `float32` any more,
-  so a `case float32:` matches only a `float32` that your own code stored.
+  and neither is a `float32` that your code stores once it is in a document.
 - A comparison of a decoded value with `reflect.DeepEqual` or `assert.Equal`
   against a `float32` must compare against the `float64` instead. A value from
   a peer now equals the writer's `float64`, as it does in Yjs.
@@ -41,12 +41,14 @@ tag 125, because lib0 writes tag 125 only while the magnitude is at most
 2^31-1. Read back, these integers are a `float64`, as before, except -2^31,
 which read back as an `int64`. Integers past ±2^53 keep tag 122 (BigInt).
 
-A `float32` that your own code stores is still written as tag 124. Its writer
-still prints it as `encoding/json` prints a `float32`, `float32(0.1)` as `0.1`,
-while a replica, ygo or Yjs, prints the `float64` it receives,
-`0.10000000149011612`. A text attribute or embed sent as V1 is JSON text, so
-there the replica receives the writer's `0.1`. Store a `float64` if every peer
-must print the same.
+A `float32` that your own code stores is now held as the `float64` that every
+reader decodes: in `YMap.Set`, `YArray.Insert` and `Push`, a text attribute or
+embed, and an XML attribute, also inside a `[]any` or `map[string]any`. So the
+writer reads and prints what its replicas print, ygo or Yjs. `float32(0.1)`
+now prints as `0.10000000149011612` on every peer, and `Get` on its writer
+returns that `float64`. On v1.56.2 the writer and its ygo replicas printed
+`0.1`, and Yjs peers printed `0.10000000149011612`. Store a `float64` if you
+want `0.1`.
 
 ## v1.56.2
 

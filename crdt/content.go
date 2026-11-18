@@ -1,6 +1,10 @@
 package crdt
 
-import "unicode/utf8"
+import (
+	"maps"
+	"slices"
+	"unicode/utf8"
+)
 
 // Content is the payload carried by an Item.
 // Every concrete content type must implement this interface.
@@ -148,6 +152,62 @@ func normalizeAnyScalar(v any) any {
 		return int64(n)
 	}
 	return v
+}
+
+// storedAny is a value a caller stores as every reader decodes it: an int as
+// an int64 (normalizeAnyScalar), and a float32 as a float64, also inside a
+// []any or map[string]any, because WriteAny writes a float32 as tag 124 and
+// ReadAny reads tag 124 as a float64. A container is copied only when it
+// holds a float32.
+func storedAny(v any) any {
+	v, _ = widenFloat32(v)
+	return normalizeAnyScalar(v)
+}
+
+// widenFloat32 returns v with each float32 in it as a float64, and whether it
+// found one.
+func widenFloat32(v any) (any, bool) {
+	switch t := v.(type) {
+	case float32:
+		return float64(t), true
+	case []any:
+		var out []any
+		for i, e := range t {
+			if w, ok := widenFloat32(e); ok {
+				if out == nil {
+					out = slices.Clone(t)
+				}
+				out[i] = w
+			}
+		}
+		if out != nil {
+			return out, true
+		}
+	case map[string]any:
+		var out map[string]any
+		for k, e := range t {
+			if w, ok := widenFloat32(e); ok {
+				if out == nil {
+					out = maps.Clone(t)
+				}
+				out[k] = w
+			}
+		}
+		if out != nil {
+			return out, true
+		}
+	}
+	return v, false
+}
+
+// newStoredContentAny is NewContentAny for values a caller stores, through
+// storedAny, so the writer holds what its replicas decode.
+func newStoredContentAny(vals ...any) *ContentAny {
+	stored := make([]any, len(vals))
+	for i, v := range vals {
+		stored[i] = storedAny(v)
+	}
+	return &ContentAny{stored}
 }
 
 // NewContentAny creates a ContentAny, normalising Go int values to int64 so

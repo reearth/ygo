@@ -37,8 +37,10 @@ func textValueAt(v any, depth int) (any, error) {
 		return nil, errTextValueDepth
 	}
 	switch t := v.(type) {
-	case nil, bool, string, int64, float64, float32:
+	case nil, bool, string, int64, float64:
 		return v, nil
+	case float32:
+		return float64(t), nil // as ReadAny reads the tag 124 WriteAny writes
 	case int:
 		return int64(t), nil
 	case sharedType:
@@ -89,7 +91,7 @@ func textValueAt(v any, depth int) (any, error) {
 		}
 		return float64(rv.Uint()), nil // WriteAny's form above int64
 	case reflect.Float32:
-		return float32(rv.Float()), nil
+		return rv.Float(), nil
 	case reflect.Float64:
 		return rv.Float(), nil
 	case reflect.Pointer, reflect.Interface:

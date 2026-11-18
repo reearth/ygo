@@ -620,6 +620,8 @@ func appendJSONScalar(out []byte, value any) ([]byte, bool) {
 	case float64:
 		return appendJSONFloat(out, value, 64)
 	case float32:
+		// A stored or decoded value is never a float32. A detached type's
+		// buffered value can be, and prints as encoding/json prints it.
 		return appendJSONFloat(out, float64(value), 32)
 	}
 	return out, false

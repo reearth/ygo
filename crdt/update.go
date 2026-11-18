@@ -1409,11 +1409,10 @@ func readLegacyAnyVals(dec *encoding.Decoder, n uint64) ([]any, error) {
 	return vals, nil
 }
 
-// jsonNumbers widens lib0 Any's float32 and int64 to float64, recursively.
+// jsonNumbers widens lib0 Any's int64 to float64, recursively. ReadAny returns
+// no float32.
 func jsonNumbers(v any) any {
 	switch x := v.(type) {
-	case float32:
-		return float64(x)
 	case int64:
 		return float64(x)
 	case []any:

@@ -21,7 +21,7 @@ func contentForValue(value any) Content {
 		}
 		return NewContentType(bt)
 	}
-	return NewContentAny(value)
+	return newStoredContentAny(value)
 }
 
 // mapSub pairs a unique subscription ID with a YMapEvent callback.

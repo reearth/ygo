@@ -435,7 +435,9 @@ func (g randomJSONDoc) fillArray(txn *Transaction, a *YArray, depth int) []any {
 				run[i] = g.leaf()
 			}
 			a.Push(txn, run)
-			want = append(want, run...)
+			for _, v := range run {
+				want = append(want, storedLeaf(v))
+			}
 		default:
 			want = append(want, g.nested(txn, depth, func(st sharedType) { a.PushType(txn, st) }))
 		}
@@ -450,12 +452,21 @@ func (g randomJSONDoc) fillMap(txn *Transaction, m *YMap, depth int) map[string]
 		if g.rng.IntN(2) == 0 {
 			value := g.leaf()
 			m.Set(txn, key, value)
-			want[key] = value
+			want[key] = storedLeaf(value)
 			continue
 		}
 		want[key] = g.nested(txn, depth, func(st sharedType) { m.Set(txn, key, st) })
 	}
 	return want
+}
+
+// storedLeaf is a leaf as the document holds it: a float32 as the float64
+// every reader decodes.
+func storedLeaf(v any) any {
+	if f, ok := v.(float32); ok {
+		return float64(f)
+	}
+	return v
 }
 
 // nested attaches a nested type through attach and fills it.
