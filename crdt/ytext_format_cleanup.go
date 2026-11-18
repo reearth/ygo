@@ -468,8 +468,8 @@ func jsIdentical(a, b *ContentFormat) bool {
 // jsStrictEqual is JavaScript's === on two attribute values, nil standing for
 // an absent attribute (null). Scalars compare by value, every numeric Go type
 // being one JavaScript number. A map or slice is one JavaScript object, so it
-// is equal only to itself; a slice with no capacity has no identity to
-// compare, so it is equal only to itself by that rule too.
+// is equal only to itself — except a slice with no capacity, which has no
+// address to compare and so is equal to nothing, itself included.
 func jsStrictEqual(av, bv any) bool {
 	if av == nil || bv == nil {
 		return av == nil && bv == nil

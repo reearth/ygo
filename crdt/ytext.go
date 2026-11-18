@@ -576,10 +576,16 @@ func isContentFormat(item *Item) bool {
 	return ok
 }
 
-// attrEqual is Yjs's equalAttrs: JS === , or, for two objects, a one-level
-// compare of their entries. A missing key and a nil value are the same "no
-// formatting" state. One level is the whole rule — a nested object compares by
-// identity, as === does, so two separately built nested values are not equal.
+// attrEqual reports whether a format changes anything. It is Yjs's equalAttrs
+// — JS === , or a compare of two objects' entries — with one deliberate
+// difference: Yjs compares a nested object by identity, and ygo cannot.
+// textValueAt copies every map and slice a caller passes, so the document
+// never holds the caller's object and no two values ever share one. Comparing
+// nested objects by identity would make every re-format of a nested attribute
+// write a marker, including the case Yjs settles with === on the caller's own
+// object. Entries therefore compare by content, which keeps that case a no-op,
+// as it is in Yjs. A missing key and a nil value are the same "no formatting"
+// state.
 func attrEqual(a, b any) bool {
 	if jsStrictEqual(a, b) {
 		return true
@@ -594,7 +600,7 @@ func attrEqual(a, b any) bool {
 	}
 	for k, v := range ea {
 		w, has := eb[k]
-		if !has || !jsStrictEqual(v, w) {
+		if !has || !attrEqual(v, w) {
 			return false
 		}
 	}

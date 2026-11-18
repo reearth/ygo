@@ -16,20 +16,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently changed what the document held. The value is copied now, as
   `ContentBinary` and the V2 stream reader already did.
 - **`crdt`: attribute values compare as Yjs's `equalAttrs` compares them.**
-  `reflect.DeepEqual` decided whether a format changed anything, which is both
-  stricter and looser than Yjs: `int64(1)` and `float64(1)` were different
-  where Yjs sees one number, `[]` and `{}` were different where Yjs sees two
-  empty objects, and two separately built nested objects were equal where Yjs
-  compares them by identity. Each disagreement produced a format marker Yjs
-  does not produce, or dropped one it does. The comparison is now `===`, or a
-  one-level compare of two objects, and shares its `===` with the format
-  cleanup's `jsIdentical`.
+  `reflect.DeepEqual` decided whether a format changed anything, and it is
+  stricter than Yjs on scalars: `int64(1)` and `float64(1)` were different
+  where Yjs sees one number, and `[]` and `{}` were different where Yjs sees
+  two empty objects. Each disagreement wrote a format marker Yjs does not
+  write. The comparison is now `===` on scalars, or a compare of two objects'
+  entries, sharing its `===` with the format cleanup's `jsIdentical`.
+  Deliberately unlike Yjs, a nested object compares by content rather than by
+  identity: `textValueAt` copies every map and slice a caller passes, so the
+  document never holds the caller's object and identity would make every
+  re-format of a nested attribute write a marker.
 - **`crdt`: a binary attribute is written to a V1 update as Yjs writes it.**
-  `JSON.stringify` of a `Uint8Array` is an object keyed by index, but
-  `encoding/json` writes base64 for a Go `[]byte`, so `{"0":1,"1":2}` went out
-  as `"AQI="` and no Yjs peer read the value back. V1 format values are JSON,
-  which has no binary type, so a replica reads an object rather than a
-  `[]byte` — as a Yjs replica does. V2 carries the type and is unchanged.
+  `JSON.stringify` of a `Uint8Array` is an object keyed by index, in index
+  order, but `encoding/json` writes base64 for a Go `[]byte`, so `{"0":1,"1":2}`
+  went out as `"AQI="`. V1 format values are JSON, which has no binary type:
+  neither form restores the Go `[]byte` on a replica. A Yjs peer reads the old
+  form as the string `"AQI="` and the new one as an index-keyed object, which
+  is what it reads from its own peers. Binary values inside `ContentJSON` take
+  the same V1 path and change with it. V2 uses `WriteAny`, carries the type
+  and is unchanged, so a document holding such a value from an older V1 update
+  re-encodes to V2 as the object it now holds, not as the old base64 string.
 
 ## [1.57.0] — 2026-11-18
 
