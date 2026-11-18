@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`crdt`: a panic while committing a transaction no longer wedges the
+  document.** The commit released `d.mu` with a plain statement, so a panic
+  raised between taking the lock and that statement left the write lock held
+  for good: every later `Transact`, `GetText` or encode on that document
+  blocked forever. Inserting a value the encoder rejects — a channel, say —
+  into a document with an `OnUpdate` observer was enough to reach it. The
+  unlock is now deferred, so the commit releases the lock however it exits.
+  `decideFormattingCleanup` released the lock the same way and now defers it
+  too.
 - **`crdt`: V1 encoders write clients in descending order, as Yjs does.**
   The struct groups of a V1 update and the entries of a state vector were
   written with clients ascending, so a V1 update or state vector with more

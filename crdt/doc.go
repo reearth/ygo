@@ -304,6 +304,19 @@ func New(opts ...DocOption) *Doc {
 	return d
 }
 
+// newScratchDoc returns a Doc for decoding structs without integrating them.
+// Its identity is never read, so it skips the two crypto/rand draws New makes
+// — a decode-only doc is allocated per no-op apply, on the sync hot path.
+func newScratchDoc() *Doc {
+	return &Doc{
+		gc:         true,
+		shouldLoad: true,
+		store:      newStructStore(),
+		share:      make(map[string]sharedType),
+		subdocs:    make(map[string]*Doc),
+	}
+}
+
 // rawType is a placeholder sharedType created during update decoding when the
 // concrete type (YArray, YMap, YText, …) is not yet known. It is upgraded
 // transparently the first time the user calls GetArray/GetMap/GetText/etc.
@@ -638,6 +651,20 @@ func collectAndEncodeLocked(d *Doc, txn *Transaction) (update []byte) {
 	return update
 }
 
+// commitAndUnlock commits txn and releases d.mu, however the commit exits: a
+// panic raised with the lock still held — an unsupported value reaching the
+// encode, say — would wedge the doc for good. txn is marked committed BEFORE
+// the unlock so the txn-scoped accessors fail loudly from observers (which
+// receive the *Transaction after unlock) or from a retained txn, instead of
+// mutating d.share unsynchronized. See Transaction.done.
+func (d *Doc) commitAndUnlock(txn *Transaction, panicking bool) (phase2 func([]byte), update []byte, cleanup bool) {
+	defer func() {
+		txn.done = true
+		d.mu.Unlock()
+	}()
+	return commitLocked(d, txn, panicking)
+}
+
 // commitLocked finishes txn under d.mu: it builds the observer phase, decides
 // a remote transaction's format cleanup, and then runs the GC and the encode,
 // so no goroutine sees a partly collected state and the observer events see
@@ -714,14 +741,8 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			}()
 		}
 
-		phase2, update, cleanup := commitLocked(d, txn, r != nil)
-
-		// Mark the transaction committed BEFORE releasing the lock so the
-		// txn-scoped accessors fail loudly from observers (which receive the
-		// *Transaction after unlock) or from a retained txn, instead of
-		// mutating d.share unsynchronized. See Transaction.done.
-		txn.done = true
-		d.mu.Unlock()
+		// Marks txn done and releases d.mu, however the commit exits.
+		phase2, update, cleanup := d.commitAndUnlock(txn, r != nil)
 
 		if cleanup {
 			// Runs even if an observer panics, as Yjs runs the cleanup.

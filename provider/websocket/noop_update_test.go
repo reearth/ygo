@@ -35,12 +35,6 @@ func (s *keepingStore) StoreUpdate(_ string, update []byte) error {
 	return nil
 }
 
-func (s *keepingStore) stored() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.updates)
-}
-
 // endsWith reports whether update is the last one stored.
 func (s *keepingStore) endsWith(update []byte) bool {
 	s.mu.Lock()

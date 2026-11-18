@@ -132,7 +132,7 @@ func EqualSnapshots(a, b *Snapshot) bool {
 // without being integrated; one that does not decode returns an error
 // wrapping ErrInvalidUpdate. Matches Yjs snapshotContainsUpdate.
 func SnapshotContainsUpdateV1(snap *Snapshot, update []byte) (bool, error) {
-	structs, ds, err := decodeStructsV1(New(), update)
+	structs, ds, err := decodeStructsV1(newScratchDoc(), update)
 	if err != nil {
 		return false, err
 	}
@@ -162,7 +162,7 @@ func SnapshotContainsUpdateV1(snap *Snapshot, update []byte) (bool, error) {
 // one forward pass per client. update is not integrated; one that does not
 // decode returns an error wrapping ErrInvalidUpdate.
 func DocContainsUpdateV1(doc *Doc, update []byte) (bool, error) {
-	structs, ds, err := decodeStructsV1(New(), update)
+	structs, ds, err := decodeStructsV1(newScratchDoc(), update)
 	if err != nil {
 		return false, err
 	}

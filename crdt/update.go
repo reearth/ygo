@@ -88,7 +88,7 @@ func ApplyUpdateV1Held(doc *Doc, update []byte, origin any) (landed []byte, held
 			txn.landed = failed
 		} else if !txn.changesDoc() {
 			// An apply that changed nothing either held all of update or parked part of it.
-			if structs, ds, decodeErr := decodeStructsV1(New(), update); decodeErr == nil {
+			if structs, ds, decodeErr := decodeStructsV1(newScratchDoc(), update); decodeErr == nil {
 				held = storeContains(txn.doc.store, structs, ds)
 			}
 		}

@@ -310,3 +310,26 @@ func transactWithin(t *testing.T, doc *Doc, fn func(*Transaction)) {
 		t.Fatal("transaction did not finish: the document lock is held")
 	}
 }
+
+// TestUnit_PanicWhileEncodingTheUpdateReleasesTheDocLock covers a panic raised
+// inside the commit itself, after the observers have been built: the encode of
+// an unsupported value. The commit must still release the doc lock, or every
+// later use of the doc blocks forever.
+func TestUnit_PanicWhileEncodingTheUpdateReleasesTheDocLock(t *testing.T) {
+	d := New()
+	arr := d.GetArray("a")
+	d.OnUpdate(func([]byte, any) {})
+
+	func() {
+		defer func() { require.NotNil(t, recover(), "the encode panics") }()
+		d.Transact(func(txn *Transaction) { arr.Insert(txn, 0, []any{make(chan int)}) })
+	}()
+
+	done := make(chan struct{})
+	go func() { defer close(done); d.GetText("t") }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the doc lock was not released by the panicking commit")
+	}
+}

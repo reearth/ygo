@@ -67,11 +67,11 @@ const (
 // format cleanup, once its type observers have run.
 func (d *Doc) decideFormattingCleanup(txn *Transaction) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	txn.cleanup = cleanupNone
 	if needsFormattingCleanup(txn) {
 		txn.cleanup = cleanupRun
 	}
-	d.mu.Unlock()
 }
 
 // afterRemoteObservers finishes a remote transaction once its observers have

@@ -16,6 +16,11 @@
   every deletion. A reader that kept only the newest update and relied on it
   to list every earlier deletion must keep them all, or read the state with
   `EncodeStateAsUpdateV1`, which still writes every deletion.
+- **A panicking commit no longer wedges a document.** A panic raised while a
+  transaction committed left the document's write lock held, and every later
+  use of that document blocked forever. Inserting a value the encoder refuses
+  — a channel, say — into a document with an `OnUpdate` observer reached it.
+  The panic still reaches the caller; the document stays usable.
 - **`OnUpdate` runs only for a transaction that changes the document.** It
   ran after every transaction, also for an update the document already held
   (a client that reconnects sends again what the server did not
