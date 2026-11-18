@@ -604,10 +604,11 @@ type walk struct {
 }
 
 // landing records where neighbour traces landed in one item: at its start,
-// or at the lowest clock inside it (0 when none).
+// or inside it.
 type landing struct {
 	start  bool
-	inside uint64
+	inside bool   // a trace landed inside the item, at clock
+	clock  uint64 // the lowest such clock
 }
 
 // trace follows from's redone link one hop and returns the item it lands in,
@@ -657,7 +658,7 @@ func (p *redoPass) endWalk(txn *Transaction, w *walk) {
 	if at < into.ID.Clock {
 		into = txn.doc.store.Find(ID{Client: into.ID.Client, Clock: at})
 	}
-	if !p.pending(into) {
+	if into == nil || !p.pending(into) {
 		return
 	}
 	if p.landings == nil {
@@ -666,8 +667,8 @@ func (p *redoPass) endWalk(txn *Transaction, w *walk) {
 	l := p.landings[into.ID]
 	if at == into.ID.Clock {
 		l.start = true
-	} else if l.inside == 0 || at < l.inside {
-		l.inside = at
+	} else if !l.inside || at < l.clock {
+		l.inside, l.clock = true, at
 	}
 	p.landings[into.ID] = l
 }
@@ -676,8 +677,8 @@ func (p *redoPass) endWalk(txn *Transaction, w *walk) {
 // and rest as one struct and restores only the part before a trace's split.
 func (p *redoPass) cutRun(txn *Transaction, w *walk, item *Item, rest []*Item) []*Item {
 	p.endWalk(txn, w)
-	if l := p.landings[item.ID]; l.inside != 0 {
-		txn.doc.store.getItemCleanStart(txn, ID{Client: item.ID.Client, Clock: l.inside})
+	if l := p.landings[item.ID]; l.inside {
+		txn.doc.store.getItemCleanStart(txn, ID{Client: item.ID.Client, Clock: l.clock})
 		return nil
 	}
 	for i, r := range rest {
@@ -688,7 +689,7 @@ func (p *redoPass) cutRun(txn *Transaction, w *walk, item *Item, rest []*Item) [
 		if l.start {
 			return rest[:i]
 		}
-		txn.doc.store.getItemCleanStart(txn, ID{Client: r.ID.Client, Clock: l.inside})
+		txn.doc.store.getItemCleanStart(txn, ID{Client: r.ID.Client, Clock: l.clock})
 		return rest[:i+1]
 	}
 	return rest
