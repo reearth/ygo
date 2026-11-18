@@ -73,27 +73,26 @@ func TestUnit_YMap_OverwriteSameKey(t *testing.T) {
 // Overwriting a map or slice value on a detached map used to panic in Set,
 // which compared the old and new values with !=. The last value wins.
 func TestUnit_YMap_DetachedOverwriteOfAMapOrSliceValue(t *testing.T) {
+	same := map[string]any{"href": "https://example.com"}
 	for _, tc := range []struct {
 		name          string
 		first, second any
 	}{
 		{"map", map[string]any{"href": "https://a.example"}, map[string]any{"href": "https://b.example"}},
 		{"slice", []any{"a"}, []any{"b", "c"}},
+		{"the same map twice", same, same},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			doc := newTestDoc(1)
 			root := doc.GetMap("root")
 			m := NewMapPrelim()
-			var panicked any
-			doc.Transact(func(txn *Transaction) {
-				func() {
-					defer func() { panicked = recover() }()
+			require.NotPanics(t, func() {
+				doc.Transact(func(txn *Transaction) {
 					m.Set(txn, "k", tc.first)
 					m.Set(txn, "k", tc.second)
-				}()
-				root.Set(txn, "m", m)
+				})
 			})
-			require.Nil(t, panicked, "the overwrite panicked")
+			doc.Transact(func(txn *Transaction) { root.Set(txn, "m", m) })
 			v, _ := m.Get("k")
 			assert.Equal(t, tc.second, v)
 

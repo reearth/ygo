@@ -197,8 +197,10 @@ func (m *YMap) Set(txn *Transaction, key string, value any) {
 		}
 		if st, ok := old.(sharedType); ok && st != value {
 			// Overwriting displaces a staged handle: it leaves this map and
-			// becomes re-stageable. Only a handle is compared, as a map or
-			// slice value would make != panic.
+			// becomes re-stageable. This is an identity test, not attrEqual:
+			// deep equality calls two distinct empty handles equal and would
+			// skip the release. Only a handle is compared, as a map or slice
+			// value would make != panic.
 			releaseStaged(st)
 		}
 		if m.prelim == nil {

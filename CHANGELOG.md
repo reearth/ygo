@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`crdt`: overwriting a map or slice value on a detached `YMap` no longer
+- **`crdt`: setting a map or slice value twice on a detached `YMap` no longer
   panics.** `YMap.Set` on a map that is not yet in a document compared the old
   and new values with `!=` to decide whether to release a staged shared type,
   so a second `Set` of a key that held a map or a slice panicked with
-  "comparing uncomparable type". It now compares only a staged shared type.
+  "comparing uncomparable type" when the new value had the same type, the
+  same value included. It now compares only a staged shared type.
 
 ## [1.56.2] — 2026-11-17
 

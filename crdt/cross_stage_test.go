@@ -133,6 +133,10 @@ func TestUnit_CrossStage_DisplacedHandleIsRestageable(t *testing.T) {
 			mp.Set(txn, "k", h)
 			mp.Set(txn, "k", "plain instead")
 		}},
+		{"map overwrite with another empty handle", func(txn *Transaction, _ *YArray, mp *YMap, h *YText) {
+			mp.Set(txn, "k", h)
+			mp.Set(txn, "k", NewTextPrelim())
+		}},
 		{"map delete", func(txn *Transaction, _ *YArray, mp *YMap, h *YText) {
 			mp.Set(txn, "k", h)
 			mp.Delete(txn, "k")
