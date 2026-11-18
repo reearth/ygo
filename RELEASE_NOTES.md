@@ -1,33 +1,42 @@
 ## v1.56.3
 
-**Who is affected: servers and peers that hold large documents, and documents
-that keep deleted text (garbage collection off, or an `UndoManager` attached).**
+**Who is affected: documents that keep deleted text (garbage collection off,
+or an `UndoManager` attached) and hold emoji or other supplementary
+characters, and servers and peers that hold large documents.**
 
-Two steps of applying an update walked or shifted every item the document
-holds for one client, whatever the size of the update:
+**A delete set could permanently corrupt a deleted emoji.** Where ygo keeps
+deleted text, a delete range that started or ended inside a deleted
+supplementary character split its surrogate pair, and the halves became two
+U+FFFD characters in the kept text. A later undo restored `x��y` in place of
+`x😀y`. The undo's update carried that text to every live peer and into the
+server's stored updates, so a peer that loads the document later gets it too.
+This release stops new corruption. It does not repair text that an undo
+already restored this way. A delete range ends inside a pair only after some
+peer split an item there: a caller that passes a UTF-16 index inside a pair,
+which ygo and Yjs both accept, or a crafted update. ygo now splits only live
+items, as Yjs does, and keeps what Yjs keeps. Each peer that undoes needs the
+fix, not only the server.
+
+Two more effects of the old splits go too, where deleted text is kept. A
+deleted run that undo restored no longer stays split. With garbage collection
+off, a range from a nested type into its own text no longer splits that text
+before deleting the type, which gave the same U+FFFD result. So
+`EncodeStateAsUpdateV1` of such a document, and an undo or redo of such text,
+can now give different bytes from before: the bytes Yjs gives.
+
+Two steps of applying an update also walked or shifted every item the
+document holds for one client, whatever the size of the update:
 
 - A delete set split the item at both ends of each range before deleting
   anything, even an item already deleted, and the commit merged the halves
   back. A stale or concurrent peer's delete set that deleted again inside a
-  deleted run took this path. Like Yjs, ygo now splits only live items, and
-  splits an item at the range end only on reaching it, after the deletions
-  before it.
+  deleted run took this path.
 - An update carried characters typed in separate transactions, which the
   receiver squashes into one item. Removing the squashed items walked every
   item of the client. It now starts at the first of them.
 
 With an `OnUpdate` subscriber, encoding each update still reads the whole
 store; that cost is separate.
-
-Where deleted text is kept, the old splits also changed it, and now ygo keeps
-what Yjs keeps. A deleted run that undo restored stayed split. A range that
-started or ended inside a deleted supplementary character, such as an emoji,
-replaced it with two U+FFFD characters in the kept text, which a later undo
-restored and sent to every peer. With garbage collection off, a range from a
-nested type into its own text split that text before deleting the type, with
-the same result. So `EncodeStateAsUpdateV1` of such a document, and an undo or
-redo of such text, can now give different bytes from before: the bytes Yjs
-gives. Each peer that undoes needs the fix, not only the server.
 
 In 400 random runs of 1,000 steps each, with garbage collection on and off, and
 without undo, nested types or supplementary characters, every update that

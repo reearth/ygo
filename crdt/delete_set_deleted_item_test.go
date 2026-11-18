@@ -121,3 +121,40 @@ func TestUnit_DeleteSet_DeletedItemsKeepSearchMarkers(t *testing.T) {
 	require.Equal(t, markers, txt.markers)
 	require.Equal(t, 81, txt.Len())
 }
+
+// A peer that deletes from a UTF-16 index inside a surrogate pair sends a
+// delete set whose range starts inside the pair. A peer that deleted the
+// whole text meanwhile, then applies it and undoes, restores the emoji, and
+// so do the stored updates and the first peer.
+func TestInteg_DeleteSet_MidPairDeleteFromAPeerKeepsTheEmoji(t *testing.T) {
+	t.Parallel()
+	a := New(WithClientID(1), WithGC(false))
+	at := a.GetText("t")
+	um := NewUndoManager(a, []SharedType{at})
+	defer um.Destroy()
+	var stored [][]byte
+	a.OnUpdate(func(u []byte, _ any) { stored = append(stored, slices.Clone(u)) })
+	a.Transact(func(txn *Transaction) { at.Insert(txn, 0, "x😀y", nil) })
+	um.StopCapturing()
+
+	b := New(WithClientID(2))
+	require.NoError(t, ApplyUpdateV1(b, EncodeStateAsUpdateV1(a, nil), nil))
+	bt := b.GetText("t")
+	var fromB []byte
+	b.OnUpdate(func(u []byte, _ any) { fromB = slices.Clone(u) })
+	b.Transact(func(txn *Transaction) { bt.Delete(txn, 2, 2) }) // index 2 is inside the pair
+
+	a.Transact(func(txn *Transaction) { at.Delete(txn, 0, at.Len()) })
+	require.NoError(t, ApplyUpdateV1(a, fromB, "B"))
+	stored = append(stored, fromB)
+	require.True(t, um.Undo())
+	require.Equal(t, "x😀y", at.ToString())
+
+	merged, err := MergeUpdatesV1(stored...)
+	require.NoError(t, err)
+	c := New(WithClientID(3))
+	require.NoError(t, ApplyUpdateV1(c, merged, nil))
+	require.Equal(t, "x😀y", c.GetText("t").ToString(), "a peer that loads the stored updates")
+	require.NoError(t, ApplyUpdateV1(b, EncodeStateAsUpdateV1(a, b.StateVector()), nil))
+	require.Equal(t, "x😀y", bt.ToString(), "the peer that deleted inside the pair")
+}

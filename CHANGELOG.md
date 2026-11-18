@@ -7,25 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.56.3] — 2026-11-18
 
+### Fixed
+
+- **`crdt`: a delete set no longer turns a deleted emoji into two U+FFFD
+  characters that a later undo restores on every peer.** Where ygo keeps
+  deleted text (garbage collection off, or an `UndoManager` attached), a
+  delete range that started or ended inside a deleted supplementary character
+  split its surrogate pair, and the halves became two U+FFFD characters in
+  the kept text. A later undo restored `x��y` in place of `x😀y`. Its update
+  carried that text to live peers and into stored updates, so a peer that
+  replays them gets it too, and nothing repairs text already restored this
+  way. A delete range ends inside a pair only after a peer split an item
+  there: a caller that passes a UTF-16 index inside a pair, which ygo and Yjs
+  both accept, or a crafted update. `applyToPartial` now splits as Yjs's
+  `readAndApplyDeleteSet` does: only a live item, and at the range end only
+  on reaching it, after the deletions before it. The same change leaves a
+  deleted item that undo restored whole, where it stayed split into several
+  structs, and with garbage collection off it no longer splits a nested
+  type's text when a range runs from the type into it.
+
 ### Performance
 
-- **`crdt`: applying a delete set no longer splits items already deleted.**
-  `applyToPartial` split the item at both ends of each delete range, even
-  when it was already deleted, before deleting anything. Each split shifted
-  the rest of the client's items in the store, and the commit then merged the
-  halves back, so a stale or concurrent peer's delete set that deleted again
-  inside a deleted run cost time in proportion to the client's items. Like
-  Yjs's `readAndApplyDeleteSet`, ygo now splits only live items, and splits an
-  item at the range end only on reaching it, after the deletions before it.
+- **`crdt`: a delete set that deletes again inside a deleted run no longer
+  costs time in proportion to the client's items.** `applyToPartial` split
+  the item at both ends of each delete range, even an item already deleted,
+  before deleting anything. Each split shifted the rest of the client's items
+  in the store, and the commit then merged the halves back. Splitting only
+  live items removes that cost for a stale or concurrent peer's delete set.
   With an `OnUpdate` subscriber, encoding each update still reads the whole
-  store; that cost is separate. Three effects of the old splits also go, each
-  now as in Yjs, where ygo keeps deleted text: a deleted item that undo
-  restored, whose halves could not merge back, stayed split and encoded as
-  several structs; a range that started or ended inside a deleted
-  supplementary character replaced it with two U+FFFD characters in the kept
-  text, which a later undo restored and sent to every peer; and, with garbage
-  collection off, a range from a nested type into its own text split that
-  text before the type's deletion deleted it, with the same U+FFFD result.
+  store; that cost is separate.
 - **`crdt`: squashing typed characters no longer walks every item of their
   client.** When an update carries characters typed in separate transactions,
   the receiver squashes them into one item and removes the rest from the
