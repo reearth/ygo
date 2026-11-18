@@ -304,9 +304,8 @@ func New(opts ...DocOption) *Doc {
 	return d
 }
 
-// newScratchDoc returns a Doc for decoding structs without integrating them.
-// Its identity is never read, so it skips the two crypto/rand draws New makes
-// — a decode-only doc is allocated per no-op apply, on the sync hot path.
+// newScratchDoc skips New's crypto/rand draws, because a decode-only doc is
+// built per no-op apply.
 func newScratchDoc() *Doc {
 	return &Doc{
 		gc:         true,
@@ -651,12 +650,9 @@ func collectAndEncodeLocked(d *Doc, txn *Transaction) (update []byte) {
 	return update
 }
 
-// commitAndUnlock commits txn and releases d.mu, however the commit exits: a
-// panic raised with the lock still held — an unsupported value reaching the
-// encode, say — would wedge the doc for good. txn is marked committed BEFORE
-// the unlock so the txn-scoped accessors fail loudly from observers (which
-// receive the *Transaction after unlock) or from a retained txn, instead of
-// mutating d.share unsynchronized. See Transaction.done.
+// commitAndUnlock releases d.mu however the commit exits, so a panic cannot
+// wedge the doc; txn is marked done first, so the txn-scoped accessors fail
+// loudly once the observers hold it after the unlock.
 func (d *Doc) commitAndUnlock(txn *Transaction, panicking bool) (phase2 func([]byte), update []byte, cleanup bool) {
 	defer func() {
 		txn.done = true

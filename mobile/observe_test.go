@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/reearth/ygo/crdt"
 )
 
 // countDrainGoroutines returns the number of live docDrain goroutines by
@@ -53,6 +55,32 @@ func recv(t *testing.T, ch <-chan recUpdate, timeout time.Duration) (recUpdate, 
 		return r, true
 	case <-time.After(timeout):
 		return recUpdate{}, false
+	}
+}
+
+// assertFirstIsTheEdit fails unless the next delivery carries the edit that
+// takes before to want, which orders it after any delivery a preceding no-op
+// would make. It replays the update rather than measuring it: a no-op's
+// update is two bytes, not none, so a length check would not tell them apart.
+func assertFirstIsTheEdit(t *testing.T, ch <-chan recUpdate, before []byte, want string) {
+	t.Helper()
+	r, ok := recv(t, ch, 5*time.Second)
+	if !ok {
+		t.Fatal("the edit was never delivered")
+	}
+	if !r.local {
+		t.Fatalf("first delivery: local=%v, want the local edit", r.local)
+	}
+	probe := crdt.New()
+	probe.GetText("t")
+	if err := crdt.ApplyUpdateV1(probe, before, nil); err != nil {
+		t.Fatalf("seeding the probe: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(probe, r.update, nil); err != nil {
+		t.Fatalf("first delivery does not decode: %v", err)
+	}
+	if got := probe.GetText("t").ToString(); got != want {
+		t.Fatalf("first delivery leaves %q, want the edit's %q", got, want)
 	}
 }
 
@@ -141,11 +169,17 @@ func TestObserve_NoOpTransactionDoesNotFire(t *testing.T) {
 	sub := d.Observe(rec)
 	defer sub.Close()
 
-	// Inserting empty text is a crdt no-op, so OnUpdate does not fire.
+	// Inserting empty text is a crdt no-op, so OnUpdate does not fire. The
+	// edit after it must be the first delivery: a no-op that did fire would
+	// arrive first however late the bridge is, where a timeout would not say.
+	before := crdt.EncodeStateAsUpdateV1(d.d, nil)
 	if err := d.InsertText("t", 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	assertNoRecv(t, rec.ch, 250*time.Millisecond)
+	if err := d.InsertText("t", 0, "x"); err != nil {
+		t.Fatal(err)
+	}
+	assertFirstIsTheEdit(t, rec.ch, before, "x")
 }
 
 func TestObserve_NoOpTransactionAfterADeletionDoesNotFire(t *testing.T) {
@@ -160,12 +194,16 @@ func TestObserve_NoOpTransactionAfterADeletionDoesNotFire(t *testing.T) {
 	sub := d.Observe(rec)
 	defer sub.Close()
 
-	// A transaction that changes nothing fires no OnUpdate, so the bridge
-	// has nothing to deliver.
+	// A transaction that changes nothing fires no OnUpdate, so the edit after
+	// it is the first thing delivered.
+	before := crdt.EncodeStateAsUpdateV1(d.d, nil)
 	if err := d.InsertText("t", 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	assertNoRecv(t, rec.ch, 250*time.Millisecond)
+	if err := d.InsertText("t", 0, "x"); err != nil {
+		t.Fatal(err)
+	}
+	assertFirstIsTheEdit(t, rec.ch, before, "x"+d.GetText("t")[1:])
 }
 
 func TestObserve_SequentialEdits_ReproduceFinalState(t *testing.T) {
