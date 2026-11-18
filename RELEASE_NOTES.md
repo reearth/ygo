@@ -1,4 +1,4 @@
-## v1.55.1
+## v1.56.3
 
 **Who is affected: servers and peers that hold large documents, and documents
 that keep deleted text (garbage collection off, or an `UndoManager` attached).**
@@ -32,6 +32,114 @@ gives. Each peer that undoes needs the fix, not only the server.
 In 400 random runs of 1,000 steps each, with garbage collection on and off, and
 without undo, nested types or supplementary characters, every update that
 `OnUpdate` delivered kept its bytes.
+
+## v1.56.2
+
+**Who is affected: clustered deployments whose rooms can be evicted and
+re-created while `AttachRelay` is still running.** The exposure is the same
+attach window v1.56.1 addressed — a relay that delivers traffic from inside
+`Start` — with a room that leaves and comes back inside it.
+
+v1.56.1 holds a room's `RoomActivated` back for the length of the attach
+window and issues it once `Start` returns. Those held activations were
+tracked by room name. A room leaves `s.rooms` before its teardown runs — the
+teardown first waits for the room's persistence goroutine to drain — so a
+replacement under the same name can be created, and hold its own activation,
+while its predecessor's teardown is still pending. The predecessor's teardown
+then took whatever entry sat under that name, which was the replacement's: the
+resident room was never offered to the relay, and with a relay that subscribes
+per room it stayed unsubscribed for as long as it was resident. Edits from the
+other nodes never arrived, and the room silently diverged across the cluster.
+The mirror case cost a subscription the other way, with the teardown waiting
+out an in-flight activation and then issuing a `RoomDeactivated` that
+unsubscribed the room still using it.
+
+Held activations are now keyed by room instance, so a teardown settles only
+its own room's activation and a replacement keeps its own. The rest of the
+attach handshake is unchanged.
+
+## v1.56.1
+
+**Who is affected: clustered deployments that call `AttachRelay` on a relay
+other nodes are already publishing on.** What matters is whether the relay
+delivers anything while `Start` runs, not whether this server is taking
+connections yet: the delivery itself creates the room, so attaching before
+you serve — what `cmd/ygo-server` does — narrows the window but does not
+close it.
+
+`AttachRelay` started the relay before recording it on the server. A message
+delivered in that window found the server unattached: the room it created came
+up with no outbound lane, no observers publishing its changes, and no
+`RoomActivated` call. The room stayed unwired until it unloaded, so its peers'
+edits on this node never reached the other nodes, and with a relay that
+subscribes per room the other nodes' edits never reached it either. The room
+silently split across the cluster until the last peer left it. The same window
+also left the echo sentinel nil, and all four attach fields were read without
+the lock that guarded the writes, which the race detector reported.
+
+The attach state is now a single value committed **before** `relay.Start`, and
+undone if `Start` fails — so a failed `Start` still leaves the server
+unattached and the call retryable, as before.
+
+A room created in that window keeps its outbound backlog on its lane until
+`Start` returns, and its `RoomActivated` is held back and issued once `Start`
+succeeds — a relay that subscribes per room cannot accept an activation
+before then, and nothing repeats the call, so the room would never be
+subscribed. Publishing to a relay that has not finished starting invites
+a refusal, and the payload is already off the lane by then, so the edit would
+be lost rather than retried.
+
+**Behaviour change for relay implementations.** Because the server is wired
+before `Start` runs, a relay can now receive `RoomActivated` and `Publish`
+calls before its own `Start` has returned, and a custom relay that assumes
+`Start` completes first should be checked. Both bundled relays handle it.
+`MemRelay`'s callbacks do not depend on `Start`. The Redis relay's
+`RoomActivated` already blocked on the lock `Start` holds and then subscribed
+normally, but its `Publish` returned `ErrRelayNotStarted` for as long as
+`Start` was running — contradicting its own documented contract, which
+reserves that error for a relay `Start` has not been called on. `Publish` now
+waits for an in-flight `Start` and publishes once it finishes; it still fails
+fast when no `Start` has been called, and when the `Start` that ran failed.
+
+`RoomActivated` and `RoomDeactivated` now wait one out as well. Taking the
+relay's lock only made them wait out a `Start` that already held it: a room
+activated before `Start` reached the lock was dropped silently and never
+subscribed, and nothing repeats the call.
+
+Two further fixes on the same attach path: `Shutdown` cancelled the relay
+context only after joining the outbound lane workers, so it could hang
+forever on an attach that had not finished, and `Sink.Inject` stamped its
+echo-guard origin before loading the room — if the attach was rolled back and
+retried while that load blocked, the room's observers held a different
+sentinel and published the remote update straight back to the cluster.
+
+No API changes.
+
+## v1.56.0
+
+**Who is affected: servers that set `Server.OnPeerUpdate` and need to know who
+sent each update.** Everyone else sees no change.
+
+`ConnectionConfig` gains `Identity any`. Return it from `Server.Authorize`
+with whatever names the connection's user, and `Server.OnPeerUpdate` receives
+it as `PeerUpdateInfo.Identity` with every update that connection sends. ygo
+never reads the value.
+
+**It identifies the sender, not the author.** A reconnecting client answers
+sync step-1 with a step-2 carrying everything it holds, items other users
+authored included, and that frame reaches the hook under the reconnecting
+connection's identity. `OnPeerUpdate` also fires only for peers on this node:
+updates relayed from other cluster nodes, and `Server.Apply`, bypass it. An
+audit log built on `Identity` alone will therefore both misattribute and miss
+edits; for per-item authorship read the client IDs in `PeerUpdateInfo.Update`,
+which are the CRDT's own and are not an authenticated identity either.
+
+`Server.OnTokenAuth` replaces the connection's whole `ConnectionConfig` when it
+accepts a token, as it already did for `ReadOnly`. A hook that returns no
+`Identity` therefore clears the one `Authorize` attached, and one that returns
+only an `Identity` clears `ReadOnly` — making a read-only connection
+read-write. Return both. Connections accepted by `AuthFunc`, or with no auth
+hook, carry a nil `Identity` until an accepted token supplies one.
 
 ## v1.55.0
 

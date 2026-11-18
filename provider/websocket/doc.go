@@ -27,8 +27,9 @@
 //
 // Set Server.OnTokenAuth to validate the token carried in an Auth message:
 // a nil error accepts the connection (replying Authenticated with a
-// "read-write" or "readonly" scope, per the returned ConnectionConfig); a
-// non-nil error replies PermissionDenied and closes the connection with the
+// "read-write" or "readonly" scope, per the returned ConnectionConfig, which
+// replaces the one Server.Authorize set, both its ReadOnly and its Identity);
+// a non-nil error replies PermissionDenied and closes the connection with the
 // Hocuspocus 4401 code. When OnTokenAuth is nil (the default), Auth (tag 2)
 // frames are ignored — the legacy y-websocket behavior, preserved for
 // backward compatibility with clients that never send them.
