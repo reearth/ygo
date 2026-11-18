@@ -1,3 +1,16 @@
+## v1.58.0
+
+- **New: `crdt.HeldStructsDifferV1`.** An apply skips every struct at a
+  (client, clock) the document already holds, as Yjs does, so when two
+  documents write under one client ID, the second one's structs at clocks
+  the room holds are dropped without a word. `HeldStructsDifferV1(doc,
+  update, client, from)` reports whether the V1 update carries a struct of
+  `client`, at a clock from `from` on, that differs from what `doc` holds at
+  the same clock: in a content unit, its origin, its right origin, or, for a
+  unit placed by its parent, its parent or key. A struct `doc` does not hold
+  is not compared, nor a GC struct, nor the content of deleted content. It
+  reads the update without integrating it, under the document's read lock.
+
 ## v1.57.0
 
 - **New: `crdt.ApplyUpdateV1Held`.** It applies a V1 update as

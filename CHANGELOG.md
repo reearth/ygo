@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.58.0] — 2026-11-18
+
+### Added
+
+- **`crdt.HeldStructsDifferV1(doc, update, client, from)`** reports whether
+  a V1 update carries a struct of `client`, at a clock from `from` on, whose
+  content unit, origin, right origin, parent or key differs from what `doc`
+  holds at the same (client, clock). A struct `doc` does not hold is not
+  compared, nor a GC struct, nor the content of deleted content. An apply
+  skips every struct at clocks the document holds, so this is how a caller
+  tells an honest resend from a second writer under the same client ID.
+
 ## [1.57.0] — 2026-11-18
 
 ### Added
