@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.56.3] — 2026-11-18
+
+### Fixed
+
+- **`crdt`: an `OnStackItemAdded` callback that uses the `UndoManager` or
+  edits its document no longer deadlocks.** The callback ran with the
+  manager's mutex held, and that mutex is not reentrant, so a callback that
+  called any method on the manager that fired it — `UndoStackSize`,
+  `RedoStackSize`, `StopCapturing`, `Clear`, `OnStackItemAdded` — blocked
+  forever. So did one that opened a transaction touching a type in the
+  manager's scope, because the transaction's after-hook re-enters the capture
+  path. The goroutine held the mutex while it blocked, so every later call on
+  that `UndoManager` blocked behind it. A callback editing a type outside the
+  scope returned, which is why the hang looked intermittent. The callbacks now
+  run with the mutex released, as they do in Yjs, which fires
+  `stack-item-added` with no lock held. Both sites that fire them are fixed:
+  the capture path and the undo and redo pops.
+
+  The callback also now sees settled stacks. Yjs emits `stack-item-added`
+  last, after it has recorded the change time and cleared the redo stack; ygo
+  fired it mid-update, so a callback reading `RedoStackSize` saw a redo stack
+  that the same edit was about to clear.
+
 ## [1.56.2] — 2026-11-17
 
 ### Fixed
