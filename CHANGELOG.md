@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`crdt`: `Doc.Clone(opts ...DocOption) *Doc`** returns a new document
+  holding an independent copy of the state of the one it is called on,
+  built by copying the structures: no update is encoded, no bytes are
+  parsed, and no struct is integrated. It is the copy
+  `nd := New(opts...); ApplyUpdateV1(nd, EncodeStateAsUpdateV1(d, nil), nil)`
+  makes, for a caller that wants a document to write to, such as a server
+  that copies a live room to serve one write. It copies every struct and
+  link, the delete state, the pending queue (parked structs, the clocks
+  they wait on, parked delete ranges and deferred moves) and the named root
+  types. It copies no observer, no undo manager and no cache, and takes
+  `New`'s options, not the source's. It takes the document's read lock.
 - **`crdt`: `Doc.SetMaxPendingItems(n)`** sets the pending cap after
   construction, so stored state over a cap can load first.
 

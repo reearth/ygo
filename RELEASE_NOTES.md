@@ -71,6 +71,15 @@ the same document.
   17.2 times their bytes at the default cap, where 1.55.0 allocated up to
   137.3.
 
+**A copy of a document without an encode.** A server that wants a copy of a
+live document to write to has encoded its whole state and applied it to a
+fresh document, which allocates the update, parses it back and integrates
+every struct again. `Doc.Clone(opts...)` copies the structures instead and
+returns the document that copy builds. On a 395 KB document of 400
+paragraphs with marks, `Clone` allocates 1.74 MB in 12,038 allocations
+against the encode-and-apply copy's 6.5 to 6.9 MB in about 74,435
+(`BenchmarkDocCopy`).
+
 **Who is affected: servers that receive GC structs, which Yjs peers send for
 the content of a deleted nested type.**
 
