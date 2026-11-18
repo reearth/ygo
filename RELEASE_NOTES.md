@@ -263,6 +263,16 @@ above the state's length in either form the encode writes, so it can bound a
 document's state without an encode per apply. An apply that fails partway
 counts what the document kept of it.
 
+**A refused drain discards what it released.** A document that applies
+remote updates whole or nothing rolls back a drain of its pending queue that
+the apply check refuses, or that passes the scan bound or the apply budget,
+and parks the backlog again, so every later update that fills the same gap
+runs into the same refusal. With `Doc.SetDiscardRefusedDrain(true)` the
+rollback discards what the fill released instead, and the apply returns a
+`crdt.DrainDiscardedError` that names the origins of the applies that parked
+it, so a server can close those peers and have their clients send the
+content again. The update that filled the gap stands.
+
 **Who is affected:** servers that apply updates from peers, where one update
 places many items among the ones a document holds.
 

@@ -58,20 +58,22 @@ type integrateScanBudgetExceeded struct{ left uint32 }
 // than fail it, and the panic checkDrain raises when the apply check refuses
 // what the drain landed. scan is whether the scan bound stopped it, and left
 // is then what the bound left the scan that tripped; dropped is the error of a
-// parked struct the drain dropped before it stopped.
+// parked struct the drain dropped before it stopped, and cause the error of
+// the bound, budget or root list that stopped it.
 type drainStopped struct {
 	scan    bool
 	left    uint32
 	dropped error
+	cause   error
 }
 
 // drainStop is the drainStopped r stands for, when r stops a drain.
 func drainStop(r any) (drainStopped, bool) {
 	switch r := r.(type) {
 	case integrateScanBudgetExceeded:
-		return drainStopped{scan: true, left: r.left}, true
+		return drainStopped{scan: true, left: r.left, cause: ErrIntegrateScanBudget}, true
 	case applyBudgetExceeded, rootNotAllowed:
-		return drainStopped{}, true
+		return drainStopped{cause: recoveredApplyErr(r)}, true
 	}
 	return drainStopped{}, false
 }
@@ -1232,6 +1234,24 @@ func drainParked(txn *Transaction, drain func(*Transaction) error) (err error) {
 				stop.left = from
 			}
 		}
+		if journaled && txn.doc.discardRefusedDrain {
+			// What the fill released is discarded rather than parked again,
+			// and what is left waits on the clocks it lacks
+			// (SetDiscardRefusedDrain).
+			cause := j.drainRefused
+			if cause == nil {
+				cause = stop.cause
+			}
+			scanned := 0
+			if txn.scanBounded && from >= txn.scanLeft {
+				scanned = int(from - txn.scanLeft)
+			}
+			discardReleased(txn, j, scanned, cause)
+			if s.pending != nil {
+				s.pending.missing, s.pending.ready = waitingOn(s), false
+			}
+			return
+		}
 		if s.pending == nil {
 			// A retry of the parked deletes stopped the drain, before any pass.
 			return
@@ -1239,15 +1259,7 @@ func drainParked(txn *Transaction, drain func(*Transaction) error) (err error) {
 		// The drain stopped, so an item may wait on nothing but a later drain:
 		// nothing tells the parked items' sender to send them again. missing
 		// keeps what they do wait on.
-		missing := make(StateVector)
-		for _, item := range s.pending.heldItems() {
-			if client, parkedAt, future := itemFutureDep(item, s); future {
-				mergePendingMissing(missing, client, parkedAt)
-			} else if item.ID.Clock > s.NextClock(item.ID.Client) {
-				mergePendingMissing(missing, item.ID.Client, s.NextClock(item.ID.Client))
-			}
-		}
-		s.pending.missing, s.pending.ready = missing, false
+		s.pending.missing, s.pending.ready = waitingOn(s), false
 		s.pending.tripped, s.pending.scanLeft = true, stop.left
 		if stop.scan && len(s.pendingDs.clients) > 0 {
 			retryPendingDsUntilStopped(txn)
@@ -1257,6 +1269,20 @@ func drainParked(txn *Transaction, drain func(*Transaction) error) (err error) {
 		checkDrain(txn, j)
 	}
 	return err
+}
+
+// waitingOn is what the structs s parks wait on: for each, the clock it names
+// and s lacks, or, for one that names none, its own client's next clock.
+func waitingOn(s *StructStore) StateVector {
+	missing := make(StateVector)
+	for _, item := range s.pending.heldItems() {
+		if client, parkedAt, future := itemFutureDep(item, s); future {
+			mergePendingMissing(missing, client, parkedAt)
+		} else if item.ID.Clock > s.NextClock(item.ID.Client) {
+			mergePendingMissing(missing, item.ID.Client, s.NextClock(item.ID.Client))
+		}
+	}
+	return missing
 }
 
 // retryPendingDsUntilStopped is retryPendingDs for after a drain stopped: a

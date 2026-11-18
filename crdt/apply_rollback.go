@@ -37,6 +37,9 @@ type applyJournal struct {
 	// update stands (checkDrain).
 	check        func(origin any, view *ApplyView) error
 	drainRefused error
+	// discarded is what the rollbacks of refused drains discarded on a
+	// document that discards them, or nil (discardReleased).
+	discarded *DrainDiscardedError
 }
 
 // applyPoint is a point of an apply that a rollback can return the document to.
@@ -121,8 +124,9 @@ func beginRemoteApply(txn *Transaction, sv StateVector) {
 }
 
 // endRemoteApply ends txn's journal, and rolls the apply back when it failed.
-// It returns the apply check's refusal of a drain it rolled back while the
-// update stands, or nil.
+// It returns, for an apply that stands, what the rollbacks of refused drains
+// discarded (DrainDiscardedError), or else the apply check's refusal of a
+// drain it rolled back, or nil.
 func endRemoteApply(txn *Transaction, failed bool) error {
 	j := txn.doc.applying
 	if j == nil {
@@ -132,6 +136,9 @@ func endRemoteApply(txn *Transaction, failed bool) error {
 	if failed {
 		j.rollBack(txn)
 		return nil
+	}
+	if j.discarded != nil {
+		return j.discarded
 	}
 	return j.drainRefused
 }

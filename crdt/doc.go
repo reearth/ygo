@@ -514,11 +514,17 @@ type Doc struct {
 	// document panicked with, kept for the commit to raise, or nil.
 	checkPanic any
 	// parkedBy is what the document keeps of the apply that parked each
-	// parked struct, on a document with a budget or a roots list, and nil
-	// when nothing is parked; rootsDropped counts, by client, the parked
-	// structs a drain dropped under a root another apply's list leaves out.
+	// parked struct, on a document with a budget, a roots list or
+	// SetDiscardRefusedDrain, and nil when nothing is parked; rootsDropped
+	// counts, by client, the parked structs a drain dropped under a root
+	// another apply's list leaves out.
 	parkedBy     map[*Item]parkedFrom
 	rootsDropped map[ClientID]int
+	// discardRefusedDrain is SetDiscardRefusedDrain's setting, and
+	// parkedDsBy, kept only while it is on, the origin of the apply that
+	// parked each delete set the pending deletes hold (recordParkedOrigins).
+	discardRefusedDrain bool
+	parkedDsBy          []parkedDeletesBy
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -1170,7 +1176,10 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			}
 		}
 
-		// The document's park record drops this transaction's views of the queue.
+		// What the transaction parked keeps its origin, for a refused drain
+		// to name (SetDiscardRefusedDrain); then the document's park record
+		// drops this transaction's views of the queue.
+		recordParkedOrigins(d, txn)
 		if d.store.parked != nil {
 			*d.store.parked = transactionParked{}
 		}

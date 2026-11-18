@@ -130,6 +130,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or above the state in both forms the encode writes; where the document
   keeps no count of a part the state writes, the report takes the most that
   part can add.
+- **`crdt`: `Doc.SetDiscardRefusedDrain(bool)` discards what a refused drain
+  released.** Off by default. On a document that applies remote updates
+  whole or nothing, a drain of the pending queue that is rolled back (the
+  apply check refused what it integrated, or it passed the scan bound, the
+  apply budget or the allowed roots) discards everything the update that
+  filled the gap released, instead of parking it again: every parked struct
+  whose dependencies the store, or another such struct, then supplies, and
+  every pending delete range, or the part of one, below the clocks those
+  reach. What the fill did not release stays parked, and the fill stands.
+  The apply returns a `*crdt.DrainDiscardedError` with `Structs` and
+  `Ranges` discarded, `Scanned`, the `Senders` (the origins of the applies
+  that parked what was discarded, which the document records at each commit
+  that parks while the option is on) and the `Cause`. It wraps
+  `ErrApplyCheckDrain`, so a caller that answers an apply refused only in its
+  drain as applied still does.
 
 - `provider/websocket`: add `Server.CloseRoomWithinContext` to cancel a room-load
   wait without closing the room. `CloseRoomWithin` retains its signature and
