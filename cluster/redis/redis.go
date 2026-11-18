@@ -412,8 +412,15 @@ type Relay struct {
 	// Publish does NOT take mu — it uses the started/closed atomics + the
 	// done/outbound channels (the publisher hot path must not be gated on
 	// a lock that low-frequency lifecycle ops can hold).
-	mu          sync.Mutex
-	started     atomic.Bool // released after r.sink / r.pubSub / r.startCtx are committed
+	mu      sync.Mutex
+	started atomic.Bool // released after r.sink / r.pubSub / r.startCtx are committed
+	// starting holds the Start attempt that has begun but not yet finished,
+	// so Publish can wait one out instead of rejecting a relay that IS being
+	// started (see awaitStart). Set before Start takes mu, cleared when it
+	// returns. RoomActivated / RoomDeactivated consult it too (see
+	// waitForStartAttempt): taking mu only makes them wait out a Start that
+	// already holds mu, not one that has yet to reach it.
+	starting    atomic.Pointer[startAttempt]
 	closed      atomic.Bool // set under mu in Close
 	sink        cluster.Sink
 	pubSub      *goredis.PubSub
@@ -633,6 +640,19 @@ func (r *Relay) Start(ctx context.Context, sink cluster.Sink) error {
 		return ErrNilSink
 	}
 
+	// Mark the attempt BEFORE taking mu, so a Publish racing this Start sees
+	// it for the whole of it and waits rather than failing. A second,
+	// concurrent Start loses the swap and simply blocks on mu below; the
+	// winner's gate covers both, since by the time it closes the relay is
+	// either started or not.
+	att := &startAttempt{done: make(chan struct{})}
+	if r.starting.CompareAndSwap(nil, att) {
+		defer func() {
+			r.starting.Store(nil)
+			close(att.done)
+		}()
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -782,11 +802,71 @@ func (r *Relay) runSubscriber(ctx context.Context) {
 	}
 }
 
+// startAttempt is one in-flight Start, published on r.starting so Publish
+// can wait for it. done is closed when that Start returns, whether or not it
+// started the relay.
+type startAttempt struct{ done chan struct{} }
+
+// awaitStart blocks while a Start attempt is in flight. A relay being
+// started is not a relay nobody started: a caller that reaches Publish while
+// Start is running gets what it asked for rather than an error. It covers
+// only an attempt already marked — before that there is nothing to wait for,
+// so a caller racing the very front of Start still fails fast.
+// provider/websocket does not rely on this: its lanes hold their backlog
+// until AttachRelay returns, which covers the whole attach. Returns
+// ErrRelayNotStarted when no attempt is running, or when the one that was
+// running did not leave the relay started.
+func (r *Relay) awaitStart(ctx context.Context) error {
+	att := r.starting.Load()
+	if att == nil {
+		// Cleared on the way out of Start, so a nil attempt means either
+		// "never started" or "started just now".
+		if r.started.Load() {
+			return nil
+		}
+		return ErrRelayNotStarted
+	}
+	select {
+	case <-att.done:
+	case <-r.done:
+		return ErrRelayClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if !r.started.Load() {
+		return ErrRelayNotStarted
+	}
+	return nil
+}
+
+// waitForStartAttempt blocks, holding no lock, while a Start attempt is in
+// flight. Room-membership calls that arrive once Start holds mu already wait
+// on mu; one that reaches mu first does not, and would see started false and
+// drop the activation for good — nothing repeats it. Waiting here rather
+// than under mu is what keeps it from blocking the very Start it waits for.
+// provider/websocket does not rely on this: it holds activations back for
+// the whole attach window and issues them once Start has returned.
+func (r *Relay) waitForStartAttempt() {
+	if r.started.Load() || r.closed.Load() {
+		return
+	}
+	att := r.starting.Load()
+	if att == nil {
+		return
+	}
+	select {
+	case <-att.done:
+	case <-r.done:
+	}
+}
+
 // Publish hands an Outbound to the publisher goroutine. Blocks if the
 // internal buffer is full (back-pressuring the caller — same contract as
-// MemRelay). Returns ErrRelayClosed if Close has been called or the
-// relay's bound context has been cancelled; ErrRelayNotStarted if Start
-// has not been called.
+// MemRelay), and blocks while a Start attempt is in flight rather than
+// failing a relay that is mid-attach. Returns ErrRelayClosed if Close has
+// been called or the relay's bound context has been cancelled;
+// ErrRelayNotStarted if Start has not been called, or if the Start that was
+// running failed.
 //
 // Publish does NOT acquire r.mu: the started/closed atomics combined with
 // the done/startCtx channels give it all the ordering it needs, and the
@@ -803,7 +883,9 @@ func (r *Relay) Publish(ctx context.Context, out cluster.Outbound) error {
 		return ErrRelayClosed
 	}
 	if !r.started.Load() {
-		return ErrRelayNotStarted
+		if err := r.awaitStart(ctx); err != nil {
+			return err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -857,6 +939,8 @@ func (r *Relay) Publish(ctx context.Context, out cluster.Outbound) error {
 // return from getOrCreateRoom for THIS room, which is what the cancelable
 // context guards against.
 func (r *Relay) RoomActivated(room string) {
+	r.waitForStartAttempt()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -909,6 +993,8 @@ func (r *Relay) RoomActivated(room string) {
 // actual drain happens later, asynchronously, on the worker's own goroutine
 // (see runRoomWorker's w.done case), which Close's wg.Wait joins.
 func (r *Relay) RoomDeactivated(room string) {
+	r.waitForStartAttempt()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
