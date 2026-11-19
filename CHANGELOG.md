@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compared, nor a GC struct, nor the content of deleted content. An apply
   skips every struct at clocks the document holds, so this is how a caller
   tells an honest resend from a second writer under the same client ID.
+- **`crdt.DocContainsUpdateV1Limit`, `crdt.DiffUpdateV1Limit` and
+  `crdt.HeldStructsDifferV1Limit`** are `DocContainsUpdateV1`,
+  `DiffUpdateV1` and `HeldStructsDifferV1` with a last argument, `values`:
+  the decode of the update into a scratch document stops past that many
+  values (each struct, each delete range, each lib0 Any value at any depth,
+  each JSON value), before the value past it is built, with an error
+  wrapping the new `crdt.ErrValueLimit`. A limit below zero bounds nothing,
+  which is what the existing functions pass.
 
 ## [1.57.0] — 2026-11-18
 

@@ -56,6 +56,9 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 		// A later group for the client replaces earlier ones, as in apply (yjs parity).
 		var structs []*Item
 		for j := uint64(0); j < numStructs; j++ {
+			// Each struct is a value the decode reads, counted before it is
+			// read when the scratch document carries a limit (decodeLimitedV1).
+			scratch.values().decode(1)
 			item, err := decodeItem(dec, scratch, client, clock)
 			if err != nil {
 				return nil, DeleteSet{}, wrapUpdateErr(err)
@@ -76,6 +79,7 @@ func decodeStructsV1(scratch *Doc, update []byte) (map[ClientID][]*Item, DeleteS
 	if err != nil {
 		return nil, DeleteSet{}, wrapUpdateErr(err)
 	}
+	scratch.values().decode(deleteRangeCount(ds))
 	return out, ds, nil
 }
 
@@ -323,9 +327,18 @@ func MergeUpdatesV1(updates ...[]byte) ([]byte, error) {
 // missing: structs whose clock range extends past sv are kept (sliced at the sv
 // boundary), and the full delete set is preserved (deletions are small and
 // idempotent — matching Yjs diffUpdate). (Previously this dropped parked
-// structs; #125.)
+// structs; #125.) The decode is not bounded: DiffUpdateV1Limit bounds it.
 func DiffUpdateV1(update []byte, sv StateVector) ([]byte, error) {
-	perClient, ds, store, err := buildMergeStore([][]byte{update}, decodeStructsV1)
+	return DiffUpdateV1Limit(update, sv, -1)
+}
+
+// DiffUpdateV1Limit is DiffUpdateV1 whose decode of update may decode at most
+// values values, as DocContainsUpdateV1Limit counts them, and returns an
+// error wrapping ErrValueLimit past it. values below zero bounds nothing.
+func DiffUpdateV1Limit(update []byte, sv StateVector, values int) ([]byte, error) {
+	perClient, ds, store, err := buildMergeStore([][]byte{update}, func(_ *Doc, u []byte) (map[ClientID][]*Item, DeleteSet, error) {
+		return decodeLimitedV1(u, values)
+	})
 	if err != nil {
 		return nil, err
 	}

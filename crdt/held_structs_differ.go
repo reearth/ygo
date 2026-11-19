@@ -54,9 +54,18 @@ import (
 // struct whose units are compared, so a long run doc holds costs its length
 // even where one unit of it is compared. An update that does not decode
 // returns false and an error wrapping ErrInvalidUpdate. Do not call it from
-// a Transact callback on doc, which holds doc's lock already.
+// a Transact callback on doc, which holds doc's lock already. The decode is
+// not bounded: HeldStructsDifferV1Limit bounds it.
 func HeldStructsDifferV1(doc *Doc, update []byte, client ClientID, from uint64) (bool, error) {
-	structs, _, err := decodeStructsV1(New(), update)
+	return HeldStructsDifferV1Limit(doc, update, client, from, -1)
+}
+
+// HeldStructsDifferV1Limit is HeldStructsDifferV1 whose decode of update may
+// decode at most values values, as DocContainsUpdateV1Limit counts them, and
+// returns false and an error wrapping ErrValueLimit past it. values below
+// zero bounds nothing.
+func HeldStructsDifferV1Limit(doc *Doc, update []byte, client ClientID, from uint64, values int) (bool, error) {
+	structs, _, err := decodeLimitedV1(update, values)
 	if err != nil {
 		return false, err
 	}

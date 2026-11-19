@@ -158,6 +158,10 @@ type Doc struct {
 	subdocs         map[string]*Doc
 	onSubdocs       []subdocsSub
 	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
+	// valueLimit, set only on the scratch document of a decode outside an
+	// apply that its caller bounded, counts what the decode reads
+	// (decodeLimitedV1).
+	valueLimit *valueLimit
 
 	store *StructStore
 	share map[string]sharedType // named root types

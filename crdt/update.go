@@ -1084,10 +1084,17 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if n > uint64(dec.Remaining()) {
 			return nil, ErrInvalidUpdate
 		}
+		// A bounded scratch decode counts the declared values before the list
+		// is allocated, and what each holds once its text decoded (valueLimit).
+		limit := doc.values()
+		limit.decode(int(n))
 		if n == 0 || !isAnyTag(dec.RemainingBytes()[0]) {
 			vals, err := readJSONVals(dec, n)
 			if err != nil {
 				return nil, err
+			}
+			for _, v := range vals {
+				limit.nested(v)
 			}
 			return NewContentJSON(vals...), nil
 		}
@@ -1102,10 +1109,16 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 			for range len(rem) - sub.Remaining() {
 				_, _ = dec.ReadUint8()
 			}
+			for _, v := range vals {
+				limit.nested(v)
+			}
 			return NewContentJSON(vals...), nil
 		}
 		if vals, err = readLegacyAnyVals(dec, n); err != nil {
 			return nil, jsonErr
+		}
+		for _, v := range vals {
+			limit.nested(v)
 		}
 		return NewContentJSON(vals...), nil
 
@@ -1135,6 +1148,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
+		doc.values().value(v)
 		return NewContentEmbed(v), nil
 
 	case wireFormat:
@@ -1150,6 +1164,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
+		doc.values().value(val)
 		return NewContentFormat(key, val), nil
 
 	case wireType:
@@ -1171,6 +1186,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if n > uint64(dec.Remaining()) {
 			return nil, ErrInvalidUpdate
 		}
+		doc.values().anyRun(dec, n)
 		vals := make([]any, n)
 		for i := range vals {
 			if vals[i], err = dec.ReadAny(); err != nil {
@@ -1184,6 +1200,7 @@ func decodeContent(dec *encoding.Decoder, doc *Doc, tag byte) (Content, error) {
 		if err != nil {
 			return nil, err
 		}
+		doc.values().anyRun(dec, 1)
 		optsAny, err := dec.ReadAny()
 		if err != nil {
 			return nil, err

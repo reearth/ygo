@@ -10,6 +10,13 @@
   unit placed by its parent, its parent or key. A struct `doc` does not hold
   is not compared, nor a GC struct, nor the content of deleted content. It
   reads the update without integrating it, under the document's read lock.
+- **New: a value limit for the decodes of an update outside an apply.**
+  `DocContainsUpdateV1`, `DiffUpdateV1` and `HeldStructsDifferV1` decode the
+  whole update into a scratch document, so a frame dense in values costs
+  whatever it holds. `DocContainsUpdateV1Limit`, `DiffUpdateV1Limit` and
+  `HeldStructsDifferV1Limit` take a last argument, `values`, and stop past
+  that many values with `ErrValueLimit`, before the value past it is built.
+  The existing functions keep their signatures and stay unbounded.
 
 ## v1.57.0
 

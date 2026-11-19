@@ -160,9 +160,20 @@ func SnapshotContainsUpdateV1(snap *Snapshot, update []byte) (bool, error) {
 // doc is held under its read lock only, its structs are compared against
 // doc's clocks, and its deletion ranges are checked against doc's store in
 // one forward pass per client. update is not integrated; one that does not
-// decode returns an error wrapping ErrInvalidUpdate.
+// decode returns an error wrapping ErrInvalidUpdate. The decode is not
+// bounded: DocContainsUpdateV1Limit bounds it.
 func DocContainsUpdateV1(doc *Doc, update []byte) (bool, error) {
-	structs, ds, err := decodeStructsV1(newScratchDoc(), update)
+	return DocContainsUpdateV1Limit(doc, update, -1)
+}
+
+// DocContainsUpdateV1Limit is DocContainsUpdateV1 whose decode of update into
+// a scratch document may decode at most values values: each struct, each
+// delete range, each lib0 Any value at any depth, each JSON value, and each
+// element of an array or entry of a map inside one. Past it the decode stops
+// before the value past it is built and returns an error wrapping
+// ErrValueLimit. values below zero bounds nothing.
+func DocContainsUpdateV1Limit(doc *Doc, update []byte, values int) (bool, error) {
+	structs, ds, err := decodeLimitedV1(update, values)
 	if err != nil {
 		return false, err
 	}
