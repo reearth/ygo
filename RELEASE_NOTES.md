@@ -12,18 +12,20 @@
     integrated: the commit's own update, the bytes the room's `OnUpdate`
     observers are handed. A frame that only parked is relayed to nobody, and
     the frame that fills its gap is relayed with what the drain of the queue
-    landed with it. Updates the cluster relay delivers are relayed as
-    before.
+    landed with it, to its own sender as well when the drain landed
+    something: no peer was sent what waited in the queue, the sender
+    included. Updates the cluster relay delivers are relayed as before.
   - `Server.AnswerParkedNotApplied` answers `SyncStatus(0)` for a peer update
     the room applied but left part of parked. What did integrate stays and is
     relayed. The client sends the edit again, and once the room holds it the
     room answers 1.
 - **New: `crdt.ApplyUpdateV1Outcome`**, which both options read. It is
   `ApplyUpdateV1Held` with an `ApplyOutcome`: `Integrated` is the commit's
-  update, and `Parked` says whether a struct the update carries, or a clock
-  it deletes, is past the clocks the store holds of its client. To report it,
-  the function reads the update's structs and delete set once more, without
-  decoding their content.
+  update, `Drained` says whether the drain of the pending queue landed a
+  struct or a deletion an earlier apply parked, and `Parked` says whether a
+  struct the update carries, or a clock it deletes, is past the clocks the
+  store holds of its client. To report it, the function reads the update's
+  structs and delete set once more, without decoding their content.
 
 ## v1.57.0
 

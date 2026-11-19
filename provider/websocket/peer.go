@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"sync"
@@ -237,9 +238,12 @@ func (p *peer) handleMessage(data []byte) {
 // broadcasts payload to the room's other peers once the room has applied it,
 // unless the room already held all of it. With Server.RelayIntegratedOnly it
 // broadcasts what the apply integrated instead (crdt.ApplyOutcome.Integrated),
-// when it integrated anything. A read-only peer's update is neither applied
-// nor broadcast (#59). An update the hook refused is not broadcast, and the
-// peer is then closed (see PeerUpdateHook).
+// when it integrated anything, and to the sender as well when the drain of
+// the room's pending queue landed something (crdt.ApplyOutcome.Drained): the
+// sender lacks what waited in the queue, which was relayed to nobody. A
+// read-only peer's update is neither applied nor broadcast (#59). An update
+// the hook refused is not broadcast, and the peer is then closed (see
+// PeerUpdateHook).
 //
 // On a connection using Hocuspocus framing it answers every such frame with
 // exactly one SyncStatus (tag 8), in the order the frames arrived, so a client
@@ -276,7 +280,7 @@ func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 	switch {
 	case p.server.RelayIntegratedOnly:
 		if out.Integrated != nil {
-			p.broadcastSync(ygsync.EncodeUpdate(out.Integrated))
+			p.broadcastUpdate(out.Integrated, !out.Drained)
 		}
 	case !out.Held:
 		p.broadcastSync(payload)
@@ -292,7 +296,9 @@ func (p *peer) applySyncUpdate(subType int, update, payload []byte) {
 // update that overflows MaxPendingItems can leave part of itself in the room;
 // when it fails, applyToRoom broadcasts that part, and only that part, to the
 // room's other peers. Under RelayIntegratedOnly that part is only what
-// integrated, as the room's other peers are sent nothing that parked.
+// integrated, as the room's other peers are sent nothing that parked, and it
+// goes to the sender as well when the apply's drain landed something, as for
+// an apply that succeeded.
 func (p *peer) applyToRoom(update []byte) (crdt.ApplyOutcome, error) {
 	var (
 		out crdt.ApplyOutcome
@@ -304,12 +310,12 @@ func (p *peer) applyToRoom(update []byte) (crdt.ApplyOutcome, error) {
 		out.Landed, out.Held, err = crdt.ApplyUpdateV1Held(p.room.doc, update, p)
 	}
 	if err != nil {
-		relay := out.Landed
+		relay, excludeSelf := out.Landed, true
 		if p.server.RelayIntegratedOnly {
-			relay = out.Integrated
+			relay, excludeSelf = out.Integrated, !out.Drained
 		}
 		if relay != nil {
-			p.broadcastSync(ygsync.EncodeUpdate(relay))
+			p.broadcastUpdate(relay, excludeSelf)
 		}
 	}
 	return out, err
@@ -844,6 +850,34 @@ func (p *peer) broadcastSync(syncMsg []byte) {
 		enc.WriteVarUint(msgSync)
 		enc.WriteRaw(syncMsg)
 	}), true)
+}
+
+// broadcastUpdate sends update, a V1 update, as a sync Update message to the
+// room's peers, the sender too unless excludeSelf (syncUpdateFrame).
+func (p *peer) broadcastUpdate(update []byte, excludeSelf bool) {
+	p.broadcast(syncUpdateFrame(update), excludeSelf)
+}
+
+// syncUpdateFrame is the Sync frame (outer type 0) of an Update message
+// carrying update, built in one buffer of its exact length. A relayed update
+// can be as long as the frame its sender sent, and building it through
+// ygsync.EncodeUpdate and an encoder would copy it twice more, the pooled
+// encoder keeping a buffer of that length after.
+func syncUpdateFrame(update []byte) []byte {
+	n := uint64(len(update))
+	frame := make([]byte, 0, 2+uvarintLen(n)+len(update))
+	frame = append(frame, byte(msgSync), byte(ygsync.MsgUpdate))
+	frame = binary.AppendUvarint(frame, n) // lib0's var uint is LEB128
+	return append(frame, update...)
+}
+
+// uvarintLen is the bytes binary.AppendUvarint writes n in.
+func uvarintLen(n uint64) int {
+	l := 1
+	for ; n >= 0x80; n >>= 7 {
+		l++
+	}
+	return l
 }
 
 // broadcastAwareness sends an awareness message to all OTHER peers in the room.

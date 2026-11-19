@@ -183,3 +183,50 @@ func TestUnit_ApplyOutcome_HeldAndLandedAreApplyUpdateV1Helds(t *testing.T) {
 		t.Fatalf("what the failed apply integrated reads %q, want %q", got, "abcdef")
 	}
 }
+
+// Drained is whether the drain of the pending queue landed anything: a
+// parked struct the update's own clocks let integrate, or a parked delete
+// they let apply. An apply that only parks, that the queue does not wait
+// on, or that the document holds already, drained nothing.
+func TestUnit_ApplyOutcome_DrainedIsWhetherTheDrainLandedAnything(t *testing.T) {
+	w := outcomeWriter{New(WithClientID(5))}
+	first := w.insert(0, "ab")
+	second := w.insert(2, "cd")
+	other := outcomeWriter{New(WithClientID(6))}.insert(0, "xy")
+
+	room := New(WithClientID(1))
+	if out := applyOutcome(t, room, other); out.Drained {
+		t.Fatalf("an apply with nothing parked reports %+v, want nothing drained", out)
+	}
+	if out := applyOutcome(t, room, second); out.Drained || !out.Parked {
+		t.Fatalf("an apply that only parks reports %+v, want parked and nothing drained", out)
+	}
+	if out := applyOutcome(t, room, outcomeWriter{New(WithClientID(7))}.insert(0, "z")); out.Drained {
+		t.Fatalf("an apply the queue does not wait on reports %+v, want nothing drained", out)
+	}
+	if out := applyOutcome(t, room, first); !out.Drained {
+		t.Fatalf("the fill whose drain landed the parked update reports %+v, want drained", out)
+	}
+	if out := applyOutcome(t, room, first); out.Drained || !out.Held {
+		t.Fatalf("the fill sent again reports %+v, want held and nothing drained", out)
+	}
+
+	// A delete of clocks the room lacks parks; the insert that brings them
+	// lands it in its drain.
+	insert := outcomeWriter{New(WithClientID(8))}.insert(0, "abcd")
+	del := outcomeWriter{New(WithClientID(9))}
+	if err := ApplyUpdateV1(del.doc, insert, nil); err != nil {
+		t.Fatal(err)
+	}
+	cut := del.delete(1, 2)
+	deletes := New(WithClientID(1))
+	if out := applyOutcome(t, deletes, cut); out.Drained || !out.Parked {
+		t.Fatalf("a delete of clocks the room lacks reports %+v, want parked and nothing drained", out)
+	}
+	if out := applyOutcome(t, deletes, insert); !out.Drained {
+		t.Fatalf("the insert whose drain applied the parked delete reports %+v, want drained", out)
+	}
+	if got := deletes.GetText("t").ToString(); got != "ad" {
+		t.Fatalf("the room reads %q, want the parked delete applied, %q", got, "ad")
+	}
+}

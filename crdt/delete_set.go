@@ -145,7 +145,17 @@ func retryPendingDs(txn *Transaction) {
 		pending.sortAndCompact(c)
 	}
 	slices.SortFunc(pending.order, func(a, b ClientID) int { return cmp.Compare(b, a) })
+	// A parked delete lands when it deletes an item, which adds to the span
+	// of the transaction's delete set (ApplyOutcome.Drained).
+	report := reportsDrain(txn)
+	var before uint64
+	if report {
+		before = deletedSpan(txn.deleteSet)
+	}
 	store.pendingDs = pending.applyToPartial(txn)
+	if report && deletedSpan(txn.deleteSet) != before {
+		noteDrained(txn)
+	}
 }
 
 // applyToPartial applies delete-set entries whose target items are

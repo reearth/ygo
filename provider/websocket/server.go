@@ -1021,10 +1021,12 @@ type Server struct {
 	// waiting for a struct the room lacks, is relayed without them, or not
 	// at all when nothing of it integrated, and the commit that lands them,
 	// the apply of the frame that fills their gap, relays them with that
-	// frame's own; a frame the room already held relays nothing, as without
-	// the option; and a frame whose apply fails partway relays what it
-	// integrated, without what it parked. It applies to the SyncStep2 and
-	// Update frames peers send, not to updates the cluster relay delivers.
+	// frame's own, to that frame's sender as well (crdt.ApplyOutcome.Drained),
+	// since no peer was sent what waited in the queue; a frame the room
+	// already held relays nothing, as without the option; and a frame whose
+	// apply fails partway relays what it integrated, without what it parked.
+	// It applies to the SyncStep2 and Update frames peers send, not to
+	// updates the cluster relay delivers.
 	// It is off by default: the room relays the sync message the peer sent,
 	// parked content included, so the other peers park it as the room does.
 	RelayIntegratedOnly bool

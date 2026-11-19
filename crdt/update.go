@@ -855,6 +855,9 @@ func drainPending(txn *Transaction) {
 			}()
 			integratePending(txn, items, done)
 		}()
+		if reportsDrain(txn) && drainIntegrated(txn.doc.store, items, done) {
+			noteDrained(txn)
+		}
 		stillPending, stillMissing := unresolvedPending(txn.doc.store, items, done)
 		progressed := len(stillPending) < len(items)
 
