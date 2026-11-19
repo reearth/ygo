@@ -128,21 +128,30 @@ func TestUnit_ApplyUpdate_ACappedDocumentRefusesWithTheDecodersReason(t *testing
 		// column is whether the V2 update's client column, made to read past its
 		// end, is refused for that.
 		column bool
+		// raceStride, where set, is the step between the cut lengths tried
+		// under the race detector, which makes each apply several times
+		// slower; every length is tried without it.
+		raceStride int
 	}{
 		{name: "one client", v1: EncodeStateAsUpdateV1(one, nil), exact: 1},
 		{name: "array", v1: EncodeStateAsUpdateV1(values, nil), exact: 1, column: true},
 		{name: "parking", v1: parking(8, many...), exact: 50, pastCap: true},
 		{name: "two parking", v1: parking(9, 0, 9), exact: 50, tight: true, pastCap: true, column: true},
 		{name: "json", v1: jsonUpdate(), exact: 1},
-		{name: "many writers", v1: manyWritersUpdate(t)},
+		{name: "many writers", v1: manyWritersUpdate(t), raceStride: 5},
 	}
 	for _, u := range updates {
 		for _, f := range formats(t, u.v1) {
-			capped, differ := u.exact, 0
+			capped, differ, cuts := u.exact, 0, 0
 			if capped == 0 {
 				capped = 1
 			}
-			for n := 1; n < len(f.update); n++ {
+			step := 1
+			if raceEnabled && u.raceStride > 0 {
+				step = u.raceStride
+			}
+			for n := 1; n < len(f.update); n += step {
+				cuts++
 				plain, cappedErr := refuse(f, f.update[:n], capped)
 				named := u.exact > 0 || (plain != nil && plain.Error() != ErrInvalidUpdate.Error())
 				if plain == nil || cappedErr == nil || (named && cappedErr.Error() != plain.Error()) {
@@ -152,7 +161,7 @@ func TestUnit_ApplyUpdate_ACappedDocumentRefusesWithTheDecodersReason(t *testing
 				}
 			}
 			if differ > 0 {
-				t.Errorf("%s %s: %d of %d cuts differ", u.name, f.name, differ, len(f.update)-1)
+				t.Errorf("%s %s: %d of %d cuts differ", u.name, f.name, differ, cuts)
 			}
 			for n := 1; u.tight && n < len(f.update)-1; n++ {
 				if plain, cappedErr := refuse(f, f.update[:n], 1); plain == nil || cappedErr == nil || cappedErr.Error() != plain.Error() {
