@@ -72,9 +72,22 @@ type applyPoint struct {
 // changes in place: its emptied slots, its ready latch and its tail record.
 type queueCounts struct {
 	dead      int
+	bytes     int
 	ready     bool
 	tail      uint64
 	tailValid bool
+}
+
+// itemsBytes is the content bytes of items, an emptied slot (nil) counting
+// nothing (PendingStats.ContentBytes).
+func itemsBytes(items []*Item) int {
+	n := 0
+	for _, item := range items {
+		if item != nil {
+			n += contentBytes(item.Content)
+		}
+	}
+	return n
 }
 
 // parkedDeletesAt is the store's pending deletes as a point found them: the
@@ -161,7 +174,7 @@ func pointNow(txn *Transaction, sv StateVector) applyPoint {
 	}
 	if q := s.pending; q != nil {
 		p.pending, p.pendingItems, p.missing = q, q.items, q.missing
-		p.queue = queueCounts{dead: q.dead, ready: q.ready, tail: q.tail, tailValid: q.tailValid}
+		p.queue = queueCounts{dead: q.dead, bytes: q.bytes, ready: q.ready, tail: q.tail, tailValid: q.tailValid}
 	}
 	if s.parked != nil {
 		p.parkedLeft = len(s.parked.left)
@@ -432,7 +445,7 @@ func (j *applyJournal) rollBackTo(txn *Transaction, point *applyPoint) {
 		// what the apply parked.
 		clear(point.pendingItems[len(point.pendingItems):cap(point.pendingItems)])
 		q.items, q.missing = point.pendingItems, point.missing
-		q.dead, q.ready, q.tail, q.tailValid = point.queue.dead, point.queue.ready, point.queue.tail, point.queue.tailValid
+		q.dead, q.bytes, q.ready, q.tail, q.tailValid = point.queue.dead, point.queue.bytes, point.queue.ready, point.queue.tail, point.queue.tailValid
 	}
 	s.pending = point.pending
 	point.pendingDs.restore(s)

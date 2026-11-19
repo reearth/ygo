@@ -154,6 +154,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that parks while the option is on) and the `Cause`. It wraps
   `ErrApplyCheckDrain`, so a caller that answers an apply refused only in its
   drain as applied still does.
+- **`crdt`: `ApplyBudget.MayParkDeletes func(ClientID) bool`** judges each
+  client a delete range of a remote update would park under, called only
+  when a range parks. When it answers false the apply is refused whole with
+  the new `crdt.ErrParkedDeleteRefused`.
+- **`crdt`: `WithMaxPendingDeleteRanges(n)` and
+  `Doc.SetMaxPendingDeleteRanges(n)`** cap the parked delete ranges apart from
+  `WithMaxPendingItems`; a resend of ranges already parked is admitted.
+  `provider/websocket`: `Server.MaxPendingDeleteRanges` sets it on each room.
+- **`crdt`: `PendingStats.ContentBytes`**, the content bytes the pending queue
+  holds now.
+- **`crdt`: the record of who parked each delete range keeps only what each
+  apply newly parked**, and is pruned by the ranges it holds, so a frame sent
+  again does not grow it.
 
 - `provider/websocket`: add `Server.CloseRoomWithinContext` to cancel a room-load
   wait without closing the room. `CloseRoomWithin` retains its signature and

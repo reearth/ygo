@@ -44,7 +44,7 @@ func outOfStateRoom(t *testing.T, on, control bool) (room *Doc, fill []byte) {
 	if !control {
 		require.NoError(t, ApplyUpdateV1(room, cd, nil))
 		require.NoError(t, ApplyUpdateV1(room, deletion, nil))
-		require.Equal(t, PendingStats{Items: 1, DeleteRanges: 1, MissingFor: []ClientID{7}}, room.PendingStats())
+		require.Equal(t, PendingStats{Items: 1, DeleteRanges: 1, ContentBytes: len("cd"), MissingFor: []ClientID{7}}, room.PendingStats())
 	}
 	return room, fill
 }

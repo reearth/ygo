@@ -114,10 +114,11 @@ func WithCollectionID(id string) DocOption {
 const defaultMaxPendingItems = 100_000
 
 // WithMaxPendingItems caps parked items and, separately, parked delete ranges
-// (default 100,000 when n <= 0), refusing with ErrInvalidUpdate, before any
-// change, an update that would park past either, so a peer cannot grow them
-// without bound. A struct sent again merges into the queue as Yjs merges its
-// pending update, and the cap counts what the park adds after the merge.
+// unless WithMaxPendingDeleteRanges gives those a cap of their own (default
+// 100,000 when n <= 0), refusing with ErrInvalidUpdate, before any change,
+// an update that would park past either, so a peer cannot grow them without
+// bound. A struct sent again merges into the queue as Yjs merges its pending
+// update, and the cap counts what the park adds after the merge.
 func WithMaxPendingItems(n int) DocOption {
 	return func(d *Doc) { d.maxPendingItems = n }
 }
@@ -129,6 +130,33 @@ func (d *Doc) SetMaxPendingItems(n int) {
 	defer d.mu.Unlock()
 	d.maxPendingItems = n
 }
+
+// WithMaxPendingDeleteRanges caps the parked delete ranges apart from the
+// parked structs WithMaxPendingItems caps: an update whose delete set would
+// grow them past n is refused with ErrInvalidUpdate before anything changes,
+// and one that parks only ranges already parked - the same frame sent again
+// - is not. n <= 0 leaves them under WithMaxPendingItems's cap, as before.
+// A parked range costs a document two words in its pending deletes and, on
+// one that discards refused drains, two in the record of who parked it,
+// where a parked struct costs an item and its content, so the two caps are
+// sized apart.
+func WithMaxPendingDeleteRanges(n int) DocOption {
+	return func(d *Doc) { d.maxPendingDeleteRanges = n }
+}
+
+// SetMaxPendingDeleteRanges sets the WithMaxPendingDeleteRanges cap after
+// construction, so stored state that exceeds it can load first.
+func (d *Doc) SetMaxPendingDeleteRanges(n int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.maxPendingDeleteRanges = n
+}
+
+// ErrParkedDeleteRefused is why a document refuses a remote update whose
+// delete set would park a range under a client its apply budget's
+// MayParkDeletes answers false for. It wraps ErrInvalidUpdate, and ApplyUpdate
+// returns it inside a RefusedUpdateError, the update taken back whole.
+var ErrParkedDeleteRefused = fmt.Errorf("%w: it would park a deletion under a client the document does not let it", ErrInvalidUpdate)
 
 // WithIntegrateScanBudget bounds the items the conflict scans of one remote
 // apply (ApplyUpdate and its V1 and V2 forms) may pass, by origin, so a server
@@ -188,6 +216,15 @@ type ApplyBudget struct {
 	// that would pass it stops and parks the rest without failing the apply.
 	// Split: 1 allows one split and refuses the second.
 	Split int
+	// MayParkDeletes, when set, judges each client a delete range of the
+	// update would park under: a range, or the part of one, past the clocks
+	// the document holds of its client. When it answers false the apply is
+	// refused with ErrParkedDeleteRefused and taken back whole, as for every
+	// refusal. It is called only when a range would park, once for each
+	// client, under the document's lock, so it must not call the document;
+	// an apply that parks nothing never calls it. Nil lets every client
+	// park, as before.
+	MayParkDeletes func(ClientID) bool
 }
 
 // WithApplyBudget bounds each remote apply (ApplyUpdate and its V1 and V2
@@ -486,18 +523,21 @@ type Doc struct {
 	// linkMu guards shouldLoad, collectionID, item, parent and detached. It is a leaf lock:
 	// no other lock is taken while it is held, so a parent's transaction can
 	// take it, also for a document embedded in itself.
-	linkMu          sync.Mutex
-	shouldLoad      bool
-	autoLoad        bool
-	wholeOrNothing  bool // see WithWholeOrNothingApplies
-	collectionID    string
-	meta            any   // subdocument meta from Yjs opts, written back unchanged
-	item            *Item // set on integrate when this Doc is embedded as a subdocument (#63)
-	parent          *Doc  // document that owns item
-	detached        bool  // true once an embedded Doc is removed or destroyed
-	subdocs         map[string]*Doc
-	onSubdocs       []subdocsSub
-	maxPendingItems int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
+	linkMu         sync.Mutex
+	shouldLoad     bool
+	autoLoad       bool
+	wholeOrNothing bool // see WithWholeOrNothingApplies
+	collectionID   string
+	meta           any   // subdocument meta from Yjs opts, written back unchanged
+	item           *Item // set on integrate when this Doc is embedded as a subdocument (#63)
+	parent         *Doc  // document that owns item
+	detached       bool  // true once an embedded Doc is removed or destroyed
+	subdocs        map[string]*Doc
+	// maxPendingDeleteRanges is WithMaxPendingDeleteRanges's cap, 0 for none
+	// of its own.
+	maxPendingDeleteRanges int
+	onSubdocs              []subdocsSub
+	maxPendingItems        int // 0 = use defaultMaxPendingItems; see WithMaxPendingItems and #46
 	// integrateScanBudget is the bound of WithIntegrateScanBudget, or nil.
 	integrateScanBudget func(origin any) int
 	// applying is the journal of the remote apply in progress on a document
@@ -529,9 +569,11 @@ type Doc struct {
 	rootsDropped map[ClientID]int
 	// discardRefusedDrain is SetDiscardRefusedDrain's setting, and
 	// parkedDsBy, kept only while it is on, the origin of the apply that
-	// parked each delete set the pending deletes hold (recordParkedOrigins).
+	// parked each delete set the pending deletes hold (recordParkedOrigins);
+	// parkedDsByRanges counts parkedDsBy's ranges.
 	discardRefusedDrain bool
 	parkedDsBy          []parkedDeletesBy
+	parkedDsByRanges    int
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -680,6 +722,26 @@ func (d *Doc) maxPendingItemsLimit() int {
 		return defaultMaxPendingItems
 	}
 	return d.maxPendingItems
+}
+
+// maxPendingDeleteRangesLimit returns the effective cap on parked delete
+// ranges: WithMaxPendingDeleteRanges's, else WithMaxPendingItems's.
+func (d *Doc) maxPendingDeleteRangesLimit() int {
+	if d.maxPendingDeleteRanges > 0 {
+		return d.maxPendingDeleteRanges
+	}
+	return d.maxPendingItemsLimit()
+}
+
+// callMayParkDeletes calls an apply budget's MayParkDeletes, tagging a panic
+// it raises as the budget's other callbacks are; the caller holds d.mu.
+func callMayParkDeletes(may func(ClientID) bool, client ClientID) bool {
+	defer func() {
+		if r := recover(); r != nil {
+			panic(budgetCallbackPanic{"ApplyBudget.MayParkDeletes", r})
+		}
+	}()
+	return may(client)
 }
 
 // scanBudget is the bound WithIntegrateScanBudget sets for a remote apply with
@@ -1538,6 +1600,15 @@ type PendingStats struct {
 	// across all clients. Each range is one [clock, clock+len) span.
 	DeleteRanges int
 
+	// ContentBytes is the bytes of content the parked structs hold now, as
+	// ApplyBudget.Bytes counts a struct's content: text and binary as they
+	// are, a value as the words it takes. The map key a struct carries is
+	// left out, since a parked struct holds it only once its origin is
+	// known. A caller that charges what the queue holds reads it after each
+	// apply rather than summing what each apply added, since a drain, a
+	// merge or a discard takes content out of the queue too.
+	ContentBytes int
+
 	// MissingFor lists the ClientIDs that pending items reference but
 	// haven't yet received. Sorted ascending. Read-only.
 	MissingFor []ClientID
@@ -1565,6 +1636,7 @@ func (d *Doc) PendingStats() PendingStats {
 	stats := PendingStats{}
 	if d.store.pending != nil {
 		stats.Items = d.store.pending.heldStructs()
+		stats.ContentBytes = d.store.pending.bytes
 		// missing is a StateVector (map[ClientID]uint64) — extract sorted keys
 		missing := make([]ClientID, 0, len(d.store.pending.missing))
 		for c := range d.store.pending.missing {

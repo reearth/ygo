@@ -238,15 +238,42 @@ func retryPendingDs(txn *Transaction) {
 }
 
 // applyDecodedDeleteSet parks the ranges it cannot apply only when the decode
-// succeeded, since Yjs readAndApplyDeleteSet drops them when it throws partway.
+// succeeded, since Yjs readAndApplyDeleteSet drops them when it throws partway,
+// and refuses the apply when its budget does not let a range park where it
+// would (mayParkDeletes).
 func applyDecodedDeleteSet(txn *Transaction, ds DeleteSet, err error) error {
 	unresolvable := ds.applyToPartial(txn)
 	if err != nil {
 		return wrapUpdateErr(err)
 	}
 	if len(unresolvable.clients) > 0 {
+		if err := mayParkDeletes(txn, unresolvable); err != nil {
+			return err
+		}
+		var fresh DeleteSet
+		if txn.doc.discardRefusedDrain {
+			fresh = unparkedPart(unresolvable, txn.doc.store.pendingDs)
+		}
 		parkDeletes(txn, unresolvable)
-		txn.noteParkedDeletes(unresolvable)
+		txn.noteParkedDeletes(unresolvable, fresh)
+	}
+	return nil
+}
+
+// mayParkDeletes is ErrParkedDeleteRefused when the apply's budget answers
+// false for a client parks would park a range under
+// (ApplyBudget.MayParkDeletes), asked once for each client in the order the
+// set lists them, and nil otherwise, which includes every apply with no such
+// callback.
+func mayParkDeletes(txn *Transaction, parks DeleteSet) error {
+	t := txn.doc.tally()
+	if t == nil || t.budget.MayParkDeletes == nil {
+		return nil
+	}
+	for _, client := range parks.orderedClients() {
+		if !callMayParkDeletes(t.budget.MayParkDeletes, client) {
+			return ErrParkedDeleteRefused
+		}
 	}
 	return nil
 }
@@ -363,9 +390,10 @@ func (ds *DeleteSet) allAbsent(store *StructStore) bool {
 }
 
 // checkParkedDeletes refuses, before anything changes, an update whose delete
-// set would grow the parked ranges past WithMaxPendingItems.
+// set would grow the parked ranges past their cap (WithMaxPendingDeleteRanges,
+// else WithMaxPendingItems).
 func checkParkedDeletes(doc *Doc, b *pendingBudget) error {
-	limit := doc.maxPendingItemsLimit()
+	limit := doc.maxPendingDeleteRangesLimit()
 	pending := doc.store.pendingDs
 	before := doc.store.pendingDsRanges
 	if !b.readsDeleteSet() {

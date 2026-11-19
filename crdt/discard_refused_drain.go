@@ -35,7 +35,7 @@ func (d *Doc) SetDiscardRefusedDrain(on bool) {
 	defer d.mu.Unlock()
 	d.discardRefusedDrain = on
 	if !on {
-		d.parkedDsBy = nil
+		d.parkedDsBy, d.parkedDsByRanges = nil, 0
 	}
 }
 
@@ -113,8 +113,11 @@ func recordParkedOrigins(d *Doc, txn *Transaction) {
 				}
 			}
 		}
-		for _, ds := range rec.deletes {
-			d.parkedDsBy = append(d.parkedDsBy, parkedDeletesBy{ds: copyDeleteSet(ds), origin: txn.Origin})
+		// Only what the apply newly parked is its own: a frame sent again
+		// records nothing, so resends cannot grow the record.
+		for _, ds := range rec.fresh {
+			d.parkedDsBy = append(d.parkedDsBy, parkedDeletesBy{ds: ds, origin: txn.Origin})
+			d.parkedDsByRanges += rangeCount(ds)
 		}
 	}
 	held := s.pending.heldStructs()
@@ -130,14 +133,65 @@ func recordParkedOrigins(d *Doc, txn *Transaction) {
 		}
 		d.parkedBy = kept
 	}
+	// The record is pruned by the ranges it holds, not by its records, so a
+	// few records of many ranges the queue no longer holds go too.
 	switch {
 	case len(s.pendingDs.clients) == 0:
-		d.parkedDsBy = nil
-	case len(d.parkedDsBy) > 2*s.pendingDsRanges+16:
+		d.parkedDsBy, d.parkedDsByRanges = nil, 0
+	case d.parkedDsByRanges > 2*s.pendingDsRanges+16:
 		d.parkedDsBy = slices.DeleteFunc(d.parkedDsBy, func(by parkedDeletesBy) bool {
 			return !deletesOverlap(by.ds, s.pendingDs)
 		})
+		d.parkedDsByRanges = 0
+		for _, by := range d.parkedDsBy {
+			d.parkedDsByRanges += rangeCount(by.ds)
+		}
 	}
+}
+
+// rangeCount is how many ranges ds holds over all its clients.
+func rangeCount(ds DeleteSet) int {
+	n := 0
+	for _, ranges := range ds.clients {
+		n += len(ranges)
+	}
+	return n
+}
+
+// unparkedPart is the part of ds that parked does not hold: each range of ds
+// less the clocks parked's ranges of the same client cover.
+func unparkedPart(ds, parked DeleteSet) DeleteSet {
+	out := newDeleteSet()
+	for client, ranges := range ds.clients {
+		held := slices.Clone(parked.clients[client])
+		slices.SortFunc(held, func(a, b DeleteRange) int { return cmp.Compare(a.Clock, b.Clock) })
+		var kept []DeleteRange
+		for _, r := range ranges {
+			start, end := r.Clock, r.Clock+r.Len
+			for _, h := range held {
+				if h.Clock+h.Len <= start {
+					continue
+				}
+				if h.Clock >= end {
+					break
+				}
+				if h.Clock > start {
+					kept = append(kept, DeleteRange{Clock: start, Len: h.Clock - start})
+				}
+				start = h.Clock + h.Len
+				if start >= end {
+					break
+				}
+			}
+			if start < end {
+				kept = append(kept, DeleteRange{Clock: start, Len: end - start})
+			}
+		}
+		if len(kept) > 0 {
+			out.clients[client] = kept
+		}
+	}
+	return out
 }
 
 // releasedByFill is every struct of items, the pending queue as a drain
@@ -206,7 +260,7 @@ func discardReleased(txn *Transaction, j *applyJournal, scanned int, cause error
 		}
 		s.pending = nil
 		if len(kept) > 0 {
-			s.pending = &pendingUpdate{items: kept}
+			s.pending = &pendingUpdate{items: kept, bytes: itemsBytes(kept)}
 		}
 	}
 

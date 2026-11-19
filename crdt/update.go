@@ -1131,7 +1131,7 @@ func parkUndrained(txn *Transaction, items []*Item, done []bool) bool {
 	}
 	stillPending, stillMissing := unresolvedPending(txn.doc.store, items, done)
 	if len(stillPending) > 0 {
-		txn.doc.store.pending = &pendingUpdate{items: stillPending, missing: stillMissing}
+		txn.doc.store.pending = &pendingUpdate{items: stillPending, missing: stillMissing, bytes: itemsBytes(stillPending)}
 	}
 	return len(stillPending) < len(items)
 }

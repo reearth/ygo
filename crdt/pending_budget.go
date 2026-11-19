@@ -59,7 +59,7 @@ func newPendingBudget(doc *Doc, initial StateVector, update []byte, v2 bool) pen
 		remaining = max(remaining-doc.store.pending.heldStructs(), 0)
 	}
 	return pendingBudget{initial: initial, update: update, remaining: remaining, v2: v2, parked: doc.store.pending,
-		deleteRoom: max(limit-doc.store.pendingDsRanges, 0)}
+		deleteRoom: max(doc.maxPendingDeleteRangesLimit()-doc.store.pendingDsRanges, 0)}
 }
 
 // setSuperseded records the groups the decoder drops, so preflight counts

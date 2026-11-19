@@ -1241,8 +1241,12 @@ type Server struct {
 	mergeFn func(...[]byte) ([]byte, error)
 
 	// MaxPendingItems caps each document's parked items and, separately, parked
-	// delete ranges (crdt.WithMaxPendingItems).
+	// delete ranges unless MaxPendingDeleteRanges is set (crdt.WithMaxPendingItems).
 	MaxPendingItems int
+	// MaxPendingDeleteRanges, when positive, caps each document's parked delete
+	// ranges apart from MaxPendingItems (crdt.WithMaxPendingDeleteRanges); it
+	// applies once the room's stored state has loaded, as MaxPendingItems does.
+	MaxPendingDeleteRanges int
 
 	// HandshakeTimeout caps how long a peer may stay connected without sending
 	// any message after the WebSocket upgrade completes. This is the first-line
@@ -1894,6 +1898,7 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 	loadErr := s.loadRoomDoc(r, name)
 	// Cap only after the stored state is in, since it can hold more than the cap.
 	r.doc.SetMaxPendingItems(s.MaxPendingItems)
+	r.doc.SetMaxPendingDeleteRanges(s.MaxPendingDeleteRanges)
 	// #60 — fire OnLoadDocument AFTER persistence bootstrap but BEFORE the
 	// persistence worker starts, so a hook returning an error fails room creation
 	// cleanly. Runs off-lock now (#182), so a slow hook no longer stalls other

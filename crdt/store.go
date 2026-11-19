@@ -120,8 +120,12 @@ func (h pendingMoveHeap) heapify() {
 type pendingUpdate struct {
 	// items are appended, or emptied in place (nil) when a merge drops them,
 	// so a transaction can record its park as a view of this queue.
-	items   []*Item
-	dead    int         // the nil slots of items
+	items []*Item
+	dead  int // the nil slots of items
+	// bytes is the content bytes items hold (contentBytes), kept wherever a
+	// struct enters or leaves the queue or a merge cuts one in place, and
+	// summed afresh wherever a queue is rebuilt (PendingStats.ContentBytes).
+	bytes   int
 	missing StateVector // clientID -> store clock at park time for that client
 	// cover is the clocks items span, built on demand and kept by addCover.
 	cover *pendingCover

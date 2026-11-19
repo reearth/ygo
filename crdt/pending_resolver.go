@@ -313,6 +313,7 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 			s.pending = &pendingUpdate{missing: make(StateVector), tailClient: item.ID.Client, tailValid: true}
 		}
 		s.pending.items = append(s.pending.items, item)
+		s.pending.bytes += contentBytes(item.Content)
 		s.pending.noteTail(item)
 		if client, parkedAt, future := itemFutureDep(item, s); future {
 			mergePendingMissing(parkedMissing(txn), client, parkedAt)

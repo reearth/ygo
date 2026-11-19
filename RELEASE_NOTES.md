@@ -282,6 +282,16 @@ rollback discards what the fill released instead, and the apply returns a
 it, so a server can close those peers and have their clients send the
 content again. The update that filled the gap stands.
 
+**Parked delete ranges are judged, capped and recorded once.** A delete range
+past what a document holds of its client parks, whoever sent it.
+`ApplyBudget.MayParkDeletes` is asked for each client a range would park
+under, only when one would, and refuses the apply whole with
+`ErrParkedDeleteRefused` when it answers false. `WithMaxPendingDeleteRanges`
+caps the parked ranges apart from the struct cap, and the record of who parked
+each range keeps only what each apply newly parked, so resending a frame no
+longer grows it. `PendingStats.ContentBytes` reports the content bytes the
+queue holds, for a caller that charges a room for it.
+
 **Who is affected:** servers that apply updates from peers, where one update
 places many items among the ones a document holds.
 

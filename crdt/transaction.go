@@ -89,6 +89,10 @@ type Transaction struct {
 type transactionParked struct {
 	items   []*Item     // the first run is a view of the pending queue
 	deletes []DeleteSet // sharing ranges that nothing changes
+	// fresh is, on a document that discards refused drains, the part of each
+	// set in deletes that the pending deletes did not hold already, which the
+	// record of who parked each range keeps (recordParkedOrigins).
+	fresh []DeleteSet
 	// left is what a drain took out of the queue after the park, so the
 	// structs still parked are found without a pass over the queue; a merge
 	// runs before the transaction's one park and cannot take them.
@@ -114,10 +118,14 @@ func (t *Transaction) noteParked(run []*Item) {
 	p.items = append(p.items, run...)
 }
 
-// noteParkedDeletes records ds, which this transaction parked.
-func (t *Transaction) noteParkedDeletes(ds DeleteSet) {
+// noteParkedDeletes records ds, which this transaction parked, and fresh,
+// the part of it no earlier apply had parked.
+func (t *Transaction) noteParkedDeletes(ds, fresh DeleteSet) {
 	p := t.parkRecord()
 	p.deletes = append(p.deletes, ds)
+	if len(fresh.clients) > 0 {
+		p.fresh = append(p.fresh, fresh)
+	}
 }
 
 // Ctx returns the context associated with this transaction. Transactions
