@@ -111,7 +111,7 @@ func TestUnit_MaxPendingDeleteRanges_CapsParkedRangesApartFromItems(t *testing.T
 
 			writer := New(WithClientID(5))
 			text := writer.GetText("t")
-			var gapped [][]byte
+			gapped := make([][]byte, 0, 4)
 			for i, s := range []string{"a", "b", "c", "d"} {
 				sv := writer.StateVector()
 				writer.Transact(func(txn *Transaction) { text.Insert(txn, i, s, nil) })
