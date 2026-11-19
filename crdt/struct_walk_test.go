@@ -83,11 +83,12 @@ func walkedUpdate(t testing.TB, rng *rand.Rand) (update []byte, held StateVector
 }
 
 // The group walk must reach the delete set the full scan reads, and
-// parkingRangesBound must never undercount.
+// parkingRangesBound must never undercount: a fifth of the rounds under the
+// race detector.
 func TestUnit_WalkGroups_TheWalkReadsWhatTheFullScanReads(t *testing.T) {
 	rng := rand.New(rand.NewPCG(334, 340))
 	skips := 0
-	for round := range 500 {
+	for round := range raceSeeds(500) {
 		v1, held := walkedUpdate(t, rng)
 		v2, err := UpdateV1ToV2(v1)
 		if err != nil {
@@ -383,10 +384,12 @@ func walkCorpus(t testing.TB, rng *rand.Rand) (updates [][]byte, v2 []bool) {
 }
 
 // Differential fuzz: on valid updates and on byte-level mutations of them, the
-// one group walk finds what the two separate walks found.
+// one group walk finds what the two separate walks found: a fifth of the
+// mutations under the race detector.
 func TestUnit_WalkGroups_MatchesTheSeparateWalks(t *testing.T) {
 	rng := rand.New(rand.NewPCG(334, 1))
 	updates, v2 := walkCorpus(t, rng)
+	mutations := raceSeeds(60)
 	read, unordered := 0, 0
 	for i, update := range updates {
 		if ordered, _, _, _, err := scanGroupClients(update, nil, encoding.Decoder{}, nil); !v2[i] && err == nil && !ordered {
@@ -395,7 +398,7 @@ func TestUnit_WalkGroups_MatchesTheSeparateWalks(t *testing.T) {
 		if !checkWalkGroups(t, update, v2[i]) {
 			t.Fatalf("valid update %d (V2=%v) does not walk", i, v2[i])
 		}
-		for range 60 {
+		for range mutations {
 			mutated := update
 			for range 1 + rng.IntN(3) {
 				mutated = mutate(rng, mutated)
@@ -408,7 +411,7 @@ func TestUnit_WalkGroups_MatchesTheSeparateWalks(t *testing.T) {
 	if unordered == 0 || read == 0 {
 		t.Fatalf("the corpus covers %d unordered V1 updates and %d mutations that still walk", unordered, read)
 	}
-	t.Logf("%d updates, %d unordered V1, %d of %d mutations still walk", len(updates), unordered, read, 60*len(updates))
+	t.Logf("%d updates, %d unordered V1, %d of %d mutations still walk", len(updates), unordered, read, mutations*len(updates))
 }
 
 // FuzzWalkGroups runs the comparison of TestUnit_WalkGroups_MatchesTheSeparateWalks

@@ -117,10 +117,15 @@ func TestUnit_ParkedOutOfState_StateBytesCountsNoParkedContent(t *testing.T) {
 
 // Updates that arrive late, park and land, are counted exactly, as with the
 // option off (TestUnit_ApplyReport_StateBytesIsExactForUpdatesThatArriveLate).
+// Under the race detector it runs two seeds for each GC setting.
 func TestUnit_ParkedOutOfState_StateBytesIsExactForUpdatesThatArriveLate(t *testing.T) {
+	seeds := uint64(25)
+	if raceEnabled {
+		seeds = 2
+	}
 	parkedBefore := 0
 	for _, gc := range []bool{false, true} {
-		for seed := uint64(1); seed <= 25; seed++ {
+		for seed := uint64(1); seed <= seeds; seed++ {
 			rng := rand.New(rand.NewPCG(seed, 0xC0FFEE))
 			room := New(WithClientID(1), WithGC(gc))
 			room.SetParkedOutOfState(true)
@@ -168,10 +173,12 @@ func TestUnit_ParkedOutOfState_StateBytesIsExactForUpdatesThatArriveLate(t *test
 }
 
 // Re-sent states, in any mix of what the room holds and holds parked, are
-// never counted short of what the state grew by.
+// never counted short of what the state grew by. Under the race detector it
+// runs a fifth of the seeds (raceSeeds), which still pair each GC setting of
+// the writers with each of the room's.
 func TestUnit_ParkedOutOfState_StateBytesNeverFallsShortOfRedeliveredState(t *testing.T) {
 	clients := []ClientID{3, 200, 1 << 40}
-	for seed := range uint64(40) {
+	for seed := range uint64(raceSeeds(40)) {
 		rng := rand.New(rand.NewPCG(seed, 7))
 		writers := make([]*Doc, 0, len(clients))
 		for _, c := range clients {
