@@ -96,7 +96,7 @@ func TestUnit_PendingBudget_CheckBeforeApplyAllocatesNothingForAKeystroke(t *tes
 }
 
 // The lenient readers read each struct as the validating scanner does and end
-// where it ends.
+// where it ends, on a fifth of the gapped updates under the race detector.
 func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testing.T) {
 	type read struct {
 		length  uint64
@@ -193,7 +193,7 @@ func TestUnit_PendingBudget_LenientReadersAndStructCountMatchTheScanner(t *testi
 		}
 	}
 	rng := rand.New(rand.NewPCG(340, 2526))
-	for range 300 {
+	for range raceSeeds(300) {
 		_, update := gappedUpdate(t, rng)
 		count(t, update)
 	}
