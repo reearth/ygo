@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -133,20 +134,23 @@ func readClose(t *testing.T, conn *gws.Conn) {
 
 // dialSmallReceiveBuffer connects to room with the client socket's receive
 // buffer cut to a few KiB, so that what the server writes while the client
-// does not read waits in the server's send buffer.
+// does not read waits in the server's send buffer. The buffer is cut before
+// the socket connects, as a client's own buffer is sized. Linux sets the
+// window a socket offers from its buffer when it connects, and the server
+// sizes its segments to half the largest window it has been offered; a buffer
+// cut after connecting holds less than one such segment. Linux then sends the
+// server's data only as zero-window probes, whose timer restarts on every
+// acknowledgement the client sends, so a client that keeps sending, as these
+// tests' clients do, receives nothing more however long the server waits.
 func dialSmallReceiveBuffer(t *testing.T, ts *httptest.Server, room string) *gws.Conn {
 	t.Helper()
-	dialer := gws.Dialer{NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-		c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
+	dialer := gws.Dialer{NetDialContext: (&net.Dialer{Control: func(_, _ string, c syscall.RawConn) error {
+		var err error
+		if cerr := c.Control(func(fd uintptr) { err = setReceiveBuffer(fd, 4<<10) }); cerr != nil {
+			return cerr
 		}
-		if err := c.(*net.TCPConn).SetReadBuffer(4 << 10); err != nil {
-			_ = c.Close()
-			return nil, err
-		}
-		return c, nil
-	}}
+		return err
+	}}).DialContext}
 	conn, _, err := dialer.Dial(wsURL(ts, room), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
