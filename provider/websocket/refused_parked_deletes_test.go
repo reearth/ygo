@@ -132,3 +132,31 @@ func TestInteg_RefusedParkedDeleteUpdateLeavesTheRoomUnchanged(t *testing.T) {
 	assert.Equal(t, "hlo!", replay.GetText("t").ToString(), "the stored updates replay to the room's text")
 	assert.Zero(t, replay.PendingStats().DeleteRanges, "the stored updates park no delete range")
 }
+
+// Server.MaxPendingDeleteRanges caps a room's parked delete ranges apart from
+// MaxPendingItems: a peer's frame that would park a range past it is answered
+// 0 and the room parks none of it, while the frame that parked the ranges
+// already held, sent again, is not refused, since it grows them by nothing.
+func TestInteg_MaxPendingDeleteRanges_APeerFramePastTheCapIsRefused(t *testing.T) {
+	const limit = 3
+	srv, ts := hocuspocusServer(t, func(srv *ygws.Server) {
+		srv.MaxPendingItems = 100 * limit // far above, so only the range cap refuses
+		srv.MaxPendingDeleteRanges = limit
+	})
+	conn := hpDial(t, ts, "room", false, crdt.New(crdt.WithClientID(5)))
+
+	atCap := missingDeleteRanges(98, limit)
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(atCap))
+	require.Equal(t, []uint64{1}, syncStatuses(t, conn, "room"), "ranges up to the cap park")
+	room := srv.GetDoc("room")
+	require.NotNil(t, room)
+	require.Equal(t, limit, room.PendingStats().DeleteRanges)
+
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(missingDeleteRanges(99, 1)))
+	assert.Equal(t, []uint64{0}, syncStatuses(t, conn, "room"), "a frame parking a range past the cap is refused")
+	assert.Equal(t, limit, room.PendingStats().DeleteRanges, "the room parks no range past the cap")
+
+	hpSend(t, conn, "room", tagSync, ygsync.EncodeUpdate(atCap))
+	assert.Equal(t, []uint64{1}, syncStatuses(t, conn, "room"), "a resend of the ranges parked is not refused")
+	assert.Equal(t, limit, room.PendingStats().DeleteRanges, "the resend parks nothing new")
+}
