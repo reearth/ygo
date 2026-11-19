@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/reearth/ygo/encoding"
@@ -46,78 +47,135 @@ func (s *Server) storeOne(ctx context.Context, name string, update []byte) (bool
 	return err == nil, err
 }
 
-// updateKey is what a waiting answer is found by: the first byte of the very
+// updateKey is what a commit's store is found by: the first byte of the very
 // update slice the room's OnUpdate observers were handed, which the
-// persistence worker is handed too. While an answer waits, its update is
+// persistence worker is handed too. Until its store is known the update is
 // held by the worker's queue, so no other update has that address.
 func updateKey(update []byte) *byte { return unsafe.SliceData(update) }
 
-// noteStored completes the wait of the answer waiting on update, if one is,
-// with whether it was stored. A second call for the same update finds none.
-// It runs on the persistence worker's goroutine, or on the committing one for
-// a retired room's write (persistStranded).
+// noteStored records whether update, a commit of r, was stored, and sends
+// the answers that waited for it (roomStores). A second call for the same
+// update finds nothing. It runs on the persistence worker's goroutine, or on
+// the committing one for a retired room's write (persistStranded).
 func (s *Server) noteStored(r *room, update []byte, stored bool) {
 	if !s.answersOnceStored() || len(update) == 0 {
 		return
 	}
-	if w, ok := r.storeWaiters.LoadAndDelete(updateKey(update)); ok {
-		w.(*storeWait).complete(stored)
+	for _, then := range r.stores.settle(update, stored) {
+		then()
 	}
 }
 
-// armStoreWait is the first step of the room's persistence observer, which
-// runs on the committing goroutine before the update reaches the worker: the
-// commit of the peer apply in hand (origin, that peer) is the update that
-// peer's answer waits on. A peer's apply runs on its read loop, which is also
-// the goroutine that armed the wait and reads it back (applySyncUpdate), so
-// taken needs no lock. A commit of anything else, and a second commit of the
-// same apply (the format cleanup a remote apply may run), takes nothing.
-func (s *Server) armStoreWait(r *room, update []byte, origin any) {
+// armStore is the first step of the room's persistence observer, which runs
+// on the committing goroutine before the update reaches the worker: every
+// commit of the room, whoever made it, is a store the answers wait for.
+func (s *Server) armStore(r *room, update []byte) {
 	if !s.answersOnceStored() || len(update) == 0 {
 		return
 	}
-	p, ok := origin.(*peer)
-	if !ok || p.server != s || p.storeWait == nil || p.storeWait.taken {
-		return
-	}
-	p.storeWait.taken = true
-	r.storeWaiters.Store(updateKey(update), p.storeWait)
+	r.stores.arm(update)
 }
 
-// storeWait is one apply's wait for the store of its commit.
-type storeWait struct {
-	taken bool // the apply's commit is the update waited on; the read loop's own
-
-	mu               sync.Mutex
-	resolved, stored bool
-	then             func(stored bool)
+// roomStores is a room instance's record, under AnswerOnceStored, of the
+// stores of its commits: each commit the room's persistence observer sees is
+// numbered (arm), and settled when the worker reports its store (settle). A
+// peer's answer of 1 waits until every commit numbered when the answer was
+// decided is settled (after), and goes out as 0 once a commit of the room
+// instance was not stored (unstored). So a frame whose apply commits
+// nothing - a SyncStep2 or a resend of what the room holds - takes the
+// verdict of the newest store still running, whichever peer's commit it
+// stores, as a frame that commits takes its own; and an edit the room holds
+// only because a commit that was not stored put it there is never answered
+// applied. A room loaded again is a new instance and starts clean.
+type roomStores struct {
+	mu       sync.Mutex
+	numbered uint64               // commits numbered so far
+	open     map[*byte]*openStore // the commits not yet settled, by updateKey
+	queue    []*openStore         // the same and settled ones, in number order, from the oldest not settled
+	waits    []storesWait         // answers waiting, in the order of through
+	unstored atomic.Bool          // a commit of the room instance was not stored
 }
 
-// complete records whether the update was stored and runs the wait's
-// continuation if the read loop has handed it one.
-func (w *storeWait) complete(stored bool) {
-	w.mu.Lock()
-	if then := w.then; then != nil {
-		w.then, w.resolved = nil, true
-		w.mu.Unlock()
-		then(stored)
-		return
-	}
-	w.resolved, w.stored = true, stored
-	w.mu.Unlock()
+// openStore is one commit whose store the answers wait for.
+type openStore struct {
+	n       uint64
+	settled bool
 }
 
-// whenStored runs then once the store is known, at once when it already is.
-func (w *storeWait) whenStored(then func(stored bool)) {
-	w.mu.Lock()
-	if w.resolved {
-		stored := w.stored
-		w.mu.Unlock()
-		then(stored)
+// storesWait is an answer waiting until every commit up to through is settled.
+type storesWait struct {
+	through uint64
+	then    func()
+}
+
+// arm numbers update, a commit of the room.
+func (rs *roomStores) arm(update []byte) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.numbered++
+	o := &openStore{n: rs.numbered}
+	if rs.open == nil {
+		rs.open = make(map[*byte]*openStore)
+	}
+	rs.open[updateKey(update)] = o
+	rs.queue = append(rs.queue, o)
+}
+
+// settle records whether update was stored and returns the answers it
+// releases, for the caller to send once the record's lock is free.
+func (rs *roomStores) settle(update []byte, stored bool) []func() {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	o, ok := rs.open[updateKey(update)]
+	if !ok {
+		return nil
+	}
+	delete(rs.open, updateKey(update))
+	o.settled = true
+	if !stored {
+		rs.unstored.Store(true)
+	}
+	for len(rs.queue) > 0 && rs.queue[0].settled {
+		rs.queue[0] = nil
+		rs.queue = rs.queue[1:]
+	}
+	through := rs.numbered
+	if len(rs.queue) > 0 {
+		through = rs.queue[0].n - 1
+	}
+	var ready []func()
+	for len(rs.waits) > 0 && rs.waits[0].through <= through {
+		ready = append(ready, rs.waits[0].then)
+		rs.waits[0] = storesWait{}
+		rs.waits = rs.waits[1:]
+	}
+	return ready
+}
+
+// after runs then once every commit numbered so far is settled, at once when
+// every one is.
+func (rs *roomStores) after(then func()) {
+	rs.mu.Lock()
+	if len(rs.queue) == 0 {
+		rs.mu.Unlock()
+		then()
 		return
 	}
-	w.then = then
-	w.mu.Unlock()
+	rs.waits = append(rs.waits, storesWait{through: rs.numbered, then: then})
+	rs.mu.Unlock()
+}
+
+// answerOnceStored resolves a, a frame's SyncStatus, with applied and
+// closeWith once every commit of the room numbered by now is stored or
+// known not to be (roomStores.after): the frame's own commit when it made
+// one, and every other commit that may have put in the room what the frame
+// carries. An answer of 0 needs no store, and is ready at once.
+func (p *peer) answerOnceStored(a *peerAnswer, applied bool, closeWith *PeerClose) {
+	if !applied {
+		p.resolveAnswer(a, false, closeWith)
+		return
+	}
+	p.room.stores.after(func() { p.resolveAnswer(a, true, closeWith) })
 }
 
 // peerAnswers is what a peer is owed under AnswerOnceStored, in the order its
@@ -131,8 +189,8 @@ type peerAnswers struct {
 }
 
 // peerAnswer is one entry: a frame's SyncStatus (status, applied), a close,
-// or both, ready once its store is known; or a frame to write, ready once it
-// is built.
+// or both, ready once the stores it waits for are known; or a frame to
+// write, ready once it is built.
 type peerAnswer struct {
 	ready, status, applied bool
 	close                  *PeerClose
@@ -172,7 +230,10 @@ func (p *peer) resolveFrame(a *peerAnswer, frame []byte) {
 
 // sendReadyLocked sends every ready entry at the head of p's answers, in
 // order, with the answers' lock held, so two goroutines resolving at once
-// cannot send out of order.
+// cannot send out of order. A SyncStatus goes out as 0 once a commit of the
+// room instance was not stored (roomStores.unstored), whatever it was
+// resolved with: the room then holds content no store holds, which the
+// frame may carry.
 func (p *peer) sendReadyLocked() {
 	q := &p.answers
 	for len(q.queue) > 0 && q.queue[0].ready {
@@ -180,7 +241,7 @@ func (p *peer) sendReadyLocked() {
 		q.queue[0] = nil
 		q.queue = q.queue[1:]
 		if head.status {
-			p.sendSyncStatus(head.applied)
+			p.sendSyncStatus(head.applied && !p.room.stores.unstored.Load())
 		}
 		if head.frame != nil {
 			p.write(head.frame)

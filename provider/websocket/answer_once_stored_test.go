@@ -213,7 +213,9 @@ func TestInteg_AnswerOnceStored_TheAnswerWaitsForTheStoreInFrameOrder(t *testing
 
 // An update the adapter did not store - its call failed, or a
 // PersistenceAdapterStored adapter says it dropped it - is answered 0, and
-// what it changed stands in the room.
+// what it changed stands in the room. Every later answer of the room
+// instance is 0 too, a later update the adapter stores included: the room
+// holds content no store holds.
 func TestInteg_AnswerOnceStored_AnUpdateNotStoredIsAnsweredZero(t *testing.T) {
 	for name, tc := range map[string]struct {
 		adapter func(*gatedStore) ygws.PersistenceAdapter
@@ -243,7 +245,7 @@ func TestInteg_AnswerOnceStored_AnUpdateNotStoredIsAnsweredZero(t *testing.T) {
 			hpSend(t, editor, "room", tagSync, ygsync.EncodeUpdate(textUpdate(editorDoc, "b")))
 			gate.waitStore(t)
 			gate.release <- storeVerdict{stored: true}
-			assert.Equal(t, []uint64{1}, statusesFor(t, editor, 1), "the next update stored is answered 1")
+			assert.Equal(t, []uint64{0}, statusesFor(t, editor, 1), "a later update stored is answered 0 too")
 		})
 	}
 }

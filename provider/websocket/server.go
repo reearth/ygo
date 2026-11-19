@@ -652,10 +652,10 @@ type room struct {
 	doc       *crdt.Doc
 	awareness *awareness.Awareness
 	peers     map[*peer]struct{}
-	// storeWaiters holds, under Server.AnswerOnceStored, the peer answer
-	// each committed update waits on, by the update's first byte
-	// (armStoreWait, noteStored).
-	storeWaiters sync.Map
+	// stores is, under Server.AnswerOnceStored, this room instance's record
+	// of the stores of its commits, which the peers' answers wait for
+	// (armStore, noteStored).
+	stores roomStores
 
 	// ready is closed exactly once, by the goroutine that created the room, when
 	// the off-lock load (LoadDoc + decode + OnLoadDocument) has finished — whether
@@ -1022,17 +1022,37 @@ type Server struct {
 	// it was not stored: the adapter call that took it failed, or a
 	// PersistenceAdapterStored adapter says it dropped it. So a client that
 	// keeps an edit until it is answered applied keeps it until it is stored,
-	// and sends it again after a store that failed. Only the answer waits:
-	// the update is relayed to the room's other peers as soon as it
-	// integrates, as without the option, and an update whose apply changed
-	// nothing is answered as soon as every answer before it is. Each peer's
-	// answers still go out in the order its frames arrived, and the close of
-	// a peer whose update the OnPeerUpdate hook refused, or that ClosePeer
-	// closes, goes out after the answers before it. The answer to a coalesced
-	// write (PersistCoalesceWindow) waits for the write that stores its batch.
-	// It is off by default: a peer is answered as soon as the room applies
-	// its update.
+	// and sends it again after a store that failed. An update whose apply
+	// changed nothing - a SyncStep2 or a resend of what the room holds,
+	// perhaps only because another peer's commit put it there - waits for
+	// the newest store of the room still running, whoever's commit it
+	// stores, and takes its verdict; so does a read-only peer's SyncStep2
+	// the room holds. Once a commit of the room instance was not stored,
+	// every answer the instance sends is 0, a later commit that stored
+	// included, as the room holds content no store holds; a room loaded
+	// again starts clean. Only the answer waits: the update is relayed to
+	// the room's other peers as soon as it integrates, as without the
+	// option. Each peer's answers still go out in the order its frames
+	// arrived, and the close of a peer whose update the OnPeerUpdate hook
+	// refused, or that ClosePeer closes, goes out after the answers before
+	// it. The answer to a coalesced write (PersistCoalesceWindow) waits for
+	// the write that stores its batch, and a coalesced batch whose write
+	// failed counts as not stored though a retry may store it later. It is
+	// off by default: a peer is answered as soon as the room applies its
+	// update.
 	AnswerOnceStored bool
+
+	// ReadOnlySyncStep2MaxBytes, when positive, answers SyncStatus(0),
+	// without decoding it, a SyncStep2 a read-only peer sends under Sync or
+	// SyncReply whose update is longer than this many bytes. Deciding the
+	// answer to a read-only peer's SyncStep2 (1 when the room holds all of
+	// it) decodes the whole update into a scratch document, outside any
+	// bound an OnPeerUpdate hook sets, as the hook never sees a read-only
+	// peer's update; this caps what such a decode may take. A client that
+	// keeps rows until a SyncStep2 is answered 1 keeps them, and drops them
+	// by its own reading of the document. 0, the default, decodes every one.
+	ReadOnlySyncStep2MaxBytes int
+
 	// OnTokenAuth, if non-nil, validates the token from a Hocuspocus in-band
 	// Auth message (tag 2). A nil error accepts the connection and replies
 	// Authenticated (scope from the returned ConnectionConfig.ReadOnly); a
@@ -1959,9 +1979,9 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 		r.flushReq = make(chan chan bool)
 		s.startPersistenceWorker(r, name)
 		r.doc.OnUpdate(func(update []byte, origin any) {
-			// A peer's commit is the update its answer waits on
+			// Every commit is a store the answers wait for
 			// (AnswerOnceStored), from before the worker can store it.
-			s.armStoreWait(r, update, origin)
+			s.armStore(r, update)
 			// #229 — handing the update to persistCh is only safe while the
 			// worker is still reading it. The worker publishes its retirement
 			// by closing persistRetire BEFORE its final drain, which gives this

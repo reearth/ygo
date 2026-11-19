@@ -9,10 +9,21 @@
   the update made is stored, and is 0 when it was not stored: the adapter
   call returned an error or panicked, or an adapter that implements the new
   `PersistenceAdapterStored` says it did not store it. The client keeps the
-  edit and sends it again. Only the answer waits: the update is relayed to
-  the room's other peers as soon as the room applies it. Each peer's answers
-  still go out in the order its frames arrived. Off, the default, nothing
-  changes.
+  edit and sends it again. An update whose apply commits nothing - a
+  `SyncStep2`, a resend, the reply to `ResyncPeer`, a read-only peer's
+  `SyncStep2` - may carry content another commit put in the room, so it
+  waits for the newest store of the room still running, whoever's commit it
+  stores, and takes its verdict. Once a commit of a room instance was not
+  stored, every answer the instance sends is 0, since the room holds content
+  no store holds; a room loaded again starts clean. Only the answer waits:
+  the update is relayed to the room's other peers as soon as the room
+  applies it. Each peer's answers still go out in the order its frames
+  arrived. Off, the default, nothing changes.
+- **New: `Server.ReadOnlySyncStep2MaxBytes`.** The answer to a read-only
+  peer's `SyncStep2` decodes its whole update into a scratch document, which
+  no `OnPeerUpdate` hook bounds. With the option set, a `SyncStep2` whose
+  update is longer than it is answered 0 without being decoded. 0, the
+  default, decodes every one.
 - **New: `Server.ClosePeer` and `Server.ResyncPeer` act on one peer.**
   `ClosePeer(origin, code, reason)` closes the peer whose updates carry
   `origin`, the `PeerUpdateInfo.Origin` an `OnPeerUpdate` hook is handed,

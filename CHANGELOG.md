@@ -13,11 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server with persistence, the `SyncStatus` a peer is answered for an update
   waits until the room's persistence has stored the commit that update made,
   and is 0 when it was not stored, so a client that keeps an edit until it
-  is answered applied keeps it until it is stored. Only the answer waits:
-  the update is relayed to the room's other peers as soon as the room
-  applies it. Each peer's answers still go out in the order its frames
-  arrived, and the answers to the frames one coalesced write stores wait for
-  that write.
+  is answered applied keeps it until it is stored. An update whose apply
+  commits nothing, and a read-only peer's `SyncStep2` the room holds, wait
+  for the newest store of the room still running, whoever's commit it
+  stores, and take its verdict. Once a commit of a room instance was not
+  stored, every answer the instance sends is 0. Only the answer waits: the
+  update is relayed to the room's other peers as soon as the room applies
+  it. Each peer's answers still go out in the order its frames arrived, and
+  the answers to the frames one coalesced write stores wait for that write.
+- **`provider/websocket`: `Server.ReadOnlySyncStep2MaxBytes`**, 0 (no limit)
+  by default. A read-only peer's `SyncStep2` whose update is longer than it
+  is answered `SyncStatus(0)` without being decoded.
 - **`provider/websocket`: `PersistenceAdapterStored`**, an optional adapter
   extension. `StoreUpdateStored` says whether each update is stored once the
   call returns. Under `AnswerOnceStored` the worker calls it in place of
