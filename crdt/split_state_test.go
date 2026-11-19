@@ -329,18 +329,24 @@ func crossOriginRoom(t *testing.T) *Doc {
 
 // longStructRoom holds a text struct longer than any update, one of
 // supplementary characters, which is cut only between characters, and a map
-// value longer than any update, which is not cut at all.
+// value longer than any update, which is not cut at all. Under the race
+// detector, which makes each split several times slower, each is cut to just
+// past the longest update (64 KiB), which is all the room needs.
 func longStructRoom(t *testing.T) *Doc {
+	chars, emojis, value := 200_000, 40_000, 100_000
+	if raceEnabled {
+		chars, emojis, value = 70_000, 20_000, 70_000
+	}
 	doc := New(WithClientID(7))
 	txt, emoji, m := doc.GetText("t"), doc.GetText("e"), doc.GetMap("m")
 	doc.Transact(func(txn *Transaction) {
-		txt.Insert(txn, 0, strings.Repeat("z", 200_000), nil)
-		emoji.Insert(txn, 0, strings.Repeat("😀", 40_000), nil)
-		m.Set(txn, "big", strings.Repeat("b", 100_000))
+		txt.Insert(txn, 0, strings.Repeat("z", chars), nil)
+		emoji.Insert(txn, 0, strings.Repeat("😀", emojis), nil)
+		m.Set(txn, "big", strings.Repeat("b", value))
 	})
 	// The text a receiver holding half of it already has a part of: written
 	// right after it, the next run joins the same struct.
-	doc.Transact(func(txn *Transaction) { txt.Insert(txn, 200_000, "more", nil) })
+	doc.Transact(func(txn *Transaction) { txt.Insert(txn, chars, "more", nil) })
 	longest := uint64(0)
 	for _, it := range doc.store.clients[7] {
 		longest = max(longest, it.Content.Len())
