@@ -779,9 +779,11 @@ func TestUnit_ApplyCheck_ADocumentWithACheckAppliesWholeOrNothing(t *testing.T) 
 // changes, attribute and map writes, in both wire formats, and pairs whose
 // second parks until the first drains it - a refused apply leaves the
 // document byte for byte as it was and tells no observer, and a passed apply
-// leaves it byte for byte as a document with no check.
+// leaves it byte for byte as a document with no check. Under the race
+// detector it generates a fifth of the updates (raceSeeds), half of which
+// must still reach the check.
 func TestUnit_ApplyCheck_GeneratedUpdatesRefuseByteForByte(t *testing.T) {
-	const iterations = 240
+	iterations := raceSeeds(240)
 	rng := rand.New(rand.NewPCG(179, 2544))
 	base := checkBase(t)
 	doc, control := checkedDoc(t, base), checkedDoc(t, base)
