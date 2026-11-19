@@ -11,9 +11,10 @@ import (
 )
 
 // The ranges checkParkedDeletes predicts must be exactly those the apply parks,
-// for random gapped V1 and V2 updates.
+// for random gapped V1 and V2 updates: a fifth of the rounds under the race
+// detector, where a quarter of them must still park a range.
 func TestUnit_ApplyUpdate_TheParkedDeletesCheckedAreWhatTheApplyParks(t *testing.T) {
-	const rounds = 1000
+	rounds := raceSeeds(1000)
 	rng := rand.New(rand.NewPCG(334, 2526))
 	parkedSome := 0
 	for round := range rounds {
@@ -184,11 +185,12 @@ func TestUnit_ApplyUpdate_TheParkedDeletesCheckedAreWhatTheApplyParks(t *testing
 }
 
 // A whole first pass over a one-client update gives the clocks structClocksOf
-// scans for and the delete set walkGroups finds, in V1 and V2.
+// scans for and the delete set walkGroups finds, in V1 and V2: a fifth of the
+// rounds under the race detector.
 func TestUnit_PendingBudget_AWholeFirstPassReadsWhatTheStructScansRead(t *testing.T) {
 	rng := rand.New(rand.NewPCG(340, 918))
 	compared, blocked := 0, 0
-	for round := range 200 {
+	for round := range raceSeeds(200) {
 		held, update := gappedUpdate(t, rng)
 		receiver := New(WithMaxPendingItems(math.MaxInt))
 		if err := ApplyUpdateV1(receiver, held, nil); err != nil {
