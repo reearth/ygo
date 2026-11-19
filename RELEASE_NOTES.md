@@ -16,7 +16,14 @@ back off a transient one, could not tell them apart.
 The server now does the WebSocket closing handshake: it writes the close
 frame, reads and drops what the peer sends until the peer's own close frame
 arrives, then closes the connection. A peer that has not answered within five
-seconds is closed anyway. Frames for a peer being closed are dropped
+seconds is closed anyway, without a reset: writing the frame returns once it
+is in the socket's buffers, which can hold megabytes of what was written
+before it, so a browser applying a large state can reach the frame later
+than that. The server then shuts the connection's write side, which sends
+what the buffers hold and then the end of the stream, and reads and drops
+what the browser still sends until it closes its side, ten seconds pass, or
+the server shuts down; only then does it close the socket, and the peer has
+left its room by then. Frames for a peer being closed are dropped
 meanwhile, since nothing after the close frame is written, so the room's
 broadcasts cannot fill its write queue and close it as a slow peer before it
 answers. The close the server writes at once when the peer's write queue is

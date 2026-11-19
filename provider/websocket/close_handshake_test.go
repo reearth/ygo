@@ -157,11 +157,22 @@ func dialSmallReceiveBuffer(t *testing.T, ts *httptest.Server, room string) *gws
 // code and reason, while the peer acts as a busy browser does: it reads nothing
 // for 200 ms, so that what the server writes meanwhile, the close among it,
 // waits in the buffers at both ends, and it keeps sending awareness all the
-// while. A server that closes the socket right after the close frame receives
-// that awareness on a closed socket, which resets the connection and discards
-// what the peer had not yet received, the close frame among it: the peer then
-// reads a reset and no code.
+// while (requireCloseWhileSendingAfter).
 func requireCloseWhileSending(t *testing.T, conn *gws.Conn) {
+	t.Helper()
+	requireCloseWhileSendingAfter(t, conn, 200*time.Millisecond)
+}
+
+// requireCloseWhileSendingAfter requires conn to receive the close frame, with
+// its code and reason, while the peer reads nothing for pause and sends
+// awareness all the while, until it has read the frame. A server that closes
+// the socket while the peer still sends receives that awareness on a closed
+// socket, which resets the connection and discards what the peer had not yet
+// received, the close frame among it: the peer then reads a reset and no code.
+// The peer's awareness must not fail but for its own close in answer, so a
+// reset is seen also where the stack still hands the peer what it had
+// received.
+func requireCloseWhileSendingAfter(t *testing.T, conn *gws.Conn, pause time.Duration) {
 	t.Helper()
 	presence := awareness.New(2)
 	presence.SetLocalState(map[string]any{"cursor": 7})
@@ -169,8 +180,9 @@ func requireCloseWhileSending(t *testing.T, conn *gws.Conn) {
 		enc.WriteVarUint(1) // msgAwareness
 		enc.WriteVarBytes(presence.EncodeUpdate(nil))
 	})
-	require.NoError(t, conn.SetWriteDeadline(time.Now().Add(5*time.Second)))
+	require.NoError(t, conn.SetWriteDeadline(time.Now().Add(pause+closeReadWait)))
 	stop, sending := make(chan struct{}), make(chan struct{})
+	var sendErr error
 	go func() {
 		defer close(sending)
 		tick := time.NewTicker(5 * time.Millisecond)
@@ -183,14 +195,15 @@ func requireCloseWhileSending(t *testing.T, conn *gws.Conn) {
 			}
 			// Fails once the client has answered the close with its own, or
 			// once the connection is gone.
-			if conn.WriteMessage(gws.BinaryMessage, frame) != nil {
+			if err := conn.WriteMessage(gws.BinaryMessage, frame); err != nil {
+				sendErr = err
 				return
 			}
 		}
 	}()
 
 	// The server writes what the buffers take, then the close.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(pause)
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(closeReadWait)))
 	var err error
 	for err == nil {
@@ -203,6 +216,9 @@ func requireCloseWhileSending(t *testing.T, conn *gws.Conn) {
 	require.ErrorAs(t, err, &closed, "the peer must receive the close frame")
 	assert.Equal(t, refusalCode, closed.Code)
 	assert.Equal(t, refusalReason, closed.Text)
+	if sendErr != nil {
+		assert.ErrorIs(t, sendErr, gws.ErrCloseSent, "the peer's sending must end on its own close, not on a reset")
+	}
 }
 
 // A peer that has sent frames after the server's last read still receives the
@@ -219,6 +235,25 @@ func TestInteg_CloseHandshake_APeerStillSendingReceivesTheCloseCode(t *testing.T
 	// Refused, so the close is written right behind the state.
 	sendSync(t, conn, ygsync.EncodeUpdate(textUpdate(doc, "refused")))
 	requireCloseWhileSending(t, conn)
+}
+
+// A peer that is still reading what came before the close frame when the
+// closing handshake's wait ends still receives the frame, with its code and
+// reason, though it goes on sending: the server ends the connection then
+// without a reset. The peer reads nothing until the wait has passed, so the
+// state and the close wait in the buffers at both ends, and sends awareness
+// all the while; a server that closed the socket when the wait ended would
+// receive that awareness on a closed socket, which resets the connection
+// (requireCloseWhileSendingAfter). A browser applying a large state, or one on
+// a slow link, reaches the frame that late.
+func TestInteg_CloseHandshake_APeerStillReadingWhenTheWaitEndsReceivesTheCloseCode(t *testing.T) {
+	ts := refusingServer(t, textState(192<<10), nil)
+	conn := dialSmallReceiveBuffer(t, ts, "room")
+
+	doc := crdt.New(crdt.WithClientID(2))
+	sendSync(t, conn, ygsync.EncodeSyncStep1(doc))
+	sendSync(t, conn, ygsync.EncodeUpdate(textUpdate(doc, "refused")))
+	requireCloseWhileSendingAfter(t, conn, ygws.CloseHandshakeTimeout+time.Second)
 }
 
 // A peer that never answers the close frame with its own does not hold its

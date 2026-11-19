@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,7 @@ type peer struct {
 	identity          any           // ConnectionConfig.Identity, handed to OnPeerUpdate; set and read on the read loop
 	hocuspocusFraming bool          // #104: docName-prefixed framing for this connection
 	inputClosed       atomic.Bool   // a close is queued or sent; the read loop drops input from then on
+	closeSent         atomic.Bool   // a close frame was written to the peer; see lingerClose
 
 	// disconnectOnce ensures the full teardown sequence in handleDisconnect
 	// runs exactly once, regardless of how many callers race (e.g. broadcast's
@@ -455,30 +457,29 @@ func (p *peer) enqueueClose(code int, reason string) {
 }
 
 // closeHandshakeTimeout is how long a peer that has been sent a close frame
-// has to answer with its own before the server closes the connection anyway.
+// has to answer with its own before the server ends the connection anyway.
 // Writing the close frame returns once it is in the socket's send buffer, so a
 // peer that is slow to read, such as a browser applying a large state, first
-// reads everything queued ahead of it in the buffers at both ends; a peer that
-// is closed before it answers, and sends anything meanwhile, loses the frame
-// to the reset that follows. Until the read loop ends, the peer keeps its
-// connection and its place in its room, so one that never answers must not
-// keep them long. Five seconds leaves a slow reader time to reach the frame,
-// and holds a peer that never answers for half of what one write may take
-// (writeTimeout).
+// reads everything queued ahead of it in the buffers at both ends. Until the
+// read loop ends, the peer keeps its place in its room, so one that never
+// answers must not keep it long: five seconds holds such a peer for half of
+// what one write may take (writeTimeout). A peer still reading what came
+// before the frame when they pass still receives it, since the connection then
+// ends without a reset (lingerClose).
 const closeHandshakeTimeout = 5 * time.Second
 
 // sendCloseFrame writes the queued WS close control frame and leaves the
 // connection to the closing handshake (RFC 6455, section 1.4): the read loop,
 // which drops input from enqueueClose on, reads until the peer's close frame
-// arrives or closeHandshakeTimeout passes, and its teardown then closes the
-// connection. Closing right after the frame lost it whenever the peer had sent
-// frames the server had not read: a socket closed with input unread, or that
-// input reaches after the close, is reset, and the reset discards what the
-// peer had not yet received, the close frame among it. A close frame already
-// sent for a cancel cause (closeForCause) begins the same handshake. With no
-// close frame to send, or one that cannot be written, the connection is closed
-// at once. Called only from the writer goroutine (via runWriter) or the
-// enqueueClose full-queue fallback.
+// arrives or closeHandshakeTimeout passes, and its teardown then ends the
+// connection (lingerClose). Closing right after the frame lost it whenever the
+// peer had sent frames the server had not read: a socket closed with input
+// unread, or that input reaches after the close, is reset, and the reset
+// discards what the peer had not yet received, the close frame among it. A
+// close frame already sent for a cancel cause (closeForCause) begins the same
+// handshake. With no close frame to send, or one that cannot be written, the
+// connection is closed at once. Called only from the writer goroutine (via
+// runWriter) or the enqueueClose full-queue fallback.
 func (p *peer) sendCloseFrame() {
 	p.wmu.Lock()
 	code, reason := p.closeCode, p.closeReason
@@ -491,6 +492,7 @@ func (p *peer) sendCloseFrame() {
 		gws.FormatCloseMessage(code, reason),
 		time.Now().Add(writeTimeout))
 	if err == nil || errors.Is(err, gws.ErrCloseSent) {
+		p.closeSent.Store(true)
 		err = p.conn.SetReadDeadline(time.Now().Add(closeHandshakeTimeout))
 	}
 	if err != nil {
@@ -501,17 +503,20 @@ func (p *peer) sendCloseFrame() {
 // closeForCause sends the peer the close frame for a cancel cause (see
 // Server.ServeHTTP) and waits out the closing handshake, as sendCloseFrame
 // leaves its close to it: until the read loop ends on the peer's close frame,
-// closeHandshakeTimeout passes, or the server shuts down. The caller closes the
-// connection then. It runs on the connection's own context-watcher goroutine,
-// so the wait holds up no caller. The frame goes out at once, ahead of the
-// queued frames, which are never written after it (see writeToConn), and
-// nothing is queued for the peer from here on (see closingLocked). The read
-// loop drops the peer's input from here on too, since WriteControl can wait on
-// a writer stuck on a peer that has stopped reading. A frame that cannot be
-// written within closeFrameTimeout ends the wait at once. The wait is a timer,
-// not sendCloseFrame's read deadline, because this runs beside the read loop,
-// which clears its read deadline on a peer's first frame.
-func (p *peer) closeForCause(code int, reason string) {
+// closeHandshakeTimeout passes, or the server shuts down. It reports whether
+// the read loop's teardown ends the connection, as it does once the frame is
+// written and the wait ends on the read loop or on the timer, which ends the
+// read loop; the caller closes the connection otherwise. It runs on the
+// connection's own context-watcher goroutine, so the wait holds up no caller.
+// The frame goes out at once, ahead of the queued frames, which are never
+// written after it (see writeToConn), and nothing is queued for the peer from
+// here on (see closingLocked). The read loop drops the peer's input from here
+// on too, since WriteControl can wait on a writer stuck on a peer that has
+// stopped reading. A frame that cannot be written within closeFrameTimeout
+// ends the wait at once. The wait is a timer, not sendCloseFrame's read
+// deadline, because this runs beside the read loop, which clears its read
+// deadline on a peer's first frame.
+func (p *peer) closeForCause(code int, reason string) bool {
 	p.inputClosed.Store(true)
 	p.wmu.Lock()
 	if p.closeCode == 0 {
@@ -522,15 +527,52 @@ func (p *peer) closeForCause(code int, reason string) {
 		gws.FormatCloseMessage(code, reason),
 		time.Now().Add(closeFrameTimeout))
 	if err != nil && !errors.Is(err, gws.ErrCloseSent) {
-		return
+		return false
 	}
+	p.closeSent.Store(true)
 	timer := time.NewTimer(closeHandshakeTimeout)
 	defer timer.Stop()
 	select {
 	case <-p.done:
+		return true
 	case <-p.server.shutdownCh:
+		return false
 	case <-timer.C:
+		return p.conn.SetReadDeadline(time.Now()) == nil
 	}
+}
+
+// lingerClose ends the connection of a peer that was sent a close frame and
+// did not answer it within the closing handshake, without resetting it. The
+// frame can still wait in the socket's buffers behind what was written before
+// it, and a socket closed while the peer still sends is reset, which discards
+// all of that, the frame among it: the peer, still reading, then reads a reset
+// and no close code. So the write side is shut first, which sends what the
+// buffers hold and then the end of the stream, and what the peer still sends
+// is read and dropped until it closes its side, writeTimeout passes or the
+// server shuts down. The peer has left its room by then (handleDisconnect), so
+// it holds only its socket meanwhile. A connection that cannot be half-closed
+// is closed at once.
+func (p *peer) lingerClose() {
+	nc := p.conn.NetConn()
+	half, ok := nc.(interface{ CloseWrite() error })
+	if !ok || half.CloseWrite() != nil {
+		_ = nc.Close()
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-p.server.shutdownCh:
+			_ = nc.Close()
+		case <-done:
+		}
+	}()
+	if nc.SetReadDeadline(time.Now().Add(writeTimeout)) == nil {
+		_, _ = io.Copy(io.Discard, nc)
+	}
+	close(done)
+	_ = nc.Close()
 }
 
 // closingLocked reports, with wmu held, whether a close frame is queued for the

@@ -19,7 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OnPeerUpdate` refusal, failed token auth or malformed sync message that
   closed it. The server now does RFC 6455's closing handshake: it writes the
   close frame, reads and drops what the peer sends until the peer's own close
-  frame arrives or five seconds pass, then closes the connection. A close frame
+  frame arrives or five seconds pass. A peer still reading what came before
+  the frame when they pass, such as a browser applying a large state, still
+  receives it: the server then shuts the connection's write side, which sends
+  what the socket's buffers hold and then the end of the stream, and reads and
+  drops what the peer still sends until the peer closes its side, ten seconds
+  pass or the server shuts down, and only then closes the socket. A close frame
   that cannot be written closes the connection at once, as before. Frames for
   a peer being closed are dropped rather than queued, since nothing after the
   close frame is written, so the room's broadcasts cannot fill its write queue

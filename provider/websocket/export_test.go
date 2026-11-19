@@ -76,3 +76,8 @@ func MemoryPersistenceBackoffState(m *MemoryPersistence, room string) (failures 
 	}
 	return l.failures, l.retryAt
 }
+
+// CloseHandshakeTimeout is how long the server waits for a peer's answer to its
+// close frame. Test-only: a test of a peer that is still reading when the wait
+// ends must read nothing for longer than this.
+const CloseHandshakeTimeout = closeHandshakeTimeout
