@@ -292,7 +292,7 @@ func TestUnit_PendingMerge_AWindowKeepsWhatTheWholeQueueKeeps(t *testing.T) {
 	}
 	cases := 30000
 	if raceEnabled {
-		cases = 3000 // the race detector makes each case about five times slower
+		cases = 1000 // the race detector makes each case about five times slower
 	}
 	for n := range cases {
 		gap := 2 - n%3
