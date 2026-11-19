@@ -9,10 +9,11 @@ import (
 )
 
 // A seq holds what a slice holds under random inserts, cuts and splices,
-// short and past seqFlat, where it is a treap that reuses the nodes it cut.
+// short and past seqFlat, where it is a treap that reuses the nodes it cut: a
+// fifth of the rounds under the race detector.
 func TestUnit_Seq_StepsMatchASlice(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
-	for round := range 30 {
+	for round := range raceSeeds(30) {
 		var s seq[int]
 		var want []int
 		limit := 1 + rng.IntN(6*seqFlat)
