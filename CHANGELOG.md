@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each JSON value), before the value past it is built, with an error
   wrapping the new `crdt.ErrValueLimit`. A limit below zero bounds nothing,
   which is what the existing functions pass.
+- **`provider/websocket`: `Server.ReadOnlySyncStep2MaxValues`**: when
+  positive, the decode that answers a read-only peer's SyncStep2 on a
+  Hocuspocus-framed connection (SyncStatus(1) when the room already holds all
+  of its update) stops past that many values, through
+  `crdt.DocContainsUpdateV1Limit`, before the value past it is built, and the
+  step is answered 0, as one that does not decode is. 0, the default, bounds
+  nothing.
 
 ## [1.57.0] — 2026-11-18
 

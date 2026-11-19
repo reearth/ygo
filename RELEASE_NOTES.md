@@ -17,6 +17,12 @@
   `HeldStructsDifferV1Limit` take a last argument, `values`, and stop past
   that many values with `ErrValueLimit`, before the value past it is built.
   The existing functions keep their signatures and stay unbounded.
+- **New: `Server.ReadOnlySyncStep2MaxValues`.** A read-only peer's SyncStep2
+  on a Hocuspocus-framed connection is answered SyncStatus(1) when the room
+  already holds all of its update, and deciding that decodes the whole update
+  outside any apply. When positive, this option stops that decode past that
+  many values (`DocContainsUpdateV1Limit`), and the step is answered 0, as
+  one that does not decode is. 0, the default, bounds nothing.
 
 ## v1.57.0
 

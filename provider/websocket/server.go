@@ -1100,6 +1100,17 @@ type Server struct {
 	// raise it for unusual bulk-sync workloads.
 	MaxMessageBytes int64
 
+	// ReadOnlySyncStep2MaxValues, when positive, bounds the decode that
+	// answers a SyncStep2 a read-only peer sends on a connection using
+	// Hocuspocus framing. The answer is SyncStatus(1) when the room already
+	// holds all of the step's update, and deciding it decodes the whole
+	// update into a scratch document, outside any apply. With this set, that
+	// decode stops past this many values, as crdt.DocContainsUpdateV1Limit
+	// counts them, before the value past it is built, and the step is
+	// answered SyncStatus(0), as one whose update does not decode is. 0, the
+	// default, bounds nothing.
+	ReadOnlySyncStep2MaxValues int
+
 	// MessageRateLimit caps the sustained inbound-message rate (messages per
 	// second) for each peer. Zero (the default) means unlimited, preserving
 	// existing behaviour. When set, every peer gets its own token-bucket limiter;

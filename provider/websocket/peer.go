@@ -289,11 +289,18 @@ func (p *peer) applyToRoom(update []byte) (bool, error) {
 }
 
 // roomHolds reports whether the room's document already holds everything the
-// V1 update carries. An update that does not decode is not held.
+// V1 update carries. An update that does not decode is not held, nor one that
+// carries more values than Server.ReadOnlySyncStep2MaxValues, whose decode
+// stops there.
 func (p *peer) roomHolds(update []byte) bool {
-	held, err := crdt.DocContainsUpdateV1(p.room.doc, update)
+	values := -1
+	if p.server.ReadOnlySyncStep2MaxValues > 0 {
+		values = p.server.ReadOnlySyncStep2MaxValues
+	}
+	held, err := crdt.DocContainsUpdateV1Limit(p.room.doc, update, values)
 	if err != nil {
-		p.server.log().Debug("read-only sync message does not decode",
+		// One past the limit fails with crdt.ErrValueLimit.
+		p.server.log().Debug("read-only sync message not decoded",
 			"room", p.roomName, "err", err)
 		return false
 	}
