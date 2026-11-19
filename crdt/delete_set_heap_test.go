@@ -65,8 +65,21 @@ type craftedDeleteSet struct {
 	cut     bool
 }
 
-// craftedDeleteSets are delete sets of about a MiB, as written in V1 or V2.
+// deleteSetScale is what craftedDeleteSets divides its sizes by, and what the
+// test divides the default pending cap by: 8 under the race detector, which
+// makes each apply several times slower, and 1 without it. A shape the cap
+// refuses at full size is refused at the smaller one too.
+func deleteSetScale() int {
+	if raceEnabled {
+		return 8
+	}
+	return 1
+}
+
+// craftedDeleteSets are delete sets of about a MiB, as written in V1 or V2,
+// each divided by deleteSetScale.
 func craftedDeleteSets(v2 bool) []craftedDeleteSet {
+	scale := deleteSetScale()
 	oneClient := func(n int, clock func(int) uint64) []rawDeleteEntry {
 		ranges := make([]DeleteRange, n)
 		for i := range ranges {
@@ -80,18 +93,18 @@ func craftedDeleteSets(v2 bool) []craftedDeleteSet {
 	if v2 {
 		merging = func(i int) uint64 { return uint64(i) }
 	}
-	many := make([]rawDeleteEntry, 170_000)
+	many := make([]rawDeleteEntry, 170_000/scale)
 	for c := range many {
 		many[c] = rawDeleteEntry{client: ClientID(5000 + c), ranges: []DeleteRange{{Clock: 0, Len: 1}}}
 	}
 	// Clients that the header declares and that add no range must cost nothing.
-	empty := make([]rawDeleteEntry, 250_000)
+	empty := make([]rawDeleteEntry, 250_000/scale)
 	for c := range empty {
 		empty[c] = rawDeleteEntry{client: ClientID(5000 + c)}
 	}
 	// A client named in many entries must get one list, sized once.
 	repeated := func(clients int) []rawDeleteEntry {
-		entries := make([]rawDeleteEntry, 1<<18)
+		entries := make([]rawDeleteEntry, 1<<18/scale)
 		for i := range entries {
 			entries[i] = rawDeleteEntry{client: ClientID(7 + i%clients), ranges: []DeleteRange{{Clock: uint64(i%120) + 1, Len: 1}}}
 		}
@@ -99,11 +112,11 @@ func craftedDeleteSets(v2 bool) []craftedDeleteSet {
 	}
 	// A range count past what the bytes hold must not size a larger list; the
 	// apply refuses the cut set after it applies the ranges before the cut.
-	cut := oneClient(1<<18, func(i int) uint64 { return uint64(2 * i) })
+	cut := oneClient(1<<18/scale, func(i int) uint64 { return uint64(2 * i) })
 	cut[0].declared = 1 << 40
 	return []craftedDeleteSet{
-		{name: "one client, ranges that merge", entries: oneClient(1<<19, merging)},
-		{name: "one client, distinct ranges", entries: oneClient(1<<18, func(i int) uint64 { return uint64(2 * i) })},
+		{name: "one client, ranges that merge", entries: oneClient(1<<19/scale, merging)},
+		{name: "one client, distinct ranges", entries: oneClient(1<<18/scale, func(i int) uint64 { return uint64(2 * i) })},
 		{name: "one client, a count past the bytes", entries: cut, cut: true},
 		{name: "one client in every entry", entries: repeated(1)},
 		{name: "two clients in turn", entries: repeated(2)},
@@ -113,10 +126,15 @@ func craftedDeleteSets(v2 bool) []craftedDeleteSet {
 }
 
 // allocatedBy is the fewest bytes f allocates over three runs, since a run can
-// also count what another goroutine allocates meanwhile.
+// also count what another goroutine allocates meanwhile; one run under the
+// race detector, which makes each run several times slower.
 func allocatedBy(f func()) uint64 {
+	runs := 3
+	if raceEnabled {
+		runs = 1
+	}
 	fewest := uint64(math.MaxUint64)
-	for range 3 {
+	for range runs {
 		runtime.GC()
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
@@ -132,7 +150,8 @@ func allocatedBy(f func()) uint64 {
 // size each list once: 16 bytes for a range that takes at least two, and one
 // map entry per client, however many entries name it. Refused or parked at the
 // default cap it holds the decoded set; parked whole with the cap lifted it
-// also holds the store's own copy.
+// also holds the store's own copy. Under the race detector the shapes and the
+// cap are each divided by deleteSetScale.
 func TestUnit_ApplyUpdate_ADeleteSetAllocatesInProportionToItsBytes(t *testing.T) {
 	const atTheCap, capLifted = 20, 36
 	for _, format := range applyFormats {
@@ -145,6 +164,8 @@ func TestUnit_ApplyUpdate_ADeleteSetAllocatesInProportionToItsBytes(t *testing.T
 				name, bound, opts := shape.name+" "+format.name, atTheCap, []DocOption{WithClientID(1)}
 				if lifted {
 					name, bound, opts = name+", cap lifted", capLifted, append(opts, WithMaxPendingItems(math.MaxInt))
+				} else if raceEnabled {
+					opts = append(opts, WithMaxPendingItems(defaultMaxPendingItems/deleteSetScale()))
 				}
 				var err error
 				allocated := allocatedBy(func() { err = apply(New(opts...), update, nil) })

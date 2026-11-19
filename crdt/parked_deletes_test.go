@@ -68,9 +68,15 @@ func textState(client ClientID, s string) []byte {
 }
 
 // A keystroke must not pay for parked delete ranges of clients it brings
-// nothing for.
+// nothing for. Under the race detector a fifth of the ranges are parked:
+// copying even those on each keystroke would cost far more than the 1 KiB the
+// check allows.
 func TestUnit_ApplyUpdate_AKeystrokeCostsNothingForParkedDeleteRanges(t *testing.T) {
-	const n, keystrokes = 100_000, 100
+	const keystrokes = 100
+	n := 100_000
+	if raceEnabled {
+		n = 20_000
+	}
 	state := textState(7, strings.Repeat("a", 8))
 	typed := typedKeystrokes(t, state, keystrokes)
 	manyClients := make(map[ClientID][]DeleteRange, n)
