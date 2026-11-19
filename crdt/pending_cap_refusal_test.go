@@ -149,9 +149,10 @@ func TestUnit_ApplyUpdate_RefusedParkedItemUpdateLeavesTheDocumentUnchanged(t *t
 }
 
 // The pending cap applies an update with room for the p items it parks and
-// refuses it, unchanged, with room for p-1.
+// refuses it, unchanged, with room for p-1: a fifth of the rounds under the
+// race detector, where a quarter of them must still be refused.
 func TestUnit_ApplyUpdate_ParkedItemCapRefusesExactlyWhatWouldPassIt(t *testing.T) {
-	const rounds = 300
+	rounds := raceSeeds(300)
 	rng := rand.New(rand.NewPCG(338, 2526))
 	refused := 0
 	for round := range rounds {
@@ -203,9 +204,10 @@ func TestUnit_ApplyUpdate_ParkedItemCapRefusesExactlyWhatWouldPassIt(t *testing.
 }
 
 // The lenient check refuses exactly what referencePendingBudgetCheck refuses,
-// at each room around what the update parks.
+// at each room around what the update parks: a fifth of the rounds under the
+// race detector.
 func TestUnit_PendingBudget_LenientCheckRefusesWhatTheValidatingCheckRefuses(t *testing.T) {
-	const rounds = 300
+	rounds := raceSeeds(300)
 	rng := rand.New(rand.NewPCG(340, 2527))
 	compared := 0
 	for round := range rounds {
@@ -465,11 +467,14 @@ func randomBlockedUpdate(rng *rand.Rand) []byte {
 
 // The check before the apply counts exactly what the apply parks: an update
 // applies under a cap with exactly the room it needs, parking that many, and
-// a cap one short refuses it before any change.
+// a cap one short refuses it before any change. More than a quarter of the
+// generated cases must grow the queue: 1,000 of 4,000, and a fifth of each
+// under the race detector.
 func TestUnit_PendingCap_AgreesWithWhatTheApplyParks(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 11))
+	cases := raceSeeds(4000)
 	tried := 0
-	for i := range 4000 {
+	for i := range cases {
 		seed, update := randomBlockedUpdate(rng), randomBlockedUpdate(rng)
 		free := New(WithClientID(1), WithMaxPendingItems(math.MaxInt))
 		if ApplyUpdateV1(free, seed, nil) != nil {
@@ -516,7 +521,7 @@ func TestUnit_PendingCap_AgreesWithWhatTheApplyParks(t *testing.T) {
 			t.Fatalf("%s: the observers were handed %d updates, want none", where, *updates)
 		}
 	}
-	if tried <= 1000 {
-		t.Fatalf("the generator reached %d updates that grow the queue, want more than 1,000", tried)
+	if tried <= cases/4 {
+		t.Fatalf("the generator reached %d updates that grow the queue, want more than %d", tried, cases/4)
 	}
 }
