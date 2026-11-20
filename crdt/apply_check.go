@@ -27,7 +27,22 @@ var errApplyCheckPanicked = errors.New("crdt: the document's apply check panicke
 // transaction to write with, and panics when it reads another document's type
 // or reads after the check has returned.
 type ApplyView struct {
-	txn *Transaction
+	txn   *Transaction
+	drain bool
+}
+
+// Drained is whether the check is judging what the apply's drain of the
+// parked queue landed, and not what the update itself left. An apply's check
+// runs at most twice: on the update, before the drain, where the update
+// changed the document, and on the drain, where the drain landed something.
+// Drained is false on the first and true on the second, so the one run of an
+// apply whose update changed nothing, or only parked, and whose drain landed
+// something is the drain's. Refusing the update's run rolls the whole apply
+// back; refusing the drain's rolls back the drain alone, and the update
+// stands (ErrApplyCheckDrain).
+func (v *ApplyView) Drained() bool {
+	v.live()
+	return v.drain
 }
 
 // ChangedTypes is the types the apply changed so far, each the direct parent
@@ -101,7 +116,7 @@ func checkApply(txn *Transaction) error {
 	if j == nil || j.check == nil || !j.updateLanded(txn) {
 		return nil
 	}
-	switch panicked, err := runCheck(txn, j.check); {
+	switch panicked, err := runCheck(txn, j.check, false); {
 	case panicked:
 		return errApplyCheckPanicked
 	case err != nil:
@@ -119,7 +134,7 @@ func checkDrain(txn *Transaction, j *applyJournal) {
 	if j.check == nil || !landedSince(txn, j.drain) {
 		return
 	}
-	panicked, err := runCheck(txn, j.check)
+	panicked, err := runCheck(txn, j.check, true)
 	if !panicked && err == nil {
 		return
 	}
@@ -171,11 +186,12 @@ func deletedSpan(ds DeleteSet) uint64 {
 	return n
 }
 
-// runCheck calls check with txn's origin and a view of its document. A panic
-// is kept on the document, to be raised once the transaction has committed,
-// and reported as panicked.
-func runCheck(txn *Transaction, check func(origin any, view *ApplyView) error) (panicked bool, err error) {
-	view := &ApplyView{txn: txn}
+// runCheck calls check with txn's origin and a view of its document, drain
+// saying whether it judges the drain (ApplyView.Drained). A panic is kept on
+// the document, to be raised once the transaction has committed, and
+// reported as panicked.
+func runCheck(txn *Transaction, check func(origin any, view *ApplyView) error, drain bool) (panicked bool, err error) {
+	view := &ApplyView{txn: txn, drain: drain}
 	defer func() {
 		view.txn = nil
 		if r := recover(); r != nil {
