@@ -389,12 +389,10 @@ func noteParked(txn *Transaction, item *Item) {
 
 // count refuses the apply when item would take the update's structs or bytes
 // past the budget, and otherwise counts it. Its bytes are its content's and
-// the map key it is set under, which the document keeps while the entry lives.
+// the map key it is set under, which the document keeps while the entry lives
+// (structBytes).
 func (t *applyTally) count(item *Item) {
-	bytes := contentBytes(item.Content)
-	if item.ParentSub != nil {
-		bytes += len(*item.ParentSub)
-	}
+	bytes := structBytes(item)
 	if b := t.budget; over(b.Structs, t.structs+1) || over(b.Bytes, t.bytes+bytes) {
 		panic(applyBudgetExceeded{})
 	}
