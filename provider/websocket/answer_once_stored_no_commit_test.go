@@ -2,7 +2,9 @@ package websocket_test
 
 import (
 	"testing"
+	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -15,6 +17,25 @@ import (
 // takes the verdict of the room instance's newest store still running,
 // whichever peer's commit that store holds, and once a commit of the room
 // instance was not stored every answer the instance sends is 0.
+
+// awaitRelay reads conn's frames into doc until doc holds everything from
+// holds. A commit's store begins in the commit, and its relay goes out only
+// once the apply returns (applySyncUpdate), so a store that has begun says
+// nothing of whether the relay has reached another peer yet.
+func awaitRelay(t *testing.T, conn *gws.Conn, doc, from *crdt.Doc) {
+	t.Helper()
+	update := crdt.EncodeStateAsUpdateV1(from, nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		held, err := crdt.DocContainsUpdateV1(doc, update)
+		require.NoError(t, err)
+		if held {
+			return
+		}
+		require.True(t, time.Now().Before(deadline), "the relay of the commit in flight never arrived")
+		watcherSyncFrames(t, conn, doc)
+	}
+}
 
 // A frame of another peer, or of a read-only peer, that carries only what a
 // commit still being stored put in the room waits for that store, and is
@@ -40,8 +61,8 @@ func TestInteg_AnswerOnceStored_AFrameThatCommitsNothingTakesTheVerdictOfTheStor
 
 			hpSend(t, editor, "room", tagSync, ygsync.EncodeUpdate(textUpdate(editorDoc, "a")))
 			gate.waitStore(t)
-			watcherSyncFrames(t, other, otherDoc)
-			watcherSyncFrames(t, reader, readerDoc)
+			awaitRelay(t, other, otherDoc, editorDoc)
+			awaitRelay(t, reader, readerDoc, editorDoc)
 			require.Equal(t, "a", otherDoc.GetText("t").ToString(), "the relay does not wait for the store")
 			hpSend(t, other, "room", tagSync, wholeStep2(t, otherDoc))
 			hpSend(t, reader, "room", tagSync, wholeStep2(t, readerDoc))
@@ -78,7 +99,7 @@ func TestInteg_AnswerOnceStored_TheReplyToResyncPeerTakesTheVerdictOfTheStoreInF
 	editor := hpDial(t, ts, "room", false, editorDoc)
 	hpSend(t, editor, "room", tagSync, ygsync.EncodeUpdate(textUpdate(editorDoc, "a")))
 	gate.waitStore(t)
-	watcherSyncFrames(t, other, otherDoc)
+	awaitRelay(t, other, otherDoc, editorDoc)
 	require.True(t, srv.ResyncPeer(otherOrigin))
 	_, step1 := syncEvents(t, other, 1)
 	reply, err := ygsync.EncodeSyncStep2(otherDoc, step1)
