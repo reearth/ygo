@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"sort"
 )
 
 // SetDiscardRefusedDrain (off by default) changes what a document that
@@ -56,8 +57,10 @@ type DrainDiscardedError struct {
 	// Senders are the origins of the applies that parked what was
 	// discarded: each comparable origin once, in no order. An origin the
 	// document has no record of - a park made before the option was set,
-	// or one whose struct a later park's merge replaced in the queue - is
-	// missing, and a nil origin is left out.
+	// one whose struct a later park's merge replaced in the queue, or one
+	// of several that parked parts of one pending delete range, when the
+	// record keeps that range under another of them (pruneParkedDeletes) -
+	// is missing, and a nil origin is left out.
 	Senders []any
 	// Cause is why the drain was rolled back: the apply check's refusal
 	// (which wraps ErrApplyCheckDrain itself), or ErrIntegrateScanBudget,
@@ -78,16 +81,19 @@ func (e *DrainDiscardedError) Unwrap() []error {
 	return []error{ErrApplyCheckDrain, e.Cause}
 }
 
-// parkedDeletesBy is a delete set an apply parked and that apply's origin.
+// parkedDeletesBy is the delete ranges the applies of one origin parked,
+// as far as the record of who parked them still holds them, and that origin.
 type parkedDeletesBy struct {
 	ds     DeleteSet
 	origin any
 }
 
 // recordParkedOrigins keeps, on a document that discards refused drains,
-// the origin of txn for every struct and delete set txn parked and the queue
-// still holds at its commit, and forgets the records of what the queue no
-// longer holds once they outnumber it. The caller holds d.mu.
+// the origin of txn for every struct and delete range txn parked and the
+// queue still holds at its commit, and forgets the records of what the queue
+// no longer holds once they outnumber it: after every commit the record of
+// delete ranges holds at most 2*pendingDsRanges+16 ranges, whatever frames
+// parked them (pruneParkedDeletes). The caller holds d.mu.
 func recordParkedOrigins(d *Doc, txn *Transaction) {
 	if !d.discardRefusedDrain {
 		return
@@ -113,11 +119,12 @@ func recordParkedOrigins(d *Doc, txn *Transaction) {
 				}
 			}
 		}
-		// Only what the apply newly parked is its own: a frame sent again
-		// records nothing, so resends cannot grow the record.
-		for _, ds := range rec.fresh {
-			d.parkedDsBy = append(d.parkedDsBy, parkedDeletesBy{ds: ds, origin: txn.Origin})
-			d.parkedDsByRanges += rangeCount(ds)
+		// Only what the apply newly parked is its own. A nil origin is
+		// named to no one (DrainDiscardedError.Senders), so it is not kept.
+		if txn.Origin != nil {
+			for _, ds := range rec.fresh {
+				recordParkedDeletes(d, ds, txn.Origin)
+			}
 		}
 	}
 	held := s.pending.heldStructs()
@@ -133,20 +140,127 @@ func recordParkedOrigins(d *Doc, txn *Transaction) {
 		}
 		d.parkedBy = kept
 	}
-	// The record is pruned by the ranges it holds, not by its records, so a
-	// few records of many ranges the queue no longer holds go too.
 	switch {
 	case len(s.pendingDs.clients) == 0:
 		d.parkedDsBy, d.parkedDsByRanges = nil, 0
 	case d.parkedDsByRanges > 2*s.pendingDsRanges+16:
-		d.parkedDsBy = slices.DeleteFunc(d.parkedDsBy, func(by parkedDeletesBy) bool {
-			return !deletesOverlap(by.ds, s.pendingDs)
-		})
-		d.parkedDsByRanges = 0
-		for _, by := range d.parkedDsBy {
-			d.parkedDsByRanges += rangeCount(by.ds)
+		pruneParkedDeletes(d)
+	}
+}
+
+// recordParkedDeletes adds ds, the delete ranges an apply of origin newly
+// parked, to the record: into the one set of origin's ranges when origin is
+// comparable, compacted as the pending deletes are, so frames of one sender
+// that grow or bridge the ranges it parked add none, and as a set of its own
+// otherwise. It keeps parkedDsByRanges.
+func recordParkedDeletes(d *Doc, ds DeleteSet, origin any) {
+	var by *parkedDeletesBy
+	if reflect.ValueOf(origin).Comparable() {
+		for i := range d.parkedDsBy {
+			if d.parkedDsBy[i].origin == origin {
+				by = &d.parkedDsBy[i]
+				break
+			}
 		}
 	}
+	if by == nil {
+		d.parkedDsBy = append(d.parkedDsBy, parkedDeletesBy{ds: newDeleteSet(), origin: origin})
+		by = &d.parkedDsBy[len(d.parkedDsBy)-1]
+	}
+	for client := range ds.clients {
+		d.parkedDsByRanges -= len(by.ds.clients[client])
+	}
+	by.ds.Merge(ds)
+	for client := range ds.clients {
+		d.parkedDsByRanges += len(by.ds.clients[client])
+	}
+}
+
+// pruneParkedDeletes cuts the record of who parked each delete range to the
+// clocks the pending deletes still hold. The sets of several origins can
+// still cut one pending range into more pieces than the bound allows - one
+// sender's frames parking the clocks between another's - so when more than
+// 2*pendingDsRanges+16 ranges are left, each pending range the record touches
+// is kept whole under one origin, that of the first set that touches it
+// (onePerPendingRange). The record then holds at most pendingDsRanges ranges
+// and still names an origin for every pending range it named one for. Each
+// range the record holds is found in the pending deletes by a binary search,
+// and the prune runs only once the record holds more than twice the pending
+// ranges, so its work is what the record holds.
+func pruneParkedDeletes(d *Doc) {
+	s := d.store
+	kept, n := d.parkedDsBy[:0], 0
+	for _, by := range d.parkedDsBy {
+		by.ds = heldPart(by.ds, s.pendingDs)
+		if r := rangeCount(by.ds); r > 0 {
+			kept = append(kept, by)
+			n += r
+		}
+	}
+	clear(d.parkedDsBy[len(kept):])
+	d.parkedDsBy, d.parkedDsByRanges = kept, n
+	if n > 2*s.pendingDsRanges+16 {
+		d.parkedDsBy, d.parkedDsByRanges = onePerPendingRange(kept, s.pendingDs)
+	}
+}
+
+// heldPart is the part of ds that held also holds: each range of ds cut to
+// the clocks the ranges of held of the same client cover, which are sorted
+// and apart, as the pending deletes keep them.
+func heldPart(ds, held DeleteSet) DeleteSet {
+	out := newDeleteSet()
+	for client, ranges := range ds.clients {
+		h := held.clients[client]
+		var kept []DeleteRange
+		for _, r := range ranges {
+			end := r.Clock + r.Len
+			i := sort.Search(len(h), func(i int) bool { return h[i].Clock+h[i].Len > r.Clock })
+			for ; i < len(h) && h[i].Clock < end; i++ {
+				start := max(r.Clock, h[i].Clock)
+				kept = append(kept, DeleteRange{Clock: start, Len: min(end, h[i].Clock+h[i].Len) - start})
+			}
+		}
+		if len(kept) > 0 {
+			out.clients[client] = kept
+		}
+	}
+	return out
+}
+
+// onePerPendingRange is the record by, each of whose ranges lies within one
+// range of pending (heldPart), with each pending range it touches kept whole
+// under the first set of by that touches it, and the ranges it then holds.
+func onePerPendingRange(by []parkedDeletesBy, pending DeleteSet) ([]parkedDeletesBy, int) {
+	taken := make(map[ClientID][]bool)
+	out, n := by[:0], 0
+	for _, b := range by {
+		ds := newDeleteSet()
+		for client, ranges := range b.ds.clients {
+			h := pending.clients[client]
+			took, ok := taken[client]
+			if !ok {
+				took = make([]bool, len(h))
+				taken[client] = took
+			}
+			var whole []DeleteRange
+			for _, r := range ranges {
+				i := sort.Search(len(h), func(i int) bool { return h[i].Clock+h[i].Len > r.Clock })
+				if !took[i] {
+					took[i] = true
+					whole = append(whole, h[i])
+				}
+			}
+			if len(whole) > 0 {
+				ds.clients[client] = whole
+				n += len(whole)
+			}
+		}
+		if len(ds.clients) > 0 {
+			out = append(out, parkedDeletesBy{ds: ds, origin: b.origin})
+		}
+	}
+	clear(by[len(out):])
+	return out, n
 }
 
 // rangeCount is how many ranges ds holds over all its clients.
