@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -508,7 +509,7 @@ func tryMergeWithLeft(item *Item, store *StructStore) bool {
 	storeItems := store.clients[item.ID.Client]
 	for i, it := range storeItems {
 		if it == item {
-			store.clients[item.ID.Client] = append(storeItems[:i], storeItems[i+1:]...)
+			store.clients[item.ID.Client] = slices.Delete(storeItems, i, i+1)
 			break
 		}
 	}

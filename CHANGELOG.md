@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.57.2] — 2026-11-20
+
+### Fixed
+
+- **An unsubscribed callback, or any other element removed from a list a
+  document, a type, a persistence or a client keeps, is no longer kept
+  alive by that list.** Each removal used `append(s[:i], s[i+1:]...)`, which
+  leaves the old last element in the backing array past the new length, so
+  an unsubscribed callback and all it captured stayed reachable until a
+  later append overwrote its slot. These removals now use `slices.Delete`,
+  which clears that slot:
+  - `crdt`: the `Doc.OnUpdate`, `Doc.OnAfterTransaction` and
+    `Doc.OnSubdocs` unsubscribes; the `Observe` unsubscribes of `YArray`,
+    `YMap`, `YText`, `YXmlFragment` and `YXmlElement`, and the `ObserveDeep`
+    one; `YXmlElement.DeleteAttribute` on an element not yet in a document;
+    the search markers' drops; the attribution ranges' merge; and the
+    removal of a struct merged into its left neighbour from its client's
+    store list.
+  - `persistence`: `MemoryPersistence.DeleteSnapshot`.
+  - `provider/client`: the `OnStatus` unsubscribe.
+
 ## [1.57.1] — 2026-11-18
 
 ### Fixed

@@ -1,6 +1,9 @@
 package crdt
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // arraySub pairs a unique subscription ID with a YArrayEvent callback.
 type arraySub struct {
@@ -446,7 +449,7 @@ func (a *YArray) Observe(fn func(YArrayEvent)) func() {
 		}
 		for i, s := range a.observers {
 			if s.id == id {
-				a.observers = append(a.observers[:i], a.observers[i+1:]...)
+				a.observers = slices.Delete(a.observers, i, i+1)
 				return
 			}
 		}

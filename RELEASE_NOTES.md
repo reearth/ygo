@@ -1,3 +1,18 @@
+## v1.57.2
+
+**Who is affected: anyone that unsubscribes callbacks, deletes snapshots
+from `MemoryPersistence`, or keeps a document open for a long time.**
+
+- **An unsubscribed callback is no longer kept alive.** Unsubscribing
+  removed the callback with `append(s[:i], s[i+1:]...)`, which leaves the old
+  last element in the backing array past the new length. Removing the newest
+  subscription left the callback itself there, so it and everything its
+  closure captured stayed reachable until a later subscription took the
+  slot. The same removal ran in `YXmlElement.DeleteAttribute` on an element
+  not yet in a document, in `MemoryPersistence.DeleteSnapshot`, in the
+  search markers, in the attribution ranges and in the store's merge of two
+  structs. Each now uses `slices.Delete`, which clears the vacated slot.
+
 ## v1.57.1
 
 **Who is affected: anyone storing binary or composite values in text
