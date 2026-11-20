@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"unicode/utf8"
 
@@ -174,7 +175,7 @@ func (r *attrRanges) getIDs() []AttrRange {
 		}
 		ids[i] = AttrRange{Clock: rng.Clock, Len: smaller, Attrs: attrsJoin(rng.Attrs, next.Attrs)}
 		if rng.Len == next.Len {
-			ids = append(ids[:i+1], ids[i+2:]...)
+			ids = slices.Delete(ids, i+1, i+2)
 		} else {
 			ids[i+1] = AttrRange{Clock: rng.Clock + smaller, Len: larger.Len - smaller, Attrs: larger.Attrs}
 			// bubble ids[i+1] right to keep clock order (yjs array.bubblesortItem).

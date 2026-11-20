@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -397,7 +398,7 @@ func (f *YXmlFragment) Observe(fn func(YXmlEvent)) func() {
 		}
 		for i, s := range f.observers {
 			if s.id == id {
-				f.observers = append(f.observers[:i], f.observers[i+1:]...)
+				f.observers = slices.Delete(f.observers, i, i+1)
 				return
 			}
 		}
@@ -523,7 +524,7 @@ func (e *YXmlElement) DeleteAttribute(txn *Transaction, key string) {
 	if t.detached() {
 		for i := range e.prelimAttrs {
 			if e.prelimAttrs[i].key == key {
-				e.prelimAttrs = append(e.prelimAttrs[:i], e.prelimAttrs[i+1:]...)
+				e.prelimAttrs = slices.Delete(e.prelimAttrs, i, i+1)
 				return
 			}
 		}
@@ -654,7 +655,7 @@ func (e *YXmlElement) Observe(fn func(YXmlEvent)) func() {
 		}
 		for i, s := range e.elemObs {
 			if s.id == id {
-				e.elemObs = append(e.elemObs[:i], e.elemObs[i+1:]...)
+				e.elemObs = slices.Delete(e.elemObs, i, i+1)
 				return
 			}
 		}

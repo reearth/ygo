@@ -1212,7 +1212,7 @@ func (txt *YText) Observe(fn func(YTextEvent)) func() {
 		}
 		for i, s := range txt.observers {
 			if s.id == id {
-				txt.observers = append(txt.observers[:i], txt.observers[i+1:]...)
+				txt.observers = slices.Delete(txt.observers, i, i+1)
 				return
 			}
 		}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1051,7 +1052,7 @@ func (c *Client) OnStatus(fn func(Status)) (unsub func()) {
 		c.statusMu.Lock()
 		for i, s := range c.statusSubs {
 			if s.id == id {
-				c.statusSubs = append(c.statusSubs[:i], c.statusSubs[i+1:]...)
+				c.statusSubs = slices.Delete(c.statusSubs, i, i+1)
 				break
 			}
 		}

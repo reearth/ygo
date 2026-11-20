@@ -1,5 +1,7 @@
 package crdt
 
+import "slices"
+
 // maxSearchMarker is the maximum number of search markers cached per
 // abstractType, matching the value used by the Yjs reference implementation
 // (ArraySearchMarker). A small fixed cap keeps the nearest-marker scan O(1)
@@ -305,7 +307,7 @@ func (t *abstractType) updateMarkerChanges(index, delta int) {
 	for i := len(t.markers) - 1; i >= 0; i-- {
 		m := &t.markers[i]
 		if m.item == nil || m.item.Deleted {
-			t.markers = append(t.markers[:i], t.markers[i+1:]...)
+			t.markers = slices.Delete(t.markers, i, i+1)
 			continue
 		}
 		if index <= m.index {
@@ -325,7 +327,7 @@ func (t *abstractType) updateMarkerChanges(index, delta int) {
 func (t *abstractType) dropUncountedMarkersAt(index int) {
 	for i := len(t.markers) - 1; i >= 0; i-- {
 		if m := t.markers[i]; m.index == index && m.item != nil && !m.item.Content.IsCountable() {
-			t.markers = append(t.markers[:i], t.markers[i+1:]...)
+			t.markers = slices.Delete(t.markers, i, i+1)
 		}
 	}
 }

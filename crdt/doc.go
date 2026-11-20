@@ -47,6 +47,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 )
@@ -880,7 +881,7 @@ func (d *Doc) OnUpdate(fn func(update []byte, origin any)) func() {
 		defer d.mu.Unlock()
 		for i, s := range d.onUpdate {
 			if s.id == id {
-				d.onUpdate = append(d.onUpdate[:i], d.onUpdate[i+1:]...)
+				d.onUpdate = slices.Delete(d.onUpdate, i, i+1)
 				return
 			}
 		}
@@ -904,7 +905,7 @@ func (d *Doc) OnAfterTransaction(fn func(*Transaction)) func() {
 		defer d.mu.Unlock()
 		for i, s := range d.onAfterTxn {
 			if s.id == id {
-				d.onAfterTxn = append(d.onAfterTxn[:i], d.onAfterTxn[i+1:]...)
+				d.onAfterTxn = slices.Delete(d.onAfterTxn, i, i+1)
 				return
 			}
 		}
@@ -925,7 +926,7 @@ func (d *Doc) OnSubdocs(fn func(SubdocsEvent)) func() {
 		defer d.mu.Unlock()
 		for i, s := range d.onSubdocs {
 			if s.id == id {
-				d.onSubdocs = append(d.onSubdocs[:i], d.onSubdocs[i+1:]...)
+				d.onSubdocs = slices.Delete(d.onSubdocs, i, i+1)
 				return
 			}
 		}

@@ -1,5 +1,7 @@
 package crdt
 
+import "slices"
+
 // SharedType is the public interface satisfied by every exported CRDT type
 // (YArray, YMap, YText, YXmlFragment, …). It exists so external callers can
 // name the element type of NewUndoManager's scope slice
@@ -252,7 +254,7 @@ func (t *abstractType) observeDeep(fn func(*Transaction)) func() {
 		}
 		for i, s := range t.deepObservers {
 			if s.id == id {
-				t.deepObservers = append(t.deepObservers[:i], t.deepObservers[i+1:]...)
+				t.deepObservers = slices.Delete(t.deepObservers, i, i+1)
 				return
 			}
 		}

@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -491,7 +492,7 @@ func (m *MemoryPersistence) DeleteSnapshot(ctx context.Context, room string, id 
 	}
 	for i, s := range r.snapVersions {
 		if s.id == id {
-			r.snapVersions = append(r.snapVersions[:i], r.snapVersions[i+1:]...)
+			r.snapVersions = slices.Delete(r.snapVersions, i, i+1)
 			return nil
 		}
 	}
