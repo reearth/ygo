@@ -30,7 +30,7 @@ import (
 // each commit that parks something while the option is on. A document that
 // does not apply remote updates whole or nothing rolls no drain back, and the
 // option changes nothing for it. Turning it off forgets the origins of parked
-// deletions it recorded.
+// deletions it recorded, and ForgetParkedOrigin forgets one origin.
 func (d *Doc) SetDiscardRefusedDrain(on bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -39,6 +39,49 @@ func (d *Doc) SetDiscardRefusedDrain(on bool) {
 		d.parkedDsBy, d.parkedDsByRanges = nil, 0
 	}
 }
+
+// ForgetParkedOrigin drops origin from what the document keeps of the apply
+// that parked each struct and delete range - on a document with a budget, a
+// roots list or SetDiscardRefusedDrain - so the document holds no reference
+// to origin and a later DrainDiscardedError does not name it. What origin
+// parked stays parked, and a struct's roots list stays with it
+// (checkParkedRoot). A server calls it once the sender whose applies carried
+// origin has gone: the document would otherwise keep that sender, and all it
+// holds, for as long as what it parked stays parked, and a sender that has
+// gone has nothing left to close. A nil origin, or one Go cannot compare, is
+// not matched. It costs a pass over the record, which the queue bounds.
+func (d *Doc) ForgetParkedOrigin(origin any) {
+	if origin == nil || !reflect.ValueOf(origin).Comparable() {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for it, from := range d.parkedBy {
+		switch {
+		case from.origin != origin:
+		case len(from.roots) == 0:
+			delete(d.parkedBy, it)
+		default:
+			from.origin = forgottenOrigin
+			d.parkedBy[it] = from
+		}
+	}
+	kept := d.parkedDsBy[:0]
+	for _, by := range d.parkedDsBy {
+		if by.origin == origin {
+			d.parkedDsByRanges -= rangeCount(by.ds)
+			continue
+		}
+		kept = append(kept, by)
+	}
+	clear(d.parkedDsBy[len(kept):])
+	d.parkedDsBy = kept
+}
+
+// forgottenOrigin stands, in what the document keeps of the apply that parked
+// a struct, for an origin ForgetParkedOrigin dropped where the struct's roots
+// list stays: no apply carries it (dropOutsideRoots) and no discard names it.
+var forgottenOrigin any = &struct{ forgotten bool }{}
 
 // DrainDiscardedError is the error of a remote apply whose update stands and
 // whose drain of the pending queue was rolled back and what its fill released
@@ -57,10 +100,11 @@ type DrainDiscardedError struct {
 	// Senders are the origins of the applies that parked what was
 	// discarded: each comparable origin once, in no order. An origin the
 	// document has no record of - a park made before the option was set,
-	// one whose struct a later park's merge replaced in the queue, or one
-	// of several that parked parts of one pending delete range, when the
-	// record keeps that range under another of them (pruneParkedDeletes) -
-	// is missing, and a nil origin is left out.
+	// one whose struct a later park's merge replaced in the queue, one of
+	// several that parked parts of one pending delete range, when the
+	// record keeps that range under another of them (pruneParkedDeletes),
+	// or one the document was told to forget (ForgetParkedOrigin) - is
+	// missing, and a nil origin is left out.
 	Senders []any
 	// Cause is why the drain was rolled back: the apply check's refusal
 	// (which wraps ErrApplyCheckDrain itself), or ErrIntegrateScanBudget,
@@ -443,7 +487,7 @@ func discardReleased(txn *Transaction, j *applyJournal, scanned int, cause error
 		}
 	}
 	add := func(origin any) {
-		if origin == nil {
+		if origin == nil || origin == forgottenOrigin {
 			return
 		}
 		if reflect.TypeOf(origin).Comparable() {

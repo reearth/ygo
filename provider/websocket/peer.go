@@ -581,6 +581,13 @@ func (p *peer) handleDisconnect() {
 		rm.mu.Unlock()
 		p.server.rmu.Unlock()
 
+		// The peer is the origin of every apply it made, which a document that
+		// discards refused drains records beside what each apply parked; the
+		// peer applies nothing more, so the record lets it go
+		// (crdt.Doc.ForgetParkedOrigin), and with it its connection and
+		// buffers, rather than keeping it for as long as what it parked stays.
+		rm.doc.ForgetParkedOrigin(p)
+
 		// Release semaphore slots now that the peer has left. These run
 		// regardless of the eviction decision below.
 		if rm.peerSem != nil {
