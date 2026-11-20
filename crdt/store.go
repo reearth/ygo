@@ -122,9 +122,12 @@ type pendingUpdate struct {
 	// so a transaction can record its park as a view of this queue.
 	items []*Item
 	dead  int // the nil slots of items
-	// bytes is the content bytes items hold (contentBytes), kept wherever a
-	// struct enters or leaves the queue or a merge cuts one in place, and
-	// summed afresh wherever a queue is rebuilt (PendingStats.ContentBytes).
+	// bytes is the bytes items hold as ApplyBudget.Bytes counts them, the
+	// map key included (structBytes), kept wherever a struct enters or
+	// leaves the queue or a merge cuts one in place, and summed afresh
+	// wherever a queue is rebuilt (PendingStats.ContentBytes). A queued
+	// struct's key changes only where a merge cuts its front (keep), which
+	// counts it again, or in a drain, which rebuilds the queue.
 	bytes   int
 	missing StateVector // clientID -> store clock at park time for that client
 	// cover is the clocks items span, built on demand and kept by addCover.

@@ -1600,13 +1600,15 @@ type PendingStats struct {
 	// across all clients. Each range is one [clock, clock+len) span.
 	DeleteRanges int
 
-	// ContentBytes is the bytes of content the parked structs hold now, as
-	// ApplyBudget.Bytes counts a struct's content: text and binary as they
-	// are, a value as the words it takes. The map key a struct carries is
-	// left out, since a parked struct holds it only once its origin is
-	// known. A caller that charges what the queue holds reads it after each
-	// apply rather than summing what each apply added, since a drain, a
-	// merge or a discard takes content out of the queue too.
+	// ContentBytes is the bytes the parked structs hold now, as
+	// ApplyBudget.Bytes counts a struct's (structBytes): its content - text
+	// and binary as they are, a value as the words it takes - and the map
+	// key it carries. A struct with neither origin carries its key from its
+	// decode on, as long as its sender made it, and one with an origin
+	// carries its origin's key once that origin is known. A caller that
+	// charges what the queue holds reads it after each apply rather than
+	// summing what each apply added, since a drain, a merge or a discard
+	// takes content out of the queue too.
 	ContentBytes int
 
 	// MissingFor lists the ClientIDs that pending items reference but

@@ -263,10 +263,11 @@ func TestUnit_DiscardRefusedDrain_TheRecordOfParkedDeletesStaysWithinTwiceThePen
 	})
 }
 
-// PendingStats.ContentBytes is the content bytes the pending queue holds
-// now, as ApplyBudget.Bytes counts a struct's content: it grows with what
-// parks, holds still for a resend that merges into the queue, and falls to
-// zero when the drain lands the queue.
+// PendingStats.ContentBytes is the bytes the pending queue holds now, as
+// ApplyBudget.Bytes counts a struct's: it grows with what parks, a map
+// entry's key included, holds still for a resend that merges into the queue,
+// and falls to zero when the drain lands the queue. A map entry written over
+// another carries no key on the wire, and parks behind its origin keyless.
 func TestUnit_PendingStats_ContentBytesIsWhatTheQueueHoldsNow(t *testing.T) {
 	for _, f := range applyFormats {
 		t.Run(f.name, func(t *testing.T) {
@@ -279,9 +280,12 @@ func TestUnit_PendingStats_ContentBytesIsWhatTheQueueHoldsNow(t *testing.T) {
 			}
 			first, second, third := insert(0, "ab"), insert(2, "cdef"), insert(6, "gh")
 			m := writer.GetMap("m")
-			sv := writer.StateVector()
-			writer.Transact(func(txn *Transaction) { m.Set(txn, "key", "value") })
-			keyed := EncodeStateAsUpdateV1(writer, sv)
+			set := func(value string) []byte {
+				sv := writer.StateVector()
+				writer.Transact(func(txn *Transaction) { m.Set(txn, "key", value) })
+				return EncodeStateAsUpdateV1(writer, sv)
+			}
+			keyed, overwritten := set("value"), set("other")
 
 			doc := New(WithClientID(1))
 			for _, step := range []struct {
@@ -292,14 +296,18 @@ func TestUnit_PendingStats_ContentBytesIsWhatTheQueueHoldsNow(t *testing.T) {
 				{"a frame behind a gap", second, 4},
 				{"the same frame again", second, 4},
 				{"the frame past it", third, 6},
-				{"a map entry past it", keyed, 6 + len("value")},
+				{"a map entry past it", keyed, 6 + len("key") + len("value")},
+				{"the entry written over", overwritten, 6 + len("key") + len("value") + len("other")},
 				{"the fill", first, 0},
 			} {
 				if err := applyIn(t, doc, f.v2, step.update); err != nil {
 					t.Fatalf("%s was refused: %v", step.name, err)
 				}
 				if got := doc.PendingStats().ContentBytes; got != step.want {
-					t.Fatalf("after %s the queue holds %d content bytes, want %d", step.name, got, step.want)
+					t.Fatalf("after %s the queue holds %d bytes, want %d", step.name, got, step.want)
+				}
+				if p := doc.store.pending; p != nil && p.bytes != itemsBytes(p.items) {
+					t.Fatalf("after %s the queue counts %d bytes and holds %d", step.name, p.bytes, itemsBytes(p.items))
 				}
 			}
 		})
