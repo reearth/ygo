@@ -2,6 +2,8 @@ package crdt
 
 import (
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -10,6 +12,7 @@ import (
 // the struct cap: ApplyBudget.MayParkDeletes judges a delete range where it
 // parks, WithMaxPendingDeleteRanges caps the parked ranges on their own,
 // the record of who parked a range keeps only what each apply newly parked,
+// within twice the parked ranges,
 // and PendingStats reports the content bytes the queue holds.
 
 // mayParkOnly is an apply budget bounding nothing but where delete ranges
@@ -194,6 +197,70 @@ func TestUnit_DiscardRefusedDrain_TheRecordOfParkedDeletesKeepsWhatEachApplyNewl
 	if got := recordedRanges(pruned); got > 2*5+16 {
 		t.Fatalf("the record holds %d ranges of %d records for 5 ranges parked, want at most %d", got, len(pruned.parkedDsBy), 2*5+16)
 	}
+}
+
+// On a document that discards refused drains, the record of who parked each
+// delete range holds at most 2*DeleteRanges+16 ranges after every apply,
+// whatever frames parked them, and still touches every pending range it
+// touched, so a discard of one names an origin. One sender's frames that each
+// grow its parked range by a clock add nothing to it. Two senders that each
+// park the clocks between the other's leave sets of their own that no
+// compaction joins, so the record keeps each pending range under one of them.
+func TestUnit_DiscardRefusedDrain_TheRecordOfParkedDeletesStaysWithinTwiceThePendingRanges(t *testing.T) {
+	check := func(t *testing.T, doc *Doc, step string) {
+		t.Helper()
+		parked := doc.PendingStats().DeleteRanges
+		if got := recordedRanges(doc); got > 2*parked+16 || got != doc.parkedDsByRanges {
+			t.Fatalf("after %s the record holds %d ranges, counted as %d, for %d parked; want at most %d",
+				step, got, doc.parkedDsByRanges, parked, 2*parked+16)
+		}
+		for client, ranges := range doc.store.pendingDs.clients {
+			for _, r := range ranges {
+				one := DeleteSet{clients: map[ClientID][]DeleteRange{client: {r}}}
+				if !slices.ContainsFunc(doc.parkedDsBy, func(by parkedDeletesBy) bool { return deletesOverlap(by.ds, one) }) {
+					t.Fatalf("after %s no origin is recorded for client %d's pending range %+v", step, client, r)
+				}
+			}
+		}
+	}
+	apply := func(t *testing.T, doc *Doc, ranges []DeleteRange, origin any, step string) {
+		t.Helper()
+		if err := ApplyUpdateV1(doc, deleteSetUpdate(map[ClientID][]DeleteRange{9: ranges}), origin); err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		check(t, doc, step)
+	}
+
+	t.Run("one sender", func(t *testing.T) {
+		doc := New(WithClientID(1))
+		doc.SetDiscardRefusedDrain(true)
+		for k := range 1000 {
+			apply(t, doc, []DeleteRange{{Clock: uint64(k), Len: 1}}, "a", fmt.Sprintf("frame %d", k))
+		}
+		if len(doc.parkedDsBy) != 1 || recordedRanges(doc) != 1 {
+			t.Fatalf("1,000 frames that each grow one parked range are recorded as %d sets of %d ranges, want 1 of 1",
+				len(doc.parkedDsBy), recordedRanges(doc))
+		}
+	})
+
+	t.Run("two senders", func(t *testing.T) {
+		doc := New(WithClientID(1))
+		doc.SetDiscardRefusedDrain(true)
+		const pairs, m = 20, 50
+		var end uint64 // the pending deletes hold [0, end) between pairs
+		for p := range pairs {
+			singles := make([]DeleteRange, m)
+			for j := range singles {
+				singles[j] = DeleteRange{Clock: end + 1 + 2*uint64(j), Len: 1}
+			}
+			apply(t, doc, singles, "a", fmt.Sprintf("pair %d's singles", p))
+			apply(t, doc, []DeleteRange{{Clock: end, Len: 2*m + 1}}, "b", fmt.Sprintf("pair %d's cover", p))
+			end += 2*m + 1
+		}
+		if got := doc.PendingStats().DeleteRanges; got != 1 {
+			t.Fatalf("the pairs leave %d ranges parked, want 1", got)
+		}
+	})
 }
 
 // PendingStats.ContentBytes is the content bytes the pending queue holds

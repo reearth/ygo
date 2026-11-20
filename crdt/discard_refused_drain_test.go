@@ -214,3 +214,27 @@ func TestUnit_DiscardRefusedDrain_AnOriginThatIsNoMapKeyIsNamed(t *testing.T) {
 	assert.Equal(t, []any{unhashable, unhashable}, discarded.Senders,
 		"one origin no map can hold is named for the struct and for the deletion")
 }
+
+// A parked deletion still names an origin when the record of who parked it
+// keeps its pending range under another sender's: here a's frame parks every
+// other clock past the y's and b's parks the range over them, the y's clock
+// with it, so the record, past twice the one pending range, keeps that range
+// under a, the first to touch it.
+func TestUnit_DiscardRefusedDrain_ARangeKeptUnderAnotherSendersOriginIsNamed(t *testing.T) {
+	s, doc := discardScenario(t, false)
+	y := doc.StateVector().Clock(5)
+	const m = 20
+	singles := make([]DeleteRange, m)
+	for j := range singles {
+		singles[j] = DeleteRange{Clock: y + 1 + 2*uint64(j), Len: 1}
+	}
+	require.NoError(t, ApplyUpdateV1(doc, deleteSetUpdate(map[ClientID][]DeleteRange{5: singles}), "a"))
+	require.NoError(t, ApplyUpdateV1(doc, deleteSetUpdate(map[ClientID][]DeleteRange{5: {{Clock: y, Len: 2*m + 1}}}), "b"))
+	require.Equal(t, 1, doc.PendingStats().DeleteRanges)
+	require.Equal(t, 1, recordedRanges(doc), "the record keeps the one pending range under one origin")
+
+	discarded := requireDiscarded(t, ApplyUpdateV1(doc, s.y, "honest"), errCheckRefused)
+	assert.Equal(t, 1, discarded.Ranges, "the deletion of the y")
+	assert.ElementsMatch(t, []any{"attacker", "a"}, discarded.Senders)
+	assert.Equal(t, PendingStats{DeleteRanges: 1}, doc.PendingStats(), "the deletions past the y stay parked")
+}

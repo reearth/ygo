@@ -568,9 +568,9 @@ type Doc struct {
 	parkedBy     map[*Item]parkedFrom
 	rootsDropped map[ClientID]int
 	// discardRefusedDrain is SetDiscardRefusedDrain's setting, and
-	// parkedDsBy, kept only while it is on, the origin of the apply that
-	// parked each delete set the pending deletes hold (recordParkedOrigins);
-	// parkedDsByRanges counts parkedDsBy's ranges.
+	// parkedDsBy, kept only while it is on, the delete ranges the applies of
+	// each origin parked, pruned to what the pending deletes hold
+	// (recordParkedOrigins); parkedDsByRanges counts parkedDsBy's ranges.
 	discardRefusedDrain bool
 	parkedDsBy          []parkedDeletesBy
 	parkedDsByRanges    int
