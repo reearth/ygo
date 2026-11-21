@@ -61,7 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopped, which `ApplyUpdateV1Landed` reports, and keeps nothing with
   `WithWholeOrNothingApplies`. A struct the drain of the parked queue
   integrates is not counted against the apply that fills its gap. An option
-  set to limit nothing changes nothing an apply does.
+  set to limit nothing changes nothing an apply does. `ApplyBudget.Integrated`,
+  when set, is called once for the apply after it has integrated and before
+  the commit's first observer, on the applying goroutine with the document
+  lock released, and never for an apply that fails or is rolled back: an
+  owner gives back there what it holds for the apply, such as memory it
+  reserved for the decode, before an observer that may block, such as one
+  that hands the update to a store through a bounded queue.
 
 ### Changed
 

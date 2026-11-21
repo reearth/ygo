@@ -203,6 +203,17 @@ keeps nothing on a document with `WithWholeOrNothingApplies`, which is the one
 option that rolls an apply back. A budget that limits nothing, or a list that
 names every root an update writes, changes nothing an apply does.
 
+A budget can also carry `Integrated`, a callback for its one apply. It is
+called after the update has integrated and before the commit's first
+observer, on the applying goroutine with the document lock released, and
+never for an apply that fails or is rolled back. An owner that holds
+something for the apply - memory it reserved for the decode, a slot of a
+shared pool - can give it back there instead of when the apply returns, which
+is after every observer; an observer that hands each update to a store
+through a bounded queue can wait for long while that queue is full. By then
+the apply's decode is garbage and what it integrated is the document's. Nil,
+the default, calls nothing.
+
 **Who is affected:** servers that apply updates from peers, where one update
 places many items among the ones a document holds.
 

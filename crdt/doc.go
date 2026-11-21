@@ -178,6 +178,23 @@ type ApplyBudget struct {
 	// decoded values, a format's key and value, and an XML element's or
 	// hook's name.
 	Bytes int
+	// Integrated, when set, is called once for the apply, after it has
+	// integrated the update and before the commit's observers run: the
+	// types' observers, OnUpdate, OnAfterTransaction and OnSubdocs. It runs
+	// on the goroutine that applies, with the document lock released, for
+	// every apply that returns no error, whether or not the apply changed
+	// the document. It is not called for an apply that fails or is rolled
+	// back, nor when a panic leaves the commit: its caller then gives back
+	// what it holds when the apply returns.
+	//
+	// It is for what the caller holds for this one apply - memory reserved
+	// for its decode, a slot of a shared pool - which it can give back here
+	// rather than when the apply returns. By now the apply's decode is
+	// garbage and the structs it integrated are the document's, while an
+	// observer can block for long after: one that hands each update to a
+	// store through a bounded queue waits while the queue is full. A panic
+	// in it is raised once the observers have run. Nil calls nothing.
+	Integrated func()
 }
 
 // WithApplyBudget bounds each remote apply (ApplyUpdate and its V1 and V2
@@ -195,6 +212,11 @@ type ApplyBudget struct {
 // count against the apply that fills its gap. Local transactions are never
 // bounded. A budget that limits nothing changes nothing an apply does, and
 // every failed remote apply on the document returns a RefusedUpdateError.
+//
+// The budget can also carry a callback for the one apply it is returned for:
+// ApplyBudget.Integrated, called once the apply has integrated and before the
+// commit's observers, so the owner can give back what it holds for that
+// apply before an observer that may block.
 func WithApplyBudget(budget func(origin any) ApplyBudget) DocOption {
 	return func(d *Doc) { d.applyBudget = budget }
 }
@@ -293,10 +315,13 @@ type Doc struct {
 	applying *applyJournal
 	// applyBudget is the budget of WithApplyBudget and allowedRoots the list
 	// of WithAllowedRoots, each nil for none; counting is the tally of the
-	// remote apply in progress on a document with either, or nil.
+	// remote apply in progress on a document with either, or nil; and
+	// integrated is the ApplyBudget.Integrated of the apply committing now,
+	// taken by the commit before it releases the lock.
 	applyBudget  func(origin any) ApplyBudget
 	allowedRoots func(origin any) []string
 	counting     *applyTally
+	integrated   func()
 
 	store *StructStore
 	share map[string]sharedType // named root types
@@ -928,12 +953,24 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			d.setClientID(NewClientID())
 		}
 
+		// A remote apply that succeeded left its owner's callback on the
+		// document (ApplyBudget.Integrated); it is taken under the lock, so
+		// the next apply cannot see it, and called below.
+		integrated := d.integrated
+		d.integrated = nil
+
 		// Mark the transaction committed BEFORE releasing the lock so the
 		// txn-scoped accessors fail loudly from observers (which receive the
 		// *Transaction after unlock) or from a retained txn, instead of
 		// mutating d.share unsynchronized. See Transaction.done.
 		txn.done = true
 		d.mu.Unlock()
+
+		// The owner's callback, before any observer runs and with the lock
+		// released. A panic in it is raised after the observers.
+		if integrated != nil && r == nil {
+			r = runIntegrated(integrated)
+		}
 
 		if deferGC {
 			// Runs even if an observer panics, as Yjs runs the cleanup.

@@ -152,9 +152,24 @@ func endApplyTally(txn *Transaction, err error) error {
 	}
 	txn.doc.counting = nil
 	if err == nil {
+		// The apply will commit: the commit takes its owner's callback
+		// before it releases the lock, and calls it before the observers
+		// (runIntegrated).
+		txn.doc.integrated = t.budget.Integrated
 		return nil
 	}
 	return &RefusedUpdateError{Err: err, Decoded: t.decoded, Structs: t.structs, Bytes: t.bytes, Split: t.split, Root: t.root}
+}
+
+// runIntegrated calls fn, the ApplyBudget.Integrated callback of a remote
+// apply that ended with no error (endApplyTally), and returns what it
+// panicked with. The commit takes fn from the document before it releases
+// the lock and calls this after, before the observers; an apply that failed
+// or was rolled back left none, so nothing is called for one.
+func runIntegrated(fn func()) (panicked any) {
+	defer func() { panicked = recover() }()
+	fn()
+	return nil
 }
 
 // decode counts n values the apply read and refuses the apply once they pass
