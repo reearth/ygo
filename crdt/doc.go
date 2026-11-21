@@ -989,8 +989,11 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 			gcTxnDeleteSet(d, txn)
 		}
 
-		// The document's park record drops this transaction's views of the queue.
+		// The document forgets who parked each struct the transaction took
+		// out of the queue for good, and its park record drops this
+		// transaction's views of the queue.
 		if d.store.parked != nil {
+			forgetGoneParked(d)
 			*d.store.parked = transactionParked{}
 		}
 
