@@ -131,31 +131,29 @@ func (p *peer) handleMessage(data []byte) {
 		p.sendAwareness(p.room.awareness.EncodeUpdate(nil))
 
 	case msgSyncReply:
-		// Hocuspocus tag 4 (#55). Same payload shape as msgSync but the
-		// sender explicitly does NOT want a reply — used by the original
-		// requester to apply a SyncStep2 without bouncing another step-1
-		// back, which would cause an infinite ping-pong on noisy links.
-		// Apply locally and broadcast updates, but never reply with our
-		// own step-1.
+		// Hocuspocus tag 4 (#55). The same payload shapes as msgSync, but a
+		// frame that triggers no step-1 back ("same as Sync, but won't
+		// trigger another SyncStep1", Hocuspocus's types.ts), so a link
+		// cannot ping-pong step-1s. A SyncStep2 or update is applied and
+		// broadcast, and we never reply with our own step-1.
 		payload := dec.RemainingBytes()
 		subType, update, err := ygsync.ReadSyncMessage(payload)
 		if err != nil {
 			p.discardMalformedSync(err)
 			return
 		}
-		if subType != ygsync.MsgSyncStep1 {
-			p.applySyncUpdate(subType, update, payload)
+		if subType == ygsync.MsgSyncStep1 {
+			// Hocuspocus's own server sends its step-1 this way, and answers
+			// one it receives with a step-2 to the sender alone, relaying
+			// nothing. This server built that step-2 and threw it away, and
+			// relayed the step-1 to every other peer, each of which answered
+			// with a step-2 against the state vector it carried; the sender
+			// got nothing. It is dropped, a read-only peer's as before (#59).
+			p.server.log().Debug("discarded sync(reply) message: a SyncStep1",
+				"room", p.roomName)
 			return
 		}
-		if p.readOnly {
-			return // #59: read-only peers' SyncReply frames are dropped.
-		}
-		if _, err := ygsync.ApplySyncMessage(p.room.doc, payload, p); err != nil {
-			p.server.log().Debug("discarded unappliable sync(reply) message",
-				"room", p.roomName, "err", err)
-			return
-		}
-		p.broadcastSync(payload)
+		p.applySyncUpdate(subType, update, payload)
 
 	case msgStateless:
 		// Hocuspocus tag 5 (#55). Arbitrary out-of-band signal addressed

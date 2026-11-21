@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.57.2] — 2026-11-21
+
+### Fixed
+
+- **`provider/websocket`: a SyncReply that carries a SyncStep1 is dropped.**
+  Hocuspocus's own server sends its SyncStep1 in a SyncReply (tag 4), and
+  answers one it receives with a SyncStep2 to the sender alone, relaying
+  nothing. Given one by a writable peer, this server built that SyncStep2
+  and threw it away, and relayed the SyncStep1 to every other peer in the
+  room, each of which answered with a SyncStep2 against the state vector it
+  carried; the sender got nothing. It is now dropped and logged at debug
+  level; a read-only peer's was already dropped. Whether to answer it as
+  Hocuspocus does is left open.
+
 ## [1.57.1] — 2026-11-18
 
 ### Fixed

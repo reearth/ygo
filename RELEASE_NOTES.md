@@ -1,3 +1,20 @@
+## v1.57.2
+
+**Who is affected: anyone running the WebSocket server for peers that send
+it a SyncReply carrying a SyncStep1.**
+
+- **A SyncReply carrying a SyncStep1 is dropped.** Hocuspocus's own server
+  sends its SyncStep1 in a SyncReply (tag 4), and answers one it receives
+  with a SyncStep2 to the sender alone, relaying nothing. Given one by a
+  writable peer, this server built that SyncStep2 and threw it away, and
+  relayed the SyncStep1 to every other peer in the room, each of which
+  answered with a SyncStep2 against the state vector it carried. The sender
+  got no answer, the server encoded a SyncStep2 for nothing, and every other
+  peer encoded and sent one. Such a frame is now dropped and logged at debug
+  level; a read-only peer's was already dropped. A SyncReply carrying a
+  SyncStep2 or an Update is applied and relayed as before. Answering a
+  SyncStep1 in a SyncReply as Hocuspocus does is left open.
+
 ## v1.57.1
 
 **Who is affected: anyone storing binary or composite values in text
