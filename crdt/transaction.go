@@ -93,9 +93,26 @@ type transactionParked struct {
 	// structs still parked are found without a pass over the queue; a merge
 	// runs before the transaction's one park and cannot take them.
 	left []*Item
+	// gone is, on a document that keeps who parked each struct (parkedBy),
+	// every parked struct the transaction took out of the queue for good:
+	// dropped by a merge or landed by a drain. The document forgets them at
+	// the commit (forgetGoneParked), so it keeps no struct the queue does not
+	// hold. A drain rolled back gives back what it listed, and an apply rolled
+	// back forgets what it parked itself (rollBack).
+	gone []*Item
 }
 
-// parkRecord allocates the document's record only when a transaction parks.
+// noteGone lists item, a parked struct the transaction took out of the queue
+// for good, on a document that keeps who parked each struct.
+func (t *Transaction) noteGone(item *Item) {
+	if len(t.doc.parkedBy) > 0 {
+		p := t.parkRecord()
+		p.gone = append(p.gone, item)
+	}
+}
+
+// parkRecord allocates the document's record only when a transaction parks,
+// or takes a parked struct out of the queue for good (noteGone).
 func (t *Transaction) parkRecord() *transactionParked {
 	s := t.doc.store
 	if s.parked == nil {
