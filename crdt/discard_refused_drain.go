@@ -134,10 +134,12 @@ type parkedDeletesBy struct {
 
 // recordParkedOrigins keeps, on a document that discards refused drains,
 // the origin of txn for every struct and delete range txn parked and the
-// queue still holds at its commit, and forgets the records of what the queue
-// no longer holds once they outnumber it: after every commit the record of
-// delete ranges holds at most 2*pendingDsRanges+16 ranges, whatever frames
-// parked them (pruneParkedDeletes). The caller holds d.mu.
+// queue still holds at its commit, and forgets the records of delete ranges
+// the queue no longer holds once they outnumber it: after every commit the
+// record of delete ranges holds at most 2*pendingDsRanges+16 ranges, whatever
+// frames parked them (pruneParkedDeletes). A struct leaves the record when it
+// leaves the queue (forgetGoneParked), so the record of structs needs no
+// prune. The caller holds d.mu.
 func recordParkedOrigins(d *Doc, txn *Transaction) {
 	if !d.discardRefusedDrain {
 		return
@@ -171,18 +173,8 @@ func recordParkedOrigins(d *Doc, txn *Transaction) {
 			}
 		}
 	}
-	held := s.pending.heldStructs()
-	switch {
-	case held == 0:
+	if s.pending.heldStructs() == 0 {
 		d.parkedBy = nil
-	case len(d.parkedBy) > 2*held+16:
-		kept := make(map[*Item]parkedFrom, held)
-		for _, it := range s.pending.heldItems() {
-			if from, ok := d.parkedBy[it]; ok {
-				kept[it] = from
-			}
-		}
-		d.parkedBy = kept
 	}
 	switch {
 	case len(s.pendingDs.clients) == 0:
@@ -504,6 +496,7 @@ func discardReleased(txn *Transaction, j *applyJournal, scanned int, cause error
 		} else if _, own := ownParks[it]; own {
 			add(txn.Origin)
 		}
+		txn.noteGone(it)
 	}
 	if droppedRanges > 0 {
 		for _, by := range d.parkedDsBy {

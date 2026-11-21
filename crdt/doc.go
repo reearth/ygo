@@ -1246,10 +1246,12 @@ func (d *Doc) transactInternal(ctx context.Context, fn func(*Transaction) error,
 		}
 
 		// What the transaction parked keeps its origin, for a refused drain
-		// to name (SetDiscardRefusedDrain); then the document's park record
-		// drops this transaction's views of the queue.
+		// to name (SetDiscardRefusedDrain); then the document forgets who
+		// parked each struct the transaction took out of the queue for good,
+		// and its park record drops this transaction's views of the queue.
 		recordParkedOrigins(d, txn)
 		if d.store.parked != nil {
+			forgetGoneParked(d)
 			*d.store.parked = transactionParked{}
 		}
 

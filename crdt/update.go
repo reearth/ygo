@@ -1122,12 +1122,16 @@ func drainPending(txn *Transaction) (dropped error) {
 // reports whether the pass took any out of the queue; the park record lists
 // those it took.
 func parkUndrained(txn *Transaction, items []*Item, done []bool) bool {
-	if rec := txn.doc.store.parked; rec != nil && len(rec.items) > 0 {
-		for i, it := range items {
-			if done[i] {
-				rec.left = append(rec.left, it)
-			}
+	rec := txn.doc.store.parked
+	listLeft := rec != nil && len(rec.items) > 0
+	for i, it := range items {
+		if !done[i] {
+			continue
 		}
+		if listLeft {
+			rec.left = append(rec.left, it)
+		}
+		txn.noteGone(it)
 	}
 	stillPending, stillMissing := unresolvedPending(txn.doc.store, items, done)
 	if len(stillPending) > 0 {

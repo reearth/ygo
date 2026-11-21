@@ -284,6 +284,12 @@ func parkWithinUpdatePending(txn *Transaction, pending []*Item) error {
 		// What the merge changes of the encoded state is a report's
 		// (measureQueueMerge).
 		merged := measureQueueMerge(txn, pl)
+		// A queued struct the merge drops leaves the queue for good.
+		for i, q := range pl.held {
+			if !pl.keepHeld[i].kept() {
+				txn.noteGone(q.Item)
+			}
+		}
 		pending = s.pending.apply(pl, pending, s.parked != nil && len(s.parked.items) > 0)
 		merged.note(pl, s.pending)
 	}
