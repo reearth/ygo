@@ -55,9 +55,10 @@ type applyPoint struct {
 	missing      StateVector
 	queue        queueCounts
 	pendingDs    parkedDeletesAt
-	// parkedLeft is how many structs the park record listed as taken out of
-	// the queue by a drain (transactionParked.left).
-	parkedLeft int
+	// parkedLeft and parkedGone are how many structs the park record listed
+	// as taken out of the queue by a drain (transactionParked.left), and for
+	// good (transactionParked.gone).
+	parkedLeft, parkedGone int
 }
 
 // queueCounts are the fields of the parked queue that a park or an append
@@ -147,7 +148,7 @@ func pointNow(txn *Transaction, sv StateVector) applyPoint {
 		p.queue = queueCounts{dead: q.dead, ready: q.ready, tail: q.tail, tailValid: q.tailValid}
 	}
 	if s.parked != nil {
-		p.parkedLeft = len(s.parked.left)
+		p.parkedLeft, p.parkedGone = len(s.parked.left), len(s.parked.gone)
 	}
 	return p
 }
@@ -307,6 +308,14 @@ func (j *applyJournal) endDrain() { j.drain, j.parkedAs = nil, nil }
 // rollBack leaves txn's document as it was when the apply began, and makes the
 // transaction commit as one that changed nothing.
 func (j *applyJournal) rollBack(txn *Transaction) {
+	if s := txn.doc.store; s.parked != nil {
+		// What the apply parked leaves the queue with it, and so leaves what
+		// the document keeps of who parked it (noteParkedRoot). It is read
+		// before the rollback empties the queue's slots the record views.
+		for _, it := range s.parked.items {
+			delete(txn.doc.parkedBy, it)
+		}
+	}
 	j.rollBackTo(txn, &j.start)
 	if p := j.start.pending; p != nil {
 		for item, as := range j.queuedAs {
@@ -422,6 +431,8 @@ func (j *applyJournal) rollBackTo(txn *Transaction, point *applyPoint) {
 	if s.parked != nil {
 		clear(s.parked.left[point.parkedLeft:])
 		s.parked.left = s.parked.left[:point.parkedLeft]
+		clear(s.parked.gone[point.parkedGone:])
+		s.parked.gone = s.parked.gone[:point.parkedGone]
 	}
 
 	merge := txn.mergeStructs[:0]

@@ -291,11 +291,24 @@ func noteIntegrated(txn *Transaction, item *Item) {
 
 // parkedFrom is what the document keeps of the apply that parked a struct:
 // its origin, and its roots list when the struct's parent was not known yet.
-// The document keeps it until nothing is parked, so a drain a whole-or-nothing
-// document takes back finds it again.
+// The document keeps it while the queue holds the struct: through a drain a
+// whole-or-nothing document takes back, which finds it again, and no longer
+// than the commit of the transaction that took the struct out of the queue
+// (forgetGoneParked) or the rollback of the apply that parked it.
 type parkedFrom struct {
 	origin any
 	roots  []string
+}
+
+// forgetGoneParked drops what the document keeps of who parked each struct
+// the committing transaction took out of the queue for good, dropped by a
+// merge or landed by a drain (transactionParked.gone), so it keeps nothing
+// of a struct the queue does not hold, and none of the struct's content.
+// The caller holds d.mu.
+func forgetGoneParked(d *Doc) {
+	for _, it := range d.store.parked.gone {
+		delete(d.parkedBy, it)
+	}
 }
 
 // noteParkedRoot checks item, a struct of the update about to park, against
