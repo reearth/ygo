@@ -1,3 +1,17 @@
+## v1.58.0
+
+- **New: `provider/websocket.PersistenceAdapterLoadContext`.** An adapter
+  that implements it loads a room with `LoadDocContext(ctx, room)` instead of
+  `LoadDoc`. `ctx` is the context of the call that created the room: the
+  request context of a peer's connection (`ServeHTTP`), or the `ctx` given to
+  `Server.Apply` or `Server.Inject`. Before this release a load had no
+  context, so an adapter could not bound a wait in it by the caller's
+  deadline, or read a value the caller put on its context. One load serves
+  every caller that waits for the room: an error the adapter returns, a
+  cancellation included, fails the load for all of them, and the next call for
+  the room loads it again. An adapter that does not implement it is loaded
+  with `LoadDoc`, as before.
+
 ## v1.57.1
 
 **Who is affected: anyone storing binary or composite values in text

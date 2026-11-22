@@ -280,6 +280,10 @@ func (s *Server) broadcastUpdate(ctx context.Context, room string, update []byte
 // best-effort signal; the transaction completes unless fn itself
 // observes ctx and returns early.
 //
+// When Apply creates the room, an adapter that implements
+// PersistenceAdapterLoadContext loads it with ctx, and can stop that load
+// when ctx is done.
+//
 // IMPORTANT: if fn calls doc.Transact directly (bypassing the supplied
 // transact helper), the delta is NOT captured and Apply returns
 // ErrNoChanges even though the doc has been mutated. This is a

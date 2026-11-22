@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.58.0] — 2026-11-22
+
+### Added
+
+- **`provider/websocket.PersistenceAdapterLoadContext`** — an optional
+  extension to `PersistenceAdapter`. An adapter that implements it loads a
+  room with `LoadDocContext(ctx, room)` instead of `LoadDoc`, where `ctx` is
+  the context of the call that created the room: the request context of a
+  peer's connection, or the `ctx` given to `Server.Apply` or `Server.Inject`.
+  The load sees that caller's values, deadline and cancellation. One load
+  serves every caller that waits for the room, so an error it returns, a
+  cancellation included, fails the load for all of them, and the next call for
+  the room loads it again. An adapter that does not implement it is loaded
+  with `LoadDoc`, as before.
+
 ## [1.57.1] — 2026-11-18
 
 ### Fixed
