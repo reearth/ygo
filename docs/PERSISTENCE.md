@@ -657,6 +657,18 @@ During `Server.Shutdown`, the in-flight `ExecContext` call sees the context canc
 
 This pattern mirrors `io.WriterTo`, `http.CloseNotifier`, and `database/sql/driver.QueryerContext` in the standard library — extension interfaces that callers can opt into without breaking older implementations.
 
+### The room load's context
+
+An adapter can also implement `PersistenceAdapterLoadContext`:
+
+```go
+type PersistenceAdapterLoadContext interface {
+    LoadDocContext(ctx context.Context, room string) ([]byte, error)
+}
+```
+
+The server then loads a room with `LoadDocContext` instead of `LoadDoc`, and passes the context of the call that created the room: the request context of a peer's connection (`ServeHTTP`), or the `ctx` given to `Server.Apply` or `Server.Inject`. The load sees that caller's values, deadline and cancellation. The Postgres adapter above could pass it to `QueryRowContext`. One load serves every caller that waits for the room, so an error it returns, a cancellation included, fails the load for all of them, and the next call for the room loads it again.
+
 ---
 
 ## Shutdown durability, and what it does not promise (v1.49.0+)

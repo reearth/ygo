@@ -264,6 +264,25 @@ type PersistenceAdapterContext interface {
 	StoreUpdateContext(ctx context.Context, room string, update []byte) error
 }
 
+// PersistenceAdapterLoadContext is an optional extension to PersistenceAdapter.
+// When the adapter implements it, the server loads a room with LoadDocContext
+// instead of LoadDoc, and passes the context of the call that created the
+// room: the request context of a peer's connection (ServeHTTP), or the ctx
+// given to Apply or Inject. The adapter sees that caller's values, deadline
+// and cancellation, so it can, for example, bound a wait in the load by the
+// caller's deadline. Adapters that implement only PersistenceAdapter are
+// loaded with LoadDoc, as before.
+//
+// One load serves every caller that waits for the room. An error the adapter
+// returns, ctx.Err() included, fails the load for all of them, and the next
+// call for the room loads it again.
+type PersistenceAdapterLoadContext interface {
+	// LoadDocContext is LoadDoc with the context of the call that created
+	// the room. ctx is never nil: a nil context loads with
+	// context.Background().
+	LoadDocContext(ctx context.Context, room string) ([]byte, error)
+}
+
 // CompactableAdapter is an optional extension to PersistenceAdapter. When the
 // adapter implements it, the server calls Compact to signal a good time to
 // collapse stored updates for a room into a compact form (e.g. merge the update
@@ -1745,6 +1764,10 @@ func (s *Server) GetDoc(name string) *crdt.Doc {
 // with s.rmu released, so one slow or large load never stalls create / lookup /
 // evict for every other room process-wide.
 //
+// The load runs under ctx, the context of the caller that creates the room:
+// the OnLoadDocument hook receives it, and so does an adapter that implements
+// PersistenceAdapterLoadContext. A nil ctx is context.Background().
+//
 // The creating goroutine (created==true) performs the load and closes r.ready;
 // every other caller — including a caller for the same still-loading room —
 // waits on r.ready rather than on s.rmu. On load failure the placeholder has
@@ -1757,6 +1780,9 @@ func (s *Server) GetDoc(name string) *crdt.Doc {
 // call finds the room and returns off an already-closed barrier instead of
 // self-deadlocking on the non-reentrant s.rmu.
 func (s *Server) getOrCreateRoom(ctx context.Context, name string) (*room, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	r, created, err := s.createRoomPlaceholder(name)
 	if err != nil {
 		return nil, false, err
@@ -1903,7 +1929,7 @@ func (s *Server) releaseInflight(rm *room) {
 // room parks on <-r.ready forever — a permanent goroutine/connection/MaxRooms
 // leak that administrative CloseRoom cannot even clear (#182 follow-up).
 func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
-	loadErr := s.loadRoomDoc(r, name)
+	loadErr := s.loadRoomDoc(ctx, r, name)
 	// #60 — fire OnLoadDocument AFTER persistence bootstrap but BEFORE the
 	// persistence worker starts, so a hook returning an error fails room creation
 	// cleanly. Runs off-lock now (#182), so a slow hook no longer stalls other
@@ -1993,15 +2019,16 @@ func (s *Server) loadRoom(ctx context.Context, r *room, name string) {
 	close(r.ready)
 }
 
-// loadRoomDoc performs the persistence LoadDoc call and, if data was returned,
-// the full-state V1 decode into r.doc. A panic raised by either — a
-// buggy/malicious PersistenceAdapter, or a decode panic on malformed/corrupt
-// persisted bytes — is recovered and converted into the returned error rather
-// than propagating up through loadRoom. This must NOT re-panic: the caller
-// (the goroutine that published the placeholder into s.rooms) has to reach
-// failRoomLoad/close(r.ready) so waiters wake with an error instead of
-// parking on r.ready forever (#182 follow-up).
-func (s *Server) loadRoomDoc(r *room, name string) (loadErr error) {
+// loadRoomDoc performs the persistence load (LoadDocContext with ctx when the
+// adapter implements PersistenceAdapterLoadContext, LoadDoc otherwise) and, if
+// data was returned, the full-state V1 decode into r.doc. A panic raised by
+// either — a buggy/malicious PersistenceAdapter, or a decode panic on
+// malformed/corrupt persisted bytes — is recovered and converted into the
+// returned error rather than propagating up through loadRoom. This must NOT
+// re-panic: the caller (the goroutine that published the placeholder into
+// s.rooms) has to reach failRoomLoad/close(r.ready) so waiters wake with an
+// error instead of parking on r.ready forever (#182 follow-up).
+func (s *Server) loadRoomDoc(ctx context.Context, r *room, name string) (loadErr error) {
 	if s.persistence == nil {
 		return nil
 	}
@@ -2010,7 +2037,13 @@ func (s *Server) loadRoomDoc(r *room, name string) (loadErr error) {
 			loadErr = fmt.Errorf("LoadDoc panic for room %q: %v", name, rv)
 		}
 	}()
-	data, err := s.persistence.LoadDoc(name)
+	var data []byte
+	var err error
+	if lc, ok := s.persistence.(PersistenceAdapterLoadContext); ok {
+		data, err = lc.LoadDocContext(ctx, name)
+	} else {
+		data, err = s.persistence.LoadDoc(name)
+	}
 	switch {
 	case err != nil:
 		return fmt.Errorf("loading room %q: %w", name, err)
