@@ -66,6 +66,7 @@ func (d *Doc) ForgetParkedOrigin(origin any) {
 			d.parkedBy[it] = from
 		}
 	}
+	shrinkParkedBy(d)
 	kept := d.parkedDsBy[:0]
 	for _, by := range d.parkedDsBy {
 		if by.origin == origin {
@@ -75,7 +76,7 @@ func (d *Doc) ForgetParkedOrigin(origin any) {
 		kept = append(kept, by)
 	}
 	clear(d.parkedDsBy[len(kept):])
-	d.parkedDsBy = kept
+	d.parkedDsBy = shrinkParkedDeletes(kept)
 }
 
 // forgottenOrigin stands, in what the document keeps of the apply that parked
@@ -139,7 +140,8 @@ type parkedDeletesBy struct {
 // record of delete ranges holds at most 2*pendingDsRanges+16 ranges, whatever
 // frames parked them (pruneParkedDeletes). A struct leaves the record when it
 // leaves the queue (forgetGoneParked), so the record of structs needs no
-// prune. The caller holds d.mu.
+// prune, and it keeps slots for about four times the structs it holds at
+// most (shrinkParkedBy). The caller holds d.mu.
 func recordParkedOrigins(d *Doc, txn *Transaction) {
 	if !d.discardRefusedDrain {
 		return
@@ -164,6 +166,7 @@ func recordParkedOrigins(d *Doc, txn *Transaction) {
 					d.parkedBy[it] = parkedFrom{origin: txn.Origin}
 				}
 			}
+			d.parkedByPeak = max(d.parkedByPeak, len(d.parkedBy))
 		}
 		// Only what the apply newly parked is its own. A nil origin is
 		// named to no one (DrainDiscardedError.Senders), so it is not kept.
@@ -174,7 +177,7 @@ func recordParkedOrigins(d *Doc, txn *Transaction) {
 		}
 	}
 	if s.pending.heldStructs() == 0 {
-		d.parkedBy = nil
+		d.parkedBy, d.parkedByPeak = nil, 0
 	}
 	switch {
 	case len(s.pendingDs.clients) == 0:
@@ -182,6 +185,23 @@ func recordParkedOrigins(d *Doc, txn *Transaction) {
 	case d.parkedDsByRanges > 2*s.pendingDsRanges+16:
 		pruneParkedDeletes(d)
 	}
+}
+
+// shrinkParkedDeletes is by, the record of who parked each delete range,
+// once sets have been cut out of it in place (ForgetParkedOrigin,
+// pruneParkedDeletes): nil when it is empty, and a copy made at its length
+// when it holds under a quarter of its capacity, since a slice cut in place
+// keeps the array of the most sets it held.
+func shrinkParkedDeletes(by []parkedDeletesBy) []parkedDeletesBy {
+	switch {
+	case len(by) == 0:
+		return nil
+	case len(by) < cap(by)/4:
+		fresh := make([]parkedDeletesBy, len(by))
+		copy(fresh, by)
+		return fresh
+	}
+	return by
 }
 
 // recordParkedDeletes adds ds, the delete ranges an apply of origin newly
@@ -238,6 +258,7 @@ func pruneParkedDeletes(d *Doc) {
 	if n > 2*s.pendingDsRanges+16 {
 		d.parkedDsBy, d.parkedDsByRanges = onePerPendingRange(kept, s.pendingDs)
 	}
+	d.parkedDsBy = shrinkParkedDeletes(d.parkedDsBy)
 }
 
 // heldPart is the part of ds that held also holds: each range of ds cut to

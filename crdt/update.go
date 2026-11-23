@@ -791,7 +791,7 @@ func drainAfterApply(txn *Transaction, err error) (retErr error) {
 	}
 	if txn.doc.store.pending == nil {
 		// No parked struct is left to carry a list.
-		txn.doc.parkedBy = nil
+		txn.doc.parkedBy, txn.doc.parkedByPeak = nil, 0
 	}
 	return retErr
 }

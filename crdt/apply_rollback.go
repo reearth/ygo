@@ -357,6 +357,7 @@ func (j *applyJournal) rollBack(txn *Transaction) {
 		for _, it := range s.parked.items {
 			delete(txn.doc.parkedBy, it)
 		}
+		shrinkParkedBy(txn.doc)
 	}
 	j.rollBackTo(txn, &j.start)
 	if p := j.start.pending; p != nil {

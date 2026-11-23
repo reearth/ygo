@@ -270,6 +270,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`crdt`: what the document keeps of who parked each struct keeps no slots
+  for its peak.** A struct leaves it by a delete as the struct leaves the
+  pending queue, or as `Doc.ForgetParkedOrigin` forgets its origin, and a Go
+  map keeps its slots after deletes. A document whose queue reached its cap of
+  structs and fell to one kept slots for the cap, about 460 KB at a cap of
+  4,096, for as long as that one struct stayed parked. It is now dropped once
+  it is empty, and replaced by a map made at its size once it holds under a
+  quarter of the most it has held. The record of who parked each delete
+  range, one set for each sender, is held to the same rule where
+  `ForgetParkedOrigin` and its prune cut sets out of it.
+
 - **`crdt`: a merge keeps an earlier update's struct where a later update
   names other content on its clocks.** A struct that names a struct no update
   carries parks, also over clocks the document holds, because the apply looks

@@ -562,10 +562,12 @@ type Doc struct {
 	checkPanic any
 	// parkedBy is what the document keeps of the apply that parked each
 	// parked struct, on a document with a budget, a roots list or
-	// SetDiscardRefusedDrain, and nil when nothing is parked; rootsDropped
-	// counts, by client, the parked structs a drain dropped under a root
-	// another apply's list leaves out.
+	// SetDiscardRefusedDrain, and nil when nothing is parked; parkedByPeak
+	// is the most entries parkedBy has held since it was made
+	// (shrinkParkedBy); rootsDropped counts, by client, the parked structs a
+	// drain dropped under a root another apply's list leaves out.
 	parkedBy     map[*Item]parkedFrom
+	parkedByPeak int
 	rootsDropped map[ClientID]int
 	// discardRefusedDrain is SetDiscardRefusedDrain's setting, and
 	// parkedDsBy, kept only while it is on, the delete ranges the applies of

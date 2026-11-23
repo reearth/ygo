@@ -309,6 +309,31 @@ func forgetGoneParked(d *Doc) {
 	for _, it := range d.store.parked.gone {
 		delete(d.parkedBy, it)
 	}
+	shrinkParkedBy(d)
+}
+
+// shrinkParkedBy drops what the document keeps of who parked each struct
+// once it is empty, and replaces it with a map made at its size and filled
+// by a copy once it holds under a quarter of the most it has held since it
+// was made (parkedByPeak). Structs leave it by delete as they leave the
+// queue (forgetGoneParked, rollBack) or as their origin is forgotten
+// (ForgetParkedOrigin), and a Go map keeps the slots of the most it held: a
+// queue that reached its cap of structs and fell to one would otherwise keep
+// slots for the cap for as long as that one stays parked. A rebuild copies
+// under a quarter of the peak after more than three quarters of it were
+// deleted, so it costs less than one copy for each delete. The caller holds
+// d.mu.
+func shrinkParkedBy(d *Doc) {
+	switch n := len(d.parkedBy); {
+	case n == 0:
+		d.parkedBy, d.parkedByPeak = nil, 0
+	case n < d.parkedByPeak/4:
+		fresh := make(map[*Item]parkedFrom, n)
+		for it, from := range d.parkedBy {
+			fresh[it] = from
+		}
+		d.parkedBy, d.parkedByPeak = fresh, n
+	}
 }
 
 // noteParkedRoot checks item, a struct of the update about to park, against
@@ -335,6 +360,7 @@ func noteParkedRoot(txn *Transaction, item *Item) {
 		d.parkedBy = make(map[*Item]parkedFrom)
 	}
 	d.parkedBy[item] = from
+	d.parkedByPeak = max(d.parkedByPeak, len(d.parkedBy))
 }
 
 // checkParkedRoot refuses the apply integrating item, a parked struct whose

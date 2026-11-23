@@ -292,6 +292,18 @@ each range keeps only what each apply newly parked, so resending a frame no
 longer grows it. `PendingStats.ContentBytes` reports the content bytes the
 queue holds, for a caller that charges a room for it.
 
+**What a document keeps of who parked each struct shrinks with the queue.**
+A struct leaves it by a delete as the struct leaves the pending queue, or as
+`Doc.ForgetParkedOrigin` forgets its origin. A Go map keeps the slots of the
+most entries it has held, so a document whose queue reached its cap of
+structs and was cut to one, by a merge that dropped the rest, kept slots for
+the cap for as long as that one struct stayed parked: about 460 KB at a cap
+of 4,096, which no figure of the queue counts. It is now dropped once it is
+empty, and replaced by a map made at its size, filled by a copy, once it
+holds under a quarter of the most it has held since it was made. The record
+of who parked each delete range, one set for each sender, is replaced by a
+copy at its length under the same rule.
+
 **Who is affected:** servers that apply updates from peers, where one update
 places many items among the ones a document holds.
 
