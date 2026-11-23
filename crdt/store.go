@@ -20,8 +20,12 @@ type StructStore struct {
 	// pendingDs holds delete-set entries targeting items not yet integrated.
 	// Accumulated across updates and retried whenever pending drains.
 	pendingDs DeleteSet
-	// pendingDsRanges counts pendingDs's ranges so an apply need not.
-	pendingDsRanges int
+	// pendingDsRanges counts pendingDs's ranges so an apply need not, and
+	// pendingDsClientsPeak is the most clients pendingDs.clients has held
+	// since the map was made (shrinkPendingDsClients); whatever puts another
+	// map in its place sets it for that map.
+	pendingDsRanges      int
+	pendingDsClientsPeak int
 	// pendingDsMoved holds the parked clients given a struct since the last
 	// retry, the only ones whose ranges can apply.
 	pendingDsMoved map[ClientID]struct{}
@@ -185,14 +189,40 @@ func (s *StructStore) parkDeletes(ds DeleteSet) {
 	if len(s.pendingDs.clients) == 0 && len(ds.clients) > 1 {
 		// Sized once, so a park of many clients does not regrow the map.
 		s.pendingDs = DeleteSet{clients: make(map[ClientID][]DeleteRange, len(ds.clients))}
+		s.pendingDsClientsPeak = 0
 	}
 	for client := range ds.clients {
 		s.pendingDsRanges -= len(s.pendingDs.clients[client])
 	}
 	s.pendingDs.Merge(ds)
 	for client := range ds.clients {
+		// The merge appends and then compacts in place, so the array keeps
+		// the most ranges the client held: ranges that a later frame bridges
+		// into one would otherwise hold it while that range stays parked.
+		s.pendingDs.clients[client] = shrunk(s.pendingDs.clients[client])
 		s.pendingDsRanges += len(s.pendingDs.clients[client])
 	}
+	s.pendingDsClientsPeak = max(s.pendingDsClientsPeak, len(s.pendingDs.clients))
+}
+
+// shrinkPendingDsClients replaces the map of clients whose deletes are
+// parked with one made at its size once the map is empty or holds under a
+// quarter of the most it has held (pendingDsClientsPeak). A client leaves the
+// map by a delete as its ranges apply (takeReadyDeletes), and a Go map keeps
+// the slots of the most entries it held: a document that parked the deletes
+// of many clients and then took them all would otherwise keep those slots for
+// as long as it stands. The check is one comparison, and each rebuild
+// follows more than three deletes for each entry it copies.
+func (s *StructStore) shrinkPendingDsClients() {
+	n := len(s.pendingDs.clients)
+	if n > 0 && n >= s.pendingDsClientsPeak/4 {
+		return
+	}
+	fresh := make(map[ClientID][]DeleteRange, n)
+	for client, ranges := range s.pendingDs.clients {
+		fresh[client] = ranges
+	}
+	s.pendingDs.clients, s.pendingDsClientsPeak = fresh, n
 }
 
 // takeReadyDeletes removes and returns the parked ranges of clients whose new
@@ -210,7 +240,14 @@ func (s *StructStore) takeReadyDeletes() DeleteSet {
 			s.pendingDsRanges -= len(ranges)
 		}
 	}
-	clear(s.pendingDsMoved)
+	// Dropped, not cleared: clear keeps the slots of the most clients the
+	// map held, which nothing counts, and noteAppend makes it again at the
+	// next append under a parked client. A point holds a copy of it
+	// (parkedDeletesOf), so a rollback is unaffected.
+	s.pendingDsMoved = nil
+	if ready.clients != nil {
+		s.shrinkPendingDsClients()
+	}
 	return ready
 }
 

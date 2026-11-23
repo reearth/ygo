@@ -269,9 +269,11 @@ func TestUnit_PendingResolver_ParkRecordHoldsOnlyWhatParks(t *testing.T) {
 // Parking state uses one lazy pointer, so ordinary transactions and stores
 // stay compact on every supported pointer width. The store's three counts of
 // waiting moves (pendingMoveCount, deletedPendingMoves, pendingMoveMapCap)
-// are a word each beside it, and SetParkedOutOfState's flag one more.
+// are a word each beside it, SetParkedOutOfState's flag one more, and the
+// most clients the pending deletes' map has held (pendingDsClientsPeak) one
+// more.
 func TestUnit_Transaction_ParkRecordKeepsItsSize(t *testing.T) {
 	word := unsafe.Sizeof(uintptr(0))
 	require.Equal(t, 28*word, unsafe.Sizeof(Transaction{}))
-	require.Equal(t, 14*word, unsafe.Sizeof(StructStore{}))
+	require.Equal(t, 15*word, unsafe.Sizeof(StructStore{}))
 }

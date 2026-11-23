@@ -281,6 +281,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   range, one set for each sender, is held to the same rule where
   `ForgetParkedOrigin` and its prune cut sets out of it.
 
+- **`crdt`: the lists and maps of parked content keep no room for their
+  peak.** Each list and map of the pending queue and of the pending delete
+  ranges that a merge, a retry or a prune cuts, compacts or empties in place
+  kept the room of the most it had held, which no figure of the document
+  counts, for as long as anything stayed parked. A list is now copied into
+  one made at its length once it holds under a quarter of its array, and a
+  map is replaced by one made at its size once it is empty or holds under a
+  quarter of the most entries it has held. Each check is one comparison.
+  What each kept before, after 4,096 entries fell to one or a few: a
+  sender's range list in the record of who parked each delete range,
+  147,440 bytes; a client's range list in the pending deletes, 90,096 bytes;
+  the queue's list of structs, 49,120 bytes; the queue's cover of a client's
+  parked clocks, about 131 KB. After 1,024 clients' pending deletes applied:
+  the map of those clients, about 82 KB, and the set of clients given a
+  struct since the last retry, about 37 KB. The most clients the map of
+  pending deletes has held now goes with the map through a rollback and a
+  drain rolled back or discarded.
+
 - **`crdt`: a merge keeps an earlier update's struct where a later update
   names other content on its clocks.** A struct that names a struct no update
   carries parks, also over clocks the document holds, because the apply looks

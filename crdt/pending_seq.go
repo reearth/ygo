@@ -12,7 +12,11 @@ const seqFlat = 256
 
 // seq is a sequence that takes an insert or a cut at any position: a slice
 // while short, then a treap, so each step costs O(log n), and filling or
-// emptying a queue one struct per update stays linear.
+// emptying a queue one struct per update stays linear. Like the queue's other
+// lists it keeps no room for the most it held (shrunk): a slice cut or
+// merged in place is copied at its length once it holds under a quarter of
+// its array, and a treap, whose cut nodes wait on its free list, is built
+// again at its length once it holds under a quarter of its nodes.
 type seq[T any] struct {
 	flat []T
 	tree *treap[T]
@@ -21,7 +25,7 @@ type seq[T any] struct {
 // seqOf takes vals as a seq.
 func seqOf[T any](vals []T) seq[T] {
 	if len(vals) <= seqFlat {
-		return seq[T]{flat: vals}
+		return seq[T]{flat: shrunk(vals)}
 	}
 	t := &treap[T]{nodes: make([]treapNode[T], 1, len(vals)+1)}
 	t.root = t.build(vals)
@@ -72,12 +76,11 @@ func (s seq[T]) slice() []T {
 	return out
 }
 
-// replace puts vals in place of the elements at [from, to).
+// replace puts vals in place of the elements at [from, to). A cut can leave
+// the seq under a quarter of its room, which it then gives back (seq).
 func (s *seq[T]) replace(from, to int, vals []T) {
 	if s.tree == nil {
-		if s.flat = slices.Replace(s.flat, from, to, vals...); len(s.flat) > seqFlat {
-			*s = seqOf(s.flat)
-		}
+		*s = seqOf(slices.Replace(s.flat, from, to, vals...))
 		return
 	}
 	t := s.tree
@@ -85,6 +88,9 @@ func (s *seq[T]) replace(from, to int, vals []T) {
 	cut, b := t.split(rest, to-from)
 	t.release(cut)
 	t.root = t.join(t.join(a, t.build(vals)), b)
+	if t.size(t.root) < cap(t.nodes)/4 {
+		*s = seqOf(s.slice())
+	}
 }
 
 func (s *seq[T]) insert(i int, v T) { s.replace(i, i, []T{v}) }

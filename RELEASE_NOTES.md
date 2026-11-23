@@ -304,6 +304,32 @@ holds under a quarter of the most it has held since it was made. The record
 of who parked each delete range, one set for each sender, is replaced by a
 copy at its length under the same rule.
 
+**The lists and maps of parked content keep no room for their peak.** The
+same rule now holds for every list and map of the parked content and of the
+pending delete ranges that is cut, compacted or emptied in place: a list is
+copied into one made at its length once it holds under a quarter of its
+array, and a map is replaced by one made at its size once it is empty or
+holds under a quarter of the most entries it has held. Each check is one
+comparison, and each copy follows more than three removals for each entry it
+copies. Changed, with what each kept before: a sender's range list in the
+record of who parked each delete range, which a frame that bridges that
+sender's parked ranges compacts in place (147,440 bytes once 4,096 ranges
+merged into one); a client's range list in the pending deletes (90,096
+bytes); the map of the clients that have pending deletes, from which a
+client is deleted as its ranges apply (about 82 KB once 1,024 clients'
+ranges applied), whose peak now goes with the map through a rollback; the
+set of clients given a struct since the last retry, which each retry cleared
+and now drops (about 37 KB); the queue's list of structs, which a merge that
+drops structs compacts in place (49,120 bytes once 4,096 structs were cut to
+a few); and the queue's cover of each client's parked clocks, a list of
+spans that a bridging struct merges into one in place and, past 256 spans, a
+tree whose cut nodes waited on a free list (about 131 KB once 4,096 spans
+merged into one). Read and left: the queue's index of structs by client and
+its list of clients, dropped at each compaction of the queue's list; the
+clocks the queue waits for, which nothing cuts in place; the deferred moves,
+which already follow the rule; a transaction's record of what it parked,
+emptied at each commit; and the buffers of one apply, merge or split.
+
 **Who is affected:** servers that apply updates from peers, where one update
 places many items among the ones a document holds.
 

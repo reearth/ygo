@@ -483,7 +483,10 @@ func (p *pendingUpdate) drop(dropped []queued, viewed bool) {
 	if !viewed {
 		clear(p.items[len(held):])
 	}
-	p.items, p.dead = held, 0
+	// Compacted in place, the list keeps the array of the most structs it
+	// held, which its figures do not count: a queue that reached its cap and
+	// was cut to one by a merge would hold it while that one stays parked.
+	p.items, p.dead = shrunk(held), 0
 	// The slots moved, so the next merge builds the struct index again.
 	p.cover.structs, p.cover.clients = nil, seq[ClientID]{}
 }

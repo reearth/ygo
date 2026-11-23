@@ -104,16 +104,18 @@ func itemsBytes(items []*Item) int {
 }
 
 // parkedDeletesAt is the store's pending deletes as a point found them: the
-// set, kept by reference, the count of its ranges, and a copy of the clients
-// given a struct since the last retry, which an append writes in place.
+// set, kept by reference, the count of its ranges, the most clients its map
+// has held (StructStore.pendingDsClientsPeak), which a retry since may have
+// reset with a smaller map, and a copy of the clients given a struct since the
+// last retry, which an append writes in place.
 type parkedDeletesAt struct {
-	ds     DeleteSet
-	ranges int
-	moved  map[ClientID]struct{}
+	ds           DeleteSet
+	ranges, peak int
+	moved        map[ClientID]struct{}
 }
 
 func parkedDeletesOf(s *StructStore) parkedDeletesAt {
-	p := parkedDeletesAt{ds: s.pendingDs, ranges: s.pendingDsRanges}
+	p := parkedDeletesAt{ds: s.pendingDs, ranges: s.pendingDsRanges, peak: s.pendingDsClientsPeak}
 	if len(s.pendingDsMoved) > 0 {
 		p.moved = maps.Clone(s.pendingDsMoved)
 	}
@@ -122,7 +124,7 @@ func parkedDeletesOf(s *StructStore) parkedDeletesAt {
 
 // restore puts the store's pending deletes back as p found them.
 func (p parkedDeletesAt) restore(s *StructStore) {
-	s.pendingDs, s.pendingDsRanges, s.pendingDsMoved = p.ds, p.ranges, p.moved
+	s.pendingDs, s.pendingDsRanges, s.pendingDsClientsPeak, s.pendingDsMoved = p.ds, p.ranges, p.peak, p.moved
 }
 
 // mapSlot names one key of one map-like type.
