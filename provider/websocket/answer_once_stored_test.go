@@ -250,6 +250,23 @@ func TestInteg_AnswerOnceStored_AnUpdateNotStoredIsAnsweredZero(t *testing.T) {
 	}
 }
 
+// relayWithin reads conn's frames into doc, one Ping's worth at a time
+// (watcherSyncFrames), until a sync frame has arrived or bound has passed, and
+// returns the bodies of the sync frames it read. A commit's store begins in
+// the commit, from the room document's OnUpdate, and the peer relays the
+// update only once its apply has returned, so a store that has begun says
+// nothing of whether the relay has reached another peer yet, and one Ping's
+// Pong can come first.
+func relayWithin(t *testing.T, conn *gws.Conn, doc *crdt.Doc, bound time.Duration) [][]byte {
+	t.Helper()
+	deadline := time.Now().Add(bound)
+	var bodies [][]byte
+	for len(bodies) == 0 && time.Now().Before(deadline) {
+		bodies = append(bodies, watcherSyncFrames(t, conn, doc)...)
+	}
+	return bodies
+}
+
 // Only the sender's answer waits: the update reaches the room's other peers
 // as soon as the room applied it, before the adapter has stored it.
 func TestInteg_AnswerOnceStored_TheRelayGoesOutBeforeTheStore(t *testing.T) {
@@ -262,7 +279,9 @@ func TestInteg_AnswerOnceStored_TheRelayGoesOutBeforeTheStore(t *testing.T) {
 
 	hpSend(t, editor, "room", tagSync, ygsync.EncodeUpdate(textUpdate(editorDoc, "a")))
 	gate.waitStore(t)
-	assert.Len(t, watcherSyncFrames(t, watcher, watcherDoc), 1, "the relay does not wait for the store")
+	// The store is held open until the release below, so a relay read here
+	// went out before the store completed.
+	assert.Len(t, relayWithin(t, watcher, watcherDoc, 5*time.Second), 1, "the relay does not wait for the store")
 	assert.Equal(t, "a", watcherDoc.GetText("t").ToString())
 	assert.Empty(t, syncStatuses(t, editor, "room"), "the sender's answer does")
 
