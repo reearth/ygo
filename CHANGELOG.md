@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.57.2] — 2026-11-25
+
+### Fixed
+
+- **`crdt`: structs are merged at the end of every transaction, as Yjs does.**
+  Yjs `cleanupTransactions` merges each struct in a transaction's delete set
+  with its neighbours, and each struct the transaction added with the struct on
+  its left — including one from an earlier transaction. ygo merged only string
+  items created in the same transaction (`squashRuns`) and split halves, so
+  text typed or deleted one transaction at a time kept one struct per
+  transaction, and runs of contiguous tombstones were never merged. A document
+  that had been typed into therefore encoded several times larger than Yjs's
+  and held one item per keystroke, which in turn made every later insert walk
+  that list. `cleanupTxnLocked` now runs the transaction GC and then
+  `mergeTxnStructs`, before the update for the `OnUpdate` observers is encoded,
+  where Yjs merges. `Item.mergeable` and `Item.absorb` hold the Yjs merge
+  conditions, move search markers as Yjs does, and append strings in amortised
+  linear time. As in Yjs, a received delete no longer splits a struct that is
+  already deleted, and a GC struct is never split, so those runs stay one
+  struct. `EncodeStateFromSnapshot` cuts a struct at the snapshot's clock when
+  a later transaction merged into it, and undo finds a restored item by the
+  unit its `redone` link names.
+
+  The full state of a replayed editing session, of a document that receives its
+  updates, and of 300 random single-client sessions is now byte-identical to
+  Yjs in V1 and V2, with garbage collection on or off; in 200 random
+  multi-client histories every client's structs match Yjs's. Closes #274.
+
+  **Encoded state changes.** A document edited by this version encodes
+  differently from one edited by an earlier version — fewer, larger structs for
+  the same content. Decoded content is unchanged, and both directions still
+  interoperate with Yjs and with earlier ygo versions, so stored updates and
+  snapshots remain readable.
+
+  **Deleting costs more.** Text is now one struct rather than one per
+  keystroke, so deleting from a run splits it, exactly as it does in Yjs.
+  `BenchmarkYText_Delete` is about 30% slower and a single transaction
+  deleting many ranges of one run about 39% slower at 16,000 ranges. In
+  exchange, on a 20,000-transaction editing session the encoded state is about
+  89% smaller, the heap after reloading it about 79% smaller, loading it about
+  97% faster, and typing itself about 99% faster, because an insert no longer
+  walks one item per prior keystroke.
+
 ## [1.57.1] — 2026-11-18
 
 ### Fixed

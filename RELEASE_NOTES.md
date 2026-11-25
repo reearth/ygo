@@ -1,3 +1,42 @@
+## v1.57.2
+
+**Who is affected: everyone storing documents that have been typed into or
+edited down. Your snapshots are about to get much smaller, and your documents
+much faster to open.**
+
+- **ygo merges structs at the end of a transaction, as Yjs does.** Yjs merges
+  each struct a transaction added with the one on its left, and each struct in
+  its delete set with its neighbours. ygo merged only text inserted inside a
+  single transaction, so one keystroke per transaction left one struct per
+  keystroke, and contiguous tombstones were never merged at all. Typing into a
+  document therefore made it grow several times larger than the same document
+  in Yjs, and made every later insert walk a list with one item per prior
+  keystroke.
+
+  On a 20,000-transaction editing session, the encoded state is about 89%
+  smaller, the heap after reloading it about 79% smaller, loading it about 97%
+  faster, and the session itself about 99% faster. How much you gain depends on
+  how contiguous your edits are: sequential typing gains the most, and
+  concurrent edits from several peers break runs apart and gain less.
+
+- **Deleting is slower, on purpose.** Because text is now one struct instead of
+  one per keystroke, deleting from the middle of a run has to split it — which
+  is what Yjs does too. `YText.Delete` costs about 30% more than it did, and a
+  single transaction deleting many ranges of one run about 39% more at 16,000
+  ranges. This is the price of the sizes above, and we think it is clearly
+  worth paying; if it is not for your workload, please tell us on #274.
+
+- **Your stored bytes change.** A document edited by this version encodes
+  differently from one edited by an earlier version: the same content, in
+  fewer and larger structs. Content is unchanged, and updates and snapshots
+  still interoperate in both directions with Yjs and with earlier ygo
+  versions, so nothing you have stored becomes unreadable. If you compare
+  snapshot bytes between versions, expect them to differ.
+
+**Upgrading.** No API change. Existing documents are not rewritten by
+upgrading; they gain the smaller encoding as they are edited, or immediately if
+you reload one from its own update log with this version.
+
 ## v1.57.1
 
 **Who is affected: anyone storing binary or composite values in text
@@ -947,7 +986,9 @@ arrives before one it depends on, ygo holds it until the missing one shows up.
 `EncodeStateAsUpdateV1`/`V2` used to leave held updates out, so a snapshot
 taken in that window — a compaction, or a sync reply to a new peer — lost them
 for good. Snapshots now include them, byte for byte as yjs does. Thanks to
-@sjawhar for the report and reproduction.
+@sjawhar for the report and reproduction. (Corrected in v1.57.2: for a
+multi-client document this held only for the held updates themselves, not for
+the whole snapshot, which until v1.57.2 kept tombstone runs Yjs merges.)
 
 ## v1.50.0
 

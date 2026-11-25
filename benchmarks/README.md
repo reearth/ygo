@@ -42,10 +42,10 @@ go test -bench=BenchmarkB4 -benchmem -count=3 ./benchmarks/
 | B4 Encode V2    | < 300 ms  | Encode final state as V2 binary update      |
 | B4 Decode       | < 2 s     | Decode + apply full V1 snapshot             |
 
-**Decode target note:** Before v1.54.1, ygo kept one `Item` per character
+**Decode target note:** Before v1.57.2, ygo kept one `Item` per character
 insertion, so decoding a full-state V1 snapshot of the B4 document allocated
 and integrated 182 k `Item` objects (~932 k heap allocations) with significant
-GC pressure. Since v1.54.1 structs merge at the end of each transaction as in
+GC pressure. Since v1.57.2 structs merge at the end of each transaction as in
 Yjs, so the snapshot holds far fewer structs. Future work (arena allocation,
 inlined `*ID` fields) could bring decoding below 200 ms; tracked in ROADMAP
 Phase 9.
@@ -80,9 +80,13 @@ BenchmarkB4_Size-16        1   1521173375 ns/op     3428241 v1_bytes   234910 v2
 | B4 Decode    | < 2 s     | ~1.18 s    | ✅     |
 | V2 size      | < V1 size | 6.9% of V1 | ✅     |
 
-Since v1.54.1, structs merge at the end of each transaction as in Yjs.
-`BenchmarkB4_Size` now reports about 387 KB V1 and 226 KB V2 (about 58% of V1);
-the exact bytes vary with its random client ID. The results above predate that change.
+Since v1.57.2, structs merge at the end of each transaction as in Yjs, so the
+B4 snapshot holds far fewer structs. On the same 182 k-op trace,
+`BenchmarkB4_Size` goes from 3,429,132 V1 bytes to 387,121 — 8.9x smaller — and
+from 232,413 V2 bytes to 226,480. V2 barely moves because its column-oriented
+RLE already compressed most of the per-keystroke redundancy that V1 wrote out
+in full; the exact bytes vary with the benchmark's random client ID. The
+results above predate that change.
 
 > To reproduce: `go test -bench=BenchmarkB4 -benchmem -benchtime=1x -count=3 ./benchmarks/`
 
